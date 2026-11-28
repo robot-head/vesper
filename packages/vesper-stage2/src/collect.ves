@@ -7,7 +7,7 @@ use @vesper/ast::{
     ItemNode, ParamNode, TypeNode as AstTypeNode, VariantNode, list_at, list_len, none as ast_none
 };
 use @vesper/check-data::names::{Names, names_new};
-use @vesper/check-data::types::{EffNode, TyKind, Types, types_new};
+use @vesper/check-data::types::{EffNode, TyKind, TyMode, Types, types_new};
 use @vesper/check-data::util::{inc32, n32, u32_at, u64_at, u8_at, w};
 
 const NONE32: u32 = 4294967295;
@@ -51,6 +51,9 @@ pub copy struct ParamInfo {
     name: u32,
     pass: u8,
     ty: u32,
+    // The parameter's source span (0 0 for synthesized parameters).
+    start: u32,
+    end: u32,
 }
 
 pub copy struct EffOpInfo {
@@ -428,7 +431,7 @@ fn collect_fn_into(
                 sub_pty
             }
         };
-        params.push(ParamInfo { name: pname, pass: p.pass, ty: pty });
+        params.push(ParamInfo { name: pname, pass: p.pass, ty: pty, start: p.start, end: p.end });
     }
     let raw_res = lower_ty(
         in ast,
@@ -481,7 +484,13 @@ fn add_ffi_op(
             Option::Some(v) => v,
             Option::None => 0,
         };
-        params.push(ParamInfo { name: names.intern(in "a".as_bytes()), pass: pass, ty: ty });
+        params.push(ParamInfo {
+            name: names.intern(in "a".as_bytes()),
+            pass: pass,
+            ty: ty,
+            start: 0,
+            end: 0
+        });
     }
     eff_ops.push(EffOpInfo {
         name: names.intern(in op_name.as_bytes()),
@@ -639,7 +648,9 @@ fn add_vcl_ops(
             params.push(ParamInfo {
                 name: names.intern(in "a".as_bytes()),
                 pass: u8_at(in passes, pi),
-                ty: u32_at(in tys, pi)
+                ty: u32_at(in tys, pi),
+                start: 0,
+                end: 0
             });
         }
         eff_ops.push(EffOpInfo {
@@ -895,7 +906,13 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
                                     inout cache,
                                     inout tmp
                                 );
-                                params.push(ParamInfo { name: pname, pass: p.pass, ty: pty });
+                                params.push(ParamInfo {
+                                    name: pname,
+                                    pass: p.pass,
+                                    ty: pty,
+                                    start: p.start,
+                                    end: p.end
+                                });
                             }
                             let ores = lower_ty(
                                 in m.ast,
@@ -1069,6 +1086,43 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
             set_by_symbol(inout world.by_name, res_sym, inc32(res_idx));
         }
     }
+    // The built-in `Box[T]` (src/fip.rs `prelude`), when a module names
+    // `Box` and none declares it: an affine struct `Box[T: linear](T)`
+    // whose zero span marks it built in (`fip::active`).
+    if mod_asts_mention(in mods, in "Box") {
+        let box_sym = names.intern(in "Box".as_bytes());
+        let has_box = match world.by_name.try_get(w(box_sym)) {
+            Option::Some(v) => v != 0,
+            Option::None => false,
+        };
+        if !has_box {
+            let t_gen = names.intern(in "T".as_bytes());
+            let bga = n32(world.generics.len());
+            world.generics.push(Generic { name: t_gen, bound: TyMode::Linear, row: false });
+            let bfa = n32(world.fields.len());
+            world.fields.push(Field {
+                name: names.intern(in "0".as_bytes()),
+                ty: types.named0(t_gen),
+                modality: 0
+            });
+            let bva = n32(world.variants.len());
+            world.variants.push(Variant { name: box_sym, fa: bfa, fc: 1, named: false });
+            let bidx = n32(world.adts.len());
+            world.adts.push(Adt {
+                name: box_sym,
+                mode: TyMode::Affine,
+                ga: bga,
+                gn: 1,
+                va: bva,
+                vn: 1,
+                is_enum: false,
+                tile: 0,
+                span_zero: true
+            });
+            set_by_symbol(inout world.by_name, box_sym, inc32(bidx));
+            world.box_active = true;
+        }
+    }
     let re_sym = names.intern(in "RuntimeError".as_bytes());
     let has_re = match world.by_name.try_get(w(re_sym)) {
         Option::Some(v) => v != 0,
@@ -1144,7 +1198,9 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
         params.push(ParamInfo {
             name: names.intern(in "e".as_bytes()),
             pass: 2,
-            ty: types.named0(e_gen)
+            ty: types.named0(e_gen),
+            start: 0,
+            end: 0
         });
         let eoa = n32(eff_ops.len());
         eff_ops.push(EffOpInfo {
@@ -1399,6 +1455,24 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
         in t_rm,
         u64_t
     );
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_write_stdout",
+        in p_rm,
+        in t_rm,
+        u64_t
+    );
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_write_stderr",
+        in p_rm,
+        in t_rm,
+        u64_t
+    );
     let mut t_dir = ChunkSeq::new[u32]();
     t_dir.push(slice_u8_t);
     t_dir.push(bool_t);
@@ -1473,7 +1547,14 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
         in t_dc,
         unit_t
     );
-    eff_decls.push(EffDeclInfo { name: fs_sym, linear: false, ga: 0, gn: 0, oa: fs_oa, on: 17 });
+    eff_decls.push(EffDeclInfo {
+        name: fs_sym,
+        linear: false,
+        ga: 0,
+        gn: 0,
+        oa: fs_oa,
+        on: wrapping_sub(n32(eff_ops.len()), fs_oa)
+    });
 
     // Only a program that names the library declares it, so every other
     // program collects as before.

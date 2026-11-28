@@ -11,22 +11,75 @@ use @vesper/check-data::world::{World, set_by_symbol};
 use @vesper/place-ir::{Program};
 use @vesper/place-ir-lower::ast::{Ast as IrAst};
 use @vesper/check-names-packages::{
-    AssembledModule, assemble_next_bytes, assembly_begin_bytes, assembly_metadata
+    AssembledModule, Assembly, AssemblyMetadata, assemble_next_bytes, assembly_begin_bytes,
+    assembly_metadata
 };
 use @vesper/place-ir-lower::lower::{L, l_new, lower_all};
 use @vesper/wasm-backend::{compile_with_facts, compile_with_facts_diag};
 use @vesper/wit-component::comp::encode as wit_encode;
 use @vesper/wit-component::wit::parse as parse_wit;
 use @vesper/wasm-backend::err::{WErr, format_werr, werr};
-use @vesper/wasm-backend::ir::{add_eff_decl, add_fn_sig, empty_facts, push_hop, set_expr_handler};
+use @vesper/wasm-backend::ir::{
+    CallRow, Pair, add_eff_decl, add_fn_sig, empty_facts, push_hop, set_expr_handler
+};
 use @vesper/place-ir::codes::{Op, Pat, PoolKind};
 use @vesper-std/env::{arg, arg_count, var};
 use @vesper-std/fs::{IoError, write_path};
-use self::ast_lower::{build_ir_ast_for_entry};
+use self::ast_lower::{build_ir_ast, build_ir_ast_for_entry};
 use self::collect::{collect_program};
-use self::loader::{load_package_graph_bytes};
+use self::facts::{record_failure_ops};
+use self::tables::{lower_table_reads};
+pub use self::ffi::{ForeignSource, foreign_source};
+use self::ffi::{
+    add_foreign_decls, close_foreign_ops, foreign_none, foreign_read, rename_foreign_calls
+};
+use self::loader::{load_package_graph_bytes_with};
+use self::sugar_policy::{
+    PolicyFailure, PolicyFailureKind, PolicyInputs, copy_inputs, explicit_access_valid, has_failure,
+    policy_inputs, resolve_rows
+};
 use self::native::{compile_x86_64_elf};
 use self::typecheck::{typecheck_ast};
+use self::linear::{LinearCode, check_linear, write_linear_fault};
+
+const INVALID_SUGAR_POLICY: Str = "invalid sugar policy metadata";
+
+/// Check the sugar policy wire and explicit accesses in assembled modules.
+pub fn sugar_policy_access_valid(
+    in meta: AssemblyMetadata,
+    in mods: ChunkSeq[AssembledModule]
+) -> bool {
+    explicit_access_valid(in meta, in mods)
+}
+
+pub fn sugar_policy_exports_valid(
+    inout assembly: Assembly,
+    in mods: ChunkSeq[AssembledModule]
+) -> bool {
+    let mut problem: Option[PolicyFailure] = Option::None;
+    let mut sugar = match policy_inputs(in assembly, in mods, inout problem) {
+        Option::Some(sugar) => sugar,
+        Option::None => return false,
+    };
+    if sugar.policies.regions.len() == 0 {
+        return true;
+    }
+    let p = collect_program(in mods);
+    let (ast, names0, types0, world) = build_ir_ast(sink p, in mods);
+    let mut names = names0;
+    let mut types = types0;
+    if !resolve_rows(inout sugar, inout assembly, inout names, inout types) {
+        return false;
+    }
+    let (_, _, _, _, _, violation) = typecheck_ast(
+        in ast,
+        sink names,
+        sink types,
+        sink world,
+        sink sugar
+    );
+    !has_failure(violation)
+}
 
 const OUTPUT_WRITE_FAILED: u64 = 4;
 const NATIVE_UNSUPPORTED: u64 = 7;
@@ -35,7 +88,7 @@ const ASCII_ONE: u8 = 49;
 /// Load, assemble, and collect declarations of a Loom package from `root_dir`
 /// via `@vesper-std/fs`, returning `(module_count, fn_count, adt_count, diagnostic_bytes)`.
 pub fn stage2_collect_dir(in root_dir: Str) -> (u64, u64, u64, u64) eff [Ffi[StdFs]] {
-    let encoded = match load_package_graph_bytes(in root_dir.as_bytes()) {
+    let encoded = match load_graph_compact(in root_dir.as_bytes(), in "".as_bytes()) {
         Option::Some(b) => b,
         Option::None => {
             return (0, 0, 0, 0);
@@ -53,6 +106,9 @@ pub fn stage2_collect_dir(in root_dir: Str) -> (u64, u64, u64, u64) eff [Ffi[Std
     }
     let mod_count = mods.len();
     let meta = assembly_metadata(sink a);
+    if !sugar_policy_access_valid(in meta, in mods) {
+        return (0, 0, 0, INVALID_SUGAR_POLICY.len());
+    }
     let collected = collect_program(in mods);
     (mod_count, collected.fns.len(), collected.world.adts.len(), meta.diagnostics.len())
 }
@@ -190,30 +246,254 @@ fn write_err_header(in out_wasm: Str, in stage: Str, in detail: Slice[u8]) eff [
     write_sidecar(in out_wasm, in ".err.txt", in msg.as_slice());
 }
 
+fn write_policy_diagnostic(problem: PolicyFailure, inout msg: ChunkSeq[u8]) {
+    if problem.kind == PolicyFailureKind::Access {
+        msg.extend(in "E0143: sugar rule exceeds the caller's place access".as_bytes());
+    } else if problem.kind == PolicyFailureKind::Effect {
+        msg.extend(in "E0144: sugar rule introduces an effect outside its emits row".as_bytes());
+    } else {
+        match problem.origin {
+            Option::Some(_) => msg.extend(
+                in "cannot verify the policy for an operation introduced by this sugar".as_bytes()
+            ),
+            Option::None => msg.extend(in INVALID_SUGAR_POLICY.as_bytes()),
+        }
+    }
+    match problem.origin {
+        Option::Some(origin) => {
+            msg.extend(in " (caller file ".as_bytes());
+            push_decimal(inout msg, origin.call.file);
+            msg.extend(in " bytes ".as_bytes());
+            push_decimal(inout msg, origin.call.start);
+            msg.extend(in "..".as_bytes());
+            push_decimal(inout msg, origin.call.end);
+            msg.extend(in "; author module ".as_bytes());
+            push_decimal(inout msg, origin.author_module);
+            msg.extend(in " rule bytes ".as_bytes());
+            push_decimal(inout msg, origin.rule_start);
+            msg.extend(in "..".as_bytes());
+            push_decimal(inout msg, origin.rule_end);
+            msg.push(41);
+        },
+        Option::None => {},
+    }
+}
+
+// Room kept below the loader's scratch for the encoded package graph, and
+// the slack its copy's sequence header and rounding may take.
+const LOAD_KEEP_BYTES: u64 = 268435456;
+const LOAD_KEEP_SLACK: u64 = 65536;
+
+// `load_package_graph_bytes` with the loader's scratch freed: the encoded
+// graph is copied into a hole reserved below the scratch and the heap is
+// reset to the copy's end, so only the graph outlives the load. Under a
+// host without Stage 2's heap, or when the graph does not fit the hole, the
+// graph is returned where the loader left it.
+fn load_graph_compact(
+    in root_dir: Slice[u8],
+    in os: Slice[u8]
+) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    load_graph_compact_with(in root_dir, in os, in NO_ROOT_EXTRA.as_bytes())
+}
+
+// No source appended to the root module.
+const NO_ROOT_EXTRA: Str = "";
+
+// `load_graph_compact` over `load_package_graph_bytes_with`.
+fn load_graph_compact_with(
+    in root_dir: Slice[u8],
+    in os: Slice[u8],
+    in root_extra: Slice[u8]
+) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    if stage2_heap_mark() == 0 {
+        return load_package_graph_bytes_with(in root_dir, in os, in root_extra);
+    }
+    let mut hole = ChunkSeq::new[u8]();
+    hole.reserve(LOAD_KEEP_BYTES);
+    let scratch = stage2_heap_mark();
+    let keep = wrapping_sub(scratch, LOAD_KEEP_BYTES);
+    let encoded = match load_package_graph_bytes_with(in root_dir, in os, in root_extra) {
+        Option::Some(b) => b,
+        Option::None => {
+            return Option::None;
+        },
+    };
+    if wrapping_add(encoded.len(), LOAD_KEEP_SLACK) > LOAD_KEEP_BYTES {
+        return Option::Some(encoded);
+    }
+    let s_load = stage2_heap_swap(keep);
+    let mut copied = ChunkSeq::with_capacity[u8](encoded.len());
+    copied.extend(in encoded.as_slice());
+    let keep_after = stage2_heap_mark();
+    let _ = stage2_heap_swap(s_load);
+    if keep_after > scratch {
+        return Option::Some(encoded);
+    }
+    // Nothing past the copy is live: the rest of the hole is reused.
+    stage2_heap_reset(keep_after);
+    Option::Some(copied)
+}
+
 fn move_front_to_perm(
     sink ir_ast0: IrAst,
     sink names0: Names,
     sink types0: Types,
     sink world0: World,
+    sink sugar0: PolicyInputs,
     front_perm: u64,
     m_front: u64
-) -> (IrAst, Names, Types, World, u64, bool) {
+) -> (IrAst, Names, Types, World, PolicyInputs, u64, bool) {
     if m_front == 0 || front_perm >= m_front {
-        return (ir_ast0, names0, types0, world0, 0, false);
+        return (ir_ast0, names0, types0, world0, sugar0, 0, false);
     }
     let s_front = stage2_heap_swap(front_perm);
     let ir_c = ir_ast0.deep_clone_in_heap();
     let names_c = names0.deep_clone_in_heap();
     let types_c = types0.deep_clone_in_heap();
     let world_c = world0.deep_clone_in_heap();
+    let sugar_c = copy_inputs(in sugar0);
     let front_after = stage2_heap_mark();
     let _ = stage2_heap_swap(s_front);
     let used = wrapping_sub(front_after, front_perm);
     if front_after < m_front {
-        (ir_c, names_c, types_c, world_c, used, true)
+        (ir_c, names_c, types_c, world_c, sugar_c, used, true)
     } else {
-        (ir_ast0, names0, types0, world0, used, false)
+        (ir_ast0, names0, types0, world0, sugar0, used, false)
     }
+}
+
+// A package lowered to @vesper/place-ir by Stage 2's front end, for the
+// native library build (bootstrap switch slice 3d of #2349): the lowering
+// state (context, IR AST, program) and the call instantiations the checker
+// found (`world.calls`).
+pub struct Lowered {
+    low: L,
+    call_rows: ChunkSeq[CallRow],
+    call_pairs: ChunkSeq[Pair],
+}
+
+/// `stage2_compile_dir`'s front end for the package at `root_dir`, for
+/// native target OS `os` (`linux`, `macos`, `windows`; src/packages.rs
+/// `src-<os>` sources), every function included: load, assemble, collect,
+/// check and lower. `None`
+/// with the reason in `err` when a step fails. The Wasm-only element-view
+/// marks are not made.
+pub fn stage2_lower_dir(
+    in root_dir: Slice[u8],
+    in os: Slice[u8],
+    in foreign_sources: ChunkSeq[ForeignSource],
+    inout err: ChunkSeq[u8]
+) -> Option[Lowered] eff [Ffi[StdFs]] {
+    stage2_lower_dir_with(
+        in root_dir,
+        in os,
+        in foreign_sources,
+        in NO_ROOT_EXTRA.as_bytes(),
+        inout err
+    )
+}
+
+// `stage2_lower_dir` with `root_extra` appended to the root module's
+// source (`load_package_graph_bytes_with`).
+pub fn stage2_lower_dir_with(
+    in root_dir: Slice[u8],
+    in os: Slice[u8],
+    in foreign_sources: ChunkSeq[ForeignSource],
+    in root_extra: Slice[u8],
+    inout err: ChunkSeq[u8]
+) -> Option[Lowered] eff [Ffi[StdFs]] {
+    // The `.vsys` imports (ffi.ves), as `ffi_lowering::check_module` reads them.
+    let mut foreign = if foreign_sources.len() == 0 {
+        foreign_none()
+    } else {
+        match foreign_read(in foreign_sources) {
+            Option::Some(f) => f,
+            Option::None => {
+                err.extend(in "foreign imports".as_bytes());
+                return Option::None;
+            },
+        }
+    };
+    let encoded = match load_graph_compact_with(in root_dir, in os, in root_extra) {
+        Option::Some(b) => b,
+        Option::None => {
+            err.extend(in "load_package_graph".as_bytes());
+            return Option::None;
+        },
+    };
+    let mut a = assembly_begin_bytes(in encoded.as_slice());
+    let mut mods = ChunkSeq::new[AssembledModule]();
+    loop {
+        match assemble_next_bytes(inout a, in encoded.as_slice()) {
+            Option::Some(m) => {
+                mods.push(sink m);
+            },
+            Option::None => break,
+        }
+    }
+    let mut policy_problem: Option[PolicyFailure] = Option::None;
+    let mut sugar = match policy_inputs(in a, in mods, inout policy_problem) {
+        Option::Some(sugar) => sugar,
+        Option::None => {
+            match policy_problem {
+                Option::Some(problem) => write_policy_diagnostic(problem, inout err),
+                Option::None => err.extend(in INVALID_SUGAR_POLICY.as_bytes()),
+            }
+            return Option::None;
+        },
+    };
+    let mut collected = collect_program(in mods);
+    add_foreign_decls(inout collected, inout foreign);
+    let (ir_ast0, names_seed, types_seed, world0) = build_ir_ast_for_entry(
+        sink collected,
+        in mods,
+        in ""
+    );
+    let mut names0 = names_seed;
+    let mut ir_ast = ir_ast0;
+    rename_foreign_calls(inout ir_ast, inout names0, in foreign);
+    let mut types0 = types_seed;
+    if !resolve_rows(inout sugar, inout a, inout names0, inout types0) {
+        err.extend(in INVALID_SUGAR_POLICY.as_bytes());
+        return Option::None;
+    }
+    let meta = assembly_metadata(sink a);
+    if meta.diagnostics.len() > 0 {
+        err.extend(in meta.diagnostics.as_slice());
+        return Option::None;
+    }
+    let (names, types, world, call_rows, call_pairs, bad_sugar) = typecheck_ast(
+        in ir_ast,
+        sink names0,
+        sink types0,
+        sink world0,
+        sink sugar
+    );
+    match bad_sugar {
+        Option::Some(problem) => {
+            write_policy_diagnostic(problem, inout err);
+            return Option::None;
+        },
+        Option::None => {},
+    }
+    // Native lowering reads the operations that may fail.
+    let (names, types, world) = record_failure_ops(in ir_ast, sink names, sink types, sink world);
+    // Pass 2 of the foreign check: one operation per slice-length vector.
+    let mut names = names;
+    let mut types = types;
+    close_foreign_ops(inout ir_ast, inout names, inout types, in world, in foreign);
+    // Native code reads constant aggregates as tables.
+    lower_table_reads(inout ir_ast, inout names, in types, in world);
+    let c = Ctx {
+        names: names,
+        types: types,
+        world: world,
+        tmap: ChunkSeq::new[u32](),
+        nmap: ChunkSeq::new[u32]()
+    };
+    let mut low = l_new(sink c, sink ir_ast);
+    lower_all(inout low);
+    Option::Some(Lowered { low: low, call_rows: call_rows, call_pairs: call_pairs })
 }
 
 /// Compile a Loom package from `root_dir` to a core Wasm module at `out_wasm`
@@ -265,7 +545,7 @@ fn stage2_compile_dir_impl(
     let mut stage_log = ChunkSeq::new[u8]();
     stage_log.reserve(4096);
     write_stage(want_syms, in out_wasm, in "load_package_graph", inout stage_log);
-    let encoded = match load_package_graph_bytes(in root_dir.as_bytes()) {
+    let encoded = match load_graph_compact(in root_dir.as_bytes(), in "".as_bytes()) {
         Option::Some(b) => b,
         Option::None => {
             let mut d = ChunkSeq::new[u8]();
@@ -301,25 +581,45 @@ fn stage2_compile_dir_impl(
             Option::None => break,
         }
     }
+    let mut policy_problem: Option[PolicyFailure] = Option::None;
+    let mut sugar0 = match policy_inputs(in a, in mods, inout policy_problem) {
+        Option::Some(sugar) => sugar,
+        Option::None => {
+            let mut detail = ChunkSeq::new[u8]();
+            match policy_problem {
+                Option::Some(problem) => write_policy_diagnostic(problem, inout detail),
+                Option::None => detail.extend(in INVALID_SUGAR_POLICY.as_bytes()),
+            }
+            write_err_header(in out_wasm, in "assembly", in detail.as_slice());
+            return (2, detail.len());
+        },
+    };
+    write_stage(want_syms, in out_wasm, in "collect_program", inout stage_log);
+    let collected = collect_program(in mods);
+    write_stage(want_syms, in out_wasm, in "build_ir_ast", inout stage_log);
+    let (ir_ast0, names_seed, types_seed, world0_in) = build_ir_ast_for_entry(
+        sink collected,
+        in mods,
+        in entry_name
+    );
+    let mut names0_in = names_seed;
+    let mut types0_in = types_seed;
+    if !resolve_rows(inout sugar0, inout a, inout names0_in, inout types0_in) {
+        write_err_header(in out_wasm, in "assembly", in INVALID_SUGAR_POLICY.as_bytes());
+        return (2, INVALID_SUGAR_POLICY.len());
+    }
     let meta = assembly_metadata(sink a);
     if meta.diagnostics.len() > 0 {
         write_err_header(in out_wasm, in "assembly", in meta.diagnostics.as_slice());
         return (2, meta.diagnostics.len());
     }
-    write_stage(want_syms, in out_wasm, in "collect_program", inout stage_log);
-    let collected = collect_program(in mods);
-    write_stage(want_syms, in out_wasm, in "build_ir_ast", inout stage_log);
-    let (ir_ast0, names0_in, types0_in, world0_in) = build_ir_ast_for_entry(
-        sink collected,
-        in mods,
-        in entry_name
-    );
     write_stage(want_syms, in out_wasm, in "front_clone", inout stage_log);
-    let (ir_ast, names0, types0, world0, front_used, front_ok) = move_front_to_perm(
+    let (ir_ast, names0, types0, world0, sugar, front_used, front_ok) = move_front_to_perm(
         sink ir_ast0,
         sink names0_in,
         sink types0_in,
         sink world0_in,
+        sink sugar0,
         front_perm,
         m_front
     );
@@ -341,12 +641,22 @@ fn stage2_compile_dir_impl(
     } else {
         write_stage(want_syms, in out_wasm, in "typecheck_ast", inout stage_log);
     }
-    let (names, types, world, call_rows, call_pairs) = typecheck_ast(
+    let (names, types, world, call_rows, call_pairs, bad_sugar) = typecheck_ast(
         in ir_ast,
         sink names0,
         sink types0,
-        sink world0
+        sink world0,
+        sink sugar
     );
+    match bad_sugar {
+        Option::Some(problem) => {
+            let mut detail = ChunkSeq::new[u8]();
+            write_policy_diagnostic(problem, inout detail);
+            write_err_header(in out_wasm, in "typecheck", in detail.as_slice());
+            return (2, detail.len());
+        },
+        Option::None => {},
+    }
     let mut c = Ctx {
         names: names,
         types: types,
@@ -354,6 +664,14 @@ fn stage2_compile_dir_impl(
         tmap: ChunkSeq::new[u32](),
         nmap: ChunkSeq::new[u32]()
     };
+    write_stage(want_syms, in out_wasm, in "linearity", inout stage_log);
+    let linear_fault = check_linear(in ir_ast, inout c);
+    if linear_fault.code != LinearCode::None {
+        let mut detail = ChunkSeq::new[u8]();
+        write_linear_fault(in c.names, linear_fault, inout detail);
+        write_err_header(in out_wasm, in "linearity", in detail.as_slice());
+        return (2, detail.len());
+    }
     let entry_sym = c.names.intern(in entry_name.as_bytes());
     let mut facts = empty_facts(entry_sym, 65535, 65536, 50000000);
     facts.calls = call_rows;

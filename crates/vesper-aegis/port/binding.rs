@@ -58,6 +58,7 @@ impl Abi for PErr {
 }
 
 const _: () = assert!(<() as Abi>::WORDS == 1);
+const _: () = assert!(<(u64, u64) as Abi>::WORDS == 2);
 const _: () = assert!(<AErr as Abi>::WORDS == 5);
 const _: () = assert!(<AtErr as Abi>::WORDS == 7);
 const _: () = assert!(<Option<u64> as Abi>::WORDS == 2);
@@ -95,7 +96,16 @@ unsafe extern "C" {
     fn vesper_aegis_host_unmap(iv: *mut u64, count: i64, win_start: i64, win_end: i64, addr: i64, len: i64) -> i64;
     fn vesper_aegis_host_validate_clock(has_prev: i64, prev: i64, max_step: i64, reported: i64) -> i64;
     fn vesper_aegis_iso8601_utc_to_unix(result: *mut u64, s: *mut u64) -> i64;
+    fn vesper_aegis_parse_amd_cert_ext(der: *mut u64, want_hwid_len: i64, out: *mut u64) -> i64;
+    fn vesper_aegis_parse_crl_this_update(result: *mut u64, der: *mut u64) -> i64;
+    fn vesper_aegis_parse_pck_ext(der: *mut u64, out: *mut u64, sgx_comps: *mut u64) -> i64;
+    fn vesper_aegis_parse_pcs_envelope(b: *mut u64, field_kind: i64, out: *mut u64, sig_out: *mut u64) -> i64;
+    fn vesper_aegis_parse_qe_identity(b: *mut u64, out: *mut u64, bytes_out: *mut u64, levels_out: *mut u64, adv_out: *mut u64) -> i64;
     fn vesper_aegis_parse_raw_cert(der: *mut u64, out: *mut u64) -> i64;
+    fn vesper_aegis_parse_sgx_tcb_info(b: *mut u64, out: *mut u64, bytes_out: *mut u64, levels_out: *mut u64, comps_out: *mut u64, adv_out: *mut u64) -> i64;
+    fn vesper_aegis_parse_spki_ec_key(spki: *mut u64, out: *mut u64) -> i64;
+    fn vesper_aegis_parse_spki_key_bits(spki: *mut u64, out: *mut u64) -> i64;
+    fn vesper_aegis_parse_tdx_tcb_info(b: *mut u64, out: *mut u64, bytes_out: *mut u64, levels_out: *mut u64, comps_out: *mut u64, mods_out: *mut u64, mod_bytes_out: *mut u64, mod_lvls_out: *mut u64, adv_out: *mut u64) -> i64;
     fn vesper_aegis_sgx_parse(b: *mut u64, mode: i64, w: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_snp_etcb_parse(b: *mut u64, w: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_snp_parse(b: *mut u64, w: *mut u64, d: *mut u64, fail: *mut u64) -> i64;
@@ -424,12 +434,94 @@ pub fn iso8601_utc_to_unix(s: &[u8]) -> Option<u64> {
     <Option<u64> as Abi>::get(&result[0..])
 }
 
+/// Calls `parse_amd_cert_ext` of the Vesper library `aegis` (`vesper_aegis_parse_amd_cert_ext`).
+pub fn parse_amd_cert_ext(der: &[u8], want_hwid_len: u64, out: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_aegis_parse_amd_cert_ext` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(der, |view_der| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aegis_parse_amd_cert_ext(view_der, want_hwid_len as i64, view_out) }));
+    raw as u64
+}
+
+/// Calls `parse_crl_this_update` of the Vesper library `aegis` (`vesper_aegis_parse_crl_this_update`).
+pub fn parse_crl_this_update(der: &[u8]) -> (u64, u64) {
+    let mut result = [0u64; 2];
+    // SAFETY: `vesper_aegis_parse_crl_this_update` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(der, |view_der| unsafe { vesper_aegis_parse_crl_this_update(result.as_mut_ptr(), view_der) });
+    <(u64, u64) as Abi>::get(&result[0..])
+}
+
+/// Calls `parse_pck_ext` of the Vesper library `aegis` (`vesper_aegis_parse_pck_ext`).
+pub fn parse_pck_ext(der: &[u8], out: &mut [u64], sgx_comps: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_aegis_parse_pck_ext` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(der, |view_der| vesper_port_abi::with_slice_mut(out, |view_out| vesper_port_abi::with_slice_mut(sgx_comps, |view_sgx_comps| unsafe { vesper_aegis_parse_pck_ext(view_der, view_out, view_sgx_comps) })));
+    raw as u64
+}
+
+/// Calls `parse_pcs_envelope` of the Vesper library `aegis` (`vesper_aegis_parse_pcs_envelope`).
+pub fn parse_pcs_envelope(b: &[u8], field_kind: u64, out: &mut [u64], sig_out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_aegis_parse_pcs_envelope` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(out, |view_out| vesper_port_abi::with_slice_mut(sig_out, |view_sig_out| unsafe { vesper_aegis_parse_pcs_envelope(view_b, field_kind as i64, view_out, view_sig_out) })));
+    raw as u64
+}
+
+/// Calls `parse_qe_identity` of the Vesper library `aegis` (`vesper_aegis_parse_qe_identity`).
+pub fn parse_qe_identity(b: &[u8], out: &mut [u64], bytes_out: &mut [u8], levels_out: &mut [u64], adv_out: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_aegis_parse_qe_identity` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(out, |view_out| vesper_port_abi::with_slice_mut(bytes_out, |view_bytes_out| vesper_port_abi::with_slice_mut(levels_out, |view_levels_out| vesper_port_abi::with_slice_mut(adv_out, |view_adv_out| unsafe { vesper_aegis_parse_qe_identity(view_b, view_out, view_bytes_out, view_levels_out, view_adv_out) })))));
+    raw as u64
+}
+
 /// Calls `parse_raw_cert` of the Vesper library `aegis` (`vesper_aegis_parse_raw_cert`).
 pub fn parse_raw_cert(der: &[u8], out: &mut [u64]) -> u64 {
     // SAFETY: `vesper_aegis_parse_raw_cert` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(der, |view_der| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aegis_parse_raw_cert(view_der, view_out) }));
+    raw as u64
+}
+
+/// Calls `parse_sgx_tcb_info` of the Vesper library `aegis` (`vesper_aegis_parse_sgx_tcb_info`).
+pub fn parse_sgx_tcb_info(b: &[u8], out: &mut [u64], bytes_out: &mut [u8], levels_out: &mut [u64], comps_out: &mut [u8], adv_out: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_aegis_parse_sgx_tcb_info` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(out, |view_out| vesper_port_abi::with_slice_mut(bytes_out, |view_bytes_out| vesper_port_abi::with_slice_mut(levels_out, |view_levels_out| vesper_port_abi::with_slice_mut(comps_out, |view_comps_out| vesper_port_abi::with_slice_mut(adv_out, |view_adv_out| unsafe { vesper_aegis_parse_sgx_tcb_info(view_b, view_out, view_bytes_out, view_levels_out, view_comps_out, view_adv_out) }))))));
+    raw as u64
+}
+
+/// Calls `parse_spki_ec_key` of the Vesper library `aegis` (`vesper_aegis_parse_spki_ec_key`).
+pub fn parse_spki_ec_key(spki: &[u8], out: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_aegis_parse_spki_ec_key` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(spki, |view_spki| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aegis_parse_spki_ec_key(view_spki, view_out) }));
+    raw as u64
+}
+
+/// Calls `parse_spki_key_bits` of the Vesper library `aegis` (`vesper_aegis_parse_spki_key_bits`).
+pub fn parse_spki_key_bits(spki: &[u8], out: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_aegis_parse_spki_key_bits` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(spki, |view_spki| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aegis_parse_spki_key_bits(view_spki, view_out) }));
+    raw as u64
+}
+
+/// Calls `parse_tdx_tcb_info` of the Vesper library `aegis` (`vesper_aegis_parse_tdx_tcb_info`).
+pub fn parse_tdx_tcb_info(b: &[u8], out: &mut [u64], bytes_out: &mut [u8], levels_out: &mut [u64], comps_out: &mut [u8], mods_out: &mut [u64], mod_bytes_out: &mut [u8], mod_lvls_out: &mut [u64], adv_out: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_aegis_parse_tdx_tcb_info` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(out, |view_out| vesper_port_abi::with_slice_mut(bytes_out, |view_bytes_out| vesper_port_abi::with_slice_mut(levels_out, |view_levels_out| vesper_port_abi::with_slice_mut(comps_out, |view_comps_out| vesper_port_abi::with_slice_mut(mods_out, |view_mods_out| vesper_port_abi::with_slice_mut(mod_bytes_out, |view_mod_bytes_out| vesper_port_abi::with_slice_mut(mod_lvls_out, |view_mod_lvls_out| vesper_port_abi::with_slice_mut(adv_out, |view_adv_out| unsafe { vesper_aegis_parse_tdx_tcb_info(view_b, view_out, view_bytes_out, view_levels_out, view_comps_out, view_mods_out, view_mod_bytes_out, view_mod_lvls_out, view_adv_out) })))))))));
     raw as u64
 }
 

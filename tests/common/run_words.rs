@@ -29,9 +29,8 @@ pub enum Answer {
 /// The world-level features the Vesper machine does not model yet, which
 /// the Rust evaluator reads from the world rather than the program: the
 /// atomic and scoped-worker preludes (`atomics::intercepted`), `dyn`
-/// objects (vtable stubs and hidden parameters), element views, the
-/// generated `Pinned[T]` and the float modes. `None` when the
-/// program may run.
+/// objects (vtable stubs and hidden parameters), element views and the
+/// generated `Pinned[T]`. `None` when the program may run.
 pub fn world_declines(world: &World) -> Option<&'static str> {
     if world.atomic_prelude || world.workers_prelude {
         Some("the atomic prelude")
@@ -41,12 +40,6 @@ pub fn world_declines(world: &World) -> Option<&'static str> {
         Some("element views")
     } else if world.adts.contains_key("Pinned") {
         Some("pinned buffers")
-    } else if vesper::native::needs_nan_canonicalization(world)
-        || !vesper::capability_effects::const_denorm_spans(world).is_empty()
-    {
-        // `FloatMode`: NaN canonicalisation (DetFloat) and flush-to-zero
-        // (`eff [ConstDenorm]`).
-        Some("a float mode")
     } else {
         None
     }
@@ -111,6 +104,7 @@ const PAT_PAIR: u64 = u64::MAX - 1;
 ///   effect call: effect op instance-key+1 label+1 region-op payload-size+1
 ///   try:     instance-key+1
 ///   closure: coerce free-count free-name... body-fn+1 param-count
+/// canonical-nans  flush-count flush-instruction...
 /// ```
 ///
 /// A pattern word is 0 for `_`, name + 1 for a binding, or `u64::MAX` for
@@ -122,8 +116,13 @@ const PAT_PAIR: u64 = u64::MAX - 1;
 /// operation (the built-in `Region` effect, `regions::active`) is its index
 /// in `regions::OPERATIONS` + 1, else 0; its payload size + 1 is the native
 /// layout size of `T` in the call's `RegionBox[r, T]` result type, or 0
-/// when that type does not fix it (`region_payload_size` would read the
-/// value instead).
+/// when that type does not fix it (the machine then sizes the value, as
+/// `region_payload_size` does).
+///
+/// The float modes follow (`FloatMode`): 1 when the program canonicalises
+/// NaN results (DetFloat), then the instructions (global indices) whose
+/// span is inside `eff [ConstDenorm]` code, whose float operations flush
+/// subnormals.
 fn sites(world: &World, program: &Program, t: &mut Tables) -> Vec<u64> {
     use vesper::ast::{ExprKind, PatternKind};
     use vesper::ir::Op;
@@ -314,6 +313,22 @@ fn sites(world: &World, program: &Program, t: &mut Tables) -> Vec<u64> {
     for r in rows {
         out.extend(r);
     }
+    out.push(u64::from(vesper::native::needs_nan_canonicalization(world)));
+    let denorm = vesper::capability_effects::const_denorm_spans(world);
+    let mut flush = vec![];
+    let mut global = 0u64;
+    for f in program.functions.values() {
+        for b in &f.blocks {
+            for i in &b.instructions {
+                if vesper::capability_effects::flushes_subnormals(&denorm, &i.span) {
+                    flush.push(global);
+                }
+                global += 1;
+            }
+        }
+    }
+    out.push(flush.len() as u64);
+    out.extend(flush);
     out
 }
 

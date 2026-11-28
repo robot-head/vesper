@@ -173,6 +173,27 @@ fn function_attributes<'a>(
     Ok((nonnull, returns_nonnull))
 }
 
+#[cfg(feature = "vesper-port")]
+fn nullability(quals: &[lang_c::span::Node<PointerQualifier>]) -> Nullability {
+    let tags: Vec<u8> = quals
+        .iter()
+        .map(|q| match &q.node {
+            PointerQualifier::TypeQualifier(t) => match t.node {
+                TypeQualifier::Nonnull => 1u8,
+                TypeQualifier::Nullable => 2u8,
+                _ => 0u8,
+            },
+            _ => 0u8,
+        })
+        .collect();
+    match crate::binding::migrate_c_nullability(&tags) {
+        1 => Nullability::Nonnull,
+        2 => Nullability::Nullable,
+        _ => Nullability::Unspecified,
+    }
+}
+
+#[cfg(not(feature = "vesper-port"))]
 fn nullability(quals: &[lang_c::span::Node<PointerQualifier>]) -> Nullability {
     let mut n = Nullability::Unspecified;
     for q in quals {
@@ -188,6 +209,35 @@ fn nullability(quals: &[lang_c::span::Node<PointerQualifier>]) -> Nullability {
 }
 
 impl CType {
+    #[cfg(feature = "vesper-port")]
+    fn vesper(&self) -> String {
+        let (kind, has_len, len, owned_inner): (u8, bool, u64, String) = match self {
+            Self::Void => (0, false, 0, String::new()),
+            Self::CBool => (1, false, 0, String::new()),
+            Self::Scalar(s) => (2, false, 0, s.name().to_owned()),
+            Self::Struct(n) | Self::Enum(n) => (2, false, 0, n.clone()),
+            Self::Pointer { pointee, .. } => (3, false, 0, pointee.vesper()),
+            Self::Array {
+                elem, len: Some(n), ..
+            } => (4, true, *n, elem.vesper()),
+            Self::Array {
+                elem, len: None, ..
+            } => (4, false, 0, elem.vesper()),
+            Self::Refused(..) => (5, false, 0, String::new()),
+        };
+        let mut out = vec![0u8; owned_inner.len() + 40];
+        let written = crate::binding::migrate_render_ctype_vesper(
+            kind,
+            has_len,
+            len,
+            owned_inner.as_bytes(),
+            &mut out,
+        ) as usize;
+        out.truncate(written);
+        String::from_utf8(out).unwrap_or_default()
+    }
+
+    #[cfg(not(feature = "vesper-port"))]
     fn vesper(&self) -> String {
         match self {
             Self::Void => "Unit".into(),
@@ -512,6 +562,50 @@ impl Ctx {
     }
 }
 
+#[cfg(feature = "vesper-port")]
+fn int_specifiers(spec: &[&TypeSpecifier]) -> CType {
+    let tags: Vec<u8> = spec
+        .iter()
+        .map(|s| match s {
+            TypeSpecifier::Signed => 1u8,
+            TypeSpecifier::Unsigned => 2u8,
+            TypeSpecifier::Char => 3u8,
+            TypeSpecifier::Short => 4u8,
+            TypeSpecifier::Int => 5u8,
+            TypeSpecifier::Long => 6u8,
+            _ => 0u8,
+        })
+        .collect();
+    match crate::binding::migrate_c_int_specifiers(&tags) {
+        1 => CType::Scalar(Scalar::U8),
+        2 => CType::Scalar(Scalar::I8),
+        3 => CType::Scalar(Scalar::U16),
+        4 => CType::Scalar(Scalar::I16),
+        5 => CType::Scalar(Scalar::U32),
+        6 => CType::Scalar(Scalar::I32),
+        7 => CType::Scalar(Scalar::U64),
+        8 => CType::Scalar(Scalar::I64),
+        100 => CType::Refused(
+            RefusalReason::UnsupportedType,
+            "mixed type specifiers".into(),
+        ),
+        101 => CType::Refused(
+            RefusalReason::PlatformDependentWidth,
+            "plain `char` has implementation-defined signedness; use int8_t/uint8_t".into(),
+        ),
+        102 => CType::Refused(
+            RefusalReason::PlatformDependentWidth,
+            "`long` is 32-bit on Windows and 64-bit on LP64 targets; use a fixed-width integer"
+                .into(),
+        ),
+        _ => CType::Refused(
+            RefusalReason::UnsupportedType,
+            "unsupported integer specifier combination".into(),
+        ),
+    }
+}
+
+#[cfg(not(feature = "vesper-port"))]
 fn int_specifiers(spec: &[&TypeSpecifier]) -> CType {
     let (mut signed, mut unsigned, mut chars, mut shorts, mut ints, mut longs) = (0, 0, 0, 0, 0, 0);
     for s in spec {

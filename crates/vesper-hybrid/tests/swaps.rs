@@ -161,15 +161,12 @@ fn gated_turns_on_exactly_the_flip_gate_passes() {
         );
     }
     assert!(passed > 0, "no swap is gated on");
-    // Off: the whole layout, the IR check, the inliner and the optimizer
-    // run in Rust.
-    for module in ["check-layout", "ir-check", "ir-inline", "ir-opt"] {
-        assert_eq!(
-            count(&output, &format!("vesper-hybrid: {module} answered ")),
-            0,
-            "gated: the Vesper {module} module answered calls"
-        );
-    }
+    // Off: the whole layout runs in Rust.
+    assert_eq!(
+        count(&output, "vesper-hybrid: check-layout answered "),
+        0,
+        "gated: the Vesper check-layout module answered calls"
+    );
     // On: the parser, AST optimizer and bounds hoisting (all PASS).
     assert!(count(&output, "vesper-hybrid: parse answered ") > 0);
     assert!(count(&output, "vesper-hybrid: optimize proposed for ") > 0);

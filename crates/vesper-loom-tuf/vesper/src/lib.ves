@@ -3,6 +3,7 @@
 // Ed25519 role quorum verifier (Rust-exit SH6 lane 16, #1411 / #2295).
 //
 // @export abi 4 options
+use self::checkpoint::parse_checkpoint_json as parse_checkpoint_json_impl;
 use @vesper/crypto::{CryptoError, HashAlg, ed25519_verify, hash};
 
 // ---------------------------------------------------------------------------
@@ -1220,4 +1221,117 @@ pub fn tuf_state_checksum(
     buf.push(BYTE_RBRACE);
 
     tuf_sha256_hex(in buf)
+}
+
+pub fn tuf_parse_checkpoint_json(
+    in b: Slice[u8],
+    inout out: Slice[u64],
+    inout roots_flat: Slice[u8],
+    inout root_lens: Slice[u64],
+    inout role_spans: Slice[u64],
+    inout role_vers: Slice[u64]
+) -> u64 {
+    parse_checkpoint_json_impl(
+        in b,
+        inout out,
+        inout roots_flat,
+        inout root_lens,
+        inout role_spans,
+        inout role_vers
+    )
+}
+
+pub fn tuf_encode_checkpoint_json(
+    schema_version: u64,
+    timestamp_version: u64,
+    snapshot_version: u64,
+    in repo_id: Slice[u8],
+    in bootstrap_sha256: Slice[u8],
+    in verified_at: Slice[u8],
+    in checksum: Slice[u8],
+    in roots_flat: Slice[u8],
+    in root_lens: Slice[u64],
+    in role_names_flat: Slice[u8],
+    in role_name_lens: Slice[u64],
+    in role_versions: Slice[u64]
+) -> ChunkSeq[u8] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push_str_bytes(inout buf, in "{\"state\":{\"schema_version\":");
+    push_u64_dec(inout buf, schema_version);
+    push_str_bytes(inout buf, in ",\"repository_id\":");
+    push_cjson_string(inout buf, in repo_id, 0, repo_id.len());
+    push_str_bytes(inout buf, in ",\"bootstrap_sha256\":");
+    push_cjson_string(inout buf, in bootstrap_sha256, 0, bootstrap_sha256.len());
+    push_str_bytes(inout buf, in ",\"roots\":[");
+
+    let mut root_off: u64 = 0;
+    let mut rti: u64 = 0;
+    loop {
+        if rti >= root_lens.len() {
+            break;
+        }
+        if rti > 0 {
+            buf.push(BYTE_COMMA);
+        }
+        buf.push(BYTE_LBRACKET);
+        let rlen = match root_lens.try_get(rti) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let mut bi: u64 = 0;
+        loop {
+            if bi >= rlen {
+                break;
+            }
+            if bi > 0 {
+                buf.push(BYTE_COMMA);
+            }
+            let bval = match roots_flat.try_get(wrapping_add(root_off, bi)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            push_u8_dec(inout buf, bval);
+            bi = wrapping_add(bi, 1);
+        }
+        buf.push(BYTE_RBRACKET);
+        root_off = wrapping_add(root_off, rlen);
+        rti = wrapping_add(rti, 1);
+    }
+
+    push_str_bytes(inout buf, in "],\"timestamp_version\":");
+    push_u64_dec(inout buf, timestamp_version);
+    push_str_bytes(inout buf, in ",\"snapshot_version\":");
+    push_u64_dec(inout buf, snapshot_version);
+    push_str_bytes(inout buf, in ",\"role_versions\":{");
+
+    let mut role_off: u64 = 0;
+    let mut ri: u64 = 0;
+    loop {
+        if ri >= role_name_lens.len() {
+            break;
+        }
+        if ri > 0 {
+            buf.push(BYTE_COMMA);
+        }
+        let nlen = match role_name_lens.try_get(ri) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        push_cjson_string(inout buf, in role_names_flat, role_off, nlen);
+        buf.push(BYTE_COLON);
+        let ver = match role_versions.try_get(ri) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        push_u64_dec(inout buf, ver);
+        role_off = wrapping_add(role_off, nlen);
+        ri = wrapping_add(ri, 1);
+    }
+
+    push_str_bytes(inout buf, in "},\"verified_at\":");
+    push_cjson_string(inout buf, in verified_at, 0, verified_at.len());
+    push_str_bytes(inout buf, in "},\"checksum\":");
+    push_cjson_string(inout buf, in checksum, 0, checksum.len());
+    buf.push(BYTE_RBRACE);
+    buf
 }

@@ -58,8 +58,11 @@ use @vesper/driver-commands::{
 };
 // Target triples (#1896).
 use @vesper/driver::triple::{is_windows as triple_is_windows};
-// Diagnostic JSON rendering for `--json` (#2458, #2473, #1893).
-use @vesper/driver::{diagnostics_json, package_diagnostics_json};
+// Diagnostic JSON and stderr fallback rendering (#2458, #2473, #2519, #2577, #1893).
+use @vesper/driver::{
+    diagnostics_json, format_manifest_error, format_raw_diagnostics, format_unlocated_error,
+    localize_diagnostics_stream, package_diagnostics_json, remap_diagnostics_stream
+};
 // Place IR JSON rendering for `vesper emit --format ir` (#2245, #1894).
 use @vesper/place-ir::{place_ir_json_bytes};
 // `--package` validation for `vesper emit --emit interface` (#2339, #1893).
@@ -515,9 +518,7 @@ fn drive(
         if is_failure(q) {
             return pass_failed(in s, q);
         }
-        if o.json {
-            emit_diagnostics_json(in s);
-        }
+        emit_diagnostics(in s);
         return count_error(r, in "syntax error(s)");
     }
     let lib = lib_mode(in o);
@@ -533,9 +534,7 @@ fn drive(
         return pass_failed(in s, r);
     }
     if r > 0 {
-        if o.json {
-            emit_diagnostics_json(in s);
-        }
+        emit_diagnostics(in s);
         return count_error(r, in "semantic error(s)");
     }
     if lib {
@@ -1553,24 +1552,160 @@ fn part(inout s: Session, which: u32) -> i64 eff [Ffi[HybridDriver]] {
 // 4. The diagnostics are printed unless the library export path reports
 //    them.
 const DIAG_JSON_PACKAGE: u8 = 1;
+const DIAG_TEXT_STREAM: u8 = 2;
+const DIAG_CHUNK_LITERAL: u8 = 0;
+const DIAG_CHUNK_RAW: u8 = 1;
+const DIAG_CHUNK_MANIFEST: u8 = 2;
+const DIAG_CHUNK_UNLOCATED: u8 = 3;
+const DIAG_WORD_BYTES: u64 = 8;
+const DIAG_BYTE_BITS: u64 = 8;
+const DIAG_BYTE_MASK: u64 = 255;
+const DIAG_MAP_SEG_WORDS: u64 = 5;
 const CH_LF: u8 = 10;
 
-// Emit `--json` diagnostics encoded in `s`'s text buffer by `ReportSyntax` or
-// `CheckReport` (tag 0 = single file, tag 1 = package).
-fn emit_diagnostics_json(in s: Session) eff [Ffi[HybridDriver]] {
+fn diag_byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn diag_read_u64(in s: Slice[u8], inout at: u64) -> u64 {
+    let mut v: u64 = 0;
+    for i in 0..DIAG_WORD_BYTES {
+        let b = widen_u64(diag_byte(in s, wrapping_add(at, i)));
+        v = v | wrapping_shl_u64(b, wrapping_u32(wrapping_mul(i, DIAG_BYTE_BITS)));
+    }
+    at = wrapping_add(at, DIAG_WORD_BYTES);
+    v
+}
+
+// Emit diagnostics encoded in `s`'s text buffer by `ReportSyntax` or
+// `CheckReport` (tag 0 = single-file JSON, tag 1 = package JSON,
+// tag 2 = stderr text chunks).
+fn emit_diagnostics(in s: Session) eff [Ffi[HybridDriver]] {
     let raw = text(in s);
     let slice = raw.as_slice();
     if slice.len() == 0 {
         return ();
     }
-    let tag = match slice.try_get(0) {
-        Option::Some(b) => b,
-        Option::None => 0,
-    };
+    let tag = diag_byte(in slice, 0);
+    if tag == DIAG_TEXT_STREAM {
+        let mut at: u64 = 1;
+        let count = diag_read_u64(in slice, inout at);
+        for _i in 0..count {
+            let kind = diag_byte(in slice, at);
+            at = wrapping_add(at, 1);
+            if kind == DIAG_CHUNK_LITERAL {
+                let n = diag_read_u64(in slice, inout at);
+                let end = wrapping_add(at, n);
+                print(stderr_stream(), in slice[at..end]);
+                at = end;
+            } else if kind == DIAG_CHUNK_RAW {
+                let rn = diag_read_u64(in slice, inout at);
+                let r_end = wrapping_add(at, rn);
+                let r_start = at;
+                at = r_end;
+                let sn = diag_read_u64(in slice, inout at);
+                let s_end = wrapping_add(at, sn);
+                let formatted = format_raw_diagnostics(
+                    in slice[r_start..r_end],
+                    in slice[at..s_end]
+                );
+                print(stderr_stream(), in formatted.as_slice());
+                at = s_end;
+            } else if kind == DIAG_CHUNK_MANIFEST {
+                let fn_len = diag_read_u64(in slice, inout at);
+                let f_start = at;
+                let f_end = wrapping_add(at, fn_len);
+                at = f_end;
+                let cn = diag_read_u64(in slice, inout at);
+                let c_start = at;
+                let c_end = wrapping_add(at, cn);
+                at = c_end;
+                let mn = diag_read_u64(in slice, inout at);
+                let m_start = at;
+                let m_end = wrapping_add(at, mn);
+                at = m_end;
+                let formatted = format_manifest_error(
+                    in slice[f_start..f_end],
+                    in slice[c_start..c_end],
+                    in slice[m_start..m_end]
+                );
+                print(stderr_stream(), in formatted.as_slice());
+            } else if kind == DIAG_CHUNK_UNLOCATED {
+                let cn = diag_read_u64(in slice, inout at);
+                let c_start = at;
+                let c_end = wrapping_add(at, cn);
+                at = c_end;
+                let mn = diag_read_u64(in slice, inout at);
+                let m_start = at;
+                let m_end = wrapping_add(at, mn);
+                at = m_end;
+                let formatted = format_unlocated_error(
+                    in slice[c_start..c_end],
+                    in slice[m_start..m_end]
+                );
+                print(stderr_stream(), in formatted.as_slice());
+            }
+        }
+        return ();
+    }
     let mut json = if tag == DIAG_JSON_PACKAGE {
-        package_diagnostics_json(in slice[1..slice.len()])
+        let mut at: u64 = 1;
+        let m_len = diag_read_u64(in slice, inout at);
+        let m_start = at;
+        let m_end = wrapping_add(at, m_len);
+        at = m_end;
+        let f_len = diag_read_u64(in slice, inout at);
+        let f_start = at;
+        let f_end = wrapping_add(at, f_len);
+        at = f_end;
+        let p_len = diag_read_u64(in slice, inout at);
+        let p_start = at;
+        let p_end = wrapping_add(at, p_len);
+        at = p_end;
+
+        let localized = localize_diagnostics_stream(
+            in slice[f_start..f_end],
+            in slice[p_start..p_end],
+            in slice[at..slice.len()]
+        );
+        let mut m_at: u64 = m_start;
+        let m_count = diag_read_u64(in slice, inout m_at);
+        if m_count == 0 {
+            package_diagnostics_json(in localized.as_slice())
+        } else {
+            let loc_slice = localized.as_slice();
+            let mut l_at: u64 = 0;
+            let l_count = diag_read_u64(in loc_slice, inout l_at);
+            let total = wrapping_add(m_count, l_count);
+            let mut combined: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            for i in 0..DIAG_WORD_BYTES {
+                let shift = wrapping_u32(wrapping_mul(i, DIAG_BYTE_BITS));
+                combined.push(wrapping_u8(wrapping_shr_u64(total, shift) & DIAG_BYTE_MASK));
+            }
+            combined.extend(in slice[m_at..m_end]);
+            combined.extend(in loc_slice[l_at..loc_slice.len()]);
+            package_diagnostics_json(in combined.as_slice())
+        }
     } else {
-        diagnostics_json(in slice[1..slice.len()])
+        let mut at: u64 = 1;
+        let segs = diag_read_u64(in slice, inout at);
+        if segs == 0 {
+            diagnostics_json(in slice[at..slice.len()])
+        } else {
+            let mut map_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            let total_words = wrapping_mul(segs, DIAG_MAP_SEG_WORDS);
+            for _i in 0..total_words {
+                map_words.push(diag_read_u64(in slice, inout at));
+            }
+            let remapped = remap_diagnostics_stream(
+                in map_words.as_slice(),
+                in slice[at..slice.len()]
+            );
+            diagnostics_json(in remapped.as_slice())
+        }
     };
     json.push(CH_LF);
     print(stdout_stream(), in json.as_slice());

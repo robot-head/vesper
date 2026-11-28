@@ -1,7 +1,19 @@
 // @vesper/aegis::der_cert: X.509 DER certificate TLV parser (`src/chain.rs` `RawCert::parse`).
 
+const DER_BOOLEAN: u64 = 0x01;
+const DER_INTEGER: u64 = 0x02;
 const DER_BIT_STRING: u64 = 0x03;
+const DER_OCTET_STRING: u64 = 0x04;
+const DER_OID: u64 = 0x06;
+const DER_UTF8_STRING: u64 = 0x0c;
+const DER_NUMERIC_STRING: u64 = 0x12;
+const DER_PRINTABLE_STRING: u64 = 0x13;
+const DER_IA5_STRING: u64 = 0x16;
+const DER_UTC_TIME: u64 = 0x17;
+const DER_GEN_TIME: u64 = 0x18;
+const DER_SEQUENCE: u64 = 0x30;
 const DER_CONTEXT_0: u64 = 0xa0;
+const DER_CONTEXT_3: u64 = 0xa3;
 const DER_LONG_FORM: u64 = 0x80;
 const DER_LENGTH_OCTETS_MASK: u64 = 0x7f;
 const DER_MAX_LENGTH_OCTETS: u64 = 4;
@@ -195,4 +207,692 @@ pub fn parse_raw_cert(in der: Slice[u8], inout out: Slice[u64]) -> u64 {
     out.try_set(OUT_SPKI_ALG_START, spki_body_s);
     out.try_set(OUT_SPKI_ALG_END, spki_alg_end);
     ERR_OK
+}
+
+const ASCII_0: u64 = 48;
+const ASCII_9: u64 = 57;
+const ASCII_Z: u64 = 90;
+const UTC_TIME_LEN: u64 = 13;
+const GEN_TIME_LEN: u64 = 15;
+const UTC_PIVOT_YEAR: u64 = 50;
+const CENTURY_1900: u64 = 1900;
+const CENTURY_2000: u64 = 2000;
+const UNIX_EPOCH_YEAR: u64 = 1970;
+const MIN_MONTH: u64 = 1;
+const MAX_MONTH: u64 = 12;
+const MAX_HOUR: u64 = 23;
+const MAX_MIN_SEC: u64 = 59;
+const SECS_PER_DAY: u64 = 86400;
+const SECS_PER_HOUR: u64 = 3600;
+const SECS_PER_MIN: u64 = 60;
+const DAYS_TO_1970: u64 = 719468;
+const DAYS_PER_ERA: u64 = 146097;
+const YEARS_PER_ERA: u64 = 400;
+
+const CRL_OK: u64 = 0;
+const CRL_ERR_MALFORMED: u64 = 1;
+const CRL_ERR_TRAILING: u64 = 2;
+const CRL_ERR_BEFORE_1970: u64 = 3;
+
+fn parse_two_digits(in b: Slice[u8], pos: u64) -> (bool, u64) {
+    let d0 = byte_at(in b, pos);
+    let d1 = byte_at(in b, wrapping_add(pos, 1));
+    if d0 < ASCII_0 || d0 > ASCII_9 || d1 < ASCII_0 || d1 > ASCII_9 {
+        return (false, 0);
+    }
+    let val = wrapping_add(wrapping_mul(wrapping_sub(d0, ASCII_0), 10), wrapping_sub(d1, ASCII_0));
+    (true, val)
+}
+
+fn days_in_month(year: u64, month: u64) -> u64 {
+    if month == 2 {
+        let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+        if leap { 29 } else { 28 }
+    } else if month == 4 || month == 6 || month == 9 || month == 11 {
+        30
+    } else {
+        31
+    }
+}
+
+fn civil_to_unix(year: u64, month: u64, day: u64, hour: u64, min: u64, sec: u64) -> u64 {
+    let y = if month <= 2 {
+        wrapping_sub(year, 1)
+    } else {
+        year
+    };
+    let era = y / YEARS_PER_ERA;
+    let yoe = wrapping_sub(y, wrapping_mul(era, YEARS_PER_ERA));
+    let mp = if month > 2 {
+        wrapping_sub(month, 3)
+    } else {
+        wrapping_add(month, 9)
+    };
+    let doy = wrapping_add(wrapping_add(wrapping_mul(153, mp), 2) / 5, wrapping_sub(day, 1));
+    let doe = wrapping_add(
+        wrapping_sub(wrapping_add(wrapping_mul(yoe, 365), yoe / 4), yoe / 100),
+        doy
+    );
+    let days = wrapping_sub(wrapping_add(wrapping_mul(era, DAYS_PER_ERA), doe), DAYS_TO_1970);
+    wrapping_add(
+        wrapping_mul(days, SECS_PER_DAY),
+        wrapping_add(
+            wrapping_mul(hour, SECS_PER_HOUR),
+            wrapping_add(wrapping_mul(min, SECS_PER_MIN), sec)
+        )
+    )
+}
+
+// Parse a DER X.509 CRL and return `(status, this_update_unix_seconds)`.
+pub fn parse_crl_this_update(in der: Slice[u8]) -> (u64, u64) {
+    let total = der.len();
+    let (ok0, body_start, outer_end) = tlv_at(in der, 0, total);
+    if !ok0 || byte_at(in der, 0) != DER_SEQUENCE {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    if outer_end != total {
+        return (CRL_ERR_TRAILING, 0);
+    }
+
+    // tbsCertList (SEQUENCE)
+    let (ok_tbs, tbs_body, tbs_end) = tlv_at(in der, body_start, outer_end);
+    if !ok_tbs || byte_at(in der, body_start) != DER_SEQUENCE {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    // signatureAlgorithm (SEQUENCE)
+    let (ok_sa, _sa_body, sa_end) = tlv_at(in der, tbs_end, outer_end);
+    if !ok_sa || byte_at(in der, tbs_end) != DER_SEQUENCE {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    // signatureValue (BIT STRING)
+    let (ok_sig, _sig_body, sig_end) = tlv_at(in der, sa_end, outer_end);
+    if !ok_sig || sig_end != outer_end || byte_at(in der, sa_end) != DER_BIT_STRING {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+
+    // Walk tbsCertList: [version INTEGER], signature SEQUENCE, issuer SEQUENCE, thisUpdate Time
+    let mut cur = tbs_body;
+    if cur >= tbs_end {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    if byte_at(in der, cur) == DER_INTEGER {
+        let (ok_v, _v_body, v_end) = tlv_at(in der, cur, tbs_end);
+        if !ok_v {
+            return (CRL_ERR_MALFORMED, 0);
+        }
+        cur = v_end;
+    }
+    // signature
+    let (ok_s, _s_body, s_end) = tlv_at(in der, cur, tbs_end);
+    if !ok_s || byte_at(in der, cur) != DER_SEQUENCE {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    cur = s_end;
+    // issuer
+    let (ok_i, _i_body, i_end) = tlv_at(in der, cur, tbs_end);
+    if !ok_i || byte_at(in der, cur) != DER_SEQUENCE {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    cur = i_end;
+    // thisUpdate (UTCTime or GeneralizedTime)
+    let (ok_t, t_body, t_end) = tlv_at(in der, cur, tbs_end);
+    if !ok_t {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    let tag = byte_at(in der, cur);
+    let t_len = wrapping_sub(t_end, t_body);
+    let mut year: u64 = 0;
+    let mut p = t_body;
+    if tag == DER_UTC_TIME {
+        if t_len != UTC_TIME_LEN || byte_at(in der, wrapping_add(t_body, 12)) != ASCII_Z {
+            return (CRL_ERR_MALFORMED, 0);
+        }
+        let (ok_y, yy) = parse_two_digits(in der, p);
+        if !ok_y {
+            return (CRL_ERR_MALFORMED, 0);
+        }
+        year = if yy >= UTC_PIVOT_YEAR {
+            wrapping_add(CENTURY_1900, yy)
+        } else {
+            wrapping_add(CENTURY_2000, yy)
+        };
+        p = wrapping_add(p, 2);
+    } else if tag == DER_GEN_TIME {
+        if t_len != GEN_TIME_LEN || byte_at(in der, wrapping_add(t_body, 14)) != ASCII_Z {
+            return (CRL_ERR_MALFORMED, 0);
+        }
+        let (ok_c, cc) = parse_two_digits(in der, p);
+        let (ok_y, yy) = parse_two_digits(in der, wrapping_add(p, 2));
+        if !ok_c || !ok_y {
+            return (CRL_ERR_MALFORMED, 0);
+        }
+        year = wrapping_add(wrapping_mul(cc, 100), yy);
+        p = wrapping_add(p, 4);
+    } else {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+
+    let (ok_mo, month) = parse_two_digits(in der, p);
+    let (ok_d, day) = parse_two_digits(in der, wrapping_add(p, 2));
+    let (ok_h, hour) = parse_two_digits(in der, wrapping_add(p, 4));
+    let (ok_mi, min) = parse_two_digits(in der, wrapping_add(p, 6));
+    let (ok_sc, sec) = parse_two_digits(in der, wrapping_add(p, 8));
+    if !ok_mo || !ok_d || !ok_h || !ok_mi || !ok_sc {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    if month < MIN_MONTH || month > MAX_MONTH || day < 1 || day > days_in_month(year, month) {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    if hour > MAX_HOUR || min > MAX_MIN_SEC || sec > MAX_MIN_SEC {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    if year < UNIX_EPOCH_YEAR {
+        return (CRL_ERR_BEFORE_1970, 0);
+    }
+    (CRL_OK, civil_to_unix(year, month, day, hour, min, sec))
+}
+
+// AMD VCEK/VLEK extension OID prefix: 1.3.6.1.4.1.3704.1 (8 DER bytes).
+const AMD_OID_PREFIX_LEN: u64 = 8;
+const AMD_OID_B0: u64 = 0x2b;
+const AMD_OID_B1: u64 = 0x06;
+const AMD_OID_B2: u64 = 0x01;
+const AMD_OID_B3: u64 = 0x04;
+const AMD_OID_B4: u64 = 0x01;
+const AMD_OID_B5: u64 = 0x9c;
+const AMD_OID_B6: u64 = 0x78;
+const AMD_OID_B7: u64 = 0x01;
+
+const AMD_ARC_STRUCT_VER: u64 = 1;
+const AMD_ARC_PRODUCT: u64 = 2;
+const AMD_ARC_TCB: u64 = 3;
+const AMD_ARC_HW_ID: u64 = 4;
+const AMD_ARC_CSP_ID: u64 = 5;
+
+const AMD_TCB_BL: u64 = 1;
+const AMD_TCB_TEE: u64 = 2;
+const AMD_TCB_SNP: u64 = 3;
+const AMD_TCB_RES_LO: u64 = 4;
+const AMD_TCB_RES_HI: u64 = 7;
+const AMD_TCB_UCODE: u64 = 8;
+const AMD_TCB_FMC: u64 = 9;
+
+// Output slots for `parse_amd_cert_ext` (12 u64 words).
+const AMD_OUT_FLAGS: u64 = 0;
+const AMD_OUT_BL: u64 = 1;
+const AMD_OUT_TEE: u64 = 2;
+const AMD_OUT_SNP: u64 = 3;
+const AMD_OUT_UCODE: u64 = 4;
+const AMD_OUT_FMC: u64 = 5;
+const AMD_OUT_PROD_START: u64 = 6;
+const AMD_OUT_PROD_END: u64 = 7;
+const AMD_OUT_HWID_START: u64 = 8;
+const AMD_OUT_HWID_END: u64 = 9;
+const AMD_OUT_CSP_START: u64 = 10;
+const AMD_OUT_CSP_END: u64 = 11;
+const AMD_OUT_LEN: u64 = 12;
+
+const AMD_FLAG_PROD: u64 = 1;
+const AMD_FLAG_BL: u64 = 2;
+const AMD_FLAG_TEE: u64 = 4;
+const AMD_FLAG_SNP: u64 = 8;
+const AMD_FLAG_UCODE: u64 = 16;
+const AMD_FLAG_FMC: u64 = 32;
+const AMD_FLAG_HWID: u64 = 64;
+const AMD_FLAG_CSP: u64 = 128;
+
+const AMD_ERR_OK: u64 = 0;
+const AMD_ERR_CERT: u64 = 1;
+const AMD_ERR_TRAILING: u64 = 2;
+const AMD_ERR_BAD_EXT: u64 = 3;
+const AMD_ERR_RESERVED_SPL: u64 = 4;
+const AMD_ERR_UNKNOWN_EXT: u64 = 5;
+const AMD_ERR_DUP_EXT: u64 = 6;
+
+const DER_INT_SIGN_BIT: u64 = 0x80;
+
+fn match_amd_oid_prefix(in b: Slice[u8], start: u64, end: u64) -> bool {
+    if wrapping_sub(end, start) <= AMD_OID_PREFIX_LEN {
+        return false;
+    }
+    byte_at(in b, start) == AMD_OID_B0
+        && byte_at(in b, wrapping_add(start, 1)) == AMD_OID_B1
+        && byte_at(in b, wrapping_add(start, 2)) == AMD_OID_B2
+        && byte_at(in b, wrapping_add(start, 3)) == AMD_OID_B3
+        && byte_at(in b, wrapping_add(start, 4)) == AMD_OID_B4
+        && byte_at(in b, wrapping_add(start, 5)) == AMD_OID_B5
+        && byte_at(in b, wrapping_add(start, 6)) == AMD_OID_B6
+        && byte_at(in b, wrapping_add(start, 7)) == AMD_OID_B7
+}
+
+fn parse_der_u8(in b: Slice[u8], start: u64, end: u64) -> (bool, u64) {
+    let (ok, v_start, v_end) = tlv_at(in b, start, end);
+    if !ok || v_end != end || byte_at(in b, start) != DER_INTEGER {
+        return (false, 0);
+    }
+    let v_len = wrapping_sub(v_end, v_start);
+    if v_len == 1 {
+        let x = byte_at(in b, v_start);
+        if x >= DER_INT_SIGN_BIT {
+            return (false, 0);
+        }
+        return (true, x);
+    }
+    if v_len == 2 && byte_at(in b, v_start) == 0 {
+        return (true, byte_at(in b, wrapping_add(v_start, 1)));
+    }
+    (false, 0)
+}
+
+fn parse_der_str(in b: Slice[u8], start: u64, end: u64) -> (bool, u64, u64) {
+    let (ok, v_start, v_end) = tlv_at(in b, start, end);
+    if !ok || v_end != end {
+        return (false, 0, 0);
+    }
+    let tag = byte_at(in b, start);
+    if tag != DER_UTF8_STRING
+        && tag != DER_PRINTABLE_STRING
+        && tag != DER_IA5_STRING
+        && tag != DER_NUMERIC_STRING
+    {
+        return (false, 0, 0);
+    }
+    (true, v_start, v_end)
+}
+
+// Parse AMD VCEK/VLEK extensions from a DER X.509 certificate into `out[0..12]`.
+pub fn parse_amd_cert_ext(in der: Slice[u8], want_hwid_len: u64, inout out: Slice[u64]) -> u64 {
+    if out.len() < AMD_OUT_LEN {
+        return AMD_ERR_CERT;
+    }
+    let total = der.len();
+    let (ok0, body_start, outer_end) = tlv_at(in der, 0, total);
+    if !ok0 || byte_at(in der, 0) != DER_SEQUENCE {
+        return AMD_ERR_CERT;
+    }
+    if outer_end != total {
+        return AMD_ERR_TRAILING;
+    }
+    let (ok_tbs, tbs_body, tbs_end) = tlv_at(in der, body_start, outer_end);
+    if !ok_tbs || byte_at(in der, body_start) != DER_SEQUENCE {
+        return AMD_ERR_CERT;
+    }
+
+    // Locate [3] EXPLICIT Extensions in TBSCertificate.
+    let mut cur = tbs_body;
+    let mut ext_seq_start: u64 = 0;
+    let mut ext_seq_end: u64 = 0;
+    let mut found_exts = false;
+    loop {
+        if cur >= tbs_end {
+            break;
+        }
+        let (ok_f, f_body, f_end) = tlv_at(in der, cur, tbs_end);
+        if !ok_f {
+            return AMD_ERR_CERT;
+        }
+        if byte_at(in der, cur) == DER_CONTEXT_3 {
+            let (ok_s, s_body, s_end) = tlv_at(in der, f_body, f_end);
+            if !ok_s || s_end != f_end || byte_at(in der, f_body) != DER_SEQUENCE {
+                return AMD_ERR_CERT;
+            }
+            ext_seq_start = s_body;
+            ext_seq_end = s_end;
+            found_exts = true;
+            break;
+        }
+        cur = f_end;
+    }
+
+    let mut flags: u64 = 0;
+    let mut bl: u64 = 0;
+    let mut tee: u64 = 0;
+    let mut snp: u64 = 0;
+    let mut ucode: u64 = 0;
+    let mut fmc: u64 = 0;
+    let mut prod_s: u64 = 0;
+    let mut prod_e: u64 = 0;
+    let mut hwid_s: u64 = 0;
+    let mut hwid_e: u64 = 0;
+    let mut csp_s: u64 = 0;
+    let mut csp_e: u64 = 0;
+
+    if found_exts {
+        let mut ecur = ext_seq_start;
+        loop {
+            if ecur >= ext_seq_end {
+                break;
+            }
+            let (ok_e, e_body, e_end) = tlv_at(in der, ecur, ext_seq_end);
+            if !ok_e || byte_at(in der, ecur) != DER_SEQUENCE {
+                return AMD_ERR_CERT;
+            }
+            ecur = e_end;
+
+            let (ok_oid, oid_body, oid_end) = tlv_at(in der, e_body, e_end);
+            if !ok_oid || byte_at(in der, e_body) != DER_OID {
+                return AMD_ERR_CERT;
+            }
+            if !match_amd_oid_prefix(in der, oid_body, oid_end) {
+                continue;
+            }
+
+            let mut vcur = oid_end;
+            if vcur < e_end && byte_at(in der, vcur) == DER_BOOLEAN {
+                let (ok_b, _b_body, b_end) = tlv_at(in der, vcur, e_end);
+                if !ok_b {
+                    return AMD_ERR_CERT;
+                }
+                vcur = b_end;
+            }
+            let (ok_val, val_s, val_e) = tlv_at(in der, vcur, e_end);
+            if !ok_val || val_e != e_end || byte_at(in der, vcur) != DER_OCTET_STRING {
+                return AMD_ERR_CERT;
+            }
+
+            let suffix_start = wrapping_add(oid_body, AMD_OID_PREFIX_LEN);
+            let suffix_len = wrapping_sub(oid_end, suffix_start);
+            let arc0 = byte_at(in der, suffix_start);
+
+            if suffix_len == 1 {
+                if arc0 == AMD_ARC_STRUCT_VER {
+                    continue;
+                } else if arc0 == AMD_ARC_PRODUCT {
+                    if (flags & AMD_FLAG_PROD) != 0 {
+                        return AMD_ERR_DUP_EXT;
+                    }
+                    let (ok_s, s0, s1) = parse_der_str(in der, val_s, val_e);
+                    if !ok_s {
+                        return AMD_ERR_BAD_EXT;
+                    }
+                    prod_s = s0;
+                    prod_e = s1;
+                    flags = flags | AMD_FLAG_PROD;
+                } else if arc0 == AMD_ARC_HW_ID {
+                    if (flags & AMD_FLAG_HWID) != 0 {
+                        return AMD_ERR_DUP_EXT;
+                    }
+                    let vlen = wrapping_sub(val_e, val_s);
+                    if vlen == wrapping_add(want_hwid_len, 2)
+                        && byte_at(in der, val_s) == DER_OCTET_STRING
+                        && byte_at(in der, wrapping_add(val_s, 1)) == want_hwid_len
+                    {
+                        hwid_s = wrapping_add(val_s, 2);
+                        hwid_e = val_e;
+                    } else {
+                        hwid_s = val_s;
+                        hwid_e = val_e;
+                    }
+                    flags = flags | AMD_FLAG_HWID;
+                } else if arc0 == AMD_ARC_CSP_ID {
+                    if (flags & AMD_FLAG_CSP) != 0 {
+                        return AMD_ERR_DUP_EXT;
+                    }
+                    let (ok_s, s0, s1) = parse_der_str(in der, val_s, val_e);
+                    if !ok_s {
+                        return AMD_ERR_BAD_EXT;
+                    }
+                    csp_s = s0;
+                    csp_e = s1;
+                    flags = flags | AMD_FLAG_CSP;
+                } else {
+                    return AMD_ERR_UNKNOWN_EXT;
+                }
+            } else if suffix_len == 2 && arc0 == AMD_ARC_TCB {
+                let arc1 = byte_at(in der, wrapping_add(suffix_start, 1));
+                let (ok_u, uval) = parse_der_u8(in der, val_s, val_e);
+                if !ok_u {
+                    return AMD_ERR_BAD_EXT;
+                }
+                if arc1 == AMD_TCB_BL {
+                    if (flags & AMD_FLAG_BL) != 0 {
+                        return AMD_ERR_DUP_EXT;
+                    }
+                    bl = uval;
+                    flags = flags | AMD_FLAG_BL;
+                } else if arc1 == AMD_TCB_TEE {
+                    if (flags & AMD_FLAG_TEE) != 0 {
+                        return AMD_ERR_DUP_EXT;
+                    }
+                    tee = uval;
+                    flags = flags | AMD_FLAG_TEE;
+                } else if arc1 == AMD_TCB_SNP {
+                    if (flags & AMD_FLAG_SNP) != 0 {
+                        return AMD_ERR_DUP_EXT;
+                    }
+                    snp = uval;
+                    flags = flags | AMD_FLAG_SNP;
+                } else if arc1 >= AMD_TCB_RES_LO && arc1 <= AMD_TCB_RES_HI {
+                    if uval != 0 {
+                        return AMD_ERR_RESERVED_SPL;
+                    }
+                } else if arc1 == AMD_TCB_UCODE {
+                    if (flags & AMD_FLAG_UCODE) != 0 {
+                        return AMD_ERR_DUP_EXT;
+                    }
+                    ucode = uval;
+                    flags = flags | AMD_FLAG_UCODE;
+                } else if arc1 == AMD_TCB_FMC {
+                    if (flags & AMD_FLAG_FMC) != 0 {
+                        return AMD_ERR_DUP_EXT;
+                    }
+                    fmc = uval;
+                    flags = flags | AMD_FLAG_FMC;
+                } else {
+                    return AMD_ERR_UNKNOWN_EXT;
+                }
+            } else {
+                return AMD_ERR_UNKNOWN_EXT;
+            }
+        }
+    }
+
+    out.try_set(AMD_OUT_FLAGS, flags);
+    out.try_set(AMD_OUT_BL, bl);
+    out.try_set(AMD_OUT_TEE, tee);
+    out.try_set(AMD_OUT_SNP, snp);
+    out.try_set(AMD_OUT_UCODE, ucode);
+    out.try_set(AMD_OUT_FMC, fmc);
+    out.try_set(AMD_OUT_PROD_START, prod_s);
+    out.try_set(AMD_OUT_PROD_END, prod_e);
+    out.try_set(AMD_OUT_HWID_START, hwid_s);
+    out.try_set(AMD_OUT_HWID_END, hwid_e);
+    out.try_set(AMD_OUT_CSP_START, csp_s);
+    out.try_set(AMD_OUT_CSP_END, csp_e);
+    AMD_ERR_OK
+}
+
+// ---------------------------------------------------------------------------
+// SubjectPublicKeyInfo (RFC 5280 §4.1.2.7) parsers for `src/chain.rs`
+// ---------------------------------------------------------------------------
+
+const SPKI_ERR_OK: u64 = 0;
+const SPKI_ERR_BAD_SPKI: u64 = 1;
+const SPKI_ERR_NOT_EC: u64 = 2;
+const SPKI_ERR_BAD_CURVE: u64 = 3;
+const SPKI_ERR_BAD_BITS: u64 = 4;
+
+const SPKI_CURVE_P256: u64 = 1;
+const SPKI_CURVE_P384: u64 = 2;
+
+const SPKI_BITS_OUT_START: u64 = 0;
+const SPKI_BITS_OUT_END: u64 = 1;
+const SPKI_BITS_OUT_LEN: u64 = 2;
+
+const SPKI_EC_OUT_CURVE: u64 = 0;
+const SPKI_EC_OUT_BITS_START: u64 = 1;
+const SPKI_EC_OUT_BITS_END: u64 = 2;
+const SPKI_EC_OUT_LEN: u64 = 3;
+
+// OID 1.2.840.10045.2.1 (id-ecPublicKey): 2a 86 48 ce 3d 02 01
+const OID_EC_PUB_LEN: u64 = 7;
+const OID_EC_B0: u64 = 0x2a;
+const OID_EC_B1: u64 = 0x86;
+const OID_EC_B2: u64 = 0x48;
+const OID_EC_B3: u64 = 0xce;
+const OID_EC_B4: u64 = 0x3d;
+const OID_EC_B5: u64 = 0x02;
+const OID_EC_B6: u64 = 0x01;
+
+// OID 1.2.840.10045.3.1.7 (secp256r1): 2a 86 48 ce 3d 03 01 07
+const OID_P256_LEN: u64 = 8;
+const OID_P256_B5: u64 = 0x03;
+const OID_P256_B6: u64 = 0x01;
+const OID_P256_B7: u64 = 0x07;
+
+// OID 1.3.132.0.34 (secp384r1): 2b 81 04 00 22
+const OID_P384_LEN: u64 = 5;
+const OID_P384_B0: u64 = 0x2b;
+const OID_P384_B1: u64 = 0x81;
+const OID_P384_B2: u64 = 0x04;
+const OID_P384_B3: u64 = 0x00;
+const OID_P384_B4: u64 = 0x22;
+
+const OID_IDX_2: u64 = 2;
+const OID_IDX_3: u64 = 3;
+const OID_IDX_4: u64 = 4;
+const OID_IDX_5: u64 = 5;
+const OID_IDX_6: u64 = 6;
+const OID_IDX_7: u64 = 7;
+
+fn is_oid_ec_public_key(in b: Slice[u8], s: u64, e: u64) -> bool {
+    if wrapping_sub(e, s) != OID_EC_PUB_LEN {
+        return false;
+    }
+    byte_at(in b, s) == OID_EC_B0
+        && byte_at(in b, wrapping_add(s, 1)) == OID_EC_B1
+        && byte_at(in b, wrapping_add(s, OID_IDX_2)) == OID_EC_B2
+        && byte_at(in b, wrapping_add(s, OID_IDX_3)) == OID_EC_B3
+        && byte_at(in b, wrapping_add(s, OID_IDX_4)) == OID_EC_B4
+        && byte_at(in b, wrapping_add(s, OID_IDX_5)) == OID_EC_B5
+        && byte_at(in b, wrapping_add(s, OID_IDX_6)) == OID_EC_B6
+}
+
+fn is_oid_secp256r1(in b: Slice[u8], s: u64, e: u64) -> bool {
+    if wrapping_sub(e, s) != OID_P256_LEN {
+        return false;
+    }
+    byte_at(in b, s) == OID_EC_B0
+        && byte_at(in b, wrapping_add(s, 1)) == OID_EC_B1
+        && byte_at(in b, wrapping_add(s, OID_IDX_2)) == OID_EC_B2
+        && byte_at(in b, wrapping_add(s, OID_IDX_3)) == OID_EC_B3
+        && byte_at(in b, wrapping_add(s, OID_IDX_4)) == OID_EC_B4
+        && byte_at(in b, wrapping_add(s, OID_IDX_5)) == OID_P256_B5
+        && byte_at(in b, wrapping_add(s, OID_IDX_6)) == OID_P256_B6
+        && byte_at(in b, wrapping_add(s, OID_IDX_7)) == OID_P256_B7
+}
+
+fn is_oid_secp384r1(in b: Slice[u8], s: u64, e: u64) -> bool {
+    if wrapping_sub(e, s) != OID_P384_LEN {
+        return false;
+    }
+    byte_at(in b, s) == OID_P384_B0
+        && byte_at(in b, wrapping_add(s, 1)) == OID_P384_B1
+        && byte_at(in b, wrapping_add(s, OID_IDX_2)) == OID_P384_B2
+        && byte_at(in b, wrapping_add(s, OID_IDX_3)) == OID_P384_B3
+        && byte_at(in b, wrapping_add(s, OID_IDX_4)) == OID_P384_B4
+}
+
+// Parse a DER SubjectPublicKeyInfo and return the byte range of its
+// `subjectPublicKey` BIT STRING (with 0 unused bits) in `out[0..2]`.
+pub fn parse_spki_key_bits(in spki: Slice[u8], inout out: Slice[u64]) -> u64 {
+    if out.len() < SPKI_BITS_OUT_LEN {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    let n = spki.len();
+    let (ok0, body_s, body_e) = tlv_at(in spki, 0, n);
+    if !ok0 || byte_at(in spki, 0) != DER_SEQUENCE || body_e != n {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    // AlgorithmIdentifier SEQUENCE
+    let (ok_alg, alg_s, alg_e) = tlv_at(in spki, body_s, body_e);
+    if !ok_alg || byte_at(in spki, body_s) != DER_SEQUENCE {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    // AlgorithmIdentifier.algorithm OID
+    let (ok_oid, oid_s, oid_e) = tlv_at(in spki, alg_s, alg_e);
+    if !ok_oid || byte_at(in spki, alg_s) != DER_OID || oid_s == oid_e {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    // Optional AlgorithmIdentifier.parameters (must consume rest of AlgorithmIdentifier)
+    if oid_e < alg_e {
+        let (ok_p, _, p_e) = tlv_at(in spki, oid_e, alg_e);
+        if !ok_p || p_e != alg_e {
+            return SPKI_ERR_BAD_SPKI;
+        }
+    }
+    // subjectPublicKey BIT STRING
+    let (ok_bs, bs_s, bs_e) = tlv_at(in spki, alg_e, body_e);
+    if !ok_bs || byte_at(in spki, alg_e) != DER_BIT_STRING || bs_e != body_e || bs_s >= bs_e {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    if byte_at(in spki, bs_s) != 0 {
+        return SPKI_ERR_BAD_BITS;
+    }
+    out.try_set(SPKI_BITS_OUT_START, wrapping_add(bs_s, 1));
+    out.try_set(SPKI_BITS_OUT_END, bs_e);
+    SPKI_ERR_OK
+}
+
+// Parse a DER SubjectPublicKeyInfo for an EC P-256 or P-384 public key.
+// Writes `(curve_id, bits_start, bits_end)` to `out[0..3]`.
+pub fn parse_spki_ec_key(in spki: Slice[u8], inout out: Slice[u64]) -> u64 {
+    if out.len() < SPKI_EC_OUT_LEN {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    let n = spki.len();
+    let (ok0, body_s, body_e) = tlv_at(in spki, 0, n);
+    if !ok0 || byte_at(in spki, 0) != DER_SEQUENCE || body_e != n {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    // AlgorithmIdentifier SEQUENCE
+    let (ok_alg, alg_s, alg_e) = tlv_at(in spki, body_s, body_e);
+    if !ok_alg || byte_at(in spki, body_s) != DER_SEQUENCE {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    // AlgorithmIdentifier.algorithm OID
+    let (ok_oid, oid_s, oid_e) = tlv_at(in spki, alg_s, alg_e);
+    if !ok_oid || byte_at(in spki, alg_s) != DER_OID || oid_s == oid_e {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    // Optional AlgorithmIdentifier.parameters
+    let mut has_param_oid = false;
+    let mut param_s: u64 = 0;
+    let mut param_e: u64 = 0;
+    if oid_e < alg_e {
+        let (ok_p, ps, pe) = tlv_at(in spki, oid_e, alg_e);
+        if !ok_p || pe != alg_e {
+            return SPKI_ERR_BAD_SPKI;
+        }
+        if byte_at(in spki, oid_e) == DER_OID {
+            has_param_oid = true;
+            param_s = ps;
+            param_e = pe;
+        }
+    }
+    // subjectPublicKey BIT STRING
+    let (ok_bs, bs_s, bs_e) = tlv_at(in spki, alg_e, body_e);
+    if !ok_bs || byte_at(in spki, alg_e) != DER_BIT_STRING || bs_e != body_e || bs_s >= bs_e {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    if !is_oid_ec_public_key(in spki, oid_s, oid_e) {
+        return SPKI_ERR_NOT_EC;
+    }
+    if !has_param_oid {
+        return SPKI_ERR_BAD_CURVE;
+    }
+    let curve = if is_oid_secp256r1(in spki, param_s, param_e) {
+        SPKI_CURVE_P256
+    } else if is_oid_secp384r1(in spki, param_s, param_e) {
+        SPKI_CURVE_P384
+    } else {
+        return SPKI_ERR_BAD_CURVE;
+    };
+    if byte_at(in spki, bs_s) != 0 {
+        return SPKI_ERR_BAD_BITS;
+    }
+    out.try_set(SPKI_EC_OUT_CURVE, curve);
+    out.try_set(SPKI_EC_OUT_BITS_START, wrapping_add(bs_s, 1));
+    out.try_set(SPKI_EC_OUT_BITS_END, bs_e);
+    SPKI_ERR_OK
 }

@@ -6,7 +6,11 @@ mod forge_commands;
 mod lib_commands;
 mod lint_commands;
 mod package_graph;
+mod sim_host;
 mod tool_commands;
+mod tool_facts;
+mod tool_facts_bench;
+mod tool_facts_fuzz;
 mod verify_commands;
 mod vsys_commands;
 use std::{
@@ -51,7 +55,9 @@ const COMPILER_COMMANDS: &[&str] = &[
     "lsp",
     "proof-audit",
     "run",
+    "sim-host",
     "test",
+    tool_facts::COMMAND,
     "verify",
 ];
 
@@ -128,11 +134,18 @@ fn cli() -> Result<(), String> {
     if command == "proof-audit" {
         return proof_commands::run(args.collect());
     }
+    if command == tool_facts::COMMAND {
+        return tool_facts::run(args.collect());
+    }
     if command == "graph" {
         return package_graph::run(args.collect());
     }
     if command == "lsp" {
         return lsp::serve(io::BufReader::new(io::stdin()), io::stdout());
+    }
+    // Hidden: the evaluator behind `vesper-sim` (crates/vesper-sim-session).
+    if command == "sim-host" {
+        return sim_host::serve_stdio();
     }
     if !matches!(command.as_str(), "check" | "run" | "jit" | "build" | "emit") {
         return Err(format!("unknown command '{command}'; see --help"));

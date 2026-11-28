@@ -1,0 +1,630 @@
+// @vesper/lsp-server: the `vesper lsp` loop of src/lsp.rs (`serve_with`,
+// `dispatch`) in Vesper (#1828 part 15a), over the ported transport and
+// gates of @vesper/lsp. The loop owns the client stream: it reads each
+// frame, answers a body the envelope refuses, drops `$/cancelRequest` and
+// client responses, runs the request and notification gates of the session
+// and answers their refusals, and hands every frame that passes them to
+// the checked-document engine seam (`lsp_engine_*` of
+// @vesper/driver-engines, crates/vesper-hybrid/src/lsp_engine.rs), whose
+// frames it writes. The engine is the Rust session until the checker runs in Vesper.
+//
+// The loop is single-threaded: each frame is handled before the next is
+// read, so a cancellation only ever names an answered request (which the
+// protocol lets the server ignore). `serve_live` (part 15b) reads the
+// client through the host as bytes arrive and, while it waits, runs the
+// debounce timers the engine armed.
+use @vesper/lsp::{
+    Env, Envelope, Gate, Id, Le, LimitWord, NO_TOKEN, Perr, Plimits, Cursor, decoded, encode_frame,
+    gate_new, gate_note, gate_request, new_doc, parse_envelope, perr_name, read_frame, read_limits,
+    refusal, refusal_code, refusal_message, Refusal, default_limits
+};
+use @vesper/serde::Doc;
+use @vesper/driver-engines::{
+    lsp_engine_deadline, lsp_engine_error_text, lsp_engine_exit, lsp_engine_frame, lsp_engine_read,
+    lsp_engine_start, lsp_engine_take, lsp_engine_tick, lsp_engine_write
+};
+
+// Where the client stream starts in the input: after the limits.
+const STREAM_AT: u64 = LimitWord::Count * Le::WordBytes;
+
+// The session state the gates take.
+const STATE_UNINITIALIZED: u64 = 0;
+const STATE_RUNNING: u64 = 1;
+const STATE_SHUTDOWN: u64 = 2;
+
+// `lsp_engine_exit`'s answers (`vesper::lsp::EngineExit`).
+const ENGINE_CONTINUE: u64 = 0;
+const ENGINE_CLEAN: u64 = 1;
+const ENGINE_UNCLEAN: u64 = 2;
+
+// `lsp_engine_start`'s answer for a session that started.
+const ENGINE_STARTED: u64 = 0;
+
+// `lsp_engine_read`'s answers besides a byte count, and the wait that has
+// no limit.
+const READ_END: i64 = 0;
+const READ_WAITED: i64 = -1;
+const WAIT_FOREVER: i64 = -1;
+// `lsp_engine_write`'s answer for a write that went through.
+const WRITE_OK: u64 = 0;
+
+// How many bytes the live loop asks the host for at a time, and how many
+// handled bytes it keeps before dropping them from its buffer.
+const READ_CHUNK: u64 = 65536;
+const KEEP_HANDLED: u64 = 1048576;
+
+const BYTE_BITS: u32 = 8;
+
+// The loop's outcome word.
+const OUTCOME_OK: u64 = 0;
+const OUTCOME_ERR: u64 = 1;
+
+// encode.ves's word stream: a response with an error payload, a
+// notification with params, and the value tags it uses.
+const PAYLOAD_ERROR: u64 = 1;
+const TAG_U64: u64 = 2;
+const TAG_STRING: u64 = 5;
+const TAG_OBJECT: u64 = 7;
+const HAS: u64 = 1;
+const NONE: u64 = 0;
+
+// `window/logMessage`'s warning type and its two members.
+const LOG_WARNING: u64 = 2;
+const LOG_MEMBERS: u64 = 2;
+
+// A frame step.
+// (Variant names share one namespace across the program's packages.)
+copy enum Step {
+    ReadFrame,
+    ReadEnd,
+    ReadBroken
+}
+
+// What the loop does next.
+copy enum Next {
+    NextGo,
+    NextDone,
+    NextFailed
+}
+
+// The loop's output and its error text, if it failed.
+struct Server {
+    out: ChunkSeq[u8],
+    error: ChunkSeq[u8],
+    state: u64,
+    gate: Gate,
+    method: ChunkSeq[u8]
+}
+
+// One `read_frame` call: the step, the body's span, or the framing error.
+copy struct Read {
+    step: Step,
+    start: u64,
+    len: u64,
+    broken: Perr
+}
+
+fn read_step(in stream: Slice[u8], inout cursor: Cursor, limits: Plimits) -> Read {
+    handle Fail[Perr] in {
+        match read_frame(in stream, inout cursor, limits) {
+            Option::Some(b) => Read {
+                step: Step::ReadFrame,
+                start: b.start,
+                len: b.len,
+                broken: Perr::PIo
+            },
+            Option::None => Read { step: Step::ReadEnd, start: 0, len: 0, broken: Perr::PIo },
+        }
+    } with {
+        return v => v,
+        raise(e, resume) => Read { step: Step::ReadBroken, start: 0, len: 0, broken: e },
+    }
+}
+
+// One `parse_envelope` call: the envelope, or why the body is refused.
+copy struct Parsed {
+    ok: bool,
+    env: Env,
+    refused: Perr
+}
+
+fn no_env() -> Env {
+    Env {
+        kind: 0,
+        id_tag: 0,
+        id_int: 0,
+        id: NO_TOKEN,
+        method: NO_TOKEN,
+        params: NO_TOKEN,
+        result: NO_TOKEN,
+        error: NO_TOKEN,
+        code: 0,
+        message: NO_TOKEN,
+        data: NO_TOKEN
+    }
+}
+
+fn parse_step(inout doc: Doc, in body: Slice[u8], limits: Plimits) -> Parsed {
+    handle Fail[Perr] in {
+        Parsed { ok: true, env: parse_envelope(inout doc, in body, limits), refused: Perr::PIo }
+    } with {
+        return v => v,
+        raise(e, resume) => Parsed { ok: false, env: no_env(), refused: e },
+    }
+}
+
+fn encode_step(
+    in words: Slice[u64],
+    in pool: Slice[u8],
+    limits: Plimits,
+    inout out: ChunkSeq[u8]
+) -> bool {
+    handle Fail[Perr] in {
+        let frame = encode_frame(in words, in pool, limits);
+        out.extend(in frame[0..frame.len()]);
+        true
+    } with {
+        return v => v,
+        raise(e, resume) => false,
+    }
+}
+
+fn fail(inout s: Server, in text: Str) -> Next {
+    s.error.extend(in text.as_bytes());
+    Next::NextFailed
+}
+
+// The error response to a request the gate refused.
+fn refuse_request(
+    inout s: Server,
+    in doc: Doc,
+    in body: Slice[u8],
+    env: Env,
+    r: Refusal,
+    limits: Plimits
+) -> Next {
+    let mut pool: ChunkSeq[u8] = ChunkSeq::new();
+    let mut words: ChunkSeq[u64] = ChunkSeq::new();
+    words.push(Envelope::Response);
+    words.push(env.id_tag);
+    words.push(wrapping_u64(env.id_int));
+    if env.id_tag == Id::String {
+        decoded(in doc, in body, env.id, inout pool);
+    }
+    words.push(0);
+    words.push(pool.len());
+    words.push(PAYLOAD_ERROR);
+    words.push(wrapping_u64(refusal_code(r)));
+    let message = refusal_message(r);
+    words.push(pool.len());
+    words.push(message.len());
+    pool.extend(in message.as_bytes());
+    words.push(NONE);
+    if encode_step(in words[0..words.len()], in pool[0..pool.len()], limits, inout s.out) {
+        Next::NextGo
+    } else {
+        fail(inout s, in "LSP OutputLimit")
+    }
+}
+
+// `window/logMessage` for a notification the gate refused (a notification
+// never receives a response). Gate messages are short ASCII, well inside
+// the 4,096 characters Rust keeps.
+fn refuse_note(inout s: Server, r: Refusal, limits: Plimits) -> Next {
+    let mut pool: ChunkSeq[u8] = ChunkSeq::new();
+    let mut words: ChunkSeq[u64] = ChunkSeq::new();
+    let method = "window/logMessage";
+    let key_message = "message";
+    let key_type = "type";
+    let message = refusal_message(r);
+    words.push(Envelope::Notification);
+    words.push(0);
+    words.push(method.len());
+    pool.extend(in method.as_bytes());
+    words.push(HAS);
+    words.push(TAG_OBJECT);
+    words.push(LOG_MEMBERS);
+    // Members in serde_json's map order: "message", then "type".
+    words.push(TAG_STRING);
+    words.push(pool.len());
+    words.push(key_message.len());
+    pool.extend(in key_message.as_bytes());
+    words.push(TAG_STRING);
+    words.push(pool.len());
+    words.push(message.len());
+    pool.extend(in message.as_bytes());
+    words.push(TAG_STRING);
+    words.push(pool.len());
+    words.push(key_type.len());
+    pool.extend(in key_type.as_bytes());
+    words.push(TAG_U64);
+    words.push(LOG_WARNING);
+    if encode_step(in words[0..words.len()], in pool[0..pool.len()], limits, inout s.out) {
+        Next::NextGo
+    } else {
+        fail(inout s, in "LSP OutputLimit")
+    }
+}
+
+// Hand a frame to the engine and write what it answered.
+fn engine(inout s: Server, in body: Slice[u8]) -> Next eff [Ffi[HybridCommands]] {
+    let n = lsp_engine_frame(in body);
+    answered(inout s, n)
+}
+
+// Run the timers that fired and write what they answered.
+fn tick(inout s: Server) -> Next eff [Ffi[HybridCommands]] {
+    let n = lsp_engine_tick();
+    answered(inout s, n)
+}
+
+// Copy the engine's `n` bytes of frames out and act on how it ended.
+fn answered(inout s: Server, n: u64) -> Next eff [Ffi[HybridCommands]] {
+    if n > 0 {
+        let at = s.out.len();
+        s.out.resize(wrapping_add(at, n), 0);
+        let _copied = lsp_engine_take(inout s.out[at..s.out.len()]);
+    }
+    let exit = lsp_engine_exit();
+    if exit == ENGINE_CONTINUE {
+        return Next::NextGo;
+    }
+    if exit == ENGINE_CLEAN {
+        return Next::NextDone;
+    }
+    if exit == ENGINE_UNCLEAN {
+        return fail(inout s, in "LSP exit before shutdown");
+    }
+    host_error(inout s);
+    Next::NextFailed
+}
+
+// Append the host's error text to the loop's.
+fn host_error(inout s: Server) eff [Ffi[HybridCommands]] {
+    let text = lsp_engine_error_text();
+    s.error.extend(in text[0..text.len()]);
+}
+
+fn method_is(in m: Slice[u8], in name: Str) -> bool {
+    let text = name.as_bytes();
+    if m.len() != text.len() {
+        return false;
+    }
+    for i in 0..m.len() {
+        if m.try_get(i) != text.try_get(i) {
+            return false;
+        }
+    }
+    true
+}
+
+// One frame body.
+fn frame(
+    inout s: Server,
+    inout doc: Doc,
+    in body: Slice[u8],
+    limits: Plimits
+) -> Next eff [Ffi[HybridCommands]] {
+    let parsed = parse_step(inout doc, in body, limits);
+    let env = parsed.env;
+    if !parsed.ok {
+        return match refusal(parsed.refused, limits) {
+            Result::Ok(reply) => {
+                s.out.extend(in reply[0..reply.len()]);
+                Next::NextGo
+            }
+            Result::Err(e) => fail(inout s, in "LSP OutputLimit"),
+        };
+    }
+    if env.kind == Envelope::Response {
+        // This server's own requests need no answer.
+        return Next::NextGo;
+    }
+    s.method.truncate(0);
+    decoded(in doc, in body, env.method, inout s.method);
+    if env.kind == Envelope::Request {
+        // `workspace/executeCommand` skips the request gate in Rust too
+        // (`handle_work`): the session checks that it is running, then the
+        // `vesper.proofAudit` arguments against its open documents.
+        if method_is(in s.method[0..s.method.len()], "workspace/executeCommand") {
+            if s.state == STATE_UNINITIALIZED {
+                return refuse_request(
+                    inout s,
+                    in doc,
+                    in body,
+                    env,
+                    Refusal::RfNotInitialized,
+                    limits
+                );
+            }
+            if s.state != STATE_RUNNING {
+                return refuse_request(inout s, in doc, in body, env, Refusal::RfShutDown, limits);
+            }
+            return engine(inout s, in body);
+        }
+        let r = gate_request(
+            inout s.gate,
+            s.state,
+            in s.method[0..s.method.len()],
+            in doc,
+            in body,
+            env.params
+        );
+        match r {
+            Refusal::RfNone => {}
+            _ => return refuse_request(inout s, in doc, in body, env, r, limits),
+        }
+        let initialize = method_is(in s.method[0..s.method.len()], "initialize");
+        let shutdown = method_is(in s.method[0..s.method.len()], "shutdown");
+        let next = engine(inout s, in body);
+        if initialize {
+            s.state = STATE_RUNNING;
+        } else if shutdown {
+            s.state = STATE_SHUTDOWN;
+        }
+        return next;
+    }
+    // An answered or unknown id is ignored, as the protocol allows; no
+    // request is still pending when a frame is read.
+    if method_is(in s.method[0..s.method.len()], "$/cancelRequest") {
+        return Next::NextGo;
+    }
+    let r = gate_note(
+        inout s.gate,
+        s.state,
+        in s.method[0..s.method.len()],
+        in doc,
+        in body,
+        env.params
+    );
+    match r {
+        Refusal::RfNone => engine(inout s, in body),
+        _ => refuse_note(inout s, r, limits),
+    }
+}
+
+// Serve the client stream `stream`: the frames written and, when the
+// server stops with an error, its text.
+pub fn serve(
+    in stream: Slice[u8],
+    limits: Plimits,
+    inout out: ChunkSeq[u8],
+    inout error: ChunkSeq[u8]
+) -> bool eff [Ffi[HybridCommands]] {
+    let mut s = Server {
+        out: ChunkSeq::new(),
+        error: ChunkSeq::new(),
+        state: STATE_UNINITIALIZED,
+        gate: gate_new(),
+        method: ChunkSeq::new()
+    };
+    let mut cursor = Cursor { pos: 0 };
+    let mut doc = new_doc();
+    let mut ok = true;
+    loop {
+        let read = read_step(in stream, inout cursor, limits);
+        match read.step {
+            Step::ReadEnd => break,
+            Step::ReadBroken => {
+                s.error.extend(in "LSP ".as_bytes());
+                s.error.extend(in perr_name(read.broken).as_bytes());
+                ok = false;
+                break;
+            }
+            Step::ReadFrame => {}
+        }
+        let end = wrapping_add(read.start, read.len);
+        match frame(inout s, inout doc, in stream[read.start..end], limits) {
+            Next::NextGo => {}
+            Next::NextDone => break,
+            Next::NextFailed => {
+                ok = false;
+                break;
+            }
+        }
+    }
+    out.extend(in s.out[0..s.out.len()]);
+    error.extend(in s.error[0..s.error.len()]);
+    ok
+}
+
+// What the live loop's wait for client bytes found.
+copy enum Fill {
+    FillMore,
+    FillEnd,
+    FillTick,
+    FillFailed
+}
+
+// Wait for more client bytes, at most until the engine's next timer.
+fn fill(inout s: Server, inout pending: ChunkSeq[u8]) -> Fill eff [Ffi[HybridCommands]] {
+    let deadline = lsp_engine_deadline();
+    let wait = if deadline < 0 { WAIT_FOREVER } else { deadline };
+    let at = pending.len();
+    pending.resize(wrapping_add(at, READ_CHUNK), 0);
+    let n = lsp_engine_read(inout pending[at..pending.len()], wait);
+    if n > READ_END {
+        pending.truncate(wrapping_add(at, wrapping_u64(n)));
+        return Fill::FillMore;
+    }
+    pending.truncate(at);
+    if n == READ_END {
+        return Fill::FillEnd;
+    }
+    if n == READ_WAITED {
+        return Fill::FillTick;
+    }
+    host_error(inout s);
+    Fill::FillFailed
+}
+
+// Write the frames the loop has produced to the client.
+fn flush(inout s: Server) -> bool eff [Ffi[HybridCommands]] {
+    if s.out.len() == 0 {
+        return true;
+    }
+    let written = lsp_engine_write(in s.out[0..s.out.len()]);
+    s.out.truncate(0);
+    if written == WRITE_OK {
+        return true;
+    }
+    host_error(inout s);
+    false
+}
+
+// Serve the client the host reads as its bytes arrive, writing each frame
+// as it is produced: the error text when the server stops with an error.
+// A frame is read only once its bytes are all in (`read_frame` reports a
+// partial one as truncated, and the client's later bytes never turn an
+// error into success), so chunking does not change what the client sees.
+pub fn serve_live(limits: Plimits, inout error: ChunkSeq[u8]) -> bool eff [Ffi[HybridCommands]] {
+    let mut s = Server {
+        out: ChunkSeq::new(),
+        error: ChunkSeq::new(),
+        state: STATE_UNINITIALIZED,
+        gate: gate_new(),
+        method: ChunkSeq::new()
+    };
+    let mut pending: ChunkSeq[u8] = ChunkSeq::new();
+    let mut start: u64 = 0;
+    let mut ended = false;
+    let mut doc = new_doc();
+    let mut ok = true;
+    loop {
+        let mut cursor = Cursor { pos: 0 };
+        let read = read_step(in pending[start..pending.len()], inout cursor, limits);
+        let partial = match read.step {
+            Step::ReadFrame => false,
+            Step::ReadEnd => true,
+            Step::ReadBroken => match read.broken {
+                Perr::PTruncated => true,
+                _ => false,
+            },
+        };
+        if partial && !ended {
+            match fill(inout s, inout pending) {
+                Fill::FillMore => {}
+                Fill::FillEnd => ended = true,
+                Fill::FillTick => match tick(inout s) {
+                    Next::NextGo => {}
+                    Next::NextDone => break,
+                    Next::NextFailed => {
+                        ok = false;
+                        break;
+                    }
+                },
+                Fill::FillFailed => {
+                    ok = false;
+                    break;
+                }
+            }
+            if !flush(inout s) {
+                ok = false;
+                break;
+            }
+            continue;
+        }
+        match read.step {
+            Step::ReadEnd => break,
+            Step::ReadBroken => {
+                s.error.extend(in "LSP ".as_bytes());
+                s.error.extend(in perr_name(read.broken).as_bytes());
+                ok = false;
+                break;
+            }
+            Step::ReadFrame => {}
+        }
+        let from = wrapping_add(start, read.start);
+        let end = wrapping_add(from, read.len);
+        start = wrapping_add(start, cursor.pos);
+        let next = frame(inout s, inout doc, in pending[from..end], limits);
+        if !flush(inout s) {
+            ok = false;
+            break;
+        }
+        match next {
+            Next::NextGo => {}
+            Next::NextDone => break,
+            Next::NextFailed => {
+                ok = false;
+                break;
+            }
+        }
+        if start >= KEEP_HANDLED {
+            let mut rest: ChunkSeq[u8] = ChunkSeq::new();
+            rest.extend(in pending[start..pending.len()]);
+            pending = rest;
+            start = 0;
+        }
+    }
+    let _flushed = flush(inout s);
+    error.extend(in s.error[0..s.error.len()]);
+    ok
+}
+
+fn put_bytes(inout out: ChunkSeq[u64], in bytes: Slice[u8]) {
+    out.push(bytes.len());
+    let mut k: u64 = 0;
+    loop {
+        if k >= bytes.len() {
+            break;
+        }
+        if wrapping_add(k, Le::WordBytes) <= bytes.len() {
+            out.push(bytes.try_read_u64_le(k).unwrap_or(0));
+        } else {
+            out.push(tail_word(in bytes, k));
+        }
+        k = wrapping_add(k, Le::WordBytes);
+    }
+}
+
+// The last, partial word of `bytes` from `k`, little-endian.
+fn tail_word(in bytes: Slice[u8], k: u64) -> u64 {
+    let mut w: u64 = 0;
+    let mut shift: u32 = 0;
+    for i in k..bytes.len() {
+        w = w | wrapping_shl_u64(widen_u64(bytes.try_get(i).unwrap_or(0)), shift);
+        shift = wrapping_add(shift, BYTE_BITS);
+    }
+    w
+}
+
+// Task "server": the input is the limits, then the client byte stream. The
+// result is `OUTCOME_OK` or `OUTCOME_ERR`, the frames written and the error
+// text (each a length word, then eight bytes per word).
+pub fn lsp_server_run(in input: Str) -> ChunkSeq[u64] eff [Ffi[HybridCommands]] {
+    let bytes = input.as_bytes();
+    let limits = read_limits(in bytes, 0);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new();
+    let mut error: ChunkSeq[u8] = ChunkSeq::new();
+    let at = STREAM_AT;
+    let ok = serve(in bytes[at..bytes.len()], limits, inout out, inout error);
+    let mut words: ChunkSeq[u64] = ChunkSeq::new();
+    words.push(if ok { OUTCOME_OK } else { OUTCOME_ERR });
+    put_bytes(inout words, in out[0..out.len()]);
+    put_bytes(inout words, in error[0..error.len()]);
+    words
+}
+
+// `vesper lsp`: start the engine, then serve the client on stdin and
+// stdout. The error text when the server stops with an error.
+pub fn serve_stdio(inout error: ChunkSeq[u8]) -> bool eff [Ffi[HybridCommands]] {
+    if lsp_engine_start() != ENGINE_STARTED {
+        let text = lsp_engine_error_text();
+        error.extend(in text[0..text.len()]);
+        return false;
+    }
+    serve_live(default_limits(), inout error)
+}
+
+// Task "server live": the input is the limits; the client is the host's.
+// The result is `OUTCOME_OK` or `OUTCOME_ERR`, then the error text.
+pub fn lsp_server_live(in input: Str) -> ChunkSeq[u64] eff [Ffi[HybridCommands]] {
+    let limits = read_limits(in input.as_bytes(), 0);
+    let mut error: ChunkSeq[u8] = ChunkSeq::new();
+    let ok = serve_live(limits, inout error);
+    let mut words: ChunkSeq[u64] = ChunkSeq::new();
+    words.push(if ok { OUTCOME_OK } else { OUTCOME_ERR });
+    put_bytes(inout words, in error[0..error.len()]);
+    words
+}

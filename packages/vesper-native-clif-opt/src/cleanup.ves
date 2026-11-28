@@ -1,0 +1,358 @@
+// The clean-up steps of src/native_clif_opt.rs in Vesper (#2362 part 4):
+// remove_dead and sink_slot_inits.
+
+use @vesper/clif::{Func, inc, n32, u32_at, w};
+use @vesper/clif::codes::{
+    F_BRANCH, F_CALL, F_LOAD, F_SIDE_EFFECTS, F_STACK_SLOT, F_STORE, F_TERMINATOR, F_TRAP, NONE,
+    OP_ISTORE16, OP_ISTORE32, OP_ISTORE8, OP_LOAD, OP_SLOAD16, OP_SLOAD32, OP_SLOAD8, OP_STACK_ADDR,
+    OP_STORE, OP_ULOAD16, OP_ULOAD32, OP_ULOAD8
+};
+use super::{layout_insts};
+use super::branches::{cfg_of, constant, dom_of, values_of};
+
+// The effect bits that keep an instruction with unused results.
+const KEEP_EFFECTS: u64 = F_TRAP
+    | F_LOAD
+    | F_STORE
+    | F_SIDE_EFFECTS
+    | F_CALL
+    | F_BRANCH
+    | F_TERMINATOR;
+// `sink_slot_inits` asks `constant` from this depth.
+const INIT_CONST_DEPTH: u64 = 0;
+// A store's stored value and address arguments.
+const STORE_VALUE_ARG: u64 = 0;
+const STORE_ADDR_ARG: u64 = 1;
+// "No rank": a block not reachable from the entry.
+const NO_RANK: u64 = 18446744073709551615;
+
+fn g32(in s: ChunkSeq[u32], i: u64) -> u32 {
+    s.try_get(i).unwrap_or(NONE)
+}
+
+fn g64(in s: ChunkSeq[u64], i: u64) -> u64 {
+    s.try_get(i).unwrap_or(0)
+}
+
+fn g8(in s: ChunkSeq[u8], i: u64) -> u8 {
+    s.try_get(i).unwrap_or(0)
+}
+
+// ----- remove_dead -----------------------------------------------------------
+
+fn is_plain_load(op: u64) -> bool {
+    op == OP_LOAD
+        || op == OP_ULOAD8
+        || op == OP_SLOAD8
+        || op == OP_ULOAD16
+        || op == OP_SLOAD16
+        || op == OP_ULOAD32
+        || op == OP_SLOAD32
+}
+
+// `removable`: an instruction with results that only loads or computes.
+fn removable(in f: Func, i: u32) -> bool {
+    if f.nresults(i) == 0 {
+        return false;
+    }
+    let op = f.op(i);
+    if is_plain_load(op) {
+        return true;
+    }
+    f.inst(w(i)).eff & KEEP_EFFECTS == 0
+}
+
+fn dead(in f: Func, in uses: ChunkSeq[u64], i: u32) -> bool {
+    if !removable(in f, i) {
+        return false;
+    }
+    for k in 0..f.nresults(i) {
+        if g64(in uses, w(f.result(i, k))) != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+// `remove_dead`: unused loads and pure instructions go, and so do the
+// definitions that only they used.
+pub fn remove_dead(inout f: Func) {
+    let all = layout_insts(in f);
+    let mut uses = ChunkSeq::new[u64]();
+    uses.resize(f.nvalues(), 0);
+    for q in 0..all.len() {
+        let vals = values_of(in f, u32_at(in all, q));
+        for k in 0..vals.len() {
+            let v = w(u32_at(in vals, k));
+            let ok = uses.try_set(v, inc(g64(in uses, v)));
+        }
+    }
+    let mut work = ChunkSeq::new[u32]();
+    for q in 0..all.len() {
+        let i = u32_at(in all, q);
+        if dead(in f, in uses, i) {
+            work.push(i);
+        }
+    }
+    let mut removed = ChunkSeq::new[u8]();
+    removed.resize(f.ninsts(), 0);
+    loop {
+        let inst = match work.pop() {
+            Option::Some(x) => x,
+            Option::None => break,
+        };
+        if g8(in removed, w(inst)) != 0 || !dead(in f, in uses, inst) {
+            continue;
+        }
+        let args = values_of(in f, inst);
+        f.remove_inst(inst);
+        let ok = removed.try_set(w(inst), 1);
+        for k in 0..args.len() {
+            let v = u32_at(in args, k);
+            let n = g64(in uses, w(v));
+            if n == 0 {
+                continue;
+            }
+            let left = wrapping_sub(n, 1);
+            let ok2 = uses.try_set(w(v), left);
+            if left == 0 {
+                let d = f.def_inst(v);
+                if d != NONE && f.inst(w(d)).block != NONE {
+                    work.push(d);
+                }
+            }
+        }
+    }
+}
+
+// ----- sink_slot_inits -------------------------------------------------------
+
+fn is_store_format(op: u64) -> bool {
+    op == OP_STORE || op == OP_ISTORE8 || op == OP_ISTORE16 || op == OP_ISTORE32
+}
+
+// The successors of `b`: the destinations of its last instruction.
+fn succs(in f: Func, b: u32) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    let last = f.last_inst(b);
+    if last == NONE {
+        return out;
+    }
+    for d in 0..f.ndests(last) {
+        out.push(f.dest_block(last, d));
+    }
+    out
+}
+
+// `in_cycle`: whether `block` can reach itself.
+fn in_cycle(in f: Func, block: u32) -> bool {
+    let mut seen = ChunkSeq::new[u8]();
+    seen.resize(f.nblocks(), 0);
+    let mut work = succs(in f, block);
+    loop {
+        let b = match work.pop() {
+            Option::Some(x) => x,
+            Option::None => break,
+        };
+        if b == block {
+            return true;
+        }
+        if g8(in seen, w(b)) == 0 {
+            let ok = seen.try_set(w(b), 1);
+            let more = succs(in f, b);
+            work.extend(in more.as_slice());
+        }
+    }
+    false
+}
+
+// A slot's uses (`Uses`): its initial stores in the entry block, the
+// blocks of its other uses, and whether it is used other than through
+// its address.
+struct SlotUses {
+    unsafe_use: ChunkSeq[u8],
+    init_slot: ChunkSeq[u32],
+    init_inst: ChunkSeq[u32],
+    use_slot: ChunkSeq[u32],
+    use_block: ChunkSeq[u32],
+}
+
+// `sink_slot_inits`: a slot's entry-block stores of constants move to the
+// top of the nearest block that dominates every other use of the slot,
+// when that block is in no cycle.
+pub fn sink_slot_inits(inout f: Func) {
+    let entry = f.first_block();
+    if entry == NONE {
+        return;
+    }
+    let cfg = cfg_of(in f);
+    let dom = dom_of(in f, in cfg);
+    let nb = f.nblocks();
+    let mut rank = ChunkSeq::new[u64]();
+    rank.resize(nb, NO_RANK);
+    let np = dom.post.len();
+    for k in 0..np {
+        let b = u32_at(in dom.post, k);
+        let ok = rank.try_set(w(b), wrapping_sub(wrapping_sub(np, 1), k));
+    }
+    let all = layout_insts(in f);
+    let nv = f.nvalues();
+    let ns = f.nslots();
+    let mut addresses = ChunkSeq::new[u32]();
+    addresses.resize(nv, NONE);
+    let mut mixed = ChunkSeq::new[u8]();
+    mixed.resize(ns, 0);
+    for q in 0..all.len() {
+        let inst = u32_at(in all, q);
+        if f.op(inst) == OP_STACK_ADDR {
+            let ok = addresses.try_set(w(f.result(inst, 0)), n32(f.inst(w(inst)).imm));
+        }
+    }
+    loop {
+        let mut grew = false;
+        for q in 0..all.len() {
+            let inst = u32_at(in all, q);
+            if f.inst(w(inst)).eff & F_BRANCH == 0 {
+                continue;
+            }
+            for d in 0..f.ndests(inst) {
+                let target = f.dest_block(inst, d);
+                let na = f.dest_nargs(inst, d);
+                let np2 = f.nparams(target);
+                let n = if na < np2 { na } else { np2 };
+                for k in 0..n {
+                    let a = f.dest_arg(inst, d, k);
+                    if a == NONE {
+                        continue;
+                    }
+                    let slot = g32(in addresses, w(f.resolve(a)));
+                    if slot == NONE {
+                        continue;
+                    }
+                    let p = f.param(target, k);
+                    let other = g32(in addresses, w(p));
+                    if other == NONE {
+                        let ok = addresses.try_set(w(p), slot);
+                        grew = true;
+                    } else if other != slot {
+                        let ok = mixed.try_set(w(slot), 1);
+                        let ok2 = mixed.try_set(w(other), 1);
+                    }
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let mut u = SlotUses {
+        unsafe_use: ChunkSeq::new[u8](),
+        init_slot: ChunkSeq::new[u32](),
+        init_inst: ChunkSeq::new[u32](),
+        use_slot: ChunkSeq::new[u32](),
+        use_block: ChunkSeq::new[u32]()
+    };
+    u.unsafe_use.resize(ns, 0);
+    for q in 0..all.len() {
+        let inst = u32_at(in all, q);
+        let row = f.inst(w(inst));
+        let block = row.block;
+        let op = f.op(inst);
+        if row.eff & F_STACK_SLOT != 0 && op != OP_STACK_ADDR {
+            let ok = u.unsafe_use.try_set(row.imm, 1);
+            continue;
+        }
+        let vals = values_of(in f, inst);
+        let mut seen = ChunkSeq::new[u32]();
+        for k in 0..vals.len() {
+            let s = g32(in addresses, w(u32_at(in vals, k)));
+            if s != NONE {
+                seen.push(s);
+            }
+        }
+        if seen.len() == 0 {
+            continue;
+        }
+        let mut init = false;
+        if block == entry && is_store_format(op) {
+            let value = f.resolve(f.arg(inst, STORE_VALUE_ARG));
+            let addr = f.resolve(f.arg(inst, STORE_ADDR_ARG));
+            init = g32(in addresses, w(addr)) != NONE
+                && g32(in addresses, w(value)) == NONE
+                && constant(in f, value, INIT_CONST_DEPTH).some;
+        }
+        for k in 0..seen.len() {
+            let s = u32_at(in seen, k);
+            if init {
+                u.init_slot.push(s);
+                u.init_inst.push(inst);
+            } else {
+                u.use_slot.push(s);
+                u.use_block.push(block);
+            }
+        }
+    }
+    for s in 0..ns {
+        let slot = n32(s);
+        if g8(in u.unsafe_use, s) != 0 || g8(in mixed, s) != 0 {
+            continue;
+        }
+        let mut has_init = false;
+        for k in 0..u.init_slot.len() {
+            if u32_at(in u.init_slot, k) == slot {
+                has_init = true;
+            }
+        }
+        if !has_init {
+            continue;
+        }
+        let mut target = NONE;
+        let mut reachable = true;
+        for k in 0..u.use_slot.len() {
+            if u32_at(in u.use_slot, k) != slot {
+                continue;
+            }
+            let b = u32_at(in u.use_block, k);
+            if g64(in rank, w(b)) == NO_RANK {
+                reachable = false;
+                break;
+            }
+            target = if target == NONE {
+                b
+            } else {
+                common(in dom, in rank, target, b)
+            };
+        }
+        if target == NONE || !reachable {
+            continue;
+        }
+        if target == entry || in_cycle(in f, target) {
+            continue;
+        }
+        let first = f.first_inst(target);
+        if first == NONE {
+            continue;
+        }
+        for k in 0..u.init_slot.len() {
+            if u32_at(in u.init_slot, k) == slot {
+                f.move_before(u32_at(in u.init_inst, k), first);
+            }
+        }
+    }
+}
+
+// The nearest common dominator of two reachable blocks.
+pub fn common(in dom: super::branches::Dom, in rank: ChunkSeq[u64], a0: u32, b0: u32) -> u32 {
+    let mut a = a0;
+    let mut b = b0;
+    loop {
+        if a == b {
+            return a;
+        }
+        if g64(in rank, w(a)) > g64(in rank, w(b)) {
+            a = g32(in dom.idom, w(a));
+        } else {
+            b = g32(in dom.idom, w(b));
+        }
+    }
+}

@@ -56,6 +56,8 @@ const E_LOOP: u64 = 19;
 const E_BREAK: u64 = 20;
 const E_CONTINUE: u64 = 21;
 const E_HANDLE: u64 = 22;
+const E_TRY: u64 = 23;
+const E_WIDE_INT: u64 = 26;
 const E_INDEX: u64 = 40;
 
 // Statement kinds of the stream.
@@ -95,6 +97,7 @@ const X_BLOCK: u8 = 5;
 const X_CALL: u8 = 6;
 const X_FIELD: u8 = 7;
 const X_INDEX: u8 = 8;
+const X_TRY: u8 = 9;
 const X_UNARY: u8 = 10;
 const X_BINARY: u8 = 11;
 const X_ASSIGN: u8 = 12;
@@ -113,6 +116,7 @@ const L_INT: u8 = 1;
 const L_FLOAT: u8 = 2;
 const L_BOOL: u8 = 3;
 const L_STRING: u8 = 4;
+const L_WIDE_INT: u8 = 5;
 
 // @vesper/ast pattern kinds.
 const AP_WILD: u8 = 1;
@@ -706,6 +710,7 @@ fn fn_words(
     if n.effects == none() {
         out.push(0);
         out.push(0);
+        out.push(0);
     } else {
         let effs = effects_node(in a, n.effects);
         let m = list_len(in a, effs.instances);
@@ -714,12 +719,14 @@ fn fn_words(
         for i in 0..m {
             let inst = effect_node(in a, list_at(in a, effs.instances, i));
             out.push(ast_name(inout e, in a, inst.name));
+            out.push(opt_ast_name(inout e, in a, inst.label));
             let c = list_len(in a, inst.args);
             out.push(c);
             for j in 0..c {
                 out.push(ty(inout e, in a, list_at(in a, inst.args, j), in off()));
             }
         }
+        out.push(opt_ast_name(inout e, in a, effs.tail));
     }
     out.push(result);
 }
@@ -868,6 +875,18 @@ fn fits(l: Lit) -> bool {
     l.hi == 0
 }
 
+// An integer literal past u64::MAX in magnitude (an `Int` or a `WideInt`).
+fn is_wide(l: Lit) -> bool {
+    (l.kind == L_INT || l.kind == L_WIDE_INT) && !fits(l)
+}
+
+// A wide literal's sign, then its magnitude's low and high words.
+fn wide_words(l: Lit, inout out: ChunkSeq[u64]) {
+    out.push(flag(l.neg));
+    out.push(l.bits);
+    out.push(l.hi);
+}
+
 fn pattern(inout e: Enc, in a: Ast, p: u32, shift: u32, inout out: ChunkSeq[u64]) {
     let n = pat_at(in a, p);
     let s = widen_u64(wrapping_add(n.start, shift));
@@ -911,6 +930,9 @@ fn pattern(inout e: Enc, in a: Ast, p: u32, shift: u32, inout out: ChunkSeq[u64]
             out.push(LIT_STRING);
         } else {
             out.push(LIT_WIDE_INT);
+            if is_wide(l) {
+                wide_words(l, inout out);
+            }
         }
     } else if n.kind == AP_TUPLE {
         let k = list_len(in a, n.a);
@@ -1037,6 +1059,9 @@ fn expr(inout e: Enc, in a: Ast, x: u32, shift: u32, fip: bool, inout out: Chunk
             out.push(flag(l.bits != 0));
         } else if l.kind == L_STRING {
             head(E_STRING, s, t, inout out);
+        } else if is_wide(l) {
+            head(E_WIDE_INT, s, t, inout out);
+            wide_words(l, inout out);
         } else {
             head(E_OTHER, s, t, inout out);
         }
@@ -1154,6 +1179,9 @@ fn expr(inout e: Enc, in a: Ast, x: u32, shift: u32, fip: bool, inout out: Chunk
         if n.a != none() {
             expr(inout e, in a, n.a, shift, fip, inout out);
         }
+    } else if n.kind == X_TRY {
+        head(E_TRY, s, t, inout out);
+        expr(inout e, in a, n.a, shift, fip, inout out);
     } else if n.kind == X_CONTINUE {
         head(E_CONTINUE, s, t, inout out);
     } else if n.kind == X_HANDLE {
@@ -1165,6 +1193,9 @@ fn expr(inout e: Enc, in a: Ast, x: u32, shift: u32, fip: bool, inout out: Chunk
         for i in 0..k {
             out.push(ty(inout e, in a, list_at(in a, eff.args, i), in off()));
         }
+        // The handler's inferred effects: not known before inference.
+        out.push(0);
+        out.push(opt_ast_name(inout e, in a, eff.label));
         out.push(flag(n.b != none()));
         if n.b != none() {
             pattern(inout e, in a, n.b, shift, inout out);

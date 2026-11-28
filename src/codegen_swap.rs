@@ -1262,8 +1262,26 @@ pub mod body {
     /// call (part 6b), or [`NO_CALLEE`]; then `sret, h, h values`: the
     /// result pointer's value word, or [`NO_VALUE`] for a function that
     /// returns its value, and the values (by index in the graph's values)
-    /// that `aggregates::plan` builds in it (#2411). No result.
+    /// that `aggregates::plan` builds in it (#2411). A function that
+    /// returns its result in registers (`FnAbi::result_words`, #2581)
+    /// builds it in a local buffer: its `sret` word is the buffer's value
+    /// with the result's word count at [`RESULT_WORDS_SHIFT`]; one that
+    /// returns a small enum's words (`FrameResult::Words`) has
+    /// [`NO_POINTER`] below its word count. Then `p, p words`: for each of
+    /// the function's `p` declared parameters the variable holding its
+    /// address, or [`NO_VALUE`] (#2563: an `inout` scalar parameter is
+    /// loaded at entry and stored through its address at every
+    /// definition). No result.
     pub const FUNCTION: u32 = 1;
+
+    /// The low word of a [`FUNCTION`] request's `sret` word when a small
+    /// enum result returns as words with no result pointer (#2581).
+    pub const NO_POINTER: u64 = u32::MAX as u64;
+
+    /// Where a [`FUNCTION`] request's `sret` word carries the number of
+    /// words a register result returns from its buffer (0 for a result
+    /// pointer); the value's own word is below it.
+    pub const RESULT_WORDS_SHIFT: u32 = 32;
 
     /// A [`FUNCTION`] request's `sret` word when the function has no result
     /// pointer.
@@ -1282,9 +1300,25 @@ pub mod body {
     /// (`FnAbi::status`) instead of storing a tag in the record.
     pub const STATUS_CALL: u64 = 1 << 33;
 
+    /// A callee word's flag for a callee that returns its small enum result
+    /// as words in registers (#2581, `FnAbi::result_words`).
+    pub const WORDS_CALL: u64 = 1 << 34;
+
+    /// A callee word's flag for a callee that writes its struct or enum
+    /// result through a result pointer (#2654): the call passes fresh
+    /// storage (or the caller's own result pointer) before the arguments,
+    /// and the call's value is that storage.
+    pub const SRET_CALL: u64 = 1 << 35;
+
     /// [`FUNCTION`]'s leading flags, `status` and `locations`: the words
     /// before the parameter count.
     pub const FLAGS: usize = 2;
+
+    /// Where a [`FUNCTION`] request's callee count word carries the number
+    /// of callee words for the calls of the body's handlers' nested graphs
+    /// (#2657), which follow the body's own; the body's own count is
+    /// below it.
+    pub const NESTED_CALLS_SHIFT: u32 = 32;
 
     /// The callee words of a [`FUNCTION`] request's arguments (after the
     /// parameters and the callee count), or `None` when the arguments do
@@ -1296,17 +1330,72 @@ pub mod body {
     /// A [`FUNCTION`] request's callees, `sret` word and result homes, or
     /// `None` when the arguments do not have that layout.
     pub fn layout(args: &[u64]) -> Option<(&[u64], u64, &[u64])> {
+        full(args).map(|(callees, sret, homes, _, _)| (callees, sret, homes))
+    }
+
+    /// The callee words of the calls in a [`FUNCTION`] request's nested
+    /// handler graphs (#2657): at each `Op::Handle` of the body, in order,
+    /// those of its handled body, its `return` clause and its operation
+    /// clauses (with a nested handler's inside its graph's); `None` when
+    /// the arguments do not have that layout.
+    pub fn nested_callees(args: &[u64]) -> Option<&[u64]> {
+        let params = usize::try_from(*args.get(FLAGS)?).ok()?;
+        let count_at = FLAGS + 1 + params;
+        let word = *args.get(count_at)?;
+        let own = usize::try_from(word & u64::from(u32::MAX)).ok()?;
+        let nested = usize::try_from(word >> NESTED_CALLS_SHIFT).ok()?;
+        let at = count_at + 1 + own;
+        full(args)?;
+        args.get(at..at + nested)
+    }
+
+    /// A [`FUNCTION`] request's parameter address words (#2563), or `None`
+    /// when the arguments do not have that layout.
+    pub fn pointers(args: &[u64]) -> Option<&[u64]> {
+        full(args).map(|(_, _, _, pointers, _)| pointers)
+    }
+    /// A [`FUNCTION`] request's entry views (#2653): for each slice
+    /// parameter read once at entry, its index, its read count and the
+    /// reads; `None` when the arguments do not have that layout.
+    pub fn entry_views(args: &[u64]) -> Option<&[u64]> {
+        full(args).map(|(_, _, _, _, views)| views)
+    }
+
+    /// A [`FUNCTION`] request's callees, `sret` word, result homes,
+    /// parameter addresses and entry view words.
+    #[allow(clippy::type_complexity)]
+    fn full(args: &[u64]) -> Option<(&[u64], u64, &[u64], &[u64], &[u64])> {
         let params = usize::try_from(*args.get(FLAGS)?).ok()?;
         // The parameter count, then the parameter variables.
         let count_at = FLAGS + 1 + params;
-        let count = usize::try_from(*args.get(count_at)?).ok()?;
-        let sret_at = count_at + 1 + count;
-        let callees = args.get(count_at + 1..sret_at)?;
+        // The body's own calls, then its nested graphs' (#2657).
+        let word = *args.get(count_at)?;
+        let own = usize::try_from(word & u64::from(u32::MAX)).ok()?;
+        let nested = usize::try_from(word >> NESTED_CALLS_SHIFT).ok()?;
+        let sret_at = count_at + 1 + own + nested;
+        let callees = args.get(count_at + 1..count_at + 1 + own)?;
         let sret = *args.get(sret_at)?;
         let homes = usize::try_from(*args.get(sret_at + 1)?).ok()?;
-        args.get(sret_at + 2..)
-            .filter(|rest| rest.len() == homes)
-            .map(|rest| (callees, sret, rest))
+        let pointers_at = sret_at + 2 + homes;
+        let result_homes = args.get(sret_at + 2..pointers_at)?;
+        let pointers = usize::try_from(*args.get(pointers_at)?).ok()?;
+        let views_at = pointers_at + 1 + pointers;
+        let pointer_words = args.get(pointers_at + 1..views_at)?;
+        // The slice parameters read once at entry (#2653): each one's
+        // parameter index, read count and reads.
+        let views = usize::try_from(*args.get(views_at)?).ok()?;
+        let mut at = views_at + 1;
+        for _ in 0..views {
+            let reads = usize::try_from(*args.get(at + 1)?).ok()?;
+            at += 2 + reads;
+        }
+        (at == args.len()).then_some((
+            callees,
+            sret,
+            result_homes,
+            pointer_words,
+            &args[views_at + 1..],
+        ))
     }
 }
 

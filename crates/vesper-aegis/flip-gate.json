@@ -77,6 +77,38 @@
     {
       "workload": "pem_pubkey",
       "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "pem_pubkey"]
+    },
+    {
+      "workload": "crl_this_update",
+      "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "crl_this_update"]
+    },
+    {
+      "workload": "amd_cert_ext",
+      "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "amd_cert_ext"]
+    },
+    {
+      "workload": "pck_ext",
+      "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "pck_ext"]
+    },
+    {
+      "workload": "spki",
+      "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "spki"]
+    },
+    {
+      "workload": "pcs_envelope",
+      "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "pcs_envelope"]
+    },
+    {
+      "workload": "qe_identity",
+      "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "qe_identity"]
+    },
+    {
+      "workload": "sgx_tcb_info",
+      "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "sgx_tcb_info"]
+    },
+    {
+      "workload": "tdx_tcb_info",
+      "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "tdx_tcb_info"]
     }
   ]
 }

@@ -24,6 +24,8 @@ use self::iface::{
 };
 use self::text::{WORD_BYTES, WORD_ROUND_UP};
 
+const WORD_BYTES_SHIFT: u32 = 3;
+
 // Type classes (plan_words.rs `C_*`).
 const C_OTHER: u8 = 0;
 const C_TUPLE: u8 = 1;
@@ -380,10 +382,12 @@ fn put_sym(inout o: ChunkSeq[u8], in names: Names, s: u32) {
 }
 
 fn put_u64(inout o: ChunkSeq[u8], v: u64) {
-    if v >= 10 {
-        put_u64(inout o, v / 10);
+    let q = v / 10;
+    if q != 0 {
+        put_u64(inout o, q);
     }
-    o.push(wrapping_u8(wrapping_add(v % 10, widen_u64(DIGIT_ZERO))));
+    let rem = wrapping_sub(v, wrapping_mul(q, 10));
+    o.push(wrapping_u8(wrapping_add(rem, widen_u64(DIGIT_ZERO))));
 }
 
 pub fn read_planner(in b: Slice[u8]) -> Planner {
@@ -1084,7 +1088,7 @@ impl Planner {
             self.decls.push(Decl {
                 name: n,
                 is_enum: nd.is_enum,
-                words: nd.size / WORD_BYTES,
+                words: wrapping_shr_u64(nd.size, WORD_BYTES_SHIFT),
                 is_handle: is_handle,
                 linear: linear,
                 drop: drop,
@@ -1143,7 +1147,7 @@ impl Planner {
                     }
                     fnames.push(lf.name);
                     ftys.push(fty);
-                    foffs.push(lf.offset / WORD_BYTES);
+                    foffs.push(wrapping_shr_u64(lf.offset, WORD_BYTES_SHIFT));
                 }
             }
             let va = self.dvars.len();

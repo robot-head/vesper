@@ -7,13 +7,13 @@ use @vesper/ast::{
 };
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{EffNode, Types};
-use @vesper/check-data::util::{inc32, n32, u32_at, w};
+use @vesper/check-data::util::{n32, u32_at, w};
 use @vesper/check-data::world::{Generic, World, set_by_symbol};
 use @vesper/check-names-packages::{AssembledModule};
 use @vesper/place-ir::codes::{Lit, Pat};
 use @vesper/place-ir-lower::ast::{Ast as IrAst, Cl, Ef, Eop, Ex, FnR, Gn, Hd, PathR, Pm, Pt};
 use @vesper-std/arena::{idx_from_raw};
-use self::collect::{CollectedProgram, FnInfo, ParamInfo, lower_effects, lower_ty, translate_sym};
+use self::collect::{CollectedProgram, ParamInfo, lower_effects, lower_ty, translate_sym};
 use self::float_math::{
     FloatMath, NEAREST_PREFIX, SATURATING_PREFIX, UNARY_FLOAT_ARGUMENTS, math_arity, math_op
 };
@@ -50,99 +50,6 @@ struct LowerCtx {
     types: Types,
     tmp: String,
     caches: ChunkSeq[ChunkSeq[u32]],
-    intrinsic_targets: ChunkSeq[u32],
-}
-
-fn names_has_suffix(in names: Names, sym: u32, in suffix: Slice[u8]) -> bool {
-    let n = names.size(sym);
-    if n < suffix.len() {
-        return false;
-    }
-    let off = wrapping_sub(n, suffix.len());
-    for i in 0..suffix.len() {
-        let b = match suffix.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        if names.byte(sym, wrapping_add(off, i)) != b {
-            return false;
-        }
-    }
-    true
-}
-
-fn names_eq_range(in names: Names, a: u32, b: u32, len: u64) -> bool {
-    if names.size(a) < len || names.size(b) < len {
-        return false;
-    }
-    for i in 0..len {
-        if names.byte(a, i) != names.byte(b, i) {
-            return false;
-        }
-    }
-    true
-}
-
-fn unmangle_tail(inout names: Names, sym: u32, from: u64) -> u32 {
-    let size = names.size(sym);
-    let mut buf = ChunkSeq::new[u8]();
-    let mut i = from;
-    loop {
-        if i >= size {
-            break;
-        }
-        let b = names.byte(sym, i);
-        if b == 95 && wrapping_add(i, 1) < size {
-            let next = names.byte(sym, wrapping_add(i, 1));
-            if next == 49 {
-                buf.push(95);
-                i = wrapping_add(i, 2);
-                continue;
-            }
-            if next == 50 {
-                buf.push(45);
-                i = wrapping_add(i, 2);
-                continue;
-            }
-        }
-        buf.push(b);
-        i = wrapping_add(i, 1);
-    }
-    names.intern(in buf.as_slice())
-}
-
-/// Discovers the mangled names of top-level functions in the synthesized
-/// `<root>::intrinsics` module regardless of the compiled package's name.
-fn populate_intrinsic_targets(inout lc: LowerCtx, in fns: ChunkSeq[FnInfo]) {
-    let short_marker_len: u64 = 17;
-    let mut anchor: u32 = NONE32;
-    let mut pfx_len: u64 = 0;
-    let mut intr_mod: u32 = NONE32;
-    for fi in 0..fns.len() {
-        let f = match fns.try_get(fi) {
-            Option::Some(v) => v,
-            Option::None => continue,
-        };
-        if names_has_suffix(in lc.names, f.name, in "__intrinsics__checked_1add_1u64".as_bytes()) {
-            anchor = f.name;
-            pfx_len = wrapping_sub(lc.names.size(f.name), short_marker_len);
-            intr_mod = f.mod_idx;
-            break;
-        }
-    }
-    if anchor == NONE32 {
-        return;
-    }
-    for fi in 0..fns.len() {
-        let f = match fns.try_get(fi) {
-            Option::Some(v) => v,
-            Option::None => continue,
-        };
-        if f.mod_idx == intr_mod && names_eq_range(in lc.names, f.name, anchor, pfx_len) {
-            let short = unmangle_tail(inout lc.names, f.name, pfx_len);
-            set_by_symbol(inout lc.intrinsic_targets, short, inc32(f.name));
-        }
-    }
 }
 
 fn sym(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, sym_id: u32) -> u32 {
@@ -459,12 +366,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
             lc.names.write(nm0, inout fbuf);
             lc.names.intern(in fbuf.as_slice())
         } else {
-            let mapped = u32_at(in lc.intrinsic_targets, w(nm0));
-            if mapped != 0 {
-                n32(wrapping_sub(w(mapped), 1))
-            } else {
-                nm0
-            }
+            nm0
         };
         let idx = lc.ir.exs.len();
         lc.ir.exs.push(Ex {
@@ -1125,10 +1027,8 @@ pub fn build_ir_ast_for_entry(
         names: prog.names,
         types: prog.types,
         tmp: String::new(),
-        caches: caches,
-        intrinsic_targets: ChunkSeq::new[u32]()
+        caches: caches
     };
-    populate_intrinsic_targets(inout lc, in prog.fns);
     let mut ex_start = ChunkSeq::new[u64]();
     let mut ex_end = ChunkSeq::new[u64]();
     for fi in 0..prog.fns.len() {
@@ -1146,8 +1046,8 @@ pub fn build_ir_ast_for_entry(
                         proj_start: 0,
                         proj_count: 0,
                         ty: pm.ty,
-                        s0: 0,
-                        s1: 0
+                        s0: widen_u64(pm.start),
+                        s1: widen_u64(pm.end)
                     });
                 },
                 Option::None => {},

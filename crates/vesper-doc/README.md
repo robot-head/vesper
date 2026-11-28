@@ -26,9 +26,9 @@ DTOs came from a checker.
 Run from the repository root:
 
 ```sh
-cargo run -p vesper -- doc crates/vesper-doc/examples/api.ves --json
-cargo run -p vesper -- doc crates/vesper-doc/examples/api.ves -o /tmp/api.html
-cargo run -p vesper -- doc crates/vesper-doc/examples/api.ves --json --query crates/vesper-doc/examples/query.json
+cargo run --locked -p vesper-hybrid --features gated-default -- doc crates/vesper-doc/examples/api.ves --json
+cargo run --locked -p vesper-hybrid --features gated-default -- doc crates/vesper-doc/examples/api.ves -o /tmp/api.html
+cargo run --locked -p vesper-hybrid --features gated-default -- doc crates/vesper-doc/examples/api.ves --json --query crates/vesper-doc/examples/query.json
 ```
 
 HTML is the default output. `--json` selects complete typed JSON metadata.

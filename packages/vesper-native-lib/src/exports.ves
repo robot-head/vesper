@@ -1,0 +1,299 @@
+// What `compile_exports` (src/native_export.rs) defines after the walk:
+// the 128-bit export entries (`define_wide_entry`, #1277) and a v2
+// library's runtime glue (`glue::define`: the sequence runtime,
+// `vesper_box_alloc`, then the export ABI v2 entry points and drop glue of
+// @vesper/codegen-export-glue). Bootstrap switch slice 2a-2b (#2642).
+//
+// Request, after the definitions (see the top of lib.ves):
+//
+//     n wide entries, each: export symbol (one of the exports, whose
+//         instance is the inner function), result pointer, wide result, failure record (0 or 1 each),
+//         n params, each: pointer, loaded (0 or 1 each);
+//     v2 (0 or 1), and when 1: the sequence runtime's argument words
+//         (`codegen_swap::seq::runtime_args`), then the interface in the
+//         words of tests/self_host_codegen_export/words.rs, as a string.
+use @vesper/cranelift::{
+    FuncId, SigId, Ty, Value, append_block_params_for_function_params, block_param, builder_new,
+    call_conv_default, create_block, declare_function, define_function, import_function, ins_call,
+    ins_iconst, ins_load, ins_return1, ins_store, inst_result, linkage_export, mem_trusted,
+    module_error_len, module_error_text, module_get_data, module_get_function, module_pointer_type,
+    seal_all_blocks, sig_new, sig_param, sig_return, switch_to_block, ty_i128, ty_i64
+};
+use @vesper/codegen-export-glue::{F_BOX_COUNTER, F_BOX_FREE, F_SEQ_COUNTER, define_export_glue};
+use @vesper/codegen-numeric::boxes::{define_box_runtime};
+use @vesper/codegen-seq-emit::{RUNTIME_ARGS, define_seq_runtime};
+use super::{MALFORMED, NO_CALLEE, Reader, SET, UNKNOWN_FUNCTION, at64};
+use super::declare::{Declared, Exports};
+
+const WIDE_MISMATCH: Str = "': 128-bit export entry does not match the function's signature";
+const NO_ENTRY_BUILDER: Str = "the 128-bit export entry's builder could not be made";
+const ENTRY_FAILED: Str = "defining a 128-bit export entry failed";
+const NARROW_POINTER: Str = "ChunkSeq in executables needs a 64-bit target";
+const GLUE_FAILED: Str = "defining the v2 runtime glue failed";
+// `seq::aot_runtime::defined`: the runtime is in the module once its
+// fault function is.
+const SEQ_FAULT: Str = "vesper_seq_fault";
+const BOX_ALLOC: Str = "vesper_box_alloc";
+const BOX_FREE: Str = "vesper_box_free";
+const SEQ_LIVE: Str = "vesper_seq_live";
+const BOX_LIVE: Str = "vesper_box_live";
+
+// One parameter of a wide entry: whether the export symbol takes it as a
+// pointer, and whether the entry loads its 128-bit value from there.
+copy struct EntryParam {
+    pointer: bool,
+    loaded: bool,
+}
+
+fn error_of(in message: Str) -> ChunkSeq[u8] {
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    err.extend(in message.as_bytes());
+    err
+}
+
+// The module's error, or `fallback` when it has none.
+fn module_failure(in m: Module, in fallback: Str) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let mut err = module_error_text(in m);
+    if err.len() == 0 {
+        err.extend(in fallback.as_bytes());
+    }
+    err
+}
+
+// The instance exported as export `e`, or `NO_CALLEE` (which `at64` reads
+// as `NO_CALLEE` from every table) when `e` is no
+// export (`none`, the exports' count) or no instance is exported as it.
+fn inner_of(in d: Declared, e: u64, none: u64) -> u64 {
+    if e == none {
+        return NO_CALLEE;
+    }
+    for i in 0..d.export.len() {
+        if at64(in d.export, i) == e {
+            return i;
+        }
+    }
+    NO_CALLEE
+}
+
+// Every 128-bit export entry of the request. Empty on success, else the
+// error.
+pub fn define_wide_entries(
+    inout m: Module,
+    in req: Slice[u8],
+    inout r: Reader,
+    in d: Declared,
+    in exports: Exports
+) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let n = r.word(in req);
+    for _ in 0..n {
+        let err = define_wide_entry(inout m, in req, inout r, in d, in exports);
+        if err.len() != 0 {
+            return err;
+        }
+    }
+    if r.bad {
+        return error_of(in MALFORMED);
+    }
+    ChunkSeq::new[u8]()
+}
+
+// `define_wide_entry`: the export symbol of a function with a by-value
+// `i128`/`u128` parameter or result. It takes each such parameter as a
+// pointer to its two words and writes such a result through a leading
+// result pointer, around one call of the inner (local) function; every
+// other parameter, the failure record and the return word pass through.
+fn define_wide_entry(
+    inout m: Module,
+    in req: Slice[u8],
+    inout r: Reader,
+    in d: Declared,
+    in exports: Exports
+) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let symbol = r.bytes(in req);
+    let result_pointer = r.word(in req) == SET;
+    let wide_result = r.word(in req) == SET;
+    let fail = r.word(in req) == SET;
+    let np = r.word(in req);
+    let mut params: ChunkSeq[EntryParam] = ChunkSeq::new[EntryParam]();
+    for _ in 0..np {
+        let pointer = r.word(in req) == SET;
+        let loaded = r.word(in req) == SET;
+        if r.bad {
+            break;
+        }
+        params.push(EntryParam { pointer: pointer, loaded: loaded });
+    }
+    if r.bad {
+        return error_of(in MALFORMED);
+    }
+    let inner = inner_of(in d, exports.find_symbol(in symbol.as_slice()), exports.count());
+    let id = at64(in d.ids, inner);
+    if id == NO_CALLEE {
+        return error_of(in UNKNOWN_FUNCTION);
+    }
+    let pointer = module_pointer_type(in m);
+    // The internal signature: [result pointer] params.. [fail record].
+    let leading: u64 = if result_pointer && !wide_result { 1 } else { 0 };
+    let fails: u64 = if fail { 1 } else { 0 };
+    let inner_params = at64(in d.params_n, inner);
+    let params_at = at64(in d.params_at, inner);
+    let returns_at = at64(in d.returns_at, inner);
+    if inner_params != wrapping_add(wrapping_add(leading, np), fails)
+        || at64(in d.returns_n, inner) != 1
+    {
+        let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        err.push(QUOTE);
+        err.extend(in symbol.as_slice());
+        err.extend(in WIDE_MISMATCH.as_bytes());
+        return err;
+    }
+    let entry = sig_new(inout m, call_conv_default());
+    if result_pointer {
+        sig_param(inout m, entry, pointer);
+    }
+    for k in 0..np {
+        let p = params.try_get(k).unwrap_or(EntryParam { pointer: false, loaded: false });
+        if p.pointer {
+            sig_param(inout m, entry, pointer);
+        } else {
+            let t = at64(in d.types, wrapping_add(wrapping_add(params_at, leading), k));
+            sig_param(inout m, entry, Ty { code: wrapping_u32(t) });
+        }
+    }
+    if fail {
+        sig_param(inout m, entry, pointer);
+    }
+    // A wide result is written through the result pointer; any other
+    // return (a float register included) passes through.
+    if wide_result {
+        sig_return(inout m, entry, ty_i64());
+    } else {
+        sig_return(inout m, entry, Ty { code: wrapping_u32(at64(in d.types, returns_at)) });
+    }
+    let export = declare_function(inout m, in symbol.as_slice(), linkage_export(), entry);
+    let mut b = match builder_new(in m, entry) {
+        Option::Some(b) => b,
+        Option::None => return error_of(in NO_ENTRY_BUILDER),
+    };
+    let block = create_block(inout b);
+    let nargs = append_block_params_for_function_params(inout b, block);
+    switch_to_block(inout b, block);
+    let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](widen_u64(nargs));
+    for k in 0..nargs {
+        let v = block_param(inout b, block, k);
+        args.push(v.id);
+    }
+    let flags = mem_trusted();
+    let mut at: u64 = 0;
+    let mut result = Value { id: 0 };
+    if result_pointer {
+        at = 1;
+        result = Value { id: args.try_get(0).unwrap_or(0) };
+    }
+    let mut call: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    if leading == 1 {
+        call.push(result.id);
+    }
+    for k in 0..np {
+        let p = params.try_get(k).unwrap_or(EntryParam { pointer: false, loaded: false });
+        let arg = Value { id: args.try_get(at).unwrap_or(0) };
+        at = wrapping_add(at, 1);
+        if p.loaded {
+            let v = ins_load(inout b, ty_i128(), flags, arg, 0);
+            call.push(v.id);
+        } else {
+            call.push(arg.id);
+        }
+    }
+    if fail {
+        call.push(args.try_get(at).unwrap_or(0));
+    }
+    let callee = import_function(inout b, inout m, FuncId { id: wrapping_u32(id) });
+    ins_call(inout b, callee, in call.as_slice());
+    let returned = inst_result(inout b, 0);
+    if wide_result {
+        ins_store(inout b, flags, returned, result, 0);
+        let zero = ins_iconst(inout b, ty_i64(), 0);
+        ins_return1(inout b, zero);
+    } else {
+        ins_return1(inout b, returned);
+    }
+    seal_all_blocks(inout b);
+    if !define_function(inout m, export, b) {
+        return module_failure(in m, in ENTRY_FAILED);
+    }
+    ChunkSeq::new[u8]()
+}
+
+// `'`, before the symbol of a mismatched entry.
+const QUOTE: u8 = 39;
+
+fn has_function(inout m: Module, in name: Str) -> bool eff [Ffi[Cranelift]] {
+    match module_get_function(inout m, in name.as_bytes()) {
+        Option::Some(_) => true,
+        Option::None => false,
+    }
+}
+
+fn has_data(inout m: Module, in name: Str) -> bool eff [Ffi[Cranelift]] {
+    match module_get_data(inout m, in name.as_bytes()) {
+        Option::Some(_) => true,
+        Option::None => false,
+    }
+}
+
+// `glue::define` for a v2 library (the request's v2 section). Empty on
+// success or for a library that is not v2, else the error.
+pub fn define_v2_glue(
+    inout m: Module,
+    in req: Slice[u8],
+    inout r: Reader
+) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let v2 = r.word(in req) == SET;
+    if r.bad {
+        return error_of(in MALFORMED);
+    }
+    if !v2 {
+        return ChunkSeq::new[u8]();
+    }
+    let mut runtime: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](RUNTIME_ARGS);
+    for _ in 0..RUNTIME_ARGS {
+        runtime.push(r.word(in req));
+    }
+    let interface = r.bytes(in req);
+    if r.bad {
+        return error_of(in MALFORMED);
+    }
+    let wide_pointer = module_pointer_type(in m).code == ty_i64().code;
+    // `seq::aot_runtime::define`, unless the walk defined it.
+    if !has_function(inout m, in SEQ_FAULT) {
+        if !wide_pointer {
+            return error_of(in NARROW_POINTER);
+        }
+        if !define_seq_runtime(inout m, in runtime.as_slice()) {
+            return module_failure(in m, in GLUE_FAILED);
+        }
+    }
+    // `fip::aot_runtime::declare_or_define`: `vesper_box_alloc`.
+    if !has_function(inout m, in BOX_ALLOC) {
+        if !define_box_runtime(inout m, true, false) {
+            return module_failure(in m, in GLUE_FAILED);
+        }
+    }
+    // The `export` hook's flags: what the module already holds.
+    let mut flags: u64 = 0;
+    if has_function(inout m, in BOX_FREE) {
+        flags = flags | F_BOX_FREE;
+    }
+    if has_data(inout m, in SEQ_LIVE) {
+        flags = flags | F_SEQ_COUNTER;
+    }
+    if has_data(inout m, in BOX_LIVE) {
+        flags = flags | F_BOX_COUNTER;
+    }
+    define_export_glue(inout m, in interface.as_slice(), flags);
+    if module_error_len(in m) != 0 {
+        return module_failure(in m, in GLUE_FAILED);
+    }
+    ChunkSeq::new[u8]()
+}

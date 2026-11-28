@@ -4,10 +4,11 @@
 
 use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset};
 use @vesper/check-names-packages::{resolve_sugar_imports_bytes};
+use @vesper/preludes::{strings_source};
 use @vesper/sugar::driver::{
     BootstrapSugarOutput, FREE_NAME_WORDS, Imports, PackageSugarBinding, PackageSugarDefinition,
-    expand_bootstrap_module, expand_module, inspect_module_sugars, may_declare_sugar,
-    plan_bootstrap_definitions, plan_bootstrap_sugars
+    SugarDeclarationSpan, SugarImportSpan, expand_bootstrap_module, expand_module,
+    inspect_module_sugars, may_declare_sugar, plan_bootstrap_definitions, plan_bootstrap_sugars
 };
 
 use @vesper-std/fs::{IoError, kind_dir, kind_file, kind_symlink, read_path};
@@ -1103,7 +1104,20 @@ fn collect_mod_files(
     }
 }
 
-fn pkg_src_dir(in pkg_dir: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+// A package's source directory for target OS `os` (src/packages.rs): for
+// wasm32-wasip2 (`os` empty) `src-wasip2` when it has a root module, for a
+// native OS `src-<os>` when it exists, else `src`.
+fn pkg_src_dir(in pkg_dir: Slice[u8], in os: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    if os.len() != 0 {
+        let mut name = ChunkSeq::new[u8]();
+        name.extend(in "src-".as_bytes());
+        name.extend(in os);
+        let os_dir = join_path(in pkg_dir, in name.as_slice());
+        return match try_list_dir(in os_dir.as_slice()) {
+            Option::Some(_) => os_dir,
+            Option::None => join_path(in pkg_dir, in "src".as_bytes()),
+        };
+    }
     let wasi_dir = join_path(in pkg_dir, in "src-wasip2".as_bytes());
     let wasi_lib = join_path(in wasi_dir.as_slice(), in "lib.ves".as_bytes());
     match try_read_file(in wasi_lib.as_slice()) {
@@ -1131,7 +1145,8 @@ fn scan_pkg_submods(
     in pkgs: ChunkSeq[PkgNode],
     inout base_off: u64,
     inout files: ChunkSeq[FileEntry],
-    inout mods: ChunkSeq[ModEntry]
+    inout mods: ChunkSeq[ModEntry],
+    in os: Slice[u8]
 ) eff [Ffi[StdFs]] {
     let mut pos: u64 = 0;
     loop {
@@ -1188,7 +1203,7 @@ fn scan_pkg_submods(
                                 },
                                 Option::None => ChunkSeq::new[u8](),
                             };
-                            let sdir = pkg_src_dir(in pdir.as_slice());
+                            let sdir = pkg_src_dir(in pdir.as_slice(), in os);
                             let mut rel = ChunkSeq::new[u8]();
                             rel.extend(in src[m0..m1]);
                             rel.extend(in ".ves".as_bytes());
@@ -1442,10 +1457,14 @@ fn push_swar(inout out: ChunkSeq[u8], in suf: Str) {
 }
 
 fn push_popcount(inout out: ChunkSeq[u8], kind_idx: u64, in bits_expr: Str) {
+    push_popcount_bytes(inout out, kind_idx, in bits_expr.as_bytes());
+}
+
+fn push_popcount_bytes(inout out: ChunkSeq[u8], kind_idx: u64, in bits_expr: Slice[u8]) {
     let wide = kind_bits_of(kind_idx) == 128;
     if wide {
         out.extend(in "let w: u128 = ".as_bytes());
-        out.extend(in bits_expr.as_bytes());
+        out.extend(in bits_expr);
         out.extend(in "; let v0lo: u64 = wrapping_u64(w); ".as_bytes());
         push_swar(inout out, in "lo");
         out.extend(in "let v0hi: u64 = wrapping_u64(w >> 64); ".as_bytes());
@@ -1453,23 +1472,35 @@ fn push_popcount(inout out: ChunkSeq[u8], kind_idx: u64, in bits_expr: Str) {
         out.extend(in "let c: u32 = wrapping_add(clo, chi); ".as_bytes());
     } else {
         out.extend(in "let v0: u64 = widen_u64(".as_bytes());
-        out.extend(in bits_expr.as_bytes());
+        out.extend(in bits_expr);
         out.extend(in "); ".as_bytes());
         push_swar(inout out, in "");
     }
 }
 
-fn push_pattern_let(inout out: ChunkSeq[u8], ki: u64) {
-    let un = kind_unsigned_name(ki);
-    out.extend(in "let pat: ".as_bytes());
-    out.extend(in un.as_bytes());
+// The operand's bit pattern in the unsigned kind of the same width
+// (src/integer_widths.rs `bit_source`'s `pattern`).
+fn push_pattern(inout out: ChunkSeq[u8], ki: u64) {
     if kind_is_signed(ki) {
-        out.extend(in " = wrapping_".as_bytes());
-        out.extend(in un.as_bytes());
-        out.extend(in "(x); ".as_bytes());
+        out.extend(in "wrapping_".as_bytes());
+        out.extend(in kind_unsigned_name(ki).as_bytes());
+        out.extend(in "(x)".as_bytes());
     } else {
-        out.extend(in " = x; ".as_bytes());
+        out.extend(in "x".as_bytes());
     }
+}
+
+// `let p: <un> = <pattern>; `, with `mut` when `mutable`.
+fn push_pattern_let(inout out: ChunkSeq[u8], ki: u64, mutable: bool) {
+    out.extend(in "let ".as_bytes());
+    if mutable {
+        out.extend(in "mut ".as_bytes());
+    }
+    out.extend(in "p: ".as_bytes());
+    out.extend(in kind_unsigned_name(ki).as_bytes());
+    out.extend(in " = ".as_bytes());
+    push_pattern(inout out, ki);
+    out.extend(in "; ".as_bytes());
 }
 
 fn emit_bit_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
@@ -1509,31 +1540,29 @@ fn emit_bit_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
     }
     out.extend(in " { ".as_bytes());
     if fam == 0 {
-        push_pattern_let(inout out, ki);
-        out.extend(in "let mut lp: ".as_bytes());
-        out.extend(in un.as_bytes());
-        out.extend(in " = pat; ".as_bytes());
+        push_pattern_let(inout out, ki, true);
         let mut s: u64 = 1;
         loop {
             if s >= bits {
                 break;
             }
-            out.extend(in "lp = lp | (lp >> ".as_bytes());
+            out.extend(in "p = p | (p >> ".as_bytes());
             push_dec(inout out, s);
             out.extend(in "); ".as_bytes());
             s = wrapping_mul(s, 2);
         }
-        push_popcount(inout out, ki, in "lp");
+        push_popcount(inout out, ki, in "p");
         out.extend(in "let width: u32 = ".as_bytes());
         push_dec(inout out, bits);
         out.extend(in "; wrapping_sub(width, c)".as_bytes());
     } else if fam == 1 {
-        push_pattern_let(inout out, ki);
-        push_popcount(inout out, ki, in "~pat & wrapping_sub(pat, 1)");
+        push_pattern_let(inout out, ki, false);
+        push_popcount(inout out, ki, in "~p & wrapping_sub(p, 1)");
         out.extend(in "c".as_bytes());
     } else if fam == 2 {
-        push_pattern_let(inout out, ki);
-        push_popcount(inout out, ki, in "pat");
+        let mut pattern = ChunkSeq::new[u8]();
+        push_pattern(inout pattern, ki);
+        push_popcount_bytes(inout out, ki, in pattern.as_slice());
         out.extend(in "c".as_bytes());
     } else if fam == 3 {
         out.extend(in "let zero: ".as_bytes());
@@ -1547,18 +1576,16 @@ fn emit_bit_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
         out.extend(in "let s: u32 = n & ".as_bytes());
         push_dec(inout out, wrapping_sub(bits, 1));
         out.extend(in "; if s == 0 { x } else { ".as_bytes());
-        push_pattern_let(inout out, ki);
+        push_pattern_let(inout out, ki, false);
         out.extend(in "let one: ".as_bytes());
         out.extend(in un.as_bytes());
         out.extend(in " = 1; let keep: ".as_bytes());
         out.extend(in un.as_bytes());
         out.extend(in " = wrapping_sub(rotate_right(one, s), one); let r: ".as_bytes());
         out.extend(in un.as_bytes());
-        out.extend(in " = rotate_right(pat, s) & keep; ".as_bytes());
+        out.extend(in " = rotate_right(p, s) & keep; ".as_bytes());
         if signed {
-            out.extend(in "let zero: ".as_bytes());
-            out.extend(in k.as_bytes());
-            out.extend(in " = 0; if x < zero { wrapping_".as_bytes());
+            out.extend(in "if x < 0 { wrapping_".as_bytes());
             out.extend(in k.as_bytes());
             out.extend(in "(r | ~keep) } else { wrapping_".as_bytes());
             out.extend(in k.as_bytes());
@@ -1603,18 +1630,16 @@ fn emit_checked_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
             in "if b > a { Option::None } else { Option::Some(wrapping_sub(a, b)) }".as_bytes()
         );
     } else if (fam == 6 || fam == 7) && signed {
-        out.extend(in "let zero: ".as_bytes());
-        out.extend(in k.as_bytes());
-        out.extend(in " = 0; let s: ".as_bytes());
+        out.extend(in "let s: ".as_bytes());
         out.extend(in k.as_bytes());
         if fam == 6 {
             out.extend(
-                in " = wrapping_add(a, b); if (a < zero) == (b < zero) && (s < zero) != (a < zero) { Option::None } else { Option::Some(s) }"
+                in " = wrapping_add(a, b); if (a < 0) == (b < 0) && (s < 0) != (a < 0) { Option::None } else { Option::Some(s) }"
                     .as_bytes()
             );
         } else {
             out.extend(
-                in " = wrapping_sub(a, b); if (a < zero) != (b < zero) && (s < zero) != (a < zero) { Option::None } else { Option::Some(s) }"
+                in " = wrapping_sub(a, b); if (a < 0) != (b < 0) && (s < 0) != (a < 0) { Option::None } else { Option::Some(s) }"
                     .as_bytes()
             );
         }
@@ -1633,9 +1658,7 @@ fn emit_checked_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
         out.extend(in k.as_bytes());
         out.extend(in "(p)) }".as_bytes());
     } else if !signed && bits == 128 {
-        out.extend(in "let zero: ".as_bytes());
-        out.extend(in k.as_bytes());
-        out.extend(in " = 0; if a == zero { Option::Some(zero) } else { let p: ".as_bytes());
+        out.extend(in "if a == 0 { Option::Some(a) } else { let p: ".as_bytes());
         out.extend(in k.as_bytes());
         out.extend(
             in " = wrapping_mul(a, b); if p / a != b { Option::None } else { Option::Some(p) } }"
@@ -1643,7 +1666,7 @@ fn emit_checked_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
         );
     } else if signed && bits == 128 {
         out.extend(
-            in "let zero: i128 = 0; let uzero: u128 = 0; let ua: u128 = if a < zero { wrapping_u128(wrapping_sub(zero, a)) } else { wrapping_u128(a) }; let ub: u128 = if b < zero { wrapping_u128(wrapping_sub(zero, b)) } else { wrapping_u128(b) }; if ua == uzero { Option::Some(zero) } else { let p: u128 = wrapping_mul(ua, ub); let one: u128 = 1; let limit: u128 = rotate_right(one, 1); if p / ua != ub { Option::None } else if (a < zero) != (b < zero) { if p > limit { Option::None } else { Option::Some(wrapping_i128(wrapping_sub(uzero, p))) } } else if p >= limit { Option::None } else { Option::Some(wrapping_i128(p)) } }"
+            in "let zero: i128 = 0; let uzero: u128 = 0; let ua: u128 = if a < 0 { wrapping_u128(wrapping_sub(zero, a)) } else { wrapping_u128(a) }; let ub: u128 = if b < 0 { wrapping_u128(wrapping_sub(zero, b)) } else { wrapping_u128(b) }; if ua == 0 { Option::Some(zero) } else { let p: u128 = wrapping_mul(ua, ub); let one: u128 = 1; let limit: u128 = rotate_right(one, 1); if p / ua != ub { Option::None } else if (a < 0) != (b < 0) { if p > limit { Option::None } else { Option::Some(wrapping_i128(wrapping_sub(uzero, p))) } } else if p >= limit { Option::None } else { Option::Some(wrapping_i128(p)) } }"
                 .as_bytes()
         );
     } else if !signed {
@@ -1657,7 +1680,7 @@ fn emit_checked_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
         out.extend(in "let zero: ".as_bytes());
         out.extend(in k.as_bytes());
         out.extend(
-            in " = 0; let ua: u64 = if a < zero { wrapping_u64(wrapping_sub(zero, a)) } else { wrapping_u64(a) }; let ub: u64 = if b < zero { wrapping_u64(wrapping_sub(zero, b)) } else { wrapping_u64(b) }; let (lo, hi) = mul_wide(ua, ub); let limit: u64 = 9223372036854775807; if hi != 0 { Option::None } else if (a < zero) != (b < zero) { if lo > wrapping_add(limit, 1) { Option::None } else { Option::Some(wrapping_"
+            in " = 0; let ua: u64 = if a < 0 { wrapping_u64(wrapping_sub(zero, a)) } else { wrapping_u64(a) }; let ub: u64 = if b < 0 { wrapping_u64(wrapping_sub(zero, b)) } else { wrapping_u64(b) }; let (lo, hi) = mul_wide(ua, ub); let limit: u64 = 9223372036854775807; if hi != 0 { Option::None } else if (a < 0) != (b < 0) { if lo > wrapping_add(limit, 1) { Option::None } else { Option::Some(wrapping_"
                 .as_bytes()
         );
         out.extend(in k.as_bytes());
@@ -1718,32 +1741,18 @@ fn append_extra_intrinsics(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8])
         need.push(false);
         skip.push(false);
     }
-    // Pre-mark the 11 functions of preludes/intrinsics.ves (always in `$string_prelude.ves`).
-    // fam 6 (checked_add): u64=3 (75), u128=5 (77); fam 7 (checked_sub): u64=3 (87)
-    // fam 8 (checked_mul): u64=3 (99), u128=5 (101)
-    // fam 3 (wrapping_neg): i64=9 (45)
-    // fam 4 (wrapping_shl): u32=2 (50), u64=3 (51)
-    // fam 5 (wrapping_shr): u32=2 (62), u64=3 (63)
-    // fam 1 (trailing_zeros): u64=3 (15)
-    let _ = skip.try_set(15, true);
-    let _ = skip.try_set(45, true);
-    let _ = skip.try_set(50, true);
-    let _ = skip.try_set(51, true);
-    let _ = skip.try_set(62, true);
-    let _ = skip.try_set(63, true);
-    let _ = skip.try_set(75, true);
-    let _ = skip.try_set(77, true);
-    let _ = skip.try_set(87, true);
-    let _ = skip.try_set(99, true);
-    let _ = skip.try_set(101, true);
-
     for mi in 0..mods.len() {
         match mods.try_get(mi) {
             Option::Some(m) => scan_mod_intrinsics(in m.text.as_slice(), inout need, inout skip),
             Option::None => {},
         }
     }
-    // 64-bit `checked_mul_k` (usize=100, i64=105, isize=106) calls `mul_wide`.
+    // 64-bit `checked_mul_k` (u64=99, usize=100, i64=105, isize=106) calls
+    // `mul_wide`.
+    let need_mul_u64 = match need.try_get(99) {
+        Option::Some(v) => v,
+        Option::None => false,
+    };
     let need_mul_usize = match need.try_get(100) {
         Option::Some(v) => v,
         Option::None => false,
@@ -1756,7 +1765,7 @@ fn append_extra_intrinsics(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8])
         Option::Some(v) => v,
         Option::None => false,
     };
-    if need_mul_usize || need_mul_i64 || need_mul_isize {
+    if need_mul_u64 || need_mul_usize || need_mul_i64 || need_mul_isize {
         let _ = need.try_set(108, true);
     }
     let need_mw = match need.try_get(108) {
@@ -1939,24 +1948,110 @@ fn scan_option_methods(
 // The Rust checker's option prelude (src/option_methods.rs): an
 // `impl Option[T]` block with the methods no module defines itself, added
 // when a module calls one of those.
-// `preludes/str_chars.ves` (`Str::next_char`), when a module calls
-// `next_char` and none defines it: the part of the string prelude the
-// Rust loader adds for it (`strings::needs_prelude`).
-fn append_str_chars(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8]) {
-    let mut used = false;
+// The string prelude's methods (src/strings.rs `PRELUDE_NAMES`): a
+// mention of one brings the prelude in.
+fn is_string_prelude_method(in tok: Slice[u8]) -> bool {
+    eq_bytes(in tok, in "is_char_boundary".as_bytes())
+        || eq_bytes(in tok, in "next_char".as_bytes())
+        || eq_bytes(in tok, in "char_at".as_bytes())
+        || eq_bytes(in tok, in "char_count".as_bytes())
+        || eq_bytes(in tok, in "concat".as_bytes())
+        || eq_bytes(in tok, in "from_utf8".as_bytes())
+}
+
+// The string prelude's static functions after `String::`
+// (src/strings.rs `PRELUDE_PATHS`).
+fn is_string_prelude_static(in tok: Slice[u8]) -> bool {
+    eq_bytes(in tok, in "new".as_bytes())
+        || eq_bytes(in tok, in "with_capacity".as_bytes())
+        || eq_bytes(in tok, in "from_utf8".as_bytes())
+}
+
+// The byte of `:`.
+fn colon_byte() -> u8 {
+    58
+}
+
+// Whether the code of `src` (not its comments or string literals) needs
+// the string prelude, as src/strings.rs `needs_prelude` decides: a
+// parameter of type `Str` (`: Str`), a path to one of the prelude's
+// static functions or a mention of one of its methods, other than where
+// a `fn` defines it.
+fn needs_string_prelude(in src: Slice[u8]) -> bool {
+    let n = src.len();
+    let mut pos: u64 = 0;
+    let mut after_fn = false;
+    let mut after_string = false;
+    let mut colons: u64 = 0;
+    loop {
+        if pos >= n {
+            break;
+        }
+        let (next_p, skipped) = next_code_byte(in src, pos);
+        if skipped != 0 {
+            after_fn = false;
+            after_string = false;
+            colons = 0;
+            pos = next_p;
+            continue;
+        }
+        let b = byte_at(in src, pos);
+        if b == 47 && wrapping_add(pos, 1) < n && byte_at(in src, wrapping_add(pos, 1)) == 42 {
+            pos = block_comment_end(in src, pos);
+            continue;
+        }
+        if is_ident_byte(b) {
+            let start = pos;
+            loop {
+                if pos >= n || !is_ident_byte(byte_at(in src, pos)) {
+                    break;
+                }
+                pos = wrapping_add(pos, 1);
+            }
+            let tok = src[start..pos];
+            if !after_fn && is_string_prelude_method(in tok) {
+                return true;
+            }
+            if after_string && colons == 2 && is_string_prelude_static(in tok) {
+                return true;
+            }
+            if colons == 1 && eq_bytes(in tok, in "Str".as_bytes()) {
+                return true;
+            }
+            after_fn = eq_bytes(in tok, in "fn".as_bytes());
+            after_string = eq_bytes(in tok, in "String".as_bytes());
+            colons = 0;
+            continue;
+        }
+        pos = wrapping_add(pos, 1);
+        if b == 32 || b == 9 || b == 10 || b == 13 {
+            continue;
+        }
+        if b == colon_byte() {
+            colons = wrapping_add(colons, 1);
+            after_fn = false;
+            continue;
+        }
+        after_fn = false;
+        after_string = false;
+        colons = 0;
+    }
+    false
+}
+
+// The string prelude (@vesper/preludes `strings_source`, the Rust
+// checker's src/strings.rs `PRELUDE`), when a module needs it.
+fn append_string_prelude(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8]) {
     for mi in 0..mods.len() {
         match mods.try_get(mi) {
             Option::Some(m) => {
-                if contains_word(in m.text.as_slice(), "fn next_char") {
+                if needs_string_prelude(in m.text.as_slice()) {
+                    out.extend(in strings_source().as_bytes());
                     return;
                 }
-                used = used || contains_word(in m.text.as_slice(), "next_char");
             },
             Option::None => {},
         }
-    }
-    if used {
-        out.extend(in include_str("preludes/str_chars.ves").as_bytes());
     }
 }
 
@@ -2174,6 +2269,32 @@ pub fn package_graph_vsys_paths(
 }
 
 pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    load_package_graph_bytes_for(in root_dir, in "".as_bytes())
+}
+
+// The package graph of `root_dir` for target OS `os` (`linux`, `macos`,
+// `windows`), or for wasm32-wasip2 when `os` is empty.
+pub fn load_package_graph_bytes_for(
+    in root_dir: Slice[u8],
+    in os: Slice[u8]
+) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    load_package_graph_bytes_with(in root_dir, in os, in NO_ROOT_EXTRA.as_bytes())
+}
+
+// No source appended to the root module.
+const NO_ROOT_EXTRA: Str = "";
+// The line break before appended source (the module may not end in one).
+const ROOT_EXTRA_BREAK: u8 = 10;
+
+// `load_package_graph_bytes_for` with `root_extra` appended to the root
+// package's `src/lib.ves`: generated items the compiled library holds, as
+// `vesper build --lib` appends an `// @export instance`'s wrapper
+// (`native_export::instance_wrappers`).
+pub fn load_package_graph_bytes_with(
+    in root_dir: Slice[u8],
+    in os: Slice[u8],
+    in root_extra: Slice[u8]
+) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
     let mut pkgs = ChunkSeq::new[PkgNode]();
     match load_pkg_graph(in root_dir, inout pkgs) {
         Option::Some(_) => {},
@@ -2193,12 +2314,17 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
             },
             Option::None => ChunkSeq::new[u8](),
         };
-        let src_dir = pkg_src_dir(in dir.as_slice());
+        let src_dir = pkg_src_dir(in dir.as_slice(), in os);
         let lib_p = join_path(in src_dir.as_slice(), in "lib.ves".as_bytes());
         let main_p = join_path(in src_dir.as_slice(), in "main.ves".as_bytes());
         let root_segs = ChunkSeq::new[ChunkSeq[u8]]();
         match try_read_file(in lib_p.as_slice()) {
-            Option::Some(t) => {
+            Option::Some(t0) => {
+                let mut t = t0;
+                if pi == 0 && root_extra.len() != 0 {
+                    t.push(ROOT_EXTRA_BREAK);
+                    t.extend(in root_extra);
+                }
                 collect_mod_files(
                     pi,
                     in dir.as_slice(),
@@ -2253,7 +2379,14 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
             },
             Option::None => ChunkSeq::new[u8](),
         };
-        scan_pkg_submods(in mtext.as_slice(), in pkgs, inout base_off, inout files, inout mods);
+        scan_pkg_submods(
+            in mtext.as_slice(),
+            in pkgs,
+            inout base_off,
+            inout files,
+            inout mods,
+            in os
+        );
         scan_idx = wrapping_add(scan_idx, 1);
     }
     let mut sp_segs = ChunkSeq::new[ChunkSeq[u8]]();
@@ -2261,11 +2394,11 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
     sp_seg.extend(in "intrinsics".as_bytes());
     sp_segs.push(sink sp_seg);
     let mut sp_src = ChunkSeq::new[u8]();
-    sp_src.extend(in include_str("preludes/string.ves").as_bytes());
-    sp_src.extend(in include_str("preludes/intrinsics.ves").as_bytes());
-    append_option_methods(in mods, inout sp_src);
-    append_str_chars(in mods, inout sp_src);
+    // The Rust checker's order (src/check.rs `World::collect`): the width
+    // intrinsics, the string prelude, then the option methods.
     append_extra_intrinsics(in mods, inout sp_src);
+    append_string_prelude(in mods, inout sp_src);
+    append_option_methods(in mods, inout sp_src);
     collect_mod_files(
         0,
         in "".as_bytes(),
@@ -2386,7 +2519,8 @@ fn expand_graph_module(
     in mods: ChunkSeq[ModEntry],
     in bindings: ChunkSeq[PackageSugarBinding],
     in catalogue: ChunkSeq[PackageSugarDefinition],
-    in spans: ChunkSeq[BootstrapDeclarationRange]
+    in spans: ChunkSeq[BootstrapDeclarationRange],
+    inout sugar_policy_words: ChunkSeq[u64]
 ) -> Option[BootstrapSugarOutput] {
     let expanded = match mods.try_get(module) {
         Option::Some(source) => {
@@ -2425,19 +2559,60 @@ fn expand_graph_module(
             return Option::None;
         }
     }
+    if expanded.policy_words.try_get(0).unwrap_or(0) != 0 {
+        let file = match mods.try_get(module) {
+            Option::Some(source) => source.file,
+            Option::None => return Option::None,
+        };
+        // Preserve the module that owns the rule as well as the file
+        // that contains its expanded call. Imported policy rows use the
+        // same import numbering as the full expander.
+        sugar_policy_words.push(file);
+        sugar_policy_words
+            .push(wrapping_add(expanded.policy_words.len(), wrapping_add(2, authors.len())));
+        sugar_policy_words.push(module);
+        sugar_policy_words.push(authors.len());
+        for i in 0..authors.len() {
+            let definition = match authors.try_get(i) {
+                Option::Some(definition) => definition,
+                Option::None => return Option::None,
+            };
+            match catalogue.try_get(definition) {
+                Option::Some(entry) => sugar_policy_words.push(entry.module_index),
+                Option::None => return Option::None,
+            }
+        }
+        sugar_policy_words.extend(in expanded.policy_words.as_slice());
+    }
     Option::Some(BootstrapSugarOutput { source: expanded.source, mappings: expanded.mappings })
 }
 
 fn has_bootstrap_sugar_candidate(in source: ChunkSeq[u8]) -> bool {
-    if !contains_word(in source.as_slice(), in "sugar") {
-        return false;
-    }
     let scratch = stage2_heap_mark();
-    let possible = may_declare_sugar(in source);
+    let possible = contains_word(in source.as_slice(), in "sugar") && may_declare_sugar(in source);
     if scratch != 0 {
         stage2_heap_reset(scratch);
     }
     possible
+}
+
+// Whether the sugar pass must parse `source`: a module of a package near a
+// sugar that names `sugar`, `use` or `Option`. The word scans' temporaries
+// are freed, since the self-built compiler frees nothing in a loop and
+// they add up over every module's bytes (#2711).
+fn worth_inspecting(near: bool, in source: ChunkSeq[u8]) -> bool {
+    if !near {
+        return false;
+    }
+    let scratch = stage2_heap_mark();
+    let text = source.as_slice();
+    let worth = contains_word(in text, in "sugar")
+        || contains_word(in text, in "use")
+        || contains_word(in text, in "Option");
+    if scratch != 0 {
+        stage2_heap_reset(scratch);
+    }
+    worth
 }
 
 // Headroom for package paths, file rows and source mappings beyond the
@@ -2488,6 +2663,110 @@ fn prepare_sugar_graph(
     Option::Some(kept)
 }
 
+// For each package, whether it or a package it depends on (directly or
+// not) has a module that names `sugar`. A module of any other package can
+// neither declare a sugar nor import one, so the sugar pass need not parse
+// it: its surface tree would only use up the scratch heap, which the
+// self-built compiler cannot free piece by piece (#2666: @vesper/stage2's
+// own closure beside one package with a sugar outgrew the 4 GiB memory).
+fn packages_near_sugar(in pkgs: ChunkSeq[PkgNode], in mods: ChunkSeq[ModEntry]) -> ChunkSeq[bool] {
+    let mut near = ChunkSeq::new[bool]();
+    for _ in 0..pkgs.len() {
+        near.push(false);
+    }
+    for module in 0..mods.len() {
+        match mods.try_get(module) {
+            Option::Some(source) => {
+                if contains_word(in source.text.as_slice(), in "sugar") {
+                    near.try_set(source.pkg, true);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    // A dependency graph of n packages settles within n rounds.
+    for _ in 0..pkgs.len() {
+        let mut changed = false;
+        for p in 0..pkgs.len() {
+            if near.try_get(p) == Option::Some(true) {
+                continue;
+            }
+            match pkgs.try_get(p) {
+                Option::Some(pkg) => {
+                    for d in 0..pkg.dep_indices.len() {
+                        let dep = pkg.dep_indices.try_get(d).unwrap_or(p);
+                        if near.try_get(dep) == Option::Some(true) {
+                            near.try_set(p, true);
+                            changed = true;
+                            break;
+                        }
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    near
+}
+
+// A module's sugar surface flags, its rows left in the caller's buffers.
+copy struct SurfaceFlags {
+    has_sugar: bool,
+    has_calls: bool,
+    shadows_bootstrap_prelude: bool,
+}
+
+// `inspect_module_sugars` with the parse freed: the surface's rows are
+// copied into `declarations` and `imports`, which the caller reserved
+// before the parse to hold `row_room` rows each (pushes within capacity
+// allocate nothing), and the heap is reset past them. The self-built
+// compiler frees nothing on its own, so every module's surface tree would
+// otherwise stay on the heap until the sugar pass ends (#2711).
+fn inspect_surface(
+    in source: ChunkSeq[u8],
+    inout declarations: ChunkSeq[SugarDeclarationSpan],
+    inout imports: ChunkSeq[SugarImportSpan],
+    row_room: u64
+) -> Option[SurfaceFlags] {
+    declarations.clear();
+    imports.clear();
+    let scratch = stage2_heap_mark();
+    let surface = match inspect_module_sugars(in source, false) {
+        Option::Some(surface) => surface,
+        Option::None => {
+            if scratch != 0 {
+                stage2_heap_reset(scratch);
+            }
+            return Option::None;
+        },
+    };
+    let fits = surface.declarations.len() <= row_room && surface.imports.len() <= row_room;
+    for i in 0..surface.declarations.len() {
+        match surface.declarations.try_get(i) {
+            Option::Some(row) => declarations.push(row),
+            Option::None => {},
+        }
+    }
+    for i in 0..surface.imports.len() {
+        match surface.imports.try_get(i) {
+            Option::Some(row) => imports.push(row),
+            Option::None => {},
+        }
+    }
+    let flags = SurfaceFlags {
+        has_sugar: surface.has_sugar,
+        has_calls: surface.has_calls,
+        shadows_bootstrap_prelude: surface.shadows_bootstrap_prelude
+    };
+    if scratch != 0 && fits {
+        stage2_heap_reset(scratch);
+    }
+    Option::Some(flags)
+}
+
 fn prepare_sugar_graph_in_scratch(
     in pkgs: ChunkSeq[PkgNode],
     inout files: ChunkSeq[FileEntry],
@@ -2503,7 +2782,24 @@ fn prepare_sugar_graph_in_scratch(
     let mut shadowed_modules = ChunkSeq::new[bool]();
     let mut declaration_spans = ChunkSeq::new[BootstrapDeclarationRange]();
     let mut source_segments = ChunkSeq::new[BootstrapSourceSegment]();
+    let mut sugar_policy_words = ChunkSeq::new[u64]();
     if possible_sugar {
+        let near_sugar = packages_near_sugar(in pkgs, in mods);
+        // Rows are disjoint spans of a module, so no module has more rows
+        // of a kind than bytes.
+        let mut row_room: u64 = 0;
+        for module in 0..mods.len() {
+            match mods.try_get(module) {
+                Option::Some(source) => {
+                    if source.text.len() > row_room {
+                        row_room = source.text.len();
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        let mut surface_declarations = ChunkSeq::with_capacity[SugarDeclarationSpan](row_room);
+        let mut surface_imports = ChunkSeq::with_capacity[SugarImportSpan](row_room);
         for module in 0..mods.len() {
             let mut import_text = ChunkSeq::new[u8]();
             let mut has_surface_sugar = false;
@@ -2511,18 +2807,23 @@ fn prepare_sugar_graph_in_scratch(
             let mut calls_own_sugar = false;
             match mods.try_get(module) {
                 Option::Some(source) => {
-                    if contains_word(in source.text.as_slice(), in "sugar")
-                        || contains_word(in source.text.as_slice(), in "use")
-                        || contains_word(in source.text.as_slice(), in "Option")
-                    {
-                        match inspect_module_sugars(in source.text, false) {
+                    if worth_inspecting(
+                        near_sugar.try_get(source.pkg) == Option::Some(true),
+                        in source.text
+                    ) {
+                        match inspect_surface(
+                            in source.text,
+                            inout surface_declarations,
+                            inout surface_imports,
+                            row_room
+                        ) {
                             Option::Some(surface) => {
                                 has_surface_sugar = surface.has_sugar;
                                 calls_own_sugar = surface.has_calls
-                                    && surface.declarations.len() != 0;
+                                    && surface_declarations.len() != 0;
                                 shadows_prelude = surface.shadows_bootstrap_prelude;
-                                for i in 0..surface.declarations.len() {
-                                    match surface.declarations.try_get(i) {
+                                for i in 0..surface_declarations.len() {
+                                    match surface_declarations.try_get(i) {
                                         Option::Some(row) => {
                                             let mut name = ChunkSeq::new[u8]();
                                             name.extend(
@@ -2552,8 +2853,8 @@ fn prepare_sugar_graph_in_scratch(
                                         Option::None => {},
                                     }
                                 }
-                                for i in 0..surface.imports.len() {
-                                    match surface.imports.try_get(i) {
+                                for i in 0..surface_imports.len() {
+                                    match surface_imports.try_get(i) {
                                         Option::Some(row) => {
                                             import_text.extend(in source.text[row.start..row.end]);
                                             import_text.push(10);
@@ -2582,7 +2883,8 @@ fn prepare_sugar_graph_in_scratch(
                 in imports,
                 in catalogue,
                 in public,
-                in source_segments
+                in source_segments,
+                in sugar_policy_words
             );
             let resolved = resolve_sugar_imports_bytes(in index.as_slice());
             let mut bindings = ChunkSeq::new[PackageSugarBinding]();
@@ -2655,7 +2957,8 @@ fn prepare_sugar_graph_in_scratch(
                         in mods,
                         in bindings,
                         in catalogue,
-                        in declaration_spans
+                        in declaration_spans,
+                        inout sugar_policy_words
                     ) {
                         Option::Some(expanded) => expanded,
                         Option::None => return Option::None,
@@ -2724,7 +3027,8 @@ fn prepare_sugar_graph_in_scratch(
         in imports,
         in catalogue,
         in public,
-        in source_segments
+        in source_segments,
+        in sugar_policy_words
     ))
 }
 
@@ -2736,7 +3040,8 @@ fn encode_package_graph(
     in import_texts: ChunkSeq[ChunkSeq[u8]],
     in catalogue: ChunkSeq[PackageSugarDefinition],
     in public: ChunkSeq[bool],
-    in source_segments: ChunkSeq[BootstrapSourceSegment]
+    in source_segments: ChunkSeq[BootstrapSourceSegment],
+    in sugar_policy_words: ChunkSeq[u64]
 ) -> ChunkSeq[u8] {
     let mut out = ChunkSeq::new[u8]();
     put_u64(inout out, pkgs.len());
@@ -2842,7 +3147,7 @@ fn encode_package_graph(
             }
         }
     }
-    if source_segments.len() != 0 {
+    if source_segments.len() != 0 || sugar_policy_words.len() != 0 {
         put_u64(inout out, source_segments.len());
         for i in 0..source_segments.len() {
             match source_segments.try_get(i) {
@@ -2858,14 +3163,25 @@ fn encode_package_graph(
             }
         }
     }
+    if sugar_policy_words.len() != 0 {
+        put_u64(inout out, sugar_policy_words.len());
+        for i in 0..sugar_policy_words.len() {
+            put_u64(inout out, sugar_policy_words.try_get(i).unwrap_or(0));
+        }
+    }
     out
 }
 
 test {
     use @vesper/check-names-packages::{
-        assembly_begin_bytes, assemble_next_bytes, assembly_metadata, assembly_parse_errors
+        assembly_begin_bytes, assemble_next_bytes, assembly_metadata, assembly_parse_errors,
+        resolve_sugar_effect_row
     };
-    use @vesper/ast::{lit_at};
+    use @vesper/ast::{EffectNode, EffectsNode, FnNode, list_at, lit_at};
+    use @vesper/ast::lower::{lower_source};
+    use @vesper-std/arena::{idx_from_raw};
+    use @vesper-std/intern::{symbol_from_id};
+    use self::sugar_policy::{decode};
 
     fn fixture_bytes(in text: Str) -> ChunkSeq[u8] {
         let mut source = ChunkSeq::new[u8]();
@@ -2956,7 +3272,7 @@ test {
     }
 
     fn test_full_expansion_keeps_a_closed_imported_template() -> bool {
-        let bytes = match fixture_graph_calling(
+        let mut bytes = match fixture_graph_calling(
             in "use @fixture/dep::twice; pub fn main() -> u64 { let x: u64 = 21; twice x {} }",
             in "pub sugar twice: expr { rule (twice $n:ident $b:block) => { { $b; wrapping_add($n, $n) } } }"
         ) {
@@ -2964,7 +3280,32 @@ test {
             Option::None => return false,
         };
         let assembly = assembly_begin_bytes(in bytes.as_slice());
-        assembly_parse_errors(in assembly) == 0
+        let parse_clean = assembly_parse_errors(in assembly) == 0;
+        let meta = assembly_metadata(sink assembly);
+        let words = meta.sugar_policy_words.len();
+        if !parse_clean
+            || meta.sugar_policy_truncated
+            || words < 3
+            || meta.sugar_policy_words.try_get(0) != Option::Some(0)
+            || meta.sugar_policy_words.try_get(1) != Option::Some(wrapping_sub(words, 2))
+            || meta.sugar_policy_words.try_get(2) != Option::Some(0)
+        {
+            return false;
+        }
+        let policies = match decode(
+            in meta.sugar_policy_words.as_slice(),
+            meta.file_base.len(),
+            2
+        ) {
+            Option::Some(policies) => policies,
+            Option::None => return false,
+        };
+        if policies.regions.len() != 1 {
+            return false;
+        }
+        bytes.truncate(wrapping_sub(bytes.len(), 1));
+        let truncated = assembly_metadata(sink assembly_begin_bytes(in bytes.as_slice()));
+        truncated.sugar_policy_truncated && truncated.sugar_policy_words.len() == 0
     }
 
     fn test_full_expansion_expands_a_module_calling_its_own_sugar() -> bool {
@@ -2977,6 +3318,73 @@ test {
         };
         let assembly = assembly_begin_bytes(in bytes.as_slice());
         assembly_parse_errors(in assembly) == 0
+    }
+
+    fn test_policy_resolves_effect_names_in_the_author_module() -> bool {
+        // Keep this scope regression below the unit evaluator's budget:
+        // the expansion wire is exercised by the imported-template test.
+        let bytes = match fixture_graph_calling(
+            in "linear effect Audit { fn from_caller(); }",
+            in "linear effect Audit { fn from_author(); }"
+        ) {
+            Option::Some(bytes) => bytes,
+            Option::None => return false,
+        };
+        let mut assembly = assembly_begin_bytes(in bytes.as_slice());
+        if assembly_parse_errors(in assembly) != 0 {
+            return false;
+        }
+        let first = assemble_next_bytes(inout assembly, in bytes.as_slice());
+        let second = assemble_next_bytes(inout assembly, in bytes.as_slice());
+        match (first, second) {
+            (Option::Some(_), Option::Some(_)) => {},
+            _ => return false,
+        };
+        let caller = policy_fixture_effect_name(inout assembly, 0);
+        let author = policy_fixture_effect_name(inout assembly, 1);
+        match (caller, author) {
+            (Option::Some(caller), Option::Some(author)) => {
+                let meta = assembly_metadata(sink assembly);
+                meta.diagnostics.len() == 0
+                    && fixture_same_name(in caller.as_str(), in "Audit")
+                    && !fixture_same_name(in author.as_str(), in caller.as_str())
+            },
+            _ => false,
+        }
+    }
+
+    fn fixture_same_name(in left: Str, in right: Str) -> bool {
+        left == right
+    }
+
+    fn policy_fixture_effect_name(
+        inout assembly: @vesper/check-names-packages::Assembly,
+        module: u64
+    ) -> Option[String] {
+        let source = lower_source(in "fn __fixture() eff [Audit] {}");
+        let mut ast = source.ast;
+        let f = match ast.fns.get(idx_from_raw[FnNode](0)) {
+            Option::Some(f) => f,
+            Option::None => return Option::None,
+        };
+        if !resolve_sugar_effect_row(inout assembly, module, inout ast, f.effects) {
+            return Option::None;
+        }
+        let row = match ast.effects.get(idx_from_raw[EffectsNode](f.effects)) {
+            Option::Some(row) => row,
+            Option::None => return Option::None,
+        };
+        let item = list_at(in ast, row.instances, 0);
+        let effect = match ast.effect_nodes.get(idx_from_raw[EffectNode](item)) {
+            Option::Some(effect) => effect,
+            Option::None => return Option::None,
+        };
+        let mut name = String::new();
+        if ast.names.resolve_into(symbol_from_id(effect.name), inout name) {
+            Option::Some(name)
+        } else {
+            Option::None
+        }
     }
 
     fn test_imported_scalar_tag_reaches_stage2_assembly() -> bool {

@@ -911,3 +911,346 @@ fn package_diagnostics_format_matches_rust() {
         "error[E0901]: invalid version (Loom.toml)\nerror[E0901]: invalid version\n"
     );
 }
+
+#[test]
+fn diagnostics_remap_matches_rust() {
+    use vesper::ast::Diagnostic;
+    use vesper::forge_frontend::{ByteRange, MapKind, SourceMapSegment, original_diagnostic};
+
+    let remap_entry = driver().entry("remap_diagnostics_json_words", true);
+
+    let map = vec![
+        SourceMapSegment {
+            expanded: ByteRange { start: 0, end: 10 },
+            original: ByteRange { start: 0, end: 10 },
+            kind: MapKind::Source,
+            r#macro: None,
+        },
+        SourceMapSegment {
+            expanded: ByteRange { start: 10, end: 40 },
+            original: ByteRange { start: 10, end: 18 },
+            kind: MapKind::Generated,
+            r#macro: Some("expand".into()),
+        },
+        SourceMapSegment {
+            expanded: ByteRange { start: 40, end: 60 },
+            original: ByteRange { start: 18, end: 38 },
+            kind: MapKind::Source,
+            r#macro: None,
+        },
+    ];
+
+    let ds = vec![
+        // Sugar rejection codes must NOT be remapped.
+        Diagnostic::new("E0143", "sugar", 12..25).with_related(42..50, "rel"),
+        Diagnostic::new("E0144", "sugar2", 15..20),
+        // Generated segment overlap (non-empty and empty).
+        Diagnostic::new("E0201", "in gen", 15..25).with_related(10..10, "gen start"),
+        // Source segment mid, boundary, clamping past original.end, and EOF fallback.
+        Diagnostic::new("E0202", "in src", 42..50)
+            .with_related(40..45, "boundary")
+            .with_related(55..70, "clamped")
+            .with_related(60..60, "eof"),
+    ];
+
+    let mut input = Vec::new();
+    input.extend_from_slice(&(map.len() as u64).to_le_bytes());
+    for s in &map {
+        input.extend_from_slice(&(s.expanded.start as u64).to_le_bytes());
+        input.extend_from_slice(&(s.expanded.end as u64).to_le_bytes());
+        input.extend_from_slice(&(s.original.start as u64).to_le_bytes());
+        input.extend_from_slice(&(s.original.end as u64).to_le_bytes());
+        let kind: u64 = match s.kind {
+            MapKind::Source => 0,
+            MapKind::Generated => 1,
+        };
+        input.extend_from_slice(&kind.to_le_bytes());
+    }
+    input.extend_from_slice(&encode_diagnostics_stream(&ds));
+
+    let words = remap_entry.words(&input);
+    let mut at = 0;
+    let got_json = String::from_utf8(unpack(&words, &mut at)).unwrap();
+    assert_eq!(at, words.len());
+
+    let want_ds: Vec<Diagnostic> = ds
+        .into_iter()
+        .map(|d| original_diagnostic(&map, d))
+        .collect();
+    let want_json = serde_json::to_string(&want_ds).unwrap();
+    assert_eq!(got_json, want_json);
+}
+
+#[test]
+fn source_map_helpers_match_rust() {
+    use std::collections::BTreeMap;
+    use vesper::packages::{SourceFile, SourceMap};
+
+    let entry = driver().entry("source_map_helpers_words", true);
+
+    let mut qualified = BTreeMap::new();
+    qualified.insert("__pkg_0_foo".to_owned(), "@demo/a::foo".to_owned());
+    qualified.insert("__pkg_0_foo_bar".to_owned(), "@demo/a::foo_bar".to_owned());
+    let map = SourceMap {
+        files: vec![
+            SourceFile {
+                display: "a.ves".into(),
+                text: "fn a() {}\n".into(),
+                base: 0,
+            },
+            SourceFile {
+                display: "b.ves".into(),
+                text: "let x = __pkg_0_foo_bar(__pkg_0_foo);\n// λ🚀 end".into(),
+                base: 11,
+            },
+        ],
+        qualified,
+    };
+
+    let mut pairs: Vec<(&String, &String)> = map.qualified.iter().collect();
+    pairs.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
+
+    let text = &map.files[1].text;
+    let line_off = text.find("end").unwrap();
+
+    for query_off in [0usize, 10, 11, 25, 100] {
+        let mut input = Vec::new();
+        let push_u64 = |buf: &mut Vec<u8>, v: u64| buf.extend_from_slice(&v.to_le_bytes());
+        let push_str = |buf: &mut Vec<u8>, s: &str| {
+            buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+            buf.extend_from_slice(s.as_bytes());
+        };
+        push_u64(&mut input, map.files.len() as u64);
+        for f in &map.files {
+            push_u64(&mut input, f.base as u64);
+            push_u64(&mut input, f.text.len() as u64);
+        }
+        push_u64(&mut input, query_off as u64);
+        push_str(&mut input, text);
+        push_u64(&mut input, line_off as u64);
+        push_u64(&mut input, pairs.len() as u64);
+        for (m, s) in &pairs {
+            push_str(&mut input, m);
+            push_str(&mut input, s);
+        }
+
+        let words = entry.words(&input);
+        let got_file = if words[0] == u64::MAX {
+            None
+        } else {
+            Some(words[0] as usize)
+        };
+        assert_eq!(got_file, map.file_at(query_off), "file_at({query_off})");
+
+        let prefix = &text[..line_off];
+        let want_line = 1 + prefix.bytes().filter(|&b| b == b'\n').count() as u64;
+        let want_col = 1 + prefix.rsplit('\n').next().unwrap().chars().count() as u64;
+        assert_eq!((words[1], words[2]), (want_line, want_col));
+
+        let mut at = 3;
+        let got_demangled = String::from_utf8(unpack(&words, &mut at)).unwrap();
+        assert_eq!(at, words.len());
+        assert_eq!(
+            got_demangled,
+            "let x = @demo/a::foo_bar(@demo/a::foo);\n// λ🚀 end"
+        );
+    }
+}
+
+#[test]
+fn localize_diagnostic_matches_rust() {
+    use std::collections::BTreeMap;
+    use vesper::ast::Diagnostic;
+    use vesper::packages::{SourceFile, SourceMap};
+
+    let entry = driver().entry("localize_diagnostics_json_words", true);
+
+    let mut qualified = BTreeMap::new();
+    qualified.insert("__pkg_0_foo".to_owned(), "@demo/a::foo".to_owned());
+    qualified.insert("__pkg_0_foo_bar".to_owned(), "@demo/a::foo_bar".to_owned());
+    let map = SourceMap {
+        files: vec![
+            SourceFile {
+                display: "src/a.ves".into(),
+                text: "fn __pkg_0_foo() {}\n".into(),
+                base: 0,
+            },
+            SourceFile {
+                display: "src/b.ves".into(),
+                text: "let x = __pkg_0_foo_bar();\n// λ🚀 note".into(),
+                base: 21,
+            },
+        ],
+        qualified,
+    };
+
+    let note_off = map.files[1].text.find("note").unwrap();
+    let ds = vec![
+        // Unlocated diagnostic (offset past all files).
+        Diagnostic::new("E0900", "bad __pkg_0_foo", 500..510).with_help("see __pkg_0_foo_bar"),
+        // Same-file diagnostic with one in-file label and one cross-file label (dropped).
+        Diagnostic::new("E0201", "unknown __pkg_0_foo_bar", 29..44)
+            .with_related(21..24, "in b __pkg_0_foo")
+            .with_related(3..14, "in a"),
+        // Sugar rejection E0143 with cross-file label appended to help.
+        Diagnostic::new("E0143", "sugar in __pkg_0_foo", 3..14)
+            .with_related(
+                21 + note_off..21 + note_off + 4,
+                "expanded from __pkg_0_foo_bar",
+            )
+            .with_help("existing help"),
+    ];
+
+    let push_u64 = |buf: &mut Vec<u8>, v: u64| buf.extend_from_slice(&v.to_le_bytes());
+    let push_str = |buf: &mut Vec<u8>, s: &str| {
+        buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    };
+
+    let mut files_stream = Vec::new();
+    push_u64(&mut files_stream, map.files.len() as u64);
+    for f in &map.files {
+        push_u64(&mut files_stream, f.base as u64);
+        push_str(&mut files_stream, &f.display);
+        push_str(&mut files_stream, &f.text);
+    }
+
+    let mut pairs: Vec<(&String, &String)> = map.qualified.iter().collect();
+    pairs.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
+    let mut pairs_stream = Vec::new();
+    push_u64(&mut pairs_stream, pairs.len() as u64);
+    for (m, s) in &pairs {
+        push_str(&mut pairs_stream, m);
+        push_str(&mut pairs_stream, s);
+    }
+
+    let mut input = Vec::new();
+    push_u64(&mut input, files_stream.len() as u64);
+    input.extend_from_slice(&files_stream);
+    push_u64(&mut input, pairs_stream.len() as u64);
+    input.extend_from_slice(&pairs_stream);
+    input.extend_from_slice(&encode_diagnostics_stream(&ds));
+
+    let words = entry.words(&input);
+    let mut at = 0;
+    let got_json = String::from_utf8(unpack(&words, &mut at)).unwrap();
+    assert_eq!(at, words.len());
+
+    let want_arr: Vec<serde_json::Value> = ds
+        .iter()
+        .map(|d| {
+            let loc = map.localize(d);
+            let file = loc
+                .file
+                .map_or("Loom.toml", |i| map.files[i].display.as_str());
+            let mut v = serde_json::to_value(&loc.diagnostic).unwrap();
+            v["file"] = serde_json::Value::String(file.to_owned());
+            v
+        })
+        .collect();
+    let want_json = serde_json::Value::Array(want_arr).to_string();
+    assert_eq!(got_json, want_json);
+}
+
+#[test]
+fn windows_lld_link_candidates_match_rust() {
+    let entry = driver().entry("windows_lld_link_candidates_words", true);
+
+    // Test both Windows (`w`) and Unix (`u`) PATH splitting.
+    let win_input = "wC:\\LLVM\\bin;\"C:\\Program Files\\LLVM\\bin\";;D:\\tools\\";
+    let words = entry.words(win_input.as_bytes());
+    let mut at = 0;
+    let got_win = String::from_utf8(unpack(&words, &mut at)).unwrap();
+    let got_msg = String::from_utf8(unpack(&words, &mut at)).unwrap();
+    assert_eq!(at, words.len());
+    assert_eq!(
+        got_win,
+        [
+            "C:\\LLVM\\bin\\lld-link",
+            "C:\\Program Files\\LLVM\\bin\\lld-link",
+            "D:\\tools\\lld-link",
+            "C:\\LLVM\\bin\\lld-link.exe",
+            "C:\\Program Files\\LLVM\\bin\\lld-link.exe",
+            "D:\\tools\\lld-link.exe",
+        ]
+        .join("\0")
+    );
+    assert_eq!(
+        got_msg,
+        "install the Visual Studio C++ build tools (x64), put lld-link on PATH, or pass --linker <path>"
+    );
+
+    let unix_input = "u/usr/bin:/opt/llvm/bin/:";
+    let uwords = entry.words(unix_input.as_bytes());
+    let mut uat = 0;
+    let got_unix = String::from_utf8(unpack(&uwords, &mut uat)).unwrap();
+    let _msg = unpack(&uwords, &mut uat);
+    assert_eq!(uat, uwords.len());
+    assert_eq!(
+        got_unix,
+        [
+            "/usr/bin/lld-link",
+            "/opt/llvm/bin/lld-link",
+            "lld-link",
+            "/usr/bin/lld-link.exe",
+            "/opt/llvm/bin/lld-link.exe",
+            "lld-link.exe",
+        ]
+        .join("\0")
+    );
+}
+
+#[test]
+fn vsys_target_os_matches_rust() {
+    use vesper::packages::{VSYS_TARGETS, driver_host};
+
+    let entry = driver().entry("vsys_target_os_words", true);
+    let host_os = std::env::consts::OS;
+
+    let cases: Vec<Option<&str>> = vec![
+        None,
+        Some("wasm32-wasip2"),
+        Some("x86_64-unknown-linux-gnu"),
+        Some("aarch64-unknown-linux-gnu"),
+        Some("aarch64-apple-darwin"),
+        Some("x86_64-pc-windows-msvc"),
+        Some("riscv64gc-unknown-none-elf"),
+    ];
+
+    for target in cases {
+        let mut input = Vec::new();
+        match target {
+            Some(t) => {
+                input.push(b'1');
+                input.extend_from_slice(t.as_bytes());
+            }
+            None => input.push(b'0'),
+        }
+        input.push(0);
+        input.extend_from_slice(host_os.as_bytes());
+
+        let words = entry.words(&input);
+        let got_wasi = words[0] != 0;
+        let got_idx = words[1];
+        let mut at = 2;
+        let got_os = String::from_utf8(unpack(&words, &mut at)).unwrap();
+        let got_abi = String::from_utf8(unpack(&words, &mut at)).unwrap();
+        assert_eq!(at, words.len());
+
+        let (want_os, want_wasi) = driver_host::target_os(target);
+        assert_eq!(
+            (got_os.as_str(), got_wasi),
+            (want_os, want_wasi),
+            "{target:?}"
+        );
+
+        let want_idx = target
+            .and_then(|t| VSYS_TARGETS.iter().position(|v| v.triple == t))
+            .map_or(4u64, |i| i as u64);
+        assert_eq!(got_idx, want_idx, "{target:?}");
+        let want_abi = target
+            .and_then(|t| VSYS_TARGETS.iter().find(|v| v.triple == t))
+            .map_or("", |v| v.abi);
+        assert_eq!(got_abi, want_abi, "{target:?}");
+    }
+}

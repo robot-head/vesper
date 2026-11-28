@@ -719,6 +719,57 @@ fn resolve_shared_method(inout ctx: Ctx, method: u32, arity: u64) -> SeqRes {
     }
 }
 
+pub fn seq_arg_pass(mode: u8, i: u64) -> u8 {
+    if mode == 1 {
+        TyPass::In
+    } else if mode == 2 {
+        TyPass::Inout
+    } else if mode == 3 && i == 0 {
+        TyPass::Inout
+    } else if mode == 4 && i == 0 {
+        TyPass::In
+    } else if mode == 5 && i == 1 {
+        TyPass::In
+    } else {
+        TyPass::Sink
+    }
+}
+
+fn label_contains(in ctx: Ctx, label: u32, in text: Str) -> bool {
+    let bytes = text.as_bytes();
+    let len = ctx.names.size(label);
+    if bytes.len() > len {
+        return false;
+    }
+    for start in 0..wrapping_add(wrapping_sub(len, bytes.len()), 1) {
+        let mut same = true;
+        for i in 0..bytes.len() {
+            if ctx.names.byte(label, wrapping_add(start, i)) != bytes.try_get(i).unwrap_or(0) {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            return true;
+        }
+    }
+    false
+}
+
+// The fallibility of a resolved SeqOp, as in the native checker. Only
+// checked forms raise RuntimeError; total siblings return false or None.
+pub fn seq_may_fail(in ctx: Ctx, label: u32) -> bool {
+    eq(in ctx, label, "Get")
+        || eq(in ctx, label, "Set")
+        || eq(in ctx, label, "Finish")
+        || eq(in ctx, label, "SliceGet")
+        || eq(in ctx, label, "SliceSet")
+        || eq(in ctx, label, "Str(ByteAt)")
+        || label_contains(in ctx, label, "total: false")
+        || (ctx.names.has_prefix(label, in "Vector(".as_bytes())
+            && label_contains(in ctx, label, "masked: false"))
+}
+
 pub fn resolve_seq_call(
     inout ctx: Ctx,
     in ast: Ast,

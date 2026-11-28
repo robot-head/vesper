@@ -1,5 +1,6 @@
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:stage2_port_builder.bzl", "stage2_port_builder")
 load("//tools/bazel:vesper_port.bzl", "vesper_package")
 load("//tools/bazel/tests:ci_analysis_test.bzl", "compile_inputs_test", "environment_test", "runfiles_test")
 
@@ -41,6 +42,53 @@ _TOOLS = [
 # `<bin>/shipped/vesper` and finds the tools (data below) at
 # `<bin>/crates/vesper-tools/bin/`, as `//:bin/vesper` does.
 _HYBRID = "//crates/vesper-hybrid:bin/vesper-hybrid"
+
+# The files of every library a port crate links (tests/self_host_codegen_export/ports.rs).
+_PORT_FILES = [
+    "//crates/vesper-aegis:files",
+    "//crates/vesper-alloc:files",
+    "//crates/vesper-aura:files",
+    "//crates/vesper-beacon:files",
+    "//crates/vesper-bench:files",
+    "//crates/vesper-chorus:files",
+    "//crates/vesper-crucible:files",
+    "//crates/vesper-diagnostics:files",
+    "//crates/vesper-ebpf:files",
+    "//crates/vesper-flux:files",
+    "//crates/vesper-fmt:files",
+    "//crates/vesper-forge:files",
+    "//crates/vesper-grammar:files",
+    "//crates/vesper-highlight:files",
+    "//crates/vesper-hybrid:files",
+    "//crates/vesper-ignis:files",
+    "//crates/vesper-kinetic:files",
+    "//crates/vesper-lean-syntax:files",
+    "//crates/vesper-lint:files",
+    "//crates/vesper-loom-audit:files",
+    "//crates/vesper-loom-calculus:files",
+    "//crates/vesper-loom-solver:files",
+    "//crates/vesper-pact:files",
+    "//crates/vesper-port-build:files",
+    "//crates/vesper-port-pilot:files",
+    "//crates/vesper-prism:files",
+    # vesper/target/ is outside :files (no **/target/** glob).
+    "//crates/vesper-prism:target_package",
+    "//crates/vesper-prism-h3:files",
+    "//crates/vesper-quarry:files",
+    "//crates/vesper-resonance:files",
+    "//crates/vesper-semver:files",
+    "//crates/vesper-serde:files",
+    "//crates/vesper-silicon:files",
+    "//crates/vesper-simpulse:files",
+    "//crates/vesper-span:files",
+    "//crates/vesper-std-driver:files",
+    "//crates/vesper-tensor:files",
+    "//crates/vesper-warp:files",
+    "//crates/vesper-warp-bbr:files",
+    "//crates/vesper-warp-tcp:files",
+    "//crates/vesper-warp-wheel:files",
+]
+
 
 copy_file(
     name = "vesper_shipped_unix",
@@ -112,6 +160,10 @@ vesper_crate(
         "//crates/vesper-port-pilot:files",
         # tests/common/wasm_words.rs embeds the Cranelift component's WIT (#2210).
         "//crates/vesper-cranelift-component:wit/vcl.wit",
+        # The CLIF pass differentials include the shim's clif_words.rs (#2606)
+        # and clif_outline.rs (#2634).
+        "//crates/vesper-cranelift-sys:src/clif_outline.rs",
+        "//crates/vesper-cranelift-sys:src/clif_words.rs",
     ],
     extra_test_data = [
         "//crates/vesper-doc:files",
@@ -300,50 +352,14 @@ vesper_crate(
             "examples/**/*.ves",
             "packages/**",
             "tests/**/*.ves",
-        ]) + [
-            "//crates/vesper-aegis:files",
-            "//crates/vesper-alloc:files",
-            "//crates/vesper-aura:files",
-            "//crates/vesper-beacon:files",
-            "//crates/vesper-bench:files",
-            "//crates/vesper-chorus:files",
-            "//crates/vesper-crucible:files",
-            "//crates/vesper-diagnostics:files",
-            "//crates/vesper-ebpf:files",
-            "//crates/vesper-flux:files",
-            "//crates/vesper-fmt:files",
-            "//crates/vesper-forge:files",
-            "//crates/vesper-grammar:files",
-            "//crates/vesper-highlight:files",
-            "//crates/vesper-hybrid:files",
-            "//crates/vesper-ignis:files",
-            "//crates/vesper-kinetic:files",
-            "//crates/vesper-lean-syntax:files",
-            "//crates/vesper-lint:files",
-            "//crates/vesper-loom-audit:files",
-            "//crates/vesper-loom-calculus:files",
-            "//crates/vesper-loom-solver:files",
-            "//crates/vesper-pact:files",
-            "//crates/vesper-port-build:files",
-            "//crates/vesper-port-pilot:files",
-            "//crates/vesper-prism:files",
-            # vesper/target/ is outside :files (no **/target/** glob).
-            "//crates/vesper-prism:target_package",
-            "//crates/vesper-prism-h3:files",
-            "//crates/vesper-quarry:files",
-            "//crates/vesper-resonance:files",
-            "//crates/vesper-semver:files",
-            "//crates/vesper-serde:files",
-            "//crates/vesper-silicon:files",
-            "//crates/vesper-simpulse:files",
-            "//crates/vesper-span:files",
-            "//crates/vesper-std-driver:files",
-            "//crates/vesper-tensor:files",
-            "//crates/vesper-warp:files",
-            "//crates/vesper-warp-bbr:files",
-            "//crates/vesper-warp-tcp:files",
-            "//crates/vesper-warp-wheel:files",
-        ],
+        ]) + _PORT_FILES,
+        # Bootstrap slice 3d (#2659): Stage 2's calls inputs against Rust's
+        # over the same port libraries.
+        "test/self_host_stage2_calls_input": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "tests/**/*.ves",
+        ]) + _PORT_FILES,
         # SH4 lane 14 (#1288): @vesper/codegen-freestanding against the
         # freestanding image builder.
         "test/self_host_freestanding": glob([
@@ -444,6 +460,8 @@ vesper_crate(
             "//bootstrap:files",
             # @vesper/run keeps region books in @vesper/alloc (#2053).
             "//crates/vesper-alloc:files",
+            # @vesper/lsp-publish renders through @vesper/diagnostics (#1828).
+            "//crates/vesper-diagnostics:files",
             "//crates/vesper-ebpf:files",
             # @vesper/driver-commands formats through @vesper/fmt (#1996).
             "//crates/vesper-fmt:files",
@@ -943,6 +961,8 @@ vesper_crate(
         "test/self_host_lsp_core": glob([
             "examples/**",
             "packages/vesper-lsp/**",
+            "packages/vesper-driver-engines/**",
+            "packages/vesper-lsp-server/**",
             "packages/vesper-memo/**",
         ]) + [
             "//crates/vesper-serde:files",
@@ -957,6 +977,7 @@ vesper_crate(
             "src/lsp/fixtures/**",
             "packages/vesper-lsp-features/**",
             "packages/vesper-lsp-format/**",
+            "packages/vesper-lsp-publish/**",
             # The macro preview's Forge programs (part 11c).
             "tests/forge_*.rs",
             "packages/vesper-ast/**",
@@ -964,6 +985,7 @@ vesper_crate(
             "packages/vesper-front/**",
             "packages/vesper-std/**",
         ]) + [
+            "//crates/vesper-diagnostics:files",
             "//crates/vesper-fmt:files",
             "//crates/vesper-span:files",
         ],
@@ -1428,6 +1450,8 @@ vesper_crate(
         "test/self_host_freestanding": "eternal",
         # Builds 51 port libraries with the vesper binary.
         "test/self_host_codegen_export": "long",
+        # Builds and checks the 52 port libraries with Rust and Stage 2.
+        "test/self_host_stage2_calls_input": "long",
         "test/self_host_place_ir_jit": "long",
         "test/self_host_ir_lower": "long",
         # Every runnable corpus world under six fuel and optimizer settings.
@@ -1943,9 +1967,11 @@ vesper_package(
     manifest = "packages/vesper-run/Loom.toml",
     visibility = ["//visibility:public"],
     # Float display takes @vesper/serde's shortest digits; region blocks
-    # keep @vesper/alloc books.
+    # keep @vesper/alloc books and size generic payloads with
+    # @vesper/check-layout.
     deps = [
         ":check_data_package",
+        ":check_layout_package",
         ":place_ir_package",
         "//crates/vesper-alloc:port_package",
         "//crates/vesper-serde:port_package",
@@ -1962,6 +1988,7 @@ vesper_package(
     deps = [
         ":check_data_package",
         ":check_layout_package",
+        ":codegen_aggregates_package",
         ":place_ir_package",
     ],
 )
@@ -2278,6 +2305,29 @@ vesper_package(
     vsys = glob(["packages/vesper-driver-engines/commands-*.vsys"]),
 )
 
+# @vesper/lsp, the LSP transport, envelope and session gates (#1828), and
+# @vesper/lsp-server, the `vesper lsp` loop over the engine seam of
+# @vesper/driver-engines (#1828 part 15c).
+vesper_package(
+    name = "lsp_package",
+    srcs = glob(["packages/vesper-lsp/src/**/*.ves"]),
+    manifest = "packages/vesper-lsp/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = ["//crates/vesper-serde:port_package"],
+)
+
+vesper_package(
+    name = "lsp_server_package",
+    srcs = glob(["packages/vesper-lsp-server/src/**/*.ves"]),
+    manifest = "packages/vesper-lsp-server/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":driver_engines_package",
+        ":lsp_package",
+        "//crates/vesper-serde:port_package",
+    ],
+)
+
 # @vesper/driver-commands, the command layers the hybrid's driver hands on
 # (self-hosting SH5 lane 13, #1336).
 vesper_package(
@@ -2288,6 +2338,7 @@ vesper_package(
     deps = [
         ":driver_engines_package",
         ":driver_package",
+        ":lsp_server_package",
         ":proof_audit_package",
         ":std_env_package",
         ":std_fs_package",
@@ -2499,4 +2550,27 @@ compile_inputs_test(
     ],
     required = ["examples/native-pulse/ticket_tally.ves"],
     target_under_test = "//:example/native-pulse",
+)
+
+# The Stage 2 port builder (#2666): @vesper/port-builder built by the
+# committed Stage 2 seed's rebuild of today's @vesper/stage2 and composed with
+# the Cranelift component. `--config=stage2-ports` builds every
+# vesper_port_object with it, and the Rust compiler where it declines;
+# crates/vesper-port-harness/tests/stage2_builder.rs counts the identical
+# outputs per port.
+stage2_port_builder(
+    name = "port_builder",
+    out = "vesper-port-builder.wasm",
+    cranelift = "//crates/vesper-cranelift-component:component",
+    packages = glob([
+        "packages/**/*.ves",
+        "packages/**/Loom.toml",
+        "packages/**/*.vsys",
+    ]) + [
+        "//packages/vesper-codegen-numeric:files",
+        "//packages/vesper-cranelift:files",
+        "//packages/vesper-crypto:files",
+    ],
+    seed = "//bootstrap/stage2-seed:seed",
+    visibility = ["//visibility:public"],
 )

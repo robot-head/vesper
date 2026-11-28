@@ -300,7 +300,10 @@ impl Builder {
         let i = wrapping_sub(widen_u64(index), self.imports.len());
         let old_row = self.func_row(i);
         let body_at = self.bodies.len();
-        append(inout self.bodies, in body);
+        // Stage 2 defines functions in its bounded permanent arena.
+        // A per-byte try_get allocates an Option in Wasm; use one bulk
+        // copy so the arena holds code, not one temporary box per byte.
+        self.bodies.extend(in body.as_slice());
         let row = FuncRow {
             ty: old_row.ty,
             body_start: body_at,

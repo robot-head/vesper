@@ -37,6 +37,10 @@ pub const E_LOOP: u64 = 19;
 pub const E_BREAK: u64 = 20;
 pub const E_CONTINUE: u64 = 21;
 pub const E_HANDLE: u64 = 22;
+pub const E_TRY: u64 = 23;
+pub const E_CLOSURE: u64 = 24;
+pub const E_ARRAY_WRITE: u64 = 25;
+pub const E_WIDE_INT: u64 = 26;
 pub const E_INDEX: u64 = 40;
 
 // Literal pattern kinds (`LIT_*` in exprs.ves).
@@ -117,9 +121,9 @@ fn encode_pattern(e: &mut Enc, p: &Pattern, out: &mut Vec<u64>) {
                 out.extend([LIT_TYPED_INT, e.name(kind.name())]);
                 return;
             }
-            // The literal's type (`literal_type`), for `bind_mode`.
-            // An integer past `u64::MAX` in magnitude is not ported yet (as
-            // in `encode_expr`): `LIT_WIDE_INT` skips the function.
+            // The literal's type (`literal_type`), for `bind_mode`. An
+            // integer past `u64::MAX` in magnitude is `LIT_WIDE_INT` with
+            // its sign and magnitude words (as `E_WIDE_INT` in `encode_expr`).
             out.push(match l {
                 Literal::Int(n) if fits_literal(*n) => LIT_INT,
                 Literal::Float(_) => LIT_FLOAT,
@@ -131,6 +135,9 @@ fn encode_pattern(e: &mut Enc, p: &Pattern, out: &mut Vec<u64>) {
                 && fits_literal(*n)
             {
                 out.extend([(*n < 0) as u64, n.unsigned_abs() as u64]);
+            }
+            if let Some((neg, magnitude)) = wide_magnitude(l) {
+                out.extend(wide_words(neg, magnitude));
             }
         }
         PatternKind::Tuple(ps) => {
@@ -163,23 +170,102 @@ fn fits_literal(n: i128) -> bool {
     n.unsigned_abs() <= u64::MAX as u128
 }
 
+/// The sign and magnitude of an integer literal past `u64::MAX` in
+/// magnitude (`Literal::WideInt` is above `i128::MAX`).
+fn wide_magnitude(l: &Literal) -> Option<(bool, u128)> {
+    match l {
+        Literal::Int(n) if !fits_literal(*n) => Some((*n < 0, n.unsigned_abs())),
+        Literal::WideInt(n) => Some((false, *n)),
+        _ => None,
+    }
+}
+
+/// A wide magnitude's words: the sign, then the low and high words.
+fn wide_words(neg: bool, magnitude: u128) -> [u64; 3] {
+    [
+        neg as u64,
+        magnitude as u64,
+        (magnitude >> u64::BITS) as u64,
+    ]
+}
+
 /// Whether an integer literal at `span` is an array's `len()` that
 /// `arrays::lower_world` wrote after checking: the checker typed the call,
 /// whose array receiver it recorded inside the span. Such a literal is
-/// encoded as `E_OTHER`, so its function is skipped.
+/// encoded as the call it replaced (`Src::lens`), or as `E_OTHER` (so its
+/// function is skipped) when the parsed module has none there.
 fn lowered_len(w: &World, span: &vesper::ast::Span) -> bool {
     w.types
         .range((span.start, span.start)..(span.start, span.end))
         .any(|(_, ty)| vesper::arrays::element(ty).is_some())
 }
 
+/// The world whose bodies are encoded, with the parsed module's `len()`
+/// method calls by span: the calls `arrays::lower_world` may have
+/// rewritten to their array's length after checking.
+struct Src<'a> {
+    world: &'a World,
+    lens: BTreeMap<(usize, usize), &'a Expr>,
+}
+
+impl std::ops::Deref for Src<'_> {
+    type Target = World;
+    fn deref(&self) -> &World {
+        self.world
+    }
+}
+
+impl<'a> Src<'a> {
+    fn new(world: &'a World, module: &'a Module) -> Self {
+        let mut lens = BTreeMap::new();
+        let mut visit = |body: &'a Expr| {
+            vesper::lean::visit_exprs(body, &mut |x: &'a Expr| {
+                if let ExprKind::Call { callee, args, .. } = &x.kind
+                    && args.is_empty()
+                    && matches!(&callee.kind, ExprKind::Field(_, m) if m == ARRAY_LEN)
+                {
+                    lens.insert((x.span.start, x.span.end), x);
+                }
+            });
+        };
+        for item in &module.items {
+            match item {
+                Item::Function(f) => f.body.iter().for_each(&mut visit),
+                Item::Impl { methods, .. } => {
+                    methods.iter().flat_map(|f| &f.body).for_each(&mut visit)
+                }
+                _ => {}
+            }
+        }
+        Src { world, lens }
+    }
+
+    /// The call a lowered `len()` literal at `span` replaced.
+    fn lowered(&self, span: &vesper::ast::Span) -> Option<&'a Expr> {
+        if !lowered_len(self.world, span) {
+            return None;
+        }
+        self.lens.get(&(span.start, span.end)).copied()
+    }
+}
+
+/// The array method `arrays::lower_world` rewrites to a constant.
+const ARRAY_LEN: &str = "len";
+
 /// An expression in pre-order: kind, start, end, then the payload. Kinds
 /// the Vesper checker does not cover yet are `E_OTHER` with no payload.
-fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
+fn encode_expr(w: &Src, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
     let (s, t) = (x.span.start as u64, x.span.end as u64);
     match &x.kind {
+        ExprKind::Literal(Literal::Int(_)) if let Some(call) = w.lowered(&x.span) => {
+            encode_expr(w, e, call, out);
+        }
         ExprKind::Literal(Literal::Int(n)) if fits_literal(*n) && !lowered_len(w, &x.span) => {
             out.extend([E_INT, s, t, (*n < 0) as u64, n.unsigned_abs() as u64]);
+        }
+        ExprKind::Literal(l) if let Some((neg, magnitude)) = wide_magnitude(l) => {
+            out.extend([E_WIDE_INT, s, t]);
+            out.extend(wide_words(neg, magnitude));
         }
         ExprKind::Literal(Literal::Float(_)) => out.extend([E_FLOAT, s, t]),
         ExprKind::Literal(Literal::Bool(b)) => out.extend([E_BOOL, s, t, *b as u64]),
@@ -277,12 +363,19 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
                 encode_expr(w, e, x, out);
             }
         }
-        // Element writes (`a[i] = v`, lowered to `"[]="`) belong to the
-        // arrays lane.
         ExprKind::Assign(op, place, value) if !op.starts_with(vesper::arrays::WRITE_PREFIX) => {
             out.extend([E_ASSIGN, s, t, (op != "=") as u64]);
             encode_expr(w, e, place, out);
             encode_expr(w, e, value, out);
+        }
+        // An element write `a[i] op= v` or `a.set(i, v)`, lowered to
+        // `Assign("[]op", a, (i, v))`: whether it is compound, the array,
+        // the operand pair.
+        ExprKind::Assign(op, array, operands) => {
+            let simple = op.strip_prefix(vesper::arrays::WRITE_PREFIX) == Some("=");
+            out.extend([E_ARRAY_WRITE, s, t, !simple as u64]);
+            encode_expr(w, e, array, out);
+            encode_expr(w, e, operands, out);
         }
         ExprKind::For { pat, iter, body } => {
             out.extend([E_FOR, s, t]);
@@ -323,6 +416,21 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
             for a in &effect.args {
                 out.push(e.ty(a));
             }
+            // The handler's inferred effects (its continuation's row), as
+            // the row of an empty function type + 1; 0 before inference.
+            out.push(
+                w.handler_effects
+                    .get(&(x.span.start, x.span.end))
+                    .map_or(0, |effects| {
+                        e.ty(&vesper::ast::Type::Function {
+                            params: vec![],
+                            result: Box::new(vesper::ast::Type::unit()),
+                            effects: effects.clone(),
+                            mode: vesper::ast::Mode::Copy,
+                        }) + 1
+                    }),
+            );
+            out.push(e.opt_name(&effect.label));
             out.push(state.is_some() as u64);
             if let Some((p, value)) = state {
                 encode_pattern(e, p, out);
@@ -338,6 +446,54 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
                 }
                 encode_expr(w, e, &c.body, out);
             }
+        }
+        // A closure infers its effect row from its body, which needs the
+        // checked world's partial and overflow operations: before
+        // inference (no inferred results yet) it is not encoded.
+        ExprKind::Closure {
+            params,
+            mode,
+            result,
+            effects,
+            infer_effects,
+            body,
+        } if !w.function_results.is_empty() => {
+            out.extend([E_CLOSURE, s, t, params.len() as u64]);
+            for p in params {
+                out.push(pass_code(p.pass));
+                out.push(e.name(&p.name));
+                out.push(e.ty(&p.ty));
+                out.push(p.projections.len() as u64);
+                out.extend([p.span.start as u64, p.span.end as u64]);
+            }
+            out.push(mode.map_or(0, |m| mode_word(m) + 1));
+            out.push(e.ty(result));
+            out.push(effects.instances.len() as u64);
+            for inst in &effects.instances {
+                out.push(e.name(&inst.name));
+                out.push(e.opt_name(&inst.label));
+                out.push(inst.args.len() as u64);
+                for a in &inst.args {
+                    out.push(e.ty(a));
+                }
+            }
+            out.push(e.opt_name(&effects.tail));
+            out.push(*infer_effects as u64);
+            // The names the body may capture (`free_names`, less the
+            // parameters).
+            let mut free = vesper::check::free_names(body);
+            for p in params {
+                free.remove(&p.name);
+            }
+            out.push(free.len() as u64);
+            for n in &free {
+                out.push(e.name(n));
+            }
+            encode_expr(w, e, body, out);
+        }
+        ExprKind::Try(value) => {
+            out.extend([E_TRY, s, t]);
+            encode_expr(w, e, value, out);
         }
         ExprKind::Return(value) => {
             out.extend([E_RETURN, s, t, value.is_some() as u64]);
@@ -393,6 +549,7 @@ pub fn checked_functions(w: &World) -> Vec<&Function> {
 /// method names the module's traits declare, and the checked functions'
 /// bodies.
 pub fn exprs_input(w: &World, module: &Module) -> Vec<u8> {
+    let src = Src::new(w, module);
     encode(w, |e, tail| {
         tail.push(w.functions.len() as u64);
         for f in w.functions.values() {
@@ -417,11 +574,13 @@ pub fn exprs_input(w: &World, module: &Module) -> Vec<u8> {
             tail.push(f.effects.instances.len() as u64);
             for inst in &f.effects.instances {
                 tail.push(e.name(&inst.name));
+                tail.push(e.opt_name(&inst.label));
                 tail.push(inst.args.len() as u64);
                 for a in &inst.args {
                     tail.push(e.ty(a));
                 }
             }
+            tail.push(e.opt_name(&f.effects.tail));
             let result = w.function_results.get(&f.name).unwrap_or(&f.result);
             tail.push(e.ty(result));
         }
@@ -474,7 +633,7 @@ pub fn exprs_input(w: &World, module: &Module) -> Vec<u8> {
         for f in fs {
             tail.push(e.name(&f.name));
             tail.extend([f.span.start as u64, f.span.end as u64]);
-            encode_expr(w, e, f.body.as_ref().unwrap(), tail);
+            encode_expr(&src, e, f.body.as_ref().unwrap(), tail);
         }
     })
 }
@@ -495,6 +654,80 @@ pub fn rust_types(w: &World, checked: &[(usize, usize)]) -> String {
         }
     }
     out
+}
+
+/// Each checked function's span and the `R type` result Vesper wrote for
+/// it (`Checker::results`).
+pub fn vesper_results(text: &str) -> Vec<((usize, usize), String)> {
+    let mut out = vec![];
+    let mut current = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("F ") {
+            let mut parts = rest.split(' ').map(|p| p.parse::<usize>().unwrap());
+            current = Some((parts.next().unwrap(), parts.next().unwrap()));
+        } else if let Some(ty) = line.strip_prefix("R ") {
+            out.push((current.take().unwrap(), ty.to_string()));
+        }
+    }
+    out
+}
+
+/// The Rust checker's result for each function span in `spans`
+/// (`World::function_results`, keyed by the function's span), as `vesper_results` writes it.
+pub fn rust_results(w: &World, spans: &[(usize, usize)]) -> Vec<((usize, usize), String)> {
+    let by_span: BTreeMap<(usize, usize), &String> = w
+        .functions
+        .iter()
+        .map(|(name, f)| ((f.span.start, f.span.end), name))
+        .collect();
+    spans
+        .iter()
+        .map(|span| {
+            let ty = by_span
+                .get(span)
+                .and_then(|name| w.function_results.get(*name))
+                .map_or_else(|| "none".to_string(), |t| format!("{t:?}"));
+            (*span, ty)
+        })
+        .collect()
+}
+
+/// Vesper's `H start end type` rows: each handler's inferred effects, as
+/// the empty function type that carries them.
+pub fn vesper_handler_effects(text: &str) -> Vec<((usize, usize), String)> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("H "))
+        .map(|rest| {
+            let parts: Vec<&str> = rest.splitn(3, ' ').collect();
+            let num = |i: usize| parts[i].parse::<usize>().unwrap();
+            ((num(0), num(1)), parts[2].to_string())
+        })
+        .collect()
+}
+
+/// The Rust checker's effects for each handler span in `spans`
+/// (`World::handler_effects`), as `vesper_handler_effects` writes them.
+pub fn rust_handler_effects(w: &World, spans: &[(usize, usize)]) -> Vec<((usize, usize), String)> {
+    spans
+        .iter()
+        .map(|span| {
+            let ty = w.handler_effects.get(span).map_or_else(
+                || "none".to_string(),
+                |effects| {
+                    format!(
+                        "{:?}",
+                        vesper::ast::Type::Function {
+                            params: vec![],
+                            result: Box::new(vesper::ast::Type::unit()),
+                            effects: effects.clone(),
+                            mode: vesper::ast::Mode::Copy,
+                        }
+                    )
+                },
+            );
+            (*span, ty)
+        })
+        .collect()
 }
 
 /// Vesper's text: `F start end` then `T start end type` rows in insertion
@@ -534,6 +767,9 @@ pub fn vesper_types(text: &str) -> (String, Vec<(usize, usize)>, usize) {
             }
             "S" => skipped += 1,
             "D" => out.push_str(&format!("{line}\n")),
+            // A checked function's result (`vesper_results`) and a
+            // handler's effects (`vesper_handler_effects`).
+            "R" | "H" => {}
             _ => panic!("unexpected line {line}"),
         }
     }

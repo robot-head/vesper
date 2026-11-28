@@ -53,7 +53,7 @@ const SELECT_ELSE_ARG: u64 = 2;
 
 // `values_of`: the arguments of `i`, then every value argument of each of
 // its destinations, all resolved.
-fn values_of(in f: Func, i: u32) -> ChunkSeq[u32] {
+pub fn values_of(in f: Func, i: u32) -> ChunkSeq[u32] {
     let mut out = ChunkSeq::new[u32]();
     for k in 0..f.nargs(i) {
         out.push(f.resolve(f.arg(i, k)));
@@ -180,15 +180,15 @@ pub fn cfg_of(in f: Func) -> Cfg {
     Cfg { at: at, inst: insts }
 }
 
-fn pred_lo(in c: Cfg, b: u32) -> u64 {
+pub fn pred_lo(in c: Cfg, b: u32) -> u64 {
     c.at.try_get(w(b)).unwrap_or(0)
 }
 
-fn pred_hi(in c: Cfg, b: u32) -> u64 {
+pub fn pred_hi(in c: Cfg, b: u32) -> u64 {
     c.at.try_get(inc(w(b))).unwrap_or(0)
 }
 
-fn pred_count(in c: Cfg, b: u32) -> u64 {
+pub fn pred_count(in c: Cfg, b: u32) -> u64 {
     wrapping_sub(pred_hi(in c, b), pred_lo(in c, b))
 }
 
@@ -325,7 +325,7 @@ fn truth(b: bool) -> Konst {
 }
 
 // `eval_icmp`: `cc` on `a` and `b` as values of type `ty`.
-fn eval_icmp(cc: u64, ty: u64, a: u64, b: u64) -> Konst {
+pub fn eval_icmp(cc: u64, ty: u64, a: u64, b: u64) -> Konst {
     let bits = type_bits(ty);
     if bits != BITS_8 && bits != BITS_16 && bits != BITS_32 && bits != BITS_64 {
         return none();

@@ -1,43 +1,25 @@
 //! `vesper highlight` (design §43): Chroma semantic highlighting.
 //!
-//! The library crate `vesper-highlight` never depends on this package, so
-//! Tier 1 facts are gathered here, read-only, from the parser's AST and the
-//! checker's existing outputs (`World::types`, `World::mode`,
-//! `World::effects`, `World::functions`) and handed over as a
-//! [`SemanticFacts`] DTO. A snippet that does not parse or check is
-//! highlighted at Tier 0 with a typed [`FallbackReason`].
-use std::fs;
-
-mod facts;
-use vesper::{
-    ast::{
-        Expr, ExprKind, Function, Item, Mode as ValueMode, Module, Pass, Pattern, PatternKind,
-        Statement, Type, substitute,
-    },
-    check::World,
-    tooling::frontend::{AnalysisFailure, AnalysisLimits, CheckedSource, check_source},
-};
+//! The library crate `vesper-highlight` never depends on the compiler, so
+//! the shipped `vesper` gathers the Tier 1 facts, read-only, from the
+//! parser's AST and the checker's outputs (`vesper tool-facts chroma`, #2670)
+//! and they are handed over as a [`SemanticFacts`] DTO. A snippet that does
+//! not parse or check is highlighted at Tier 0 with a typed
+//! [`FallbackReason`].
+use crate::compiler;
+use serde::Deserialize;
+use std::{fs, ops::Range};
 use vesper_highlight::{
-    ChromaPalette, FallbackReason, Highlight, SemanticFacts, ansi, css, highlight_tier1, html,
-    json, tier0_fallback,
+    ChromaPalette, EffectFact, FallbackReason, FieldLeafFact, Highlight, HoverEntry,
+    LinearBindingFact, SemanticFacts, ansi, css, highlight_tier1, html, json, tier0_fallback,
 };
 
 const HELP: &str = "Usage: vesper highlight [--html|--ansi|--json] [--theme dusk|dawn] [--tier 0|1] [--no-line-numbers] [-o PATH] FILE\n       vesper highlight --css [-o PATH]\n\nChroma semantic highlighting (design §43). Tier 0 classifies the lossless CST of any snippet,\ncomplete or not. Tier 1 (the default) also marks live linear bindings, mutated versus read-only\nFieldTree leaves and linear versus abortable effects when the snippet checks; otherwise it falls\nback to Tier 0 and reports why (in --json, and on stderr).\n\n  --html   Semantic HTML styled by vesper-chroma.css custom properties (copy-exact text)\n  --ansi   24-bit terminal colours (default)\n  --json   The 16-byte ChromaTokenSpanWire records (schema vesper.chroma.spans/1)\n  --css    The vesper-chroma.css sheet with both themes\n";
 
 /// Largest input file (the highlighter's default byte budget).
 const MAX_BYTES: usize = vesper_highlight::DEFAULT_MAX_SOURCE_BYTES;
-/// Tier 1 analysis budget: the guarded front end's hard maxima.
-const ANALYSIS_LIMITS: AnalysisLimits = AnalysisLimits {
-    max_source_bytes: 262_144,
-    max_ast_nodes: 8192,
-    max_type_nodes: 32768,
-    max_depth: 64,
-    max_identifier_bytes: 1024,
-    max_printed_type_bytes: 8192,
-    max_diagnostics: 256,
-    max_diagnostic_bytes: 262_144,
-    max_metadata_bytes: 2_097_152,
-};
+/// The `vesper tool-facts` kind with Chroma's Tier 1 facts.
+const CHROMA_FACTS: &str = "chroma";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Format {
@@ -166,54 +148,172 @@ pub fn highlight_source(
     if tier == 0 {
         return tier0_fallback(source, FallbackReason::NotRequested);
     }
-    match facts(source) {
+    tier1(source, facts(source))
+}
+
+/// Tier 1 from `facts`, else Tier 0 with the reason.
+pub fn tier1(
+    source: &str,
+    facts: Result<SemanticFacts, FallbackReason>,
+) -> Result<Highlight, vesper_highlight::ChromaError> {
+    match facts {
         Ok(facts) => highlight_tier1(source, &facts),
         Err(reason) => tier0_fallback(source, reason),
     }
 }
 
-/// Runs the parser and checker and extracts the Tier 1 facts.
+/// The reason a source past the highlighter's budget gets no Tier 1 facts.
+pub fn over_budget(source: &str) -> Option<FallbackReason> {
+    (source.len() > MAX_BYTES).then(|| FallbackReason::Syntax {
+        code: "E0003".into(),
+        message: "source exceeds the highlighter budget".into(),
+        span: 0..0,
+    })
+}
+
+/// Asks the shipped compiler for the Tier 1 facts.
 pub fn facts(source: &str) -> Result<SemanticFacts, FallbackReason> {
-    if source.len() > MAX_BYTES {
-        return Err(FallbackReason::Syntax {
-            code: "E0003".into(),
-            message: "source exceeds the highlighter budget".into(),
-            span: 0..0,
-        });
+    if let Some(reason) = over_budget(source) {
+        return Err(reason);
     }
-    // The guarded front end bounds AST size, nesting and type growth, so a
-    // small input such as repeated `let x = (x, x);` cannot exhaust memory.
-    let checked = match check_source(source, ANALYSIS_LIMITS) {
-        Ok(c) => c,
-        Err(AnalysisFailure::Parse { diagnostics }) => {
-            return Err(diagnostics.first().map_or_else(
-                || FallbackReason::Budget {
-                    message: "parse failed".into(),
-                },
-                |d| FallbackReason::Syntax {
-                    code: d.code.as_str().into(),
-                    message: d.message.as_str().into(),
-                    span: d.span.clone(),
-                },
-            ));
+    let answer = compiler::facts_about(CHROMA_FACTS, source, &[]).map_err(budget)?;
+    facts_from_answer(&answer)
+}
+
+/// The Tier 0 reason for a compiler answer that could not be used.
+fn budget(message: String) -> FallbackReason {
+    FallbackReason::Budget {
+        message: message.into(),
+    }
+}
+
+/// The Tier 1 facts in a `chroma` answer (`facts`), or why there are none
+/// (`fallback`).
+pub fn facts_from_answer(answer: &serde_json::Value) -> Result<SemanticFacts, FallbackReason> {
+    if let Some(reason) = answer.get("fallback") {
+        let reason: WireFallback = serde_json::from_value(reason.clone())
+            .map_err(|e| budget(format!("chroma facts: {e}")))?;
+        return Err(reason.into());
+    }
+    let facts: WireFacts = answer
+        .get("facts")
+        .cloned()
+        .ok_or_else(|| "chroma facts: no facts".to_string())
+        .and_then(|facts| serde_json::from_value(facts).map_err(|e| format!("chroma facts: {e}")))
+        .map_err(budget)?;
+    Ok(facts.into())
+}
+
+/// The fallback `kind` the compiler sends for a snippet that does not parse
+/// (`FALLBACK_SYNTAX` in `src/tool_facts.rs`).
+const FALLBACK_SYNTAX: &str = "syntax";
+/// The fallback `kind` for a snippet that does not check.
+const FALLBACK_CHECK: &str = "check";
+
+/// Why Tier 1 is unavailable, as the compiler sends it.
+#[derive(Deserialize)]
+struct WireFallback {
+    kind: String,
+    code: String,
+    message: String,
+    span: Option<Range<usize>>,
+}
+
+impl From<WireFallback> for FallbackReason {
+    fn from(w: WireFallback) -> Self {
+        let span = w.span.unwrap_or(0..0);
+        match w.kind.as_str() {
+            FALLBACK_SYNTAX => FallbackReason::Syntax {
+                code: w.code.into(),
+                message: w.message.into(),
+                span,
+            },
+            FALLBACK_CHECK => FallbackReason::Check {
+                code: w.code.into(),
+                message: w.message.into(),
+                span,
+            },
+            _ => FallbackReason::Budget {
+                message: w.message.into(),
+            },
         }
-        Err(AnalysisFailure::Semantic { diagnostics }) => {
-            return Err(diagnostics.first().map_or_else(
-                || FallbackReason::Budget {
-                    message: "check failed".into(),
-                },
-                |d| FallbackReason::Check {
-                    code: d.code.as_str().into(),
-                    message: d.message.as_str().into(),
-                    span: d.span.clone(),
-                },
-            ));
+    }
+}
+
+/// [`SemanticFacts`] as the compiler sends them (`src/tool_facts/chroma.rs`).
+#[derive(Deserialize)]
+struct WireFacts {
+    linear_bindings: Vec<WireLinearBinding>,
+    field_leaves: Vec<WireFieldLeaf>,
+    effects: Vec<WireEffect>,
+    hovers: Vec<WireHover>,
+}
+
+#[derive(Deserialize)]
+struct WireLinearBinding {
+    name: String,
+    mint: Range<usize>,
+    occurrences: Vec<Range<usize>>,
+    discharge: Option<Range<usize>>,
+    hover: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct WireFieldLeaf {
+    span: Range<usize>,
+    mutated: bool,
+}
+
+#[derive(Deserialize)]
+struct WireEffect {
+    name: String,
+    linear: bool,
+}
+
+#[derive(Deserialize)]
+struct WireHover {
+    span: Range<usize>,
+    text: String,
+}
+
+impl From<WireFacts> for SemanticFacts {
+    fn from(w: WireFacts) -> Self {
+        SemanticFacts {
+            linear_bindings: w
+                .linear_bindings
+                .into_iter()
+                .map(|b| LinearBindingFact {
+                    name: b.name.into(),
+                    mint: b.mint,
+                    occurrences: b.occurrences,
+                    discharge: b.discharge,
+                    hover: b.hover,
+                })
+                .collect(),
+            field_leaves: w
+                .field_leaves
+                .into_iter()
+                .map(|l| FieldLeafFact {
+                    span: l.span,
+                    mutated: l.mutated,
+                })
+                .collect(),
+            effects: w
+                .effects
+                .into_iter()
+                .map(|e| EffectFact {
+                    name: e.name.into(),
+                    linear: e.linear,
+                })
+                .collect(),
+            hovers: w
+                .hovers
+                .into_iter()
+                .map(|h| HoverEntry {
+                    span: h.span,
+                    text: h.text.into(),
+                })
+                .collect(),
         }
-        Err(AnalysisFailure::Resource { reason } | AnalysisFailure::Unsupported { reason }) => {
-            return Err(FallbackReason::Budget {
-                message: reason.as_str().into(),
-            });
-        }
-    };
-    Ok(facts::collect_facts(source, &checked))
+    }
 }

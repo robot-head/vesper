@@ -178,11 +178,13 @@ to.
    bit, and `bootstrap/stage2.lock` records the digests. Checked by:
    `bootstrap/stage2.sh verify` and `.github/workflows/bootstrap-stage2.yml`
    (manual dispatch and nightly). Today `@vesper/stage2` rebuilds itself
-   bit for bit (#1690), and every compiler package it builds (49, listed in
-   `COMPILER_PACKAGES` in `tests/wasm_seed_package_io.rs`) comes out
-   byte-identical from the boot Stage 2 (built by the Rust wasm backend),
-   from `stage2.wasm` (built by itself) and from the precompiled
-   `stage2.cwasm` under the pinned wasmtime CLI (#1928). Four packages are
+   bit for bit (#1690). Since #2671 the gate (`crates/vesper-stage2-gate`)
+   boots from the committed seed `bootstrap/stage2-seed/stage2.wasm` with no
+   Rust compiler, and every compiler package it builds (listed in
+   `COMPILER_PACKAGES` in `crates/vesper-stage2-gate/tests/support/packages.rs`)
+   comes out byte-identical from stage A (built by the seed), from stage B
+   (built by itself, when the seed is stale) and from the precompiled last
+   stage under the pinned wasmtime CLI (#1928). Four packages are
    gaps, listed in `STAGE2_PACKAGE_GAPS` with the reason: the native
    Cranelift glue (`codegen-base`, `codegen-control-emit`,
    `codegen-numeric`: they assemble and check, since the Stage 2 loader
@@ -308,6 +310,11 @@ the Rust lines deleted.
 | `ebpf` (PASS; compiler module, `src/ebpf_backend*` goes at the retirement) | SH4-16 | 0 differences; tests 1/1 pass | ebpf-with-encoding 1.09x [1.03x, 1.16x] n=12 | 0 (2,336 at the retirement) | #2207 |
 | `doc` (PASS; compiler module, the renderers of `crates/vesper-doc` go at the retirement) | SH5-15 | 0 differences; tests 1/1 pass | render 0.94x [0.93x, 0.97x] n=12 | 0 (1,969 at the retirement) | #2207 |
 | `tensor-check` (PASS; compiler module: the swap answers the diagnostics, while `analyze` for an accepted module and `wire::check` still run in Rust; `src/tensor_types` goes at the retirement) | SH2-14 | 0 differences on 1,518 cases; tests 1/1 pass | all 0.99x [0.96x, 1.08x] n=12; tensor 0.88x [0.81x, 0.91x] n=12 | 0 (5,084 at the retirement) | #2289 |
+| `ir-check` (PASS; compiler module, `src/ir_check.rs` goes at the retirement) | SH5-10 | 0 differences over every corpus world and its mutants; tests 1/1 pass | ir-check-per-call-encode-vesper-decode 0.80x [0.77x, 0.82x] n=12 | 0 (1,210 at the retirement) | #2289 |
+| `ir-opt` (PASS; compiler module: the swap answers `ir_opt_policy::optimize`, the default `opt` path, with Rust's policy where the package refuses; `src/ir_opt.rs` and `src/ir_opt_policy.rs` go at the retirement) | SH3-4 | 0 differences over every corpus world and its mutants; tests 1/1 pass | ir-opt-swap 0.88x [0.85x, 0.91x] n=12 | 0 (1,475 at the retirement) | #2289 |
+| `inline` (PASS; compiler module: the swap answers `ir_inline::inline` for the native path; `src/ir_inline.rs` and `src/ir_inline/site.rs` go at the retirement) | SH3-11 | 0 differences over every corpus world, tight budgets too; tests pass | inline-program 0.50x [0.48x, 0.50x] n=12 | 0 (2,033 at the retirement) | #2289 |
+| `test-report` (PASS; compiler module: the swap renders the text reports of `vesper test` and `vesper test --doc`; `src/test_report.rs` goes at the retirement) | SH5-14 | 0 differences over every repository `.ves` file; tests 1/1 pass | test-report-end-to-end 1.38x [1.34x, 1.42x] n=12 | 0 (260 at the retirement) | #2684 |
+| `pact-deps` (PASS; compiler module: the swap answers the dependency declaration pass, a clean answer leaves the session to Rust; `src/pact_frontend.rs` goes at the retirement) | SH2-13 | 0 differences on the dependency cases through the swap point's encoding; tests 1/1 pass | deps-pass-swap-path 0.21x [0.20x, 0.23x] n=12 | 0 (3,519 at the retirement) | #2684 |
 | `wit-component` (PASS; compiler module, `src/wasm_backend/component.rs` and the wit-component dependency go at the retirement) | SH5-11 | 0 differences on 1,383 cases; tests 1/1 pass | wrap 0.05x [0.05x, 0.05x] n=12; build 0.67x [0.65x, 0.68x] n=12 | 0 (933 at the retirement) | #1334 flip |
 | `vesper-aether` virtqueue walks (PASS) | SH6-14 | 0 differences; tests 2/2 pass | virtqueue 1.44x [1.36x, 1.47x] n=30 | 331 (now the tests' reference) | #1494 |
 | `native-walk` (PASS; compiler module, the walk's planning in `src/native.rs` and `src/native_export.rs` goes at the retirement) | G1-11 | 0 differences on 978 cases; tests 1/1 pass | entries 1.00x [0.98x, 1.03x] n=12; exports 0.99x [0.93x, 1.03x] n=12 | 0 | #2056 |
@@ -321,3 +328,10 @@ the Rust lines deleted.
 | `stack-bound` (PASS; compiler module, `src/stack_bound.rs` goes at the retirement) | SH2-10 | 0 differences; tests 6/6 pass | hybrid path 1.20x [1.18x, 1.26x] n=12 | 0 (at the retirement) | #2359 |
 | `parse` (PASS; compiler module, `crates/vesper-syntax/src/parser.rs` goes at the retirement) | SH1-12 | 0 differences; tests pass | parse 0.23x n=12 | 0 (at the retirement) | #2389 |
 | `test-discovery` (PASS; compiler module, `src/test_discovery.rs` goes at the retirement) | SH5-14 | 0 differences; tests pass | test-discovery 1.26x n=12 | 0 (at the retirement) | #2453 |
+| `run` (PASS; compiler module, `src/runtime.rs` and `src/regions/eval.rs` go at the retirement) | #2053 | 0 differences on 1,173 cases; tests 1/1 pass | run 0.53x [0.51x, 0.54x] n=12 | 0 (4,037 at the retirement) | #2053 |
+| `freestanding` (PASS; compiler module, `src/native_freestanding.rs` goes at the retirement) | SH4-14 | 0 differences; tests pass | freestanding-link 1.23x n=12 | 0 (at the retirement) | #2517 |
+| `pact-declarations` (PASS; compiler module, `src/pact_frontend.rs` goes at the retirement) | SH2-11 | 0 differences; tests pass | declarations-swap-point-with-encode-and-decode 0.02x n=12 | 0 (at the retirement) | #2517 |
+| `codegen-calls` (PASS; compiler module, `src/native.rs` goes at the retirement) | SH4-5 | 0 differences; tests pass | discovery-entry 0.06x n=12 | 0 (at the retirement) | #2572 |
+| `block-plan` (PASS; compiler module, `src/native.rs` goes at the retirement) | SH4-11 | 0 differences; tests pass | block-plans 0.87x n=12 | 0 (at the retirement) | #2617 |
+| `ffi-lowering` (PASS; compiler module, `src/ffi_lowering.rs` goes at the retirement) | SH4-10 | 0 differences; tests pass | ffi-type-mapping 0.33x n=12 | 0 (at the retirement) | #2617 |
+| `codegen-export` (PASS; compiler module, `src/native_export.rs` goes at the retirement) | SH4-12 | 0 differences; tests pass | binding-generator-with-encode-and-unpack 1.45x n=12 | 0 (at the retirement) | #2647 |

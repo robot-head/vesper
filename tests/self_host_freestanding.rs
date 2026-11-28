@@ -14,6 +14,8 @@
 //! take one request buffer and return one result buffer (see
 //! packages/vesper-codegen-freestanding/src/lib.ves); `Request` and
 //! `Words` here are their Rust halves.
+#[path = "common/flip_gate.rs"]
+mod flip_gate;
 #[path = "common/freestanding_words.rs"]
 mod freestanding_words;
 
@@ -571,6 +573,22 @@ fn link_cost() {
         t.elapsed()
     };
     let _ = port();
+    if flip_gate::on() {
+        let mut rust = rust;
+        let mut swap = || {
+            let t = Instant::now();
+            for _ in 0..rounds {
+                for (objects, options, traps) in &inputs {
+                    let req = link_request(objects, options, traps);
+                    let words = call(&port().link, &req.0);
+                    std::hint::black_box(decode_link(&words).unwrap());
+                }
+            }
+            t.elapsed()
+        };
+        flip_gate::pairs("freestanding-link", &mut rust, &mut swap);
+        return;
+    }
     let (a1, b1, b2, a2) = (rust(), ours(), ours(), rust());
     let r = (a1 + a2).as_secs_f64();
     let v = (b1 + b2).as_secs_f64();

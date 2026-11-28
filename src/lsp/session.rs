@@ -151,13 +151,7 @@ impl Session {
         Ok(session)
     }
     fn running(&self) -> Result<(), ServerError> {
-        match self.state {
-            Lifecycle::Running => Ok(()),
-            Lifecycle::Uninitialized => Err(ServerError::new(-32002, "Server not initialized")),
-            Lifecycle::Shutdown | Lifecycle::Exited => {
-                Err(ServerError::new(-32600, "Server has shut down"))
-            }
-        }
+        running(self.state)
     }
     pub(crate) fn request(
         &mut self,
@@ -165,102 +159,25 @@ impl Session {
         params: Option<Value>,
     ) -> Result<Value, ServerError> {
         validate_input(method, params.as_ref())?;
-        if method == "initialize" {
-            if self.state != Lifecycle::Uninitialized {
-                return Err(ServerError::new(
-                    -32600,
-                    "initialize may be requested only once",
-                ));
-            }
-            let initialize = object(params.as_ref())?;
-            let publishes = initialize
-                .get("capabilities")
-                .and_then(|value| value.pointer("/textDocument/publishDiagnostics"));
-            self.diagnostic_related = publishes
-                .and_then(|value| value.get("relatedInformation"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            self.diagnostic_help_data = publishes
-                .and_then(|value| value.get("dataSupport"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            self.hierarchical_symbols = initialize
-                .get("capabilities")
-                .and_then(|value| {
-                    value.pointer("/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
-                })
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            self.code_actions_supported =
-                initialize.get("capabilities").is_some_and(|capabilities| {
-                    capabilities
-                        .pointer("/workspace/workspaceEdit/documentChanges")
-                        .and_then(Value::as_bool)
-                        == Some(true)
-                        && capabilities
-                            .pointer("/textDocument/codeAction/codeActionLiteralSupport")
-                            .is_some_and(Value::is_object)
+        let params = match route(self.state, method, params.as_ref(), &self.lens_config)? {
+            Route::Initialize(n, result) => {
+                self.diagnostic_related = n.diagnostic_related;
+                self.diagnostic_help_data = n.diagnostic_help_data;
+                self.hierarchical_symbols = n.hierarchical_symbols;
+                self.code_actions_supported = n.code_actions;
+                self.code_lens_refresh = n.code_lens_refresh;
+                self.background = n.background.and_then(|delay| {
+                    vesper_lsp::lens::Debouncer::new(delay, lens_requests::BACKGROUND_ENTRIES).ok()
                 });
-            self.configure_background(initialize);
-            let code_actions = if self.code_actions_supported {
-                json!({"codeActionKinds":["quickfix","source.fixAll.vesper"],"resolveProvider":false})
-            } else {
-                Value::Bool(false)
-            };
-            self.state = Lifecycle::Running;
-            return Ok(json!({"capabilities":{
-                "positionEncoding":"utf-16",
-                "textDocumentSync":{"openClose":true,"change":2},
-                "hoverProvider":true,"definitionProvider":true,
-                "documentSymbolProvider":true,"workspaceSymbolProvider":true,
-                "documentFormattingProvider":true,
-                "codeActionProvider":code_actions,
-                "completionProvider":{"triggerCharacters":["."],"resolveProvider":false},
-                "inlayHintProvider":true,
-                "codeLensProvider":{"resolveProvider":false},
-                "executeCommandProvider":{"commands":[lens_requests::PROOF_COMMAND]},
-                "experimental":{
-                    "vesperLens":{"version":1,"poisonedRecovery":"VESPER_POISONED_RECOVERY",
-                        "completion":"obligation_ranked_members",
-                        "proofLenses":[super::proof_lens::EXTRACTION_SCOPE,
-                            super::proof_lens::SEMANTIC_SCOPE],
-                        "backgroundProofs":self.background.as_ref()
-                            .map(|b| json!({"debounceMs": b.delay().as_millis() as u64}))
-                            .unwrap_or(Value::Null),
-                        "asyncCancellation":"all_requests"},
-                    "vesperRecoveryStatus":{"scope":"syntax_only","version":1},
-                    "vesperMacroPreview":{"version":1,"tier":1,"scope":"expanded_source_only"}
-                }
-            },"serverInfo":{"name":"vesper","version":env!("CARGO_PKG_VERSION")}}));
-        }
-        self.running()?;
-        if method == "shutdown" {
-            if params.as_ref().is_some_and(|value| {
-                !value.is_null() && !value.as_object().is_some_and(|object| object.is_empty())
-            }) {
-                return Err(ServerError::params("shutdown takes no parameters"));
+                self.state = Lifecycle::Running;
+                return Ok(result);
             }
-            self.state = Lifecycle::Shutdown;
-            return Ok(Value::Null);
-        }
-        if !matches!(
-            method,
-            "textDocument/hover"
-                | "textDocument/definition"
-                | "textDocument/documentSymbol"
-                | "workspace/symbol"
-                | "vesper/signatureSearch"
-                | "vesper/recoveryStatus"
-                | "vesper/macroPreview"
-                | "textDocument/formatting"
-                | "textDocument/codeAction"
-                | "textDocument/completion"
-                | "textDocument/inlayHint"
-                | "textDocument/codeLens"
-        ) {
-            return Err(ServerError::new(-32601, "Method not found"));
-        }
-        let params = object(params.as_ref())?;
+            Route::Shutdown => {
+                self.state = Lifecycle::Shutdown;
+                return Ok(Value::Null);
+            }
+            Route::Handler(params) => params,
+        };
         match method {
             "vesper/macroPreview" => self.macro_preview(params),
             "vesper/recoveryStatus" => self.recovery_status(document_uri(params)?),
@@ -379,19 +296,12 @@ impl Session {
         params: Option<Value>,
     ) -> Result<NotificationOutcome, ServerError> {
         validate_input(method, params.as_ref())?;
-        if method == "exit" {
-            let clean = self.state == Lifecycle::Shutdown;
-            self.state = Lifecycle::Exited;
-            return Ok(NotificationOutcome::Exit { clean });
-        }
-        self.running()?;
-        let output = match method {
-            "textDocument/didOpen" => {
-                let params = object(params.as_ref())?;
-                let doc = object(Some(field(params, "textDocument")?))?;
-                let uri = string(field(doc, "uri")?, "uri")?;
-                let version = version(field(doc, "version")?)?;
-                let text = string(field(doc, "text")?, "text")?;
+        let output = match note_route(self.state, method, params.as_ref())? {
+            Note::Exit { clean } => {
+                self.state = Lifecycle::Exited;
+                return Ok(NotificationOutcome::Exit { clean });
+            }
+            Note::Open { uri, version, text } => {
                 if manifests::is_manifest(uri) {
                     return Ok(NotificationOutcome::Continue(vec![
                         self.manifests.open(uri, version, text)?,
@@ -404,37 +314,11 @@ impl Session {
                 self.touch_background(uri);
                 vec![self.diagnostics(uri)?]
             }
-            "textDocument/didChange" => {
-                let params = object(params.as_ref())?;
-                let doc = object(Some(field(params, "textDocument")?))?;
-                let uri = string(field(doc, "uri")?, "uri")?;
-                let version = version(field(doc, "version")?)?;
-                let changes = field(params, "contentChanges")?
-                    .as_array()
-                    .ok_or_else(|| ServerError::params("contentChanges must be an array"))?;
-                if changes.len() > StoreLimits::default().max_changes {
-                    return Err(ServerError::params("too many content changes"));
-                }
-                let changes: Vec<_> = changes
-                    .iter()
-                    .map(|change| {
-                        let change = object(Some(change))?;
-                        let range = change
-                            .get("range")
-                            .filter(|value| !value.is_null())
-                            .map(range)
-                            .transpose()?;
-                        let range_length = change
-                            .get("rangeLength")
-                            .map(|value| unsigned(value, "rangeLength"))
-                            .transpose()?;
-                        Ok(ContentChange {
-                            range,
-                            range_length,
-                            text: string(field(change, "text")?, "text")?,
-                        })
-                    })
-                    .collect::<Result<_, ServerError>>()?;
+            Note::Change {
+                uri,
+                version,
+                changes,
+            } => {
                 if manifests::is_manifest(uri) {
                     return Ok(NotificationOutcome::Continue(vec![
                         self.manifests.change(uri, version, &changes)?,
@@ -447,9 +331,7 @@ impl Session {
                 self.touch_background(uri);
                 vec![self.diagnostics(uri)?]
             }
-            "textDocument/didClose" => {
-                let params = object(params.as_ref())?;
-                let uri = document_uri(params)?;
+            Note::Close { uri } => {
                 if manifests::is_manifest(uri) {
                     return Ok(NotificationOutcome::Continue(vec![
                         self.manifests.close(uri)?,
@@ -467,7 +349,7 @@ impl Session {
             }
             // No background execution, cancellation task, trace output or file
             // read is associated with these or unknown notifications.
-            _ => Vec::new(),
+            Note::Ignore => Vec::new(),
         };
         Ok(NotificationOutcome::Continue(output))
     }
@@ -763,20 +645,11 @@ impl Session {
         };
         // Validation covers every supplied span before optional presentation
         // fields are filtered for the client's publication capabilities.
-        for diagnostic in &mut diagnostics {
-            if let Some(object) = diagnostic.as_object_mut() {
-                if !self.diagnostic_related {
-                    object.remove("relatedInformation");
-                }
-                if !self.diagnostic_help_data
-                    && object
-                        .get("data")
-                        .is_some_and(|data| data.get("help").is_some())
-                {
-                    object.remove("data");
-                }
-            }
-        }
+        publication_filter(
+            &mut diagnostics,
+            self.diagnostic_related,
+            self.diagnostic_help_data,
+        );
         let mut metadata = json!({"status":status,"kind":kind,
             "source_blake3":hash_text(analysis.source_identity().blake3())});
         if let Some(recovery) = recovery {
@@ -924,6 +797,232 @@ impl Session {
     }
 }
 
+/// What `initialize` negotiated from the client's capabilities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Negotiated {
+    diagnostic_related: bool,
+    diagnostic_help_data: bool,
+    hierarchical_symbols: bool,
+    code_actions: bool,
+    code_lens_refresh: bool,
+    background: Option<std::time::Duration>,
+}
+/// Where a validated request goes.
+enum Route<'a> {
+    /// `initialize`: the negotiated capabilities and the result.
+    Initialize(Negotiated, Value),
+    Shutdown,
+    /// A handled method, with its parameter object.
+    Handler(&'a serde_json::Map<String, Value>),
+}
+/// The methods the session handles once running.
+const HANDLED_METHODS: [&str; 12] = [
+    "textDocument/hover",
+    "textDocument/definition",
+    "textDocument/documentSymbol",
+    "workspace/symbol",
+    "vesper/signatureSearch",
+    "vesper/recoveryStatus",
+    "vesper/macroPreview",
+    "textDocument/formatting",
+    "textDocument/codeAction",
+    "textDocument/completion",
+    "textDocument/inlayHint",
+    "textDocument/codeLens",
+];
+/// The lifecycle gate of `Session::request` after `validate_input`:
+/// `initialize` once and its capability negotiation, the running check,
+/// `shutdown`, unknown methods and the parameter object.
+fn route<'a>(
+    state: Lifecycle,
+    method: &str,
+    params: Option<&'a Value>,
+    lens: &LensConfig,
+) -> Result<Route<'a>, ServerError> {
+    if method == "initialize" {
+        if state != Lifecycle::Uninitialized {
+            return Err(ServerError::new(
+                -32600,
+                "initialize may be requested only once",
+            ));
+        }
+        let initialize = object(params)?;
+        let capabilities = initialize.get("capabilities");
+        let publishes =
+            capabilities.and_then(|value| value.pointer("/textDocument/publishDiagnostics"));
+        let flag = |value: Option<&Value>| value.and_then(Value::as_bool).unwrap_or(false);
+        let code_actions = capabilities.is_some_and(|capabilities| {
+            capabilities
+                .pointer("/workspace/workspaceEdit/documentChanges")
+                .and_then(Value::as_bool)
+                == Some(true)
+                && capabilities
+                    .pointer("/textDocument/codeAction/codeActionLiteralSupport")
+                    .is_some_and(Value::is_object)
+        });
+        let (code_lens_refresh, background) = lens_requests::background_choice(initialize, lens);
+        let negotiated = Negotiated {
+            diagnostic_related: flag(publishes.and_then(|value| value.get("relatedInformation"))),
+            diagnostic_help_data: flag(publishes.and_then(|value| value.get("dataSupport"))),
+            hierarchical_symbols: flag(capabilities.and_then(|value| {
+                value.pointer("/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
+            })),
+            code_actions,
+            code_lens_refresh,
+            background,
+        };
+        return Ok(Route::Initialize(
+            negotiated,
+            initialize_result(&negotiated),
+        ));
+    }
+    running(state)?;
+    if method == "shutdown" {
+        if params.is_some_and(|value| {
+            !value.is_null() && !value.as_object().is_some_and(|object| object.is_empty())
+        }) {
+            return Err(ServerError::params("shutdown takes no parameters"));
+        }
+        return Ok(Route::Shutdown);
+    }
+    if !HANDLED_METHODS.contains(&method) {
+        return Err(ServerError::new(-32601, "Method not found"));
+    }
+    object(params).map(Route::Handler)
+}
+/// A validated notification, its parameters read.
+enum Note<'a> {
+    /// `exit`, clean after `shutdown`.
+    Exit {
+        clean: bool,
+    },
+    Open {
+        uri: &'a str,
+        version: i32,
+        text: &'a str,
+    },
+    Change {
+        uri: &'a str,
+        version: i32,
+        changes: Vec<ContentChange<'a>>,
+    },
+    Close {
+        uri: &'a str,
+    },
+    /// A notification the session takes no action on.
+    Ignore,
+}
+/// The lifecycle gate and parameter reading of `Session::notification`
+/// after `validate_input`.
+fn note_route<'a>(
+    state: Lifecycle,
+    method: &str,
+    params: Option<&'a Value>,
+) -> Result<Note<'a>, ServerError> {
+    if method == "exit" {
+        return Ok(Note::Exit {
+            clean: state == Lifecycle::Shutdown,
+        });
+    }
+    running(state)?;
+    match method {
+        "textDocument/didOpen" => {
+            let params = object(params)?;
+            let doc = object(Some(field(params, "textDocument")?))?;
+            Ok(Note::Open {
+                uri: string(field(doc, "uri")?, "uri")?,
+                version: version(field(doc, "version")?)?,
+                text: string(field(doc, "text")?, "text")?,
+            })
+        }
+        "textDocument/didChange" => {
+            let params = object(params)?;
+            let doc = object(Some(field(params, "textDocument")?))?;
+            let uri = string(field(doc, "uri")?, "uri")?;
+            let version = version(field(doc, "version")?)?;
+            let changes = field(params, "contentChanges")?
+                .as_array()
+                .ok_or_else(|| ServerError::params("contentChanges must be an array"))?;
+            if changes.len() > StoreLimits::default().max_changes {
+                return Err(ServerError::params("too many content changes"));
+            }
+            let changes = changes
+                .iter()
+                .map(|change| {
+                    let change = object(Some(change))?;
+                    let range = change
+                        .get("range")
+                        .filter(|value| !value.is_null())
+                        .map(range)
+                        .transpose()?;
+                    let range_length = change
+                        .get("rangeLength")
+                        .map(|value| unsigned(value, "rangeLength"))
+                        .transpose()?;
+                    Ok(ContentChange {
+                        range,
+                        range_length,
+                        text: string(field(change, "text")?, "text")?,
+                    })
+                })
+                .collect::<Result<_, ServerError>>()?;
+            Ok(Note::Change {
+                uri,
+                version,
+                changes,
+            })
+        }
+        "textDocument/didClose" => Ok(Note::Close {
+            uri: document_uri(object(params)?)?,
+        }),
+        _ => Ok(Note::Ignore),
+    }
+}
+/// Requests other than `initialize` need a running session.
+fn running(state: Lifecycle) -> Result<(), ServerError> {
+    match state {
+        Lifecycle::Running => Ok(()),
+        Lifecycle::Uninitialized => Err(ServerError::new(-32002, "Server not initialized")),
+        Lifecycle::Shutdown | Lifecycle::Exited => {
+            Err(ServerError::new(-32600, "Server has shut down"))
+        }
+    }
+}
+/// The `initialize` result: the server's capabilities for what the client
+/// negotiated, and its name and version.
+fn initialize_result(n: &Negotiated) -> Value {
+    let code_actions = if n.code_actions {
+        json!({"codeActionKinds":["quickfix","source.fixAll.vesper"],"resolveProvider":false})
+    } else {
+        Value::Bool(false)
+    };
+    json!({"capabilities":{
+        "positionEncoding":"utf-16",
+        "textDocumentSync":{"openClose":true,"change":2},
+        "hoverProvider":true,"definitionProvider":true,
+        "documentSymbolProvider":true,"workspaceSymbolProvider":true,
+        "documentFormattingProvider":true,
+        "codeActionProvider":code_actions,
+        "completionProvider":{"triggerCharacters":["."],"resolveProvider":false},
+        "inlayHintProvider":true,
+        "codeLensProvider":{"resolveProvider":false},
+        "executeCommandProvider":{"commands":[lens_requests::PROOF_COMMAND]},
+        "experimental":{
+            "vesperLens":{"version":1,"poisonedRecovery":"VESPER_POISONED_RECOVERY",
+                "completion":"obligation_ranked_members",
+                "proofLenses":[super::proof_lens::EXTRACTION_SCOPE,
+                    super::proof_lens::SEMANTIC_SCOPE],
+                "backgroundProofs":n.background
+                    .map(|delay| json!({"debounceMs": delay.as_millis() as u64}))
+                    .unwrap_or(Value::Null),
+                "asyncCancellation":"all_requests"},
+            "vesperRecoveryStatus":{"scope":"syntax_only","version":1},
+            "vesperMacroPreview":{"version":1,"tier":1,"scope":"expanded_source_only"}
+        }
+    },"serverInfo":{"name":"vesper","version":SERVER_VERSION}})
+}
+/// The version `initialize` reports.
+pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 fn notification(method: &str, params: Value) -> Envelope {
     Envelope::Notification {
         method: method.into(),
@@ -1082,6 +1181,139 @@ fn diagnostic_payload(
         }
     }
 }
+/// Removes the optional fields of published diagnostics that the client
+/// did not negotiate: related information, and `data` carrying help.
+fn publication_filter(diagnostics: &mut [Value], related: bool, help_data: bool) {
+    for diagnostic in diagnostics {
+        if let Some(object) = diagnostic.as_object_mut() {
+            if !related {
+                object.remove("relatedInformation");
+            }
+            if !help_data
+                && object
+                    .get("data")
+                    .is_some_and(|data| data.get("help").is_some())
+            {
+                object.remove("data");
+            }
+        }
+    }
+}
+/// The tags of `diagnostic_payload_words`' failure kinds.
+#[doc(hidden)]
+pub mod payload_tags {
+    pub const PARSE: u64 = 0;
+    pub const SEMANTIC: u64 = 1;
+    pub const RESOURCE: u64 = 2;
+    pub const UNSUPPORTED: u64 = 3;
+}
+/// `diagnostic_payload` and the publication filter as the Vesper port
+/// answers them (#1828 part 13b, `@vesper/lsp-publish`), `rounds` times: the JSON object
+/// `{"diagnostics":[..],"status":..,"kind":..}`, or `E <message>`.
+#[doc(hidden)]
+pub fn diagnostic_payload_answer(
+    uri: &str,
+    index: &vesper_span::LineIndex,
+    failure: &AnalysisFailure,
+    related: bool,
+    help_data: bool,
+    rounds: u64,
+) -> String {
+    let mut answer = String::new();
+    for _ in 0..rounds {
+        answer = match diagnostic_payload(uri, index, failure) {
+            Ok((mut diagnostics, status, kind)) => {
+                publication_filter(&mut diagnostics, related, help_data);
+                json!({"diagnostics":diagnostics,"status":status,"kind":kind}).to_string()
+            }
+            Err(error) => format!("E {}", error.message),
+        };
+    }
+    answer
+}
+/// The words the port's `lsp_diagnostic_payload` reads: `rounds`; the
+/// diagnostics limits; the record sizes the budgets charge; the publication flags; the URI and source
+/// text; then the failure: its tag (`payload_tags`) and either the reason
+/// or the diagnostics (code, message, help presence and text, primary
+/// span, then each related label's span and message).
+#[doc(hidden)]
+pub fn diagnostic_payload_words(
+    uri: &str,
+    text: &str,
+    failure: &AnalysisFailure,
+    related: bool,
+    help_data: bool,
+    rounds: u64,
+) -> Vec<u8> {
+    fn word(out: &mut Vec<u8>, w: usize) {
+        out.extend((w as u64).to_le_bytes());
+    }
+    fn text_of(out: &mut Vec<u8>, s: &str) {
+        word(out, s.len());
+        out.extend(s.as_bytes());
+    }
+    fn span_limits(out: &mut Vec<u8>, l: vesper_span::Limits) {
+        for w in [
+            l.max_source_bytes,
+            l.max_lines,
+            l.max_metadata_bytes,
+            l.max_work,
+            l.max_edits,
+            l.max_output_bytes,
+            l.max_diagnostics,
+            l.max_labels,
+            l.max_fixes,
+            l.max_text_bytes,
+        ] {
+            word(out, w);
+        }
+    }
+    let mut out = rounds.to_le_bytes().to_vec();
+    let limits = vesper_diagnostics::Limits::default();
+    span_limits(&mut out, limits.span);
+    word(&mut out, limits.max_name_bytes);
+    for size in [
+        size_of::<vesper_span::DiagnosticData>(),
+        size_of::<vesper_span::Label>(),
+        size_of::<Value>(),
+    ] {
+        word(&mut out, size);
+    }
+    word(&mut out, usize::from(related));
+    word(&mut out, usize::from(help_data));
+    text_of(&mut out, uri);
+    text_of(&mut out, text);
+    let tag = match failure {
+        AnalysisFailure::Parse { .. } => payload_tags::PARSE,
+        AnalysisFailure::Semantic { .. } => payload_tags::SEMANTIC,
+        AnalysisFailure::Resource { .. } => payload_tags::RESOURCE,
+        AnalysisFailure::Unsupported { .. } => payload_tags::UNSUPPORTED,
+    };
+    out.extend(tag.to_le_bytes());
+    match failure {
+        AnalysisFailure::Resource { reason } | AnalysisFailure::Unsupported { reason } => {
+            text_of(&mut out, reason);
+        }
+        AnalysisFailure::Parse { diagnostics } | AnalysisFailure::Semantic { diagnostics } => {
+            word(&mut out, diagnostics.len());
+            for d in diagnostics {
+                text_of(&mut out, &d.code);
+                text_of(&mut out, &d.message);
+                word(&mut out, usize::from(d.help.is_some()));
+                text_of(&mut out, d.help.as_deref().unwrap_or(""));
+                word(&mut out, d.span.start);
+                word(&mut out, d.span.end);
+                word(&mut out, d.related.len());
+                for label in &d.related {
+                    word(&mut out, label.span.start);
+                    word(&mut out, label.span.end);
+                    text_of(&mut out, &label.message);
+                }
+            }
+        }
+    }
+    out
+}
 fn unavailable_warning(
     index: &vesper_span::LineIndex,
     kind: &str,
@@ -1204,8 +1436,21 @@ pub(crate) fn command_checks_dump(
 ) -> String {
     let version_of = |uri: &str| open.iter().find(|(u, _)| u == uri).map(|(_, v)| *v);
     let refused = |e: ServerError| format!("E {} {}", e.code, e.message);
+    let default_lens = LensConfig::default();
     let mut out = String::new();
     for (check, method, params) in checks {
+        let request_lens = match *check {
+            PortCheck::Request {
+                auditor,
+                background_ms,
+                ..
+            } => Some(LensConfig {
+                auditor: auditor.then(|| std::path::PathBuf::from(PORT_AUDITOR)),
+                background: background_ms.map(std::time::Duration::from_millis),
+                ..LensConfig::default()
+            }),
+            _ => None,
+        };
         let mut row = String::new();
         for _ in 0..rounds.max(1) {
             row = match check {
@@ -1227,6 +1472,37 @@ pub(crate) fn command_checks_dump(
                     ),
                     Err(e) => refused(e),
                 },
+                PortCheck::Request { state, .. } => {
+                    let lens = request_lens.as_ref().unwrap_or(&default_lens);
+                    match validate_input(method, params.as_ref())
+                        .and_then(|()| route(state.lifecycle(), method, params.as_ref(), lens))
+                    {
+                        Ok(Route::Initialize(n, result)) => {
+                            let flags = [
+                                n.diagnostic_related,
+                                n.diagnostic_help_data,
+                                n.hierarchical_symbols,
+                                n.code_actions,
+                                n.code_lens_refresh,
+                            ]
+                            .map(|flag| if flag { '1' } else { '0' });
+                            let background = n.background.map_or_else(
+                                || "-".to_owned(),
+                                |delay| delay.as_millis().to_string(),
+                            );
+                            format!("I {} {background} {result}", String::from_iter(flags))
+                        }
+                        Ok(Route::Shutdown) => "S".to_owned(),
+                        Ok(Route::Handler(_)) => "H".to_owned(),
+                        Err(e) => refused(e),
+                    }
+                }
+                PortCheck::Note { state } => match validate_input(method, params.as_ref())
+                    .and_then(|()| note_route(state.lifecycle(), method, params.as_ref()))
+                {
+                    Ok(note) => note_row(&note),
+                    Err(e) => refused(e),
+                },
             };
             std::hint::black_box(&row);
         }
@@ -1236,6 +1512,56 @@ pub(crate) fn command_checks_dump(
     out
 }
 
+/// A `PortCheck::Note` row: `X <clean>`, `O <manifest> <version> <uri>
+/// <text>`, `C <manifest> <version> <uri> <count>` then each change's
+/// range (`R` and four numbers, or `-`), length (`L <n>` or `-`) and text,
+/// `D <manifest> <uri>`, or `N`; strings are `<len>:<bytes>`.
+fn note_row(note: &Note) -> String {
+    use std::fmt::Write;
+    let text = |s: &str| format!("{}:{s}", s.len());
+    let flag = |uri: &str| u8::from(manifests::is_manifest(uri));
+    match note {
+        Note::Exit { clean } => format!("X {}", u8::from(*clean)),
+        Note::Open {
+            uri,
+            version,
+            text: body,
+        } => {
+            format!("O {} {version} {} {}", flag(uri), text(uri), text(body))
+        }
+        Note::Change {
+            uri,
+            version,
+            changes,
+        } => {
+            let mut row = format!("C {} {version} {} {}", flag(uri), text(uri), changes.len());
+            for change in changes {
+                match change.range {
+                    Some(r) => {
+                        let _ = write!(
+                            row,
+                            " R {} {} {} {}",
+                            r.start.line, r.start.character, r.end.line, r.end.character
+                        );
+                    }
+                    None => row.push_str(" -"),
+                }
+                match change.range_length {
+                    Some(n) => {
+                        let _ = write!(row, " L {n}");
+                    }
+                    None => row.push_str(" -"),
+                }
+                row.push(' ');
+                row.push_str(&text(change.text));
+            }
+            row
+        }
+        Note::Close { uri } => format!("D {} {}", flag(uri), text(uri)),
+        Note::Ignore => "N".to_owned(),
+    }
+}
+
 /// Which check a row of `command_checks_dump` runs.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1243,7 +1569,45 @@ pub enum PortCheck {
     Input,
     Cancel,
     Proof,
+    /// `Session::request`'s gate (`validate_input`, then the lifecycle,
+    /// `initialize` negotiation, `shutdown` and method checks) in `state`,
+    /// with or without an auditor and a configured background debounce.
+    Request {
+        state: PortState,
+        auditor: bool,
+        background_ms: Option<u64>,
+    },
+    /// `Session::notification`'s gate and parameter reading
+    /// (`validate_input`, then `note_route`) in `state`.
+    Note {
+        state: PortState,
+    },
 }
+
+/// The session state a `PortCheck::Request` row starts in.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortState {
+    Uninitialized,
+    Running,
+    Shutdown,
+    Exited,
+}
+
+impl PortState {
+    fn lifecycle(self) -> Lifecycle {
+        match self {
+            PortState::Uninitialized => Lifecycle::Uninitialized,
+            PortState::Running => Lifecycle::Running,
+            PortState::Shutdown => Lifecycle::Shutdown,
+            PortState::Exited => Lifecycle::Exited,
+        }
+    }
+}
+
+/// The auditor path of a `PortCheck::Request` row that has one (only its
+/// presence matters to the gate).
+const PORT_AUDITOR: &str = "vesper";
 
 #[cfg(test)]
 mod tests {

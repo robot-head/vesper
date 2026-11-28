@@ -1,7 +1,8 @@
 // @vesper/native-cold-outline: the decisions of src/native_cold_outline.rs
 // (cold-region outlining on the native optimize path) in Vesper (#1829).
 //
-// The pass reads one function in the words of tests/common/clif_words.rs
+// The pass reads one function in the words of
+// crates/vesper-cranelift-sys/src/clif_words.rs
 // (`encode_with`, with the module's pointer type) into @vesper/clif tables
 // and runs `native_cold_outline::outline` on them: up to 16 rounds of
 // `find_candidate` (classify a root, close its region, weigh it) and the
@@ -760,7 +761,13 @@ fn extract(inout f: Func, in r: Region, idx: u64) -> bool {
 // `native_cold_outline::outline` on the function the input encodes: the
 // edit script (one E_OUTLINE or E_SKIP per round that found a candidate).
 pub fn outline_words(in input: Str) -> ChunkSeq[u64] {
-    let mut f = read_func(in input.as_bytes());
+    outline_script(in input.as_bytes())
+}
+
+// `outline_words` on function words already in bytes (the native-lib
+// driver reads them from the shim's `function_words`).
+pub fn outline_script(in words: Slice[u8]) -> ChunkSeq[u64] {
+    let mut f = read_func(in words);
     let mut nlayout: u64 = 0;
     let mut b = f.first_block();
     loop {

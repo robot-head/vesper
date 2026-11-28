@@ -1,0 +1,852 @@
+// The reserved vector intrinsics of `Checker::call` (src/vector/check.rs,
+// §14.3): `Vec::`, `Mask::` and `Isa::` paths, including the slice loads
+// and stores (`SliceIo`). The `Isa[P]` requirements are checked afterwards
+// by `vector::check_world`, which this port does not cover. The caller
+// tries these only when no world function matches.
+
+use @vesper/check-data::util::{add, u32_at, u8_at, w};
+use @vesper/check-data::types::{default_type, TyKind};
+use @vesper/check-data::world::{vector_words};
+use self::exprs::{
+    Arg, Ck, Ex, actual_arg, error, expect_type, expr, expr_expected, is_named, named, note, record
+};
+use self::methods::{is_seq_or_slice, peek_type, view_base};
+
+const NONE32: u32 = 4294967295;
+
+// Argument passing (keep equal to exprs.ves).
+const P_IN: u8 = 0;
+const P_INOUT: u8 = 1;
+
+// The expression kind of an integer literal (keep equal to exprs.ves).
+const E_INT: u8 = 1;
+
+// `Intrinsic` families. `F_NONE` is a path outside the reserved
+// namespaces, `F_UNKNOWN` an unknown name inside them.
+const F_NONE: u8 = 0;
+const F_SPLAT: u8 = 1;
+const F_FROM: u8 = 2;
+const F_BINARY: u8 = 3;
+const F_NOT: u8 = 4;
+const F_UNARY: u8 = 5;
+const F_MUL_ADD: u8 = 6;
+const F_CONVERT: u8 = 7;
+const F_SHIFT: u8 = 8;
+const F_COMPARE: u8 = 9;
+const F_SELECT: u8 = 10;
+const F_MASK_BINARY: u8 = 11;
+const F_MASK_NOT: u8 = 12;
+const F_MASK_COUNT: u8 = 13;
+const F_MASK_BITMASK: u8 = 14;
+const F_MASK_ANY: u8 = 15;
+const F_MASK_ALL: u8 = 16;
+const F_REDUCE: u8 = 17;
+const F_EXTRACT: u8 = 18;
+const F_REPLACE: u8 = 19;
+const F_SHUFFLE: u8 = 20;
+const F_LOAD_MASKED: u8 = 21;
+const F_LOAD: u8 = 22;
+const F_STORE: u8 = 23;
+const F_STORE_MASKED: u8 = 24;
+const F_IN_BOUNDS: u8 = 25;
+const F_ACTIVE: u8 = 26;
+const F_ISA_SUPPORTED: u8 = 27;
+const F_UNKNOWN: u8 = 255;
+
+// The operations within a family that `Intrinsic::lane_error` tells apart.
+const OP_OTHER: u8 = 0;
+// `BinOp::Mul`, `BinOp::Div`, the saturating and the bitwise operations.
+const OP_MUL: u8 = 1;
+const OP_DIV: u8 = 2;
+const OP_SATURATING: u8 = 3;
+const OP_BITWISE: u8 = 4;
+// `Conv`.
+const OP_TO_BITS: u8 = 5;
+const OP_FROM_BITS: u8 = 6;
+const OP_WIDEN: u8 = 7;
+const OP_NARROW: u8 = 8;
+
+// The reserved namespaces.
+const VEC_SPACE: Str = "Vec::";
+const MASK_SPACE: Str = "Mask::";
+const ISA_SPACE: Str = "Isa::";
+
+// `Kind`.
+const KIND_VEC: u8 = 0;
+const KIND_MASK: u8 = 1;
+
+// `Profile::ALL` spellings.
+const PROFILE_BASELINE128: Str = "Baseline128";
+const PROFILE_AVX2: Str = "Avx2";
+const PROFILE_AVX512: Str = "Avx512";
+const PROFILE_SVE2: Str = "Sve2";
+const PROFILE_RVV1: Str = "Rvv1";
+
+// `Shape::new`: a vector is 128, 256 or 512 bits.
+const BITS_128: u64 = 128;
+const BITS_256: u64 = 256;
+const BITS_512: u64 = 512;
+
+// `Mask::bitmask` sets one bit of a `u64` per lane.
+const BITMASK_LANES: u64 = 64;
+
+// The largest lane count a `u16` holds (`count.parse::<u16>()`).
+const MAX_LANES: u64 = 65535;
+
+// ASCII digits.
+const DIGIT_0: u8 = 48;
+const DIGIT_9: u8 = 57;
+const DECIMAL: u64 = 10;
+
+// The operands of a slice load and of a slice store.
+const LOAD_OPERANDS: u64 = 2;
+const STORE_OPERANDS: u64 = 3;
+
+// A resolved intrinsic name.
+copy struct Intr {
+    family: u8,
+    op: u8,
+}
+
+// A vector shape: the lane kind symbol and lane count; `lanes == 0` is no
+// shape.
+copy struct Shape {
+    elem: u32,
+    lanes: u64,
+}
+
+fn no_shape() -> Shape {
+    Shape { elem: NONE32, lanes: 0 }
+}
+
+fn intr(family: u8, op: u8) -> Intr {
+    Intr { family: family, op: op }
+}
+
+// Whether `text` from `from` is exactly `word`.
+fn rest_is(in text: ChunkSeq[u8], from: u64, in word: Str) -> bool {
+    let bytes = word.as_bytes();
+    if text.len() != add(from, bytes.len()) {
+        return false;
+    }
+    for i in 0..bytes.len() {
+        let c = match bytes.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if u8_at(in text, add(from, i)) != c {
+            return false;
+        }
+    }
+    true
+}
+
+fn text_len(in text: Str) -> u64 {
+    let bytes = text.as_bytes();
+    bytes.len()
+}
+
+// Whether `text` starts with `prefix`.
+fn has_prefix(in text: ChunkSeq[u8], in prefix: Str) -> bool {
+    let bytes = prefix.as_bytes();
+    if text.len() < bytes.len() {
+        return false;
+    }
+    for i in 0..bytes.len() {
+        let c = match bytes.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if u8_at(in text, i) != c {
+            return false;
+        }
+    }
+    true
+}
+
+fn vec_op(in text: ChunkSeq[u8], at: u64) -> Intr {
+    if rest_is(in text, at, "splat") {
+        intr(F_SPLAT, OP_OTHER)
+    } else if rest_is(in text, at, "from") {
+        intr(F_FROM, OP_OTHER)
+    } else if rest_is(in text, at, "add")
+        || rest_is(in text, at, "sub")
+        || rest_is(in text, at, "min")
+        || rest_is(in text, at, "max")
+    {
+        intr(F_BINARY, OP_OTHER)
+    } else if rest_is(in text, at, "mul") {
+        intr(F_BINARY, OP_MUL)
+    } else if rest_is(in text, at, "div") {
+        intr(F_BINARY, OP_DIV)
+    } else if rest_is(in text, at, "and")
+        || rest_is(in text, at, "or")
+        || rest_is(in text, at, "xor")
+    {
+        intr(F_BINARY, OP_BITWISE)
+    } else if rest_is(in text, at, "saturating_add") || rest_is(in text, at, "saturating_sub") {
+        intr(F_BINARY, OP_SATURATING)
+    } else if rest_is(in text, at, "not") {
+        intr(F_NOT, OP_OTHER)
+    } else if rest_is(in text, at, "sqrt")
+        || rest_is(in text, at, "abs")
+        || rest_is(in text, at, "neg")
+    {
+        intr(F_UNARY, OP_OTHER)
+    } else if rest_is(in text, at, "mul_add") {
+        intr(F_MUL_ADD, OP_OTHER)
+    } else if rest_is(in text, at, "to_bits") {
+        intr(F_CONVERT, OP_TO_BITS)
+    } else if rest_is(in text, at, "from_bits") {
+        intr(F_CONVERT, OP_FROM_BITS)
+    } else if rest_is(in text, at, "widen_f64") {
+        intr(F_CONVERT, OP_WIDEN)
+    } else if rest_is(in text, at, "nearest_f32") {
+        intr(F_CONVERT, OP_NARROW)
+    } else if rest_is(in text, at, "load") {
+        intr(F_LOAD, OP_OTHER)
+    } else if rest_is(in text, at, "store") {
+        intr(F_STORE, OP_OTHER)
+    } else if rest_is(in text, at, "store_masked") {
+        intr(F_STORE_MASKED, OP_OTHER)
+    } else if rest_is(in text, at, "shl") || rest_is(in text, at, "shr") {
+        intr(F_SHIFT, OP_OTHER)
+    } else if rest_is(in text, at, "eq")
+        || rest_is(in text, at, "ne")
+        || rest_is(in text, at, "lt")
+        || rest_is(in text, at, "le")
+        || rest_is(in text, at, "gt")
+        || rest_is(in text, at, "ge")
+    {
+        intr(F_COMPARE, OP_OTHER)
+    } else if rest_is(in text, at, "select") {
+        intr(F_SELECT, OP_OTHER)
+    } else if rest_is(in text, at, "reduce_add")
+        || rest_is(in text, at, "reduce_min")
+        || rest_is(in text, at, "reduce_max")
+    {
+        intr(F_REDUCE, OP_OTHER)
+    } else if rest_is(in text, at, "reduce_xor")
+        || rest_is(in text, at, "reduce_or")
+        || rest_is(in text, at, "reduce_and")
+    {
+        intr(F_REDUCE, OP_BITWISE)
+    } else if rest_is(in text, at, "extract") {
+        intr(F_EXTRACT, OP_OTHER)
+    } else if rest_is(in text, at, "replace") {
+        intr(F_REPLACE, OP_OTHER)
+    } else if rest_is(in text, at, "shuffle") {
+        intr(F_SHUFFLE, OP_OTHER)
+    } else if rest_is(in text, at, "load_masked") {
+        intr(F_LOAD_MASKED, OP_OTHER)
+    } else {
+        intr(F_UNKNOWN, OP_OTHER)
+    }
+}
+
+fn mask_op(in text: ChunkSeq[u8], at: u64) -> Intr {
+    if rest_is(in text, at, "and") || rest_is(in text, at, "or") || rest_is(in text, at, "xor") {
+        intr(F_MASK_BINARY, OP_OTHER)
+    } else if rest_is(in text, at, "not") {
+        intr(F_MASK_NOT, OP_OTHER)
+    } else if rest_is(in text, at, "count") {
+        intr(F_MASK_COUNT, OP_OTHER)
+    } else if rest_is(in text, at, "bitmask") {
+        intr(F_MASK_BITMASK, OP_OTHER)
+    } else if rest_is(in text, at, "any") {
+        intr(F_MASK_ANY, OP_OTHER)
+    } else if rest_is(in text, at, "all") {
+        intr(F_MASK_ALL, OP_OTHER)
+    } else if rest_is(in text, at, "in_bounds") {
+        intr(F_IN_BOUNDS, OP_OTHER)
+    } else if rest_is(in text, at, "active") {
+        intr(F_ACTIVE, OP_OTHER)
+    } else {
+        intr(F_UNKNOWN, OP_OTHER)
+    }
+}
+
+// `Intrinsic::lookup`.
+fn lookup_intrinsic(in ck: Ck, name: u32) -> Intr {
+    let mut text = ChunkSeq::new[u8]();
+    ck.ctx.names.write(name, inout text);
+    if has_prefix(in text, VEC_SPACE) {
+        return vec_op(in text, text_len(VEC_SPACE));
+    }
+    if has_prefix(in text, MASK_SPACE) {
+        return mask_op(in text, text_len(MASK_SPACE));
+    }
+    if has_prefix(in text, ISA_SPACE) {
+        if rest_is(in text, text_len(ISA_SPACE), "supported") {
+            return intr(F_ISA_SUPPORTED, OP_OTHER);
+        }
+        return intr(F_UNKNOWN, OP_OTHER);
+    }
+    intr(F_NONE, OP_OTHER)
+}
+
+fn takes_shape_arguments(family: u8) -> bool {
+    family == F_SPLAT
+        || family == F_FROM
+        || family == F_LOAD_MASKED
+        || family == F_LOAD
+        || family == F_IN_BOUNDS
+        || family == F_ACTIVE
+}
+
+fn mask_result(family: u8) -> bool {
+    family == F_COMPARE
+        || family == F_MASK_BINARY
+        || family == F_MASK_NOT
+        || family == F_IN_BOUNDS
+        || family == F_ACTIVE
+}
+
+fn mask_operand(family: u8) -> bool {
+    family == F_SELECT
+        || family == F_MASK_BINARY
+        || family == F_MASK_NOT
+        || family == F_MASK_COUNT
+        || family == F_MASK_BITMASK
+        || family == F_MASK_ANY
+        || family == F_MASK_ALL
+}
+
+fn is_float_elem(in ck: Ck, elem: u32) -> bool {
+    let known = ck.ctx.world.k;
+    elem == known.f32_ || elem == known.f64_
+}
+
+// `Conv::accepts`.
+fn conv_accepts(in ck: Ck, op: u8, elem: u32) -> bool {
+    let known = ck.ctx.world.k;
+    if op == OP_TO_BITS {
+        is_float_elem(in ck, elem)
+    } else if op == OP_FROM_BITS {
+        elem == known.u32_ || elem == known.u64_
+    } else if op == OP_WIDEN {
+        elem == known.f32_
+    } else {
+        elem == known.f64_
+    }
+}
+
+// `Conv::target`.
+fn conv_target(in ck: Ck, op: u8, elem: u32) -> u32 {
+    let known = ck.ctx.world.k;
+    if op == OP_TO_BITS {
+        if elem == known.f32_ {
+            known.u32_
+        } else if elem == known.f64_ {
+            known.u64_
+        } else {
+            elem
+        }
+    } else if (op == OP_FROM_BITS && elem == known.u32_) || op == OP_NARROW {
+        known.f32_
+    } else {
+        known.f64_
+    }
+}
+
+// `Intrinsic::lane_error`: whether the intrinsic is undefined for `elem`.
+fn lane_error(in ck: Ck, it: Intr, elem: u32) -> bool {
+    let known = ck.ctx.world.k;
+    let float = is_float_elem(in ck, elem);
+    let f = it.family;
+    if f == F_BINARY && it.op == OP_MUL && elem == known.u8_ {
+        return true;
+    }
+    if f == F_BINARY && it.op == OP_DIV && !float {
+        return true;
+    }
+    if (f == F_UNARY || f == F_MUL_ADD) && !float {
+        return true;
+    }
+    if f == F_CONVERT && !conv_accepts(in ck, it.op, elem) {
+        return true;
+    }
+    if f == F_BINARY && it.op == OP_SATURATING && elem != known.u8_ {
+        return true;
+    }
+    let bitwise = (f == F_BINARY && it.op == OP_BITWISE)
+        || f == F_NOT
+        || f == F_SHIFT
+        || (f == F_REDUCE && it.op == OP_BITWISE);
+    if bitwise && float {
+        return true;
+    }
+    (f == F_LOAD_MASKED || f == F_IN_BOUNDS) && elem != known.u8_
+}
+
+// `Shape::new`.
+fn shape_new(in ck: Ck, elem: u32, lanes: u64) -> Shape {
+    let bits = wrapping_mul(w(ck.ctx.world.k.elem_bits(elem)), lanes);
+    if bits == BITS_128 || bits == BITS_256 || bits == BITS_512 {
+        Shape { elem: elem, lanes: lanes }
+    } else {
+        no_shape()
+    }
+}
+
+// `count.parse::<u16>()` of a type argument symbol, or NONE32 as u64.
+fn lane_count(in ck: Ck, sym: u32) -> u64 {
+    let size = ck.ctx.names.size(sym);
+    if size == 0 {
+        return w(NONE32);
+    }
+    let mut lanes: u64 = 0;
+    for i in 0..size {
+        let digit = ck.ctx.names.byte(sym, i);
+        if digit < DIGIT_0 || digit > DIGIT_9 {
+            return w(NONE32);
+        }
+        lanes = add(wrapping_mul(lanes, DECIMAL), widen_u64(wrapping_sub(digit, DIGIT_0)));
+        if lanes > MAX_LANES {
+            return w(NONE32);
+        }
+    }
+    lanes
+}
+
+// The shape of `ty`, a valid `Vec[e, N]` (KIND_VEC) or `Mask[e, N]`
+// (KIND_MASK) of `kind`, or no shape (`vector::shape_of`).
+fn shape_of(in ck: Ck, ty: u32, kind: u8) -> Shape {
+    let known = ck.ctx.world.k;
+    if vector_words(in ck.ctx.types, in ck.ctx.names, known, ty) == 0 {
+        return no_shape();
+    }
+    let node = ck.ctx.types.node(ty);
+    let want = if kind == KIND_VEC {
+        known.vec
+    } else {
+        known.mask
+    };
+    if node.name != want {
+        return no_shape();
+    }
+    let elem = ck.ctx.types.node(ck.ctx.types.arg(ty, 0)).name;
+    let count = ck.ctx.types.node(ck.ctx.types.arg(ty, 1)).name;
+    Shape { elem: elem, lanes: lane_count(in ck, count) }
+}
+
+// The explicit `[T, N]` shape of the call, `lanes == 0` when the type
+// arguments do not spell a valid shape. `spelled` reports whether they
+// have the `[T, N]` form at all.
+fn explicit_shape(inout ck: Ck, ex: Ex, inout spelled: bool) -> Shape {
+    spelled = false;
+    if ex.m != 2 {
+        return no_shape();
+    }
+    let elem_ty = u32_at(in ck.targs, w(ex.b));
+    let count_ty = u32_at(in ck.targs, add(w(ex.b), 1));
+    note(inout ck, elem_ty);
+    let count = ck.ctx.types.node(count_ty);
+    if count.kind != TyKind::Named || count.n != 0 {
+        return no_shape();
+    }
+    spelled = true;
+    let elem = ck.ctx.types.node(elem_ty);
+    if elem.kind != TyKind::Named || elem.n != 0 {
+        return no_shape();
+    }
+    let lanes = lane_count(in ck, count.name);
+    if lanes == w(NONE32) {
+        return no_shape();
+    }
+    shape_new(in ck, elem.name, lanes)
+}
+
+fn shape_type(inout ck: Ck, shape: Shape, kind: u8) -> u32 {
+    let known = ck.ctx.world.k;
+    let mut digits = ChunkSeq::new[u8]();
+    put_decimal(inout digits, shape.lanes);
+    let count_sym = ck.ctx.names.intern(in digits.as_slice());
+    let mut targs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    targs.push(named(inout ck, shape.elem));
+    targs.push(named(inout ck, count_sym));
+    let name = if kind == KIND_VEC {
+        known.vec
+    } else {
+        known.mask
+    };
+    ck.ctx.types.named(name, in targs)
+}
+
+fn put_decimal(inout out: ChunkSeq[u8], value: u64) {
+    if value >= DECIMAL {
+        put_decimal(inout out, value / DECIMAL);
+    }
+    out.push(wrapping_u8(add(value % DECIMAL, widen_u64(DIGIT_0))));
+}
+
+// `Checker::arity`.
+fn arity(inout ck: Ck, ex: Ex, n: u64) -> bool {
+    if w(ex.n) == n {
+        return true;
+    }
+    error(inout ck, "E0207", ex.start, ex.end);
+    false
+}
+
+// `Checker::vector_fallback`: every argument checked with no goal.
+fn fallback(inout ck: Ck, ex: Ex, from: u64) -> u32 {
+    let hole = ck.ctx.types.infer;
+    for i in from..w(ex.n) {
+        let arg = actual_arg(in ck, ex, i);
+        let t = expr_expected(inout ck, arg.expr, hole);
+    }
+    hole
+}
+
+fn is_profile(in ck: Ck, sym: u32) -> bool {
+    sym == ck.ctx.names.lookup(in PROFILE_BASELINE128.as_bytes())
+        || sym == ck.ctx.names.lookup(in PROFILE_AVX2.as_bytes())
+        || sym == ck.ctx.names.lookup(in PROFILE_AVX512.as_bytes())
+        || sym == ck.ctx.names.lookup(in PROFILE_SVE2.as_bytes())
+        || sym == ck.ctx.names.lookup(in PROFILE_RVV1.as_bytes())
+}
+
+// `Checker::vector_call`: the type of a call of a reserved vector path,
+// or NONE32 when `name` is outside those namespaces.
+pub fn vector_call(inout ck: Ck, ex: Ex, name: u32, expected: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let known = ck.ctx.world.k;
+    let it = lookup_intrinsic(in ck, name);
+    let family = it.family;
+    if family == F_NONE {
+        return NONE32;
+    }
+    if family == F_UNKNOWN {
+        error(inout ck, "E1402", ex.start, ex.end);
+        return fallback(inout ck, ex, 0);
+    }
+    // A slice view argument has no type yet: it selects the slice form like
+    // any `Slice[T]` operand.
+    let mut first_seq = false;
+    if ex.n != 0 {
+        let first = actual_arg(in ck, ex, 0);
+        if view_base(in ck, first.expr) != NONE32 {
+            first_seq = true;
+        } else {
+            let peeked = peek_type(inout ck, first.expr);
+            first_seq = is_seq_or_slice(in ck, peeked);
+        }
+        if ck.skip {
+            return hole;
+        }
+    }
+    if family == F_LOAD
+        || family == F_STORE
+        || family == F_STORE_MASKED
+        || (family == F_LOAD_MASKED && first_seq)
+    {
+        return slice_io(inout ck, ex, family, expected);
+    }
+    for i in 0..w(ex.n) {
+        let arg = actual_arg(in ck, ex, i);
+        if arg.pass != P_IN || arg.explicit {
+            let arg_ex = ck.ex(arg.expr);
+            error(inout ck, "E0308", arg_ex.start, arg_ex.end);
+        }
+    }
+    if family == F_ISA_SUPPORTED {
+        let counted = arity(inout ck, ex, 0);
+        let mut ok = false;
+        if ex.m == 1 {
+            let p = ck.ctx.types.node(u32_at(in ck.targs, w(ex.b)));
+            ok = p.kind == TyKind::Named && p.n == 0 && is_profile(in ck, p.name);
+        }
+        if !ok {
+            error(inout ck, "E1404", ex.start, ex.end);
+        }
+        return named(inout ck, known.bool_);
+    }
+    // The shape: explicit `[T, N]`, else the expected type, else the first
+    // operand.
+    let mut shape = no_shape();
+    if takes_shape_arguments(family) && ex.m != 0 {
+        let mut spelled = false;
+        shape = explicit_shape(inout ck, ex, inout spelled);
+        if ck.skip {
+            return hole;
+        }
+        if shape.lanes == 0 {
+            error(inout ck, "E1401", ex.start, ex.end);
+            return fallback(inout ck, ex, 0);
+        }
+    } else if !takes_shape_arguments(family) && ex.m != 0 {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    let result_kind = if mask_result(family) {
+        KIND_MASK
+    } else {
+        KIND_VEC
+    };
+    let from_expected = shape_of(in ck, expected, result_kind);
+    let mut rest: u64 = 0;
+    if shape.lanes == 0 && takes_shape_arguments(family) {
+        if from_expected.lanes == 0 {
+            error(inout ck, "E1401", ex.start, ex.end);
+            return fallback(inout ck, ex, 0);
+        }
+        shape = from_expected;
+    } else if shape.lanes == 0 {
+        // Type the first operand, guided by the expected result where the
+        // operand has the result's type.
+        if ex.n == 0 {
+            let counted = arity(inout ck, ex, 1);
+            return hole;
+        }
+        let operand_kind = if mask_operand(family) {
+            KIND_MASK
+        } else {
+            KIND_VEC
+        };
+        let same_shape = operand_kind == result_kind && family != F_CONVERT;
+        let goal = if from_expected.lanes != 0 && same_shape {
+            shape_type(inout ck, from_expected, operand_kind)
+        } else {
+            hole
+        };
+        let first = actual_arg(in ck, ex, 0);
+        let t = expr_expected(inout ck, first.expr, goal);
+        if ck.skip {
+            return hole;
+        }
+        let operand_shape = shape_of(in ck, t, operand_kind);
+        if operand_shape.lanes == 0 {
+            if t != hole {
+                let first_ex = ck.ex(first.expr);
+                error(inout ck, "E1402", first_ex.start, first_ex.end);
+            }
+            return fallback(inout ck, ex, 1);
+        }
+        shape = operand_shape;
+        rest = 1;
+    }
+    if lane_error(in ck, it, shape.elem) {
+        error(inout ck, "E1402", ex.start, ex.end);
+    }
+    let vec = shape_type(inout ck, shape, KIND_VEC);
+    let mask = shape_type(inout ck, shape, KIND_MASK);
+    let lane = named(inout ck, shape.elem);
+    let u64_ty = named(inout ck, known.u64_);
+    let string = named(inout ck, known.string);
+    let bool_ty = named(inout ck, known.bool_);
+    // The operand types (the first already typed when `rest == 1`) and the
+    // result.
+    let mut operands: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut result = vec;
+    if family == F_SPLAT {
+        operands.push(lane);
+    } else if family == F_FROM {
+        for i in 0..shape.lanes {
+            operands.push(lane);
+        }
+    } else if family == F_BINARY {
+        operands.push(vec);
+        operands.push(vec);
+    } else if family == F_NOT || family == F_UNARY {
+        operands.push(vec);
+    } else if family == F_MUL_ADD {
+        operands.push(vec);
+        operands.push(vec);
+        operands.push(vec);
+    } else if family == F_CONVERT {
+        operands.push(vec);
+        let converted = shape_new(in ck, conv_target(in ck, it.op, shape.elem), shape.lanes);
+        if converted.lanes == 0 {
+            error(inout ck, "E1401", ex.start, ex.end);
+            result = hole;
+        } else {
+            result = shape_type(inout ck, converted, KIND_VEC);
+        }
+    } else if family == F_SHIFT {
+        operands.push(vec);
+        operands.push(u64_ty);
+    } else if family == F_COMPARE {
+        operands.push(vec);
+        operands.push(vec);
+        result = mask;
+    } else if family == F_SELECT {
+        operands.push(mask);
+        operands.push(vec);
+        operands.push(vec);
+    } else if family == F_MASK_BINARY {
+        operands.push(mask);
+        operands.push(mask);
+        result = mask;
+    } else if family == F_MASK_NOT {
+        operands.push(mask);
+        result = mask;
+    } else if family == F_MASK_COUNT || family == F_MASK_BITMASK {
+        operands.push(mask);
+        result = u64_ty;
+    } else if family == F_MASK_ANY || family == F_MASK_ALL {
+        operands.push(mask);
+        result = bool_ty;
+    } else if family == F_REDUCE {
+        operands.push(vec);
+        result = lane;
+    } else if family == F_EXTRACT {
+        operands.push(vec);
+        operands.push(u64_ty);
+        result = lane;
+    } else if family == F_REPLACE {
+        operands.push(vec);
+        operands.push(u64_ty);
+        operands.push(lane);
+    } else if family == F_SHUFFLE {
+        operands.push(vec);
+        for i in 0..shape.lanes {
+            operands.push(u64_ty);
+        }
+    } else if family == F_LOAD_MASKED {
+        operands.push(string);
+        operands.push(u64_ty);
+    } else if family == F_IN_BOUNDS {
+        operands.push(string);
+        operands.push(u64_ty);
+        result = mask;
+    } else {
+        // `Intrinsic::Active`.
+        operands.push(u64_ty);
+        operands.push(u64_ty);
+        result = mask;
+    }
+    if family == F_MASK_BITMASK && shape.lanes > BITMASK_LANES {
+        error(inout ck, "E1402", ex.start, ex.end);
+    }
+    if !arity(inout ck, ex, operands.len()) {
+        let from = if rest < w(ex.n) { rest } else { w(ex.n) };
+        let t = fallback(inout ck, ex, from);
+        return result;
+    }
+    // `Intrinsic::constant_positions`: literal lane indices.
+    let constants_from: u64 = 1;
+    let constants_to: u64 = if family == F_EXTRACT || family == F_REPLACE {
+        2
+    } else if family == F_SHUFFLE {
+        if w(ex.n) > 1 { w(ex.n) } else { 1 }
+    } else {
+        0
+    };
+    for i in rest..w(ex.n) {
+        let goal = u32_at(in operands, i);
+        let arg = actual_arg(in ck, ex, i);
+        let t = expr_expected(inout ck, arg.expr, goal);
+        if ck.skip {
+            return hole;
+        }
+        let arg_ex = ck.ex(arg.expr);
+        expect_type(inout ck, goal, t, arg_ex.start, arg_ex.end);
+        if ck.ctx.types.kind(t) == TyKind::Lit {
+            record(inout ck, arg.expr, goal);
+        }
+        if i >= constants_from && i < constants_to {
+            let in_range = arg_ex.kind == E_INT
+                && !arg_ex.neg
+                && arg_ex.hi == 0
+                && arg_ex.mag < shape.lanes;
+            if !in_range {
+                error(inout ck, "E1402", arg_ex.start, arg_ex.end);
+            }
+        }
+    }
+    result
+}
+
+// `Checker::vector_slice_io`: `Vec::load[T, N](in s, at)`,
+// `Vec::store(inout s, at, v)` and their masked forms on a `Slice[T]` or
+// `ChunkSeq[T]`. The unmasked forms' `Fail[RuntimeError]` comes from the
+// world's partial operations, as for every expression.
+fn slice_io(inout ck: Ck, ex: Ex, family: u8, expected: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let known = ck.ctx.world.k;
+    let store = family == F_STORE || family == F_STORE_MASKED;
+    let fallback_ty = if store { ck.ctx.types.unit } else { hole };
+    let operands = if store { STORE_OPERANDS } else { LOAD_OPERANDS };
+    if !arity(inout ck, ex, operands) {
+        let t = fallback(inout ck, ex, 0);
+        return fallback_ty;
+    }
+    if store && ex.m != 0 {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    let s = actual_arg(in ck, ex, 0);
+    let s_ex = ck.ex(s.expr);
+    if store && !(s.explicit && s.pass == P_INOUT) {
+        error(inout ck, "E0308", s_ex.start, s_ex.end);
+    } else if !store && s.explicit && s.pass != P_IN {
+        error(inout ck, "E0308", s_ex.start, s_ex.end);
+    }
+    let seq_ty = expr(inout ck, s.expr);
+    if ck.skip {
+        return hole;
+    }
+    let mut elem_ty = NONE32;
+    if is_seq_or_slice(in ck, seq_ty) {
+        elem_ty = default_type(inout ck.ctx.types, ck.ctx.types.arg(seq_ty, 0));
+    } else if seq_ty != hole {
+        error(inout ck, "E1402", s_ex.start, s_ex.end);
+    }
+    let u64_ty = named(inout ck, known.u64_);
+    let at = actual_arg(in ck, ex, 1);
+    let at_ex = ck.ex(at.expr);
+    if at.pass != P_IN || at.explicit {
+        error(inout ck, "E0308", at_ex.start, at_ex.end);
+    }
+    let at_ty = expr_expected(inout ck, at.expr, u64_ty);
+    if ck.skip {
+        return hole;
+    }
+    expect_type(inout ck, u64_ty, at_ty, at_ex.start, at_ex.end);
+    if ck.ctx.types.kind(at_ty) == TyKind::Lit {
+        record(inout ck, at.expr, u64_ty);
+    }
+    // The shape: the stored vector's, else explicit `[T, N]`, else the
+    // expected result.
+    let mut shape = no_shape();
+    if store {
+        let v = actual_arg(in ck, ex, 2);
+        let v_ex = ck.ex(v.expr);
+        if v.pass != P_IN || v.explicit {
+            error(inout ck, "E0308", v_ex.start, v_ex.end);
+        }
+        let t = expr_expected(inout ck, v.expr, hole);
+        if ck.skip {
+            return hole;
+        }
+        shape = shape_of(in ck, t, KIND_VEC);
+        if shape.lanes == 0 && t != hole {
+            error(inout ck, "E1402", v_ex.start, v_ex.end);
+        }
+    } else if ex.m == 0 {
+        shape = shape_of(in ck, expected, KIND_VEC);
+        if shape.lanes == 0 {
+            error(inout ck, "E1401", ex.start, ex.end);
+        }
+    } else {
+        let mut spelled = false;
+        shape = explicit_shape(inout ck, ex, inout spelled);
+        if ck.skip {
+            return hole;
+        }
+        if shape.lanes == 0 {
+            error(inout ck, "E1401", ex.start, ex.end);
+        }
+    }
+    if shape.lanes != 0 && elem_ty != NONE32 && elem_ty != hole {
+        if !(is_named(in ck, elem_ty, shape.elem) && ck.ctx.types.node(elem_ty).n == 0) {
+            error(inout ck, "E1402", ex.start, ex.end);
+        }
+    }
+    if store {
+        ck.ctx.types.unit
+    } else if shape.lanes != 0 {
+        shape_type(inout ck, shape, KIND_VEC)
+    } else {
+        hole
+    }
+}

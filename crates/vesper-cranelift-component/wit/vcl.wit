@@ -136,6 +136,13 @@ interface vcl {
     %vcl-call-memmove: func(%b: u64, %m: u64, %dst: u32, %src: u32, %count: u32);
     %vcl-isa-triple-arch: func(%m: u64) -> u32;
     %vcl-has-x86-pshufb-lowering: func(%m: u64) -> u32;
+    %vcl-builder-finalize: func(%b: u64) -> u32;
+    %vcl-function-words: func(%b: u64, %flags: u32, %ptr-ty: u32, %offset: u64, %out: list<u8>) -> tuple<u64, list<u8>>;
+    %vcl-apply-edits: func(%b: u64, %edits: list<u64>) -> u32;
+    %vcl-outline-cold: func(%b: u64, %m: u64, %edits: list<u64>) -> u32;
+    %vcl-take-cold-helper: func(%b: u64) -> u64;
+    %vcl-cold-helper-func: func(%b: u64) -> u32;
+    %vcl-define-with-cold-helpers: func(%m: u64, %func: u32, %b: u64) -> u32;
 }
 
 world cranelift {

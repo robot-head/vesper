@@ -14,7 +14,7 @@ mod pact_binding;
 #[path = "../../../../tests/common/pact_words.rs"]
 mod pact_words;
 
-use super::{Registry, Swap, check_words, must, on, open, stats};
+use super::{Registry, Swap, check_words, must, on, open, pass, stats};
 
 /// Packages whose trait declarations the Vesper declaration pass checked.
 static PACT_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -136,17 +136,15 @@ const VESPER_DEPS_PASS: vesper::pact_frontend::DepsPassTable =
                 .iter()
                 .map(|d| vesper::check::World::collect(&d.module).0)
                 .collect();
+            // Each dependency's package name (what Rust's `add_dependency`
+            // dedups on) and its whole identity (`name@version`, what its
+            // messages print).
+            let dep_ids: Vec<String> = deps.iter().map(|d| d.identity.to_string()).collect();
             let dep_refs: Vec<_> = deps
                 .iter()
                 .zip(&dep_worlds)
-                .map(|(d, w)| {
-                    (
-                        d.identity.name.as_str(),
-                        d.identity.version.as_str(),
-                        &d.module,
-                        w,
-                    )
-                })
+                .zip(&dep_ids)
+                .map(|((d, w), id)| (d.identity.name.as_str(), id.as_str(), &d.module, w))
                 .collect();
             let input = pact_words::encode_deps_input(
                 module,
@@ -211,10 +209,16 @@ const VESPER_PACT_SESSION: vesper::pact_frontend::PactSessionTable =
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[
-    open("declaration_pass", "no flip-gate configuration"),
-    open("pact_session", "no flip-gate configuration"),
-    open("builtin_wanted", "no flip-gate configuration"),
-    open("deps_pass", "no flip-gate configuration"),
+    pass("declaration_pass", "pact-declarations", "#2517"),
+    open(
+        "pact_session",
+        "no flip-gate workload: the session also answers every later solve and mono check, so it needs an end-to-end check_package timing (#2684)",
+    ),
+    open(
+        "builtin_wanted",
+        "flip gate FAIL ~4.2x: the swap encodes the whole module to answer one bit (scripts/ci/flip-gate/pact-builtin-wanted.json, #2684)",
+    ),
+    pass("deps_pass", "pact-deps", "#2684"),
 ];
 
 pub(super) fn register(_r: &mut Registry) {

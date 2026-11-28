@@ -24,7 +24,7 @@ mod checks_binding;
 #[path = "../crossing.rs"]
 mod crossing;
 
-use super::{Registry, Swap, check_words, must, on, open, stats};
+use super::{Registry, Swap, check_words, must, on, open, pass, stats};
 
 /// `Layout::of` calls answered by the Vesper check-layout module.
 static CHECK_LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -267,10 +267,7 @@ const VESPER_IR_CHECK: vesper::ir_check::IrCheckTable = vesper::ir_check::IrChec
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[
     open("layout", "0 diffs; no flip-gate configuration"),
-    open(
-        "ir_check",
-        "flip gate FAIL 1.71x with encoding (scripts/ci/flip-gate/ir-check.json, #2289)",
-    ),
+    pass("ir_check", "ir-check", "#2289"),
 ];
 
 pub(super) fn register(_r: &mut Registry) {

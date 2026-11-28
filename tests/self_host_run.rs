@@ -13,7 +13,9 @@
 //!
 //! `run_cost` (ignored; `CHECK_HARNESS_SPEED=1`): ABBA of the Vesper
 //! machine (encoding included) against `Runtime::run` (lowering and
-//! optimizing included) on the programs it runs.
+//! optimizing included) on the programs it runs. With `FLIP_GATE` set it
+//! prints the `flip-gate pairs run` line `aspect ci flip-gate -- run`
+//! reads instead (scripts/ci/flip-gate/run.json).
 #[path = "common/check_harness.rs"]
 mod check_harness;
 #[path = "common/check_words.rs"]
@@ -28,6 +30,10 @@ use run_words::{Answer, decode, program, run_input, world_declines};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use vesper::check::World;
+
+/// The flip gate's workload name for [`run_cost`]
+/// (scripts/ci/flip-gate/run.json).
+const GATE_WORKLOAD: &str = "run";
 
 fn package() -> &'static Package {
     static P: OnceLock<Package> = OnceLock::new();
@@ -332,8 +338,11 @@ const PROGRAMS: &[(&str, &str)] = &[
          fn main() -> (i64, i64, i64, i64) { (name(0), name(1), name(255), name(7)) }",
     ),
     (
+        // Spins in a loop, not by recursion: ten million frames of the
+        // Rust evaluator's stack took 7 GB, enough to kill the run on a
+        // 15 GB host. The small-fuel configs still cut recursion short.
         "unbounded",
-        "fn spin(n: i64) -> i64 { spin(wrapping_add(n, 1)) } fn main() -> i64 { spin(0) }",
+        "fn main() -> i64 { let mut n = 0; loop { n = wrapping_add(n, 1); } n }",
     ),
     (
         "options",
@@ -348,6 +357,31 @@ const PROGRAMS: &[(&str, &str)] = &[
          r.set(c, 5); let t = r.box(T { v: 4 }); let before = r.used(); let T { v } = r.take(t); \
          let n = region q(16) { let x = q.box(7); q.used() }; \
          (a == b, a == c, u, before, wrapping_add(wrapping_add(r.get(c), r.get(d)), v), n) } }",
+    ),
+    (
+        // DetFloat canonicalises NaN results program-wide; `eff
+        // [ConstDenorm]` code flushes subnormal operands and results, but
+        // not bit reinterpretations.
+        "float_modes",
+        "fn nan(x: f64) -> (u64, u64, u32, f64) eff [DetFloat] { \
+         let n = from_bits_f64(9221120237041090561); let m = x * 1.0; \
+         (to_bits_f64(n + 1.0), to_bits_f64(m), to_bits_f32(nearest_f32(n)), -n) } \
+         fn flush(x: f64, y: f32) -> (f64, f32, f64, u64) eff [ConstDenorm] { \
+         let tiny = from_bits_f64(1); (x * 1e-310, y * 1e-40, tiny + 0.0, to_bits_f64(tiny)) } \
+         fn main() -> ((u64, u64, u32, f64), (f64, f32, f64, u64), f64) { \
+         let raw = from_bits_f64(9221120237041090561); (nan(raw), flush(1.0, 1.0), 1e-310 * 1.0) }",
+    ),
+    (
+        // Inside a generic function the payload's size comes from its value:
+        // generic data binds what its fields determine, the rest is a word.
+        "region_generic_payloads",
+        "copy struct W[T: mod copy] { a: T, b: i64 } \
+         fn put[T: mod copy](v: T) -> RegionBox[r, T] eff [r: Region] { r.box(v) } \
+         fn main() -> (u64, u64, u64, u64, u64) { region r { let a = put((1, true)); \
+         let s0 = r.used(); let b = put(W { a: (2, 3), b: 4 }); let s1 = r.used(); \
+         let n: Option[(i64, i64, i64)] = Option::None; let c = put(n); let s2 = r.used(); \
+         let x: u8 = 1; let d = put(Option::Some((x, x))); let s3 = r.used(); let e = put(2.5); \
+         (s0, s1, s2, s3, r.used()) } }",
     ),
     (
         "region_first_chunk",
@@ -491,6 +525,10 @@ fn run_matches_rust() {
     for d in diffs.iter().take(20) {
         eprintln!("{d}");
     }
+    println!(
+        "flip-gate differential differences={} cases={ran}",
+        diffs.len()
+    );
     assert!(diffs.is_empty(), "{} differences", diffs.len());
     assert!(programs_ran > 0, "no program ran in Vesper");
 }
@@ -525,6 +563,10 @@ fn run_cost() {
             }
         })
     };
+    if flip_gate::on() {
+        flip_gate::pairs(GATE_WORKLOAD, &mut rust, &mut vesper);
+        return;
+    }
     let label = format!("run over {} programs", ours.len());
     let (_, _, hi) = abba_ci(&label, 15, &mut rust, &mut vesper);
     assert!(hi <= 1.5, "the 95% CI upper bound {hi:.3}x is above 1.50x");

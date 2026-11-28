@@ -38,9 +38,10 @@ use wasm_words::*;
 
 /// Bazel runs this target as three shards (`test_shards` in BUILD.bazel), so
 /// each can start beside other tests instead of waiting for one 12 GiB slot
-/// at the end of "Test all targets". Shard 0 runs the self-compilation fixed
-/// point (the longest test) and the short tests; shards 1 and 2 split the
-/// other five stage2 builds. Cargo, without Bazel's shard variables, runs
+/// at the end of "Test all targets". Shard 0 runs the short tests; shards 1
+/// and 2 split the stage2 builds. The Stage 2 fixed point and the compiler
+/// package builds moved to crates/vesper-stage2-gate (#2671), which boots
+/// from the committed seed. Cargo, without Bazel's shard variables, runs
 /// every test.
 fn runs_on_shard(owner: usize) -> bool {
     let shard = corpus_shard::Shard::from_environment();
@@ -51,13 +52,6 @@ fn backend() -> &'static Entry {
     static BACKEND: OnceLock<Entry> = OnceLock::new();
     BACKEND.get_or_init(|| {
         Package::load("packages/vesper-wasm-backend").entry("wasm_backend_compile", true)
-    })
-}
-
-fn backend_diag() -> &'static Entry {
-    static BACKEND_DIAG: OnceLock<Entry> = OnceLock::new();
-    BACKEND_DIAG.get_or_init(|| {
-        Package::load("packages/vesper-wasm-backend").entry("wasm_backend_compile_diag", true)
     })
 }
 
@@ -110,33 +104,6 @@ fn port(c: &ForeignChecked, o: &WasmOptions) -> Result<Vec<u8>, String> {
     let program = backend_program(w, o).ok_or("optimize failed")?;
     let input = wasm_input(w, &program, "main", o).ok_or("not encodable")?;
     match outcome(&backend().words(&input)) {
-        Outcome::Module { core, wit, .. } => Ok(wrap(core, &wit, o.world)),
-        o => Err(format!("{o:?}")),
-    }
-}
-
-fn port_with_syms(c: &ForeignChecked, o: &WasmOptions, syms_out: &Path) -> Result<Vec<u8>, String> {
-    let w = &c.checked.world;
-    let program = backend_program(w, o).ok_or("optimize failed")?;
-    let input = wasm_input(w, &program, "main", o).ok_or("not encodable")?;
-    let words = backend_diag().words(&input);
-    if words.first() != Some(&0) {
-        return Err(format!("{:?}", outcome(&words)));
-    }
-    let syms_len = *words.get(2).ok_or("missing syms len")? as usize;
-    let syms_words = syms_len.div_ceil(8);
-    let syms_end = 3 + syms_words;
-    let mut syms = Vec::with_capacity(syms_words * 8);
-    for w in &words[3..syms_end] {
-        syms.extend_from_slice(&w.to_le_bytes());
-    }
-    syms.truncate(syms_len);
-    let _ = std::fs::write(syms_out, &syms);
-    let mut stripped = Vec::with_capacity(2 + words.len() - syms_end);
-    stripped.push(words[0]);
-    stripped.push(words[1]);
-    stripped.extend_from_slice(&words[syms_end..]);
-    match outcome(&stripped) {
         Outcome::Module { core, wit, .. } => Ok(wrap(core, &wit, o.world)),
         o => Err(format!("{o:?}")),
     }
@@ -363,24 +330,6 @@ fn wasmtime_cli_bin() -> Option<PathBuf> {
         panic!("hermetic @wasmtime//:wasmtime CLI binary `{exe}` missing from Bazel PATH");
     }
     None
-}
-
-fn precompile_stage2_wasmtime_cli(cli: &Path, stage2_wasm: &Path, out_cwasm: &Path) {
-    let _ = std::fs::remove_file(out_cwasm);
-    let comp = std::process::Command::new(cli)
-        .arg("compile")
-        .arg(stage2_wasm)
-        .arg("-o")
-        .arg(out_cwasm)
-        .output()
-        .expect("run wasmtime compile");
-    assert!(
-        comp.status.success(),
-        "wasmtime compile failed (status={}):\nstdout={}\nstderr={}",
-        comp.status,
-        String::from_utf8_lossy(&comp.stdout),
-        String::from_utf8_lossy(&comp.stderr),
-    );
 }
 
 fn run_stage2_wasmtime_cli(
@@ -625,7 +574,7 @@ fn get(in name: Str, cap: u64) -> u64 eff [Ffi[StdFs]] {
 const FS_PROGRAMS: &[&str] = &[
     // write, truncate, append, create_new on an existing file, read back
     // through a big and a small buffer, a missing file
-    r#"fn main() -> u64 eff [Ffi[StdFs]] {
+    r#"pub fn main() -> u64 eff [Ffi[StdFs]] {
     let mut acc: u64 = 0;
     acc = mix(acc, put("a.txt", 1, "hello, wasm seed".as_bytes()));
     acc = mix(acc, get("a.txt", 64));
@@ -688,7 +637,7 @@ fn list(in name: Str, cap: u64) -> u64 eff [Ffi[StdFs]] {
         Option::None => mix(66, err),
     }
 }
-fn main() -> u64 eff [Ffi[StdFs]] {
+pub fn main() -> u64 eff [Ffi[StdFs]] {
     let mut acc: u64 = 0;
     acc = mix(acc, dir("d1", false));
     acc = mix(acc, dir("d1", false));
@@ -794,7 +743,7 @@ fn relative_paths_use_the_dot_preopen() {
     let src = format!(
         "{}\n{}",
         PRELUDE.replace("BASE/", ""),
-        r#"fn main() -> u64 eff [Ffi[StdFs]] {
+        r#"pub fn main() -> u64 eff [Ffi[StdFs]] {
     let mut acc: u64 = 0;
     acc = mix(acc, put("./rel.txt", 1, "relative".as_bytes()));
     acc = mix(acc, get("rel.txt", 64));
@@ -843,7 +792,7 @@ fn too_many_preopens_fail_every_path() {
     let src = format!(
         "{}\n{}",
         PRELUDE.replace("BASE/", ""),
-        r#"fn main() -> u64 eff [Ffi[StdFs]] {
+        r#"pub fn main() -> u64 eff [Ffi[StdFs]] {
     let mut err: u64 = 0;
     match StdFs::vstd_fs_open(in "/p16/x.txt".as_bytes(), 1, inout err) {
         Option::Some(f) => { StdFs::vstd_fs_close(f); },
@@ -885,7 +834,7 @@ fn preopen_name_overflow_fails_every_path() {
     let prelude = PRELUDE.replace("BASE/", "");
     let src = format!(
         r#"{prelude}
-fn main() -> u64 eff [Ffi[StdFs]] {{
+pub fn main() -> u64 eff [Ffi[StdFs]] {{
     let mut err: u64 = 0;
     match StdFs::vstd_fs_open(in {target_guest:?}.as_bytes(), 1, inout err) {{
         Option::Some(f) => {{ StdFs::vstd_fs_close(f); }},
@@ -908,6 +857,606 @@ fn main() -> u64 eff [Ffi[StdFs]] {{
     let got = run(&component, &ctx).expect("run");
     assert_eq!(got, 11 | (95 << 32));
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn std_env_high_level_ops_work_under_wasi() {
+    if !runs_on_shard(0) {
+        return;
+    }
+
+    let pkg = fresh("std-env-high-level-wasi");
+    std::fs::create_dir(pkg.join("src")).unwrap();
+    let env_dep = std::fs::canonicalize("packages/vesper-std/env").unwrap();
+    let fs_dep = std::fs::canonicalize("packages/vesper-std/fs").unwrap();
+    std::fs::write(
+        pkg.join("Loom.toml"),
+        format!(
+            r#"[package]
+name = "@wasm-seed/std-env-high-level-wasi"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Alloc", "Fail", "Ffi[StdEnv]", "Ffi[StdFs]"]
+
+[dependencies]
+"@vesper-std/env" = {{ version = "^0.1", path = {env_dep:?} }}
+"@vesper-std/fs" = {{ version = "^0.1", path = {fs_dep:?} }}
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("src/main.ves"),
+        r#"use @vesper-std/env::{
+    arg, arg_count, current_dir, current_exe_bytes, os, var, var_at_bytes, var_count,
+};
+use @vesper-std/fs::{IoError, unsupported};
+
+fn eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        let ba = match a.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let bb = match b.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 1,
+        };
+        if ba != bb {
+            return false;
+        }
+    }
+    true
+}
+
+fn opt_str_is(in opt: Option[String], in want: Str) -> bool {
+    match opt {
+        Option::Some(s) => eq_bytes(in s.as_bytes(), in want.as_bytes()),
+        Option::None => false,
+    }
+}
+
+fn run_ops() -> u64 eff [Ffi[StdEnv], Fail[IoError]] {
+    if os() != 0 {
+        return 1;
+    }
+    if arg_count() != 2 {
+        return 2;
+    }
+    if !opt_str_is(in arg(0), in "vesper") || !opt_str_is(in arg(1), in "--check") {
+        return 3;
+    }
+    let past_arg = match arg(2) {
+        Option::Some(_) => false,
+        Option::None => true,
+    };
+    if !past_arg {
+        return 4;
+    }
+    if var_count() != 2 {
+        return 5;
+    }
+    if !opt_str_is(in var(in "VESPER_MODE"), in "wasi") {
+        return 6;
+    }
+    let missing_var = match var(in "VESPER_UNSET") {
+        Option::Some(_) => false,
+        Option::None => true,
+    };
+    if !missing_var {
+        return 7;
+    }
+    let has_kv = match var_at_bytes(0) {
+        Option::Some(b) => b.len() > 0,
+        Option::None => false,
+    };
+    if !has_kv {
+        return 8;
+    }
+    let cwd_err = handle Fail[IoError] in {
+        let _ = current_dir();
+        0
+    } with {
+        return v => v,
+        raise(e, _k) => if e.kind == unsupported() { 1 } else { 2 },
+    };
+    if cwd_err != 1 {
+        return 9;
+    }
+    let exe_err = handle Fail[IoError] in {
+        let _ = current_exe_bytes();
+        0
+    } with {
+        return v => v,
+        raise(e, _k) => if e.kind == unsupported() { 1 } else { 2 },
+    };
+    if exe_err != 1 {
+        return 10;
+    }
+    42
+}
+
+pub fn main() -> u64 eff [Ffi[StdEnv]] {
+    handle Fail[IoError] in {
+        run_ops()
+    } with {
+        return v => v,
+        raise(e, _k) => wrapping_add(1_000_000, widen_u64(e.kind)),
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let assembled =
+        vesper::packages::load_for_target(&pkg, Some(vesper::wasm_backend::TARGET), false).unwrap();
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports())
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let wasm = port(&checked, &options(false)).expect("compile std_env probe");
+    let ctx = Ctx {
+        args: vec!["vesper", "--check"],
+        env: vec![("VESPER_MODE", "wasi"), ("PWD", "/work")],
+        ..Ctx::default()
+    };
+    let got = run(&wasm, &ctx).expect("run std_env probe");
+    assert_eq!(got, 42);
+}
+
+#[test]
+fn std_fs_list_dir_and_walk_work_under_wasi() {
+    if !runs_on_shard(0) {
+        return;
+    }
+
+    let pkg = fresh("std-fs-walk-wasi");
+    std::fs::create_dir(pkg.join("src")).unwrap();
+    let work = pkg.join("work");
+    std::fs::create_dir_all(work.join("root/b")).unwrap();
+    std::fs::write(work.join("root/z.txt"), b"z").unwrap();
+    std::fs::write(work.join("root/a.txt"), b"a").unwrap();
+    std::fs::write(work.join("root/b/c.txt"), b"c").unwrap();
+    let fs_dep = std::fs::canonicalize("packages/vesper-std/fs").unwrap();
+    std::fs::write(
+        pkg.join("Loom.toml"),
+        format!(
+            r#"[package]
+name = "@wasm-seed/std-fs-walk-wasi"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Alloc", "Fail", "Ffi[StdFs]"]
+
+[dependencies]
+"@vesper-std/fs" = {{ version = "^0.1", path = {fs_dep:?} }}
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("src/main.ves"),
+        r#"use @vesper-std/fs::{IoError, kind_dir, kind_file, not_found};
+use @vesper-std/fs::walk::{entry_count, entry_join, entry_kind, entry_path, list_dir, walk};
+
+fn eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        let ba = match a.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let bb = match b.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 1,
+        };
+        if ba != bb {
+            return false;
+        }
+    }
+    true
+}
+
+fn path_is(in opt: Option[String], in want: Str) -> bool {
+    match opt {
+        Option::Some(s) => eq_bytes(in s.as_bytes(), in want.as_bytes()),
+        Option::None => false,
+    }
+}
+
+fn run_ops() -> u64 eff [Ffi[StdFs], Fail[IoError]] {
+    let entries = list_dir(in "/work/root");
+    if entry_count(in entries) != 3 {
+        return 1;
+    }
+    if !path_is(in entry_path(in entries, 0), in "a.txt") || entry_kind(in entries, 0) != kind_file() {
+        return 2;
+    }
+    if !path_is(in entry_path(in entries, 1), in "b") || entry_kind(in entries, 1) != kind_dir() {
+        return 3;
+    }
+    if !path_is(in entry_path(in entries, 2), in "z.txt") || entry_kind(in entries, 2) != kind_file() {
+        return 4;
+    }
+
+    let walked = walk(in "/work/root");
+    if entry_count(in walked) != 4 {
+        return 5;
+    }
+    if !path_is(in entry_path(in walked, 0), in "a.txt") {
+        return 6;
+    }
+    if !path_is(in entry_path(in walked, 1), in "b") {
+        return 7;
+    }
+    if !path_is(in entry_path(in walked, 2), in "b/c.txt") {
+        return 8;
+    }
+    if !path_is(in entry_path(in walked, 3), in "z.txt") {
+        return 9;
+    }
+    let joined = entry_join(in "/work/root".as_bytes(), in walked, 2);
+    if !eq_bytes(in joined.as_slice(), in "/work/root/b/c.txt".as_bytes()) {
+        return 10;
+    }
+
+    let missing = handle Fail[IoError] in {
+        let _ = list_dir(in "/work/does-not-exist");
+        0
+    } with {
+        return v => v,
+        raise(e, _k) => if e.kind == not_found() { 1 } else { 2 },
+    };
+    if missing != 1 {
+        return 11;
+    }
+    42
+}
+
+pub fn main() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        run_ops()
+    } with {
+        return v => v,
+        raise(e, _k) => wrapping_add(1_000_000, widen_u64(e.kind)),
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let assembled =
+        vesper::packages::load_for_target(&pkg, Some(vesper::wasm_backend::TARGET), false).unwrap();
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports())
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let wasm = port(&checked, &options(false)).expect("compile std_fs walk probe");
+    let ctx = Ctx {
+        dirs: vec![(work.clone(), "/work".to_string())],
+        ..Ctx::default()
+    };
+    let got = run(&wasm, &ctx).expect("run std_fs walk probe");
+    assert_eq!(got, 42);
+}
+
+#[test]
+fn std_fs_high_level_ops_work_under_wasi() {
+    if !runs_on_shard(0) {
+        return;
+    }
+
+    let pkg = fresh("std-fs-high-level-wasi");
+    std::fs::create_dir(pkg.join("src")).unwrap();
+    let work = pkg.join("work");
+    std::fs::create_dir(&work).unwrap();
+    let fs_dep = std::fs::canonicalize("packages/vesper-std/fs").unwrap();
+    std::fs::write(
+        pkg.join("Loom.toml"),
+        format!(
+            r#"[package]
+name = "@wasm-seed/std-fs-high-level-wasi"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Alloc", "Fail", "Ffi[StdFs]"]
+
+[dependencies]
+"@vesper-std/fs" = {{ version = "^0.1", path = {fs_dep:?} }}
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("src/main.ves"),
+        r#"use @vesper-std/fs::{
+    IoError, already_exists, append, copy, create_dir_all, create_new, exists, is_dir_path,
+    is_file_path, kind_dir, kind_file, metadata, read_string, rename, write,
+};
+
+fn run_ops() -> u64 eff [Ffi[StdFs], Fail[IoError]] {
+    create_dir_all(in "/work/a/b/c");
+    // Idempotent on existing directory.
+    create_dir_all(in "/work/a/b/c");
+    if !is_dir_path(in "/work/a/b/c".as_bytes()) {
+        return 1;
+    }
+
+    create_new(in "/work/a/b/c/log.txt", in "hi".as_bytes());
+    let dup = handle Fail[IoError] in {
+        create_new(in "/work/a/b/c/log.txt", in "dup".as_bytes());
+        0
+    } with {
+        return v => v,
+        raise(e, _k) => if e.kind == already_exists() { 1 } else { 2 },
+    };
+    if dup != 1 {
+        return 2;
+    }
+
+    append(in "/work/a/b/c/log.txt", in "!".as_bytes());
+    let text = read_string(in "/work/a/b/c/log.txt");
+    if text.as_bytes().len() != 3 {
+        return 3;
+    }
+
+    let copied = copy(in "/work/a/b/c/log.txt", in "/work/a/copy.txt");
+    if copied != 3 {
+        return 4;
+    }
+    rename(in "/work/a/copy.txt", in "/work/a/moved.txt");
+    if exists(in "/work/a/copy.txt") || !is_file_path(in "/work/a/moved.txt".as_bytes()) {
+        return 5;
+    }
+
+    let fm = metadata(in "/work/a/moved.txt");
+    if fm.kind != kind_file() || fm.size != 3 {
+        return 6;
+    }
+    let dm = metadata(in "/work/a/b");
+    if dm.kind != kind_dir() {
+        return 7;
+    }
+
+    write(in "/work/a/moved.txt", in "done".as_bytes());
+    let fm2 = metadata(in "/work/a/moved.txt");
+    if fm2.size != 4 {
+        return 8;
+    }
+    42
+}
+
+pub fn main() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        run_ops()
+    } with {
+        return v => v,
+        raise(e, _k) => wrapping_add(1_000_000, widen_u64(e.kind)),
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let assembled =
+        vesper::packages::load_for_target(&pkg, Some(vesper::wasm_backend::TARGET), false).unwrap();
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports())
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let wasm = port(&checked, &options(false)).expect("compile std_fs high-level probe");
+    let ctx = Ctx {
+        dirs: vec![(work.clone(), "/work".to_string())],
+        ..Ctx::default()
+    };
+    let got = run(&wasm, &ctx).expect("run std_fs high-level probe");
+    assert_eq!(got, 42);
+    assert_eq!(
+        std::fs::read_to_string(work.join("a/b/c/log.txt")).unwrap(),
+        "hi!"
+    );
+    assert_eq!(
+        std::fs::read_to_string(work.join("a/moved.txt")).unwrap(),
+        "done"
+    );
+}
+
+#[test]
+fn remove_dir_all_deletes_nested_tree_under_wasi() {
+    if !runs_on_shard(0) {
+        return;
+    }
+
+    let pkg = fresh("remove-dir-all-wasi");
+    std::fs::create_dir(pkg.join("src")).unwrap();
+    let work = pkg.join("work");
+    std::fs::create_dir_all(work.join("tree/a/b")).unwrap();
+    std::fs::create_dir_all(work.join("tree/empty_sub")).unwrap();
+    std::fs::write(work.join("tree/root.txt"), b"root").unwrap();
+    std::fs::write(work.join("tree/a/b/file.txt"), b"nested").unwrap();
+    let fs_dep = std::fs::canonicalize("packages/vesper-std/fs").unwrap();
+    std::fs::write(
+        pkg.join("Loom.toml"),
+        format!(
+            r#"[package]
+name = "@wasm-seed/remove-dir-all-wasi"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Alloc", "Fail", "Ffi[StdFs]"]
+
+[dependencies]
+"@vesper-std/fs" = {{ version = "^0.1", path = {fs_dep:?} }}
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("src/main.ves"),
+        r#"use @vesper-std/fs::{ IoError, exists, not_found, remove_dir_all };
+
+fn run_remove(in path: Str) -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        remove_dir_all(in path);
+        0
+    } with {
+        return v => v,
+        raise(e, _k) => wrapping_add(1_000_000, widen_u64(e.kind)),
+    }
+}
+
+pub fn main() -> u64 eff [Ffi[StdFs]] {
+    let ok = run_remove(in "/work/tree");
+    if ok != 0 {
+        return ok;
+    }
+    if exists(in "/work/tree") {
+        return 2;
+    }
+    let missing = run_remove(in "/work/missing");
+    if missing == wrapping_add(1_000_000, widen_u64(not_found())) {
+        42
+    } else {
+        missing
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let assembled =
+        vesper::packages::load_for_target(&pkg, Some(vesper::wasm_backend::TARGET), false).unwrap();
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports())
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let wasm = port(&checked, &options(false)).expect("compile remove_dir_all probe");
+    let ctx = Ctx {
+        dirs: vec![(work.clone(), "/work".to_string())],
+        ..Ctx::default()
+    };
+    let got = run(&wasm, &ctx).expect("run remove_dir_all probe");
+    assert_eq!(got, 42);
+    assert!(!work.join("tree").exists());
+}
+
+#[test]
+fn write_stdout_and_write_stderr_emit_to_wasi_streams() {
+    if !runs_on_shard(0) {
+        return;
+    }
+    use wasmtime::component::{Component, Linker, Val};
+
+    let pkg = fresh("stdio-wasi");
+    std::fs::create_dir(pkg.join("src")).unwrap();
+    let fs_dep = std::fs::canonicalize("packages/vesper-std/fs").unwrap();
+    std::fs::write(
+        pkg.join("Loom.toml"),
+        format!(
+            r#"[package]
+name = "@wasm-seed/stdio-wasi"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Alloc", "Fail", "Ffi[StdFs]"]
+
+[dependencies]
+"@vesper-std/fs" = {{ version = "^0.1", path = {fs_dep:?} }}
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("src/main.ves"),
+        r#"use @vesper-std/fs::{ IoError, write_stderr, write_stdout };
+
+pub fn main() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        write_stdout(in "hello stdout\n".as_bytes());
+        write_stderr(in "hello stderr\n".as_bytes());
+        42
+    } with {
+        return v => v,
+        raise(e, _k) => wrapping_add(1_000_000, widen_u64(e.kind)),
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let assembled =
+        vesper::packages::load_for_target(&pkg, Some(vesper::wasm_backend::TARGET), false).unwrap();
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports())
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let wasm = port(&checked, &options(false)).expect("compile stdio probe");
+
+    let mut cfg = wasmtime::Config::new();
+    cfg.wasm_component_model(true);
+    let engine = wasmtime::Engine::new(&cfg).unwrap();
+    let component = Component::new(&engine, &wasm).expect("load stdio component");
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker).unwrap();
+
+    let stdout_pipe = wasmtime_wasi::p2::pipe::MemoryOutputPipe::new(1 << 16);
+    let stderr_pipe = wasmtime_wasi::p2::pipe::MemoryOutputPipe::new(1 << 16);
+    let mut builder = wasmtime_wasi::WasiCtxBuilder::new();
+    builder.stdout(stdout_pipe.clone());
+    builder.stderr(stderr_pipe.clone());
+    struct State {
+        wasi: wasmtime_wasi::WasiCtx,
+        table: wasmtime_wasi::ResourceTable,
+    }
+    impl wasmtime_wasi::WasiView for State {
+        fn ctx(&mut self) -> wasmtime_wasi::WasiCtxView<'_> {
+            wasmtime_wasi::WasiCtxView {
+                ctx: &mut self.wasi,
+                table: &mut self.table,
+            }
+        }
+    }
+    let mut store = wasmtime::Store::new(
+        &engine,
+        State {
+            wasi: builder.build(),
+            table: wasmtime_wasi::ResourceTable::new(),
+        },
+    );
+    let instance = linker.instantiate(&mut store, &component).unwrap();
+    let iface = instance
+        .get_export_index(&mut store, None, vesper::wasm_backend::ENTRY_INTERFACE)
+        .expect("entry iface");
+    let main = instance
+        .get_export_index(&mut store, Some(&iface), "main")
+        .expect("main");
+    let func = instance.get_func(&mut store, main).unwrap();
+    let mut results = [Val::U64(0)];
+    func.call(&mut store, &[], &mut results).unwrap();
+    assert_eq!(results[0], Val::U64(42));
+    assert_eq!(stdout_pipe.contents().as_ref(), b"hello stdout\n");
+    assert_eq!(stderr_pipe.contents().as_ref(), b"hello stderr\n");
 }
 
 #[test]
@@ -1400,7 +1949,7 @@ fn all(i: u64) -> u64 eff [Ffi[StdFs], Fail[IoError]] {
     all(wrapping_add(i, 1))
 }
 
-fn main() -> u64 eff [Ffi[StdFs]] {
+pub fn main() -> u64 eff [Ffi[StdFs]] {
     handle Fail[IoError] in {
         all(0)
     } with {
@@ -1586,7 +2135,7 @@ fn opens(in name: Str, mode: u32) -> u64 eff [Ffi[StdFs]] {
         Option::None => 0,
     }
 }
-fn main() -> u64 eff [Ffi[StdFs]] {
+pub fn main() -> u64 eff [Ffi[StdFs]] {
     if opens("/src/in", 0) != 1 { return 1; }
     if opens("/src/out", 1) != 1 { return 2; }
     if opens("/src/in", 1) != 0 { return 3; }
@@ -1645,7 +2194,7 @@ fn compile_file() eff [Ffi[StdFs], Fail[IoError]] {
     write("/src/compiler-output.bin", output.as_slice());
 }
 
-fn main() -> u64 eff [Ffi[StdFs]] {
+pub fn main() -> u64 eff [Ffi[StdFs]] {
     handle Fail[IoError] in { compile_file() } with {
         return value => 0,
         raise(e, k) => wrapping_add(1, widen_u64(e.kind)),
@@ -1921,10 +2470,12 @@ fn stage2_collects_package_under_wasi_impl() {
         },
     )
     .expect("run @vesper/stage2 under WASI");
-    // 3 modules (prelude + `lib.ves` + `sub.ves`), 19 functions (17 prelude + `main` + `helper`),
-    // 5 ADTs (3 prelude: `Option`, `RuntimeError`, `ArithOverflow`; + `Pair` + `Flag`),
-    // 0 diagnostic bytes => 3190500.
-    assert_eq!(got, 3190500);
+    // 3 modules (the prelude module + `lib.ves` + `sub.ves`), 2 functions
+    // (`main` + `helper`: like Rust, Stage 2 adds a prelude function only
+    // when the package uses it), 5 ADTs (3 prelude: `Option`,
+    // `RuntimeError`, `ArithOverflow`; + `Pair` + `Flag`), 0 diagnostic
+    // bytes => 3020500.
+    assert_eq!(got, 3020500);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -2120,1249 +2671,6 @@ fn stage2_compiles_vesper_ast_impl() {
 }
 
 #[test]
-fn stage2_self_compilation_fixed_point() {
-    if !runs_on_shard(0) {
-        return;
-    }
-    with_large_stack(stage2_self_compilation_fixed_point_impl);
-}
-
-fn stage2_self_compilation_fixed_point_impl() {
-    let dir = fresh("stage2-fixed-point");
-    let stage2_pkg = repo().join("packages/vesper-stage2");
-    let assembled = vesper::packages::load_for_target(&stage2_pkg, Some("wasm32-wasip2"), false)
-        .expect("load @vesper/stage2");
-    assert!(assembled.ok(), "{:?}", assembled.diagnostics);
-    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
-    let o = stage2_boot_options();
-    let stage2_guest = "/out/tmp_stage2_fp.wasm";
-    let stage3_guest = "/out/tmp_stage3_fp.wasm";
-    let stage2_path = dir.join("tmp_stage2_fp.wasm");
-    let stage3_path = dir.join("tmp_stage3_fp.wasm");
-    let boot_syms_path = sidecar_path(&stage2_path, ".boot.syms");
-    remove_stage2_sidecars(&stage2_path);
-    remove_stage2_sidecars(&stage3_path);
-    let _ = std::fs::remove_file(&boot_syms_path);
-    let boot_component = port_with_syms(&checked, &o, &boot_syms_path)
-        .expect("compile @vesper/stage2 boot component");
-    let boot = PreparedComponent::new(&boot_component).expect("prepare @vesper/stage2 boot");
-
-    let got = boot
-        .run(&Ctx {
-            args: vec!["stage2", "packages/vesper-stage2", stage2_guest, "main"],
-            env: vec![("VESPER_STAGE2_SYMS", "1")],
-            dirs: vec![(repo(), ".".into()), (dir.clone(), "/out".into())],
-            fuel: Some(u64::MAX),
-            diag_base: Some(stage2_path.clone()),
-            syms_file: Some(boot_syms_path.clone()),
-        })
-        .unwrap_or_else(|e| panic!("run @vesper/stage2 boot under WASI:\n{e}"));
-    assert_eq!(
-        got,
-        0,
-        "{}",
-        format_stage2_error("stage2 boot", got, Some(&stage2_path))
-    );
-    let stage2_bytes = std::fs::read(&stage2_path).expect("read stage2.wasm");
-    assert!(
-        stage2_bytes.starts_with(b"\0asm\x0d\x00\x01\x00"),
-        "expected WASI component header from @vesper/stage2"
-    );
-
-    // Stage 2 directly emits a runnable WASI component via @vesper/wit-component:
-    // instantiate stage2.wasm directly with zero Rust compiler or wrapping glue.
-    let stage2_syms = sidecar_path(&stage2_path, ".syms");
-    let got3 = run(
-        &stage2_bytes,
-        &Ctx {
-            args: vec!["stage2", "packages/vesper-stage2", stage3_guest, "main"],
-            env: vec![("VESPER_STAGE2_SYMS", "1")],
-            dirs: vec![(repo(), ".".into()), (dir.clone(), "/out".into())],
-            fuel: Some(u64::MAX),
-            diag_base: Some(stage3_path.clone()),
-            syms_file: Some(stage2_syms),
-        },
-    )
-    .unwrap_or_else(|e| panic!("run @vesper/stage2 self-built component under WASI:\n{e}"));
-    assert_eq!(
-        got3,
-        0,
-        "{}",
-        format_stage2_error("stage2 self-built", got3, Some(&stage3_path))
-    );
-
-    let stage3_bytes = std::fs::read(&stage3_path).expect("read stage3.wasm");
-    assert_eq!(
-        stage2_bytes,
-        stage3_bytes,
-        "Stage 2 fixed point mismatch: stage2.wasm ({} bytes) != stage3.wasm ({} bytes)",
-        stage2_bytes.len(),
-        stage3_bytes.len()
-    );
-
-    let cli = wasmtime_cli_bin();
-    let stage2_cwasm_path = dir.join("tmp_stage2_fp.cwasm");
-    if let Some(cli) = &cli {
-        let stage3_cli_path = dir.join("tmp_stage3_cli_fp.wasm");
-        run_stage2_wasmtime_cli(
-            cli,
-            &stage2_path,
-            false,
-            &repo(),
-            &dir,
-            "packages/vesper-stage2",
-            &stage3_cli_path,
-        );
-        let stage3_cli_bytes = std::fs::read(&stage3_cli_path).expect("read CLI stage3.wasm");
-        assert_eq!(
-            stage2_bytes,
-            stage3_cli_bytes,
-            "Stage 2 wasmtime CLI fixed point mismatch: stage2.wasm ({} bytes) != stage3_cli.wasm ({} bytes)",
-            stage2_bytes.len(),
-            stage3_cli_bytes.len()
-        );
-        remove_stage2_sidecars(&stage3_cli_path);
-
-        let stage3_cwasm_path = dir.join("tmp_stage3_cwasm_fp.wasm");
-        precompile_stage2_wasmtime_cli(cli, &stage2_path, &stage2_cwasm_path);
-        run_stage2_wasmtime_cli(
-            cli,
-            &stage2_cwasm_path,
-            true,
-            &repo(),
-            &dir,
-            "packages/vesper-stage2",
-            &stage3_cwasm_path,
-        );
-        let stage3_cwasm_bytes =
-            std::fs::read(&stage3_cwasm_path).expect("read precompiled CLI stage3.wasm");
-        assert_eq!(
-            stage2_bytes,
-            stage3_cwasm_bytes,
-            "Stage 2 precompiled wasmtime CLI fixed point mismatch: stage2.wasm ({} bytes) != stage3_cwasm.wasm ({} bytes)",
-            stage2_bytes.len(),
-            stage3_cwasm_bytes.len()
-        );
-        remove_stage2_sidecars(&stage3_cwasm_path);
-    }
-
-    let stage2 = PreparedComponent::new(&stage2_bytes).expect("prepare stage2.wasm");
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    check_stage2_native_object(&stage2, &dir);
-    check_compiler_packages_fixed_point(
-        &dir,
-        &boot,
-        &boot_syms_path,
-        &stage2,
-        &sidecar_path(&stage2_path, ".syms"),
-        cli.as_deref().map(|c| (c, stage2_cwasm_path.as_path())),
-    );
-    let _ = std::fs::remove_file(&stage2_cwasm_path);
-
-    remove_stage2_sidecars(&stage2_path);
-    remove_stage2_sidecars(&stage3_path);
-    let _ = std::fs::remove_file(&boot_syms_path);
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
-    use object::{Object, ObjectSection, ObjectSymbol};
-
-    let package = dir.join("native-scalar");
-    std::fs::create_dir_all(package.join("src")).unwrap();
-    std::fs::write(
-        package.join("Loom.toml"),
-        "[package]\nname = \"@vesper-test/native-scalar\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
-    )
-    .unwrap();
-    std::fs::write(
-        package.join("src/lib.ves"),
-        "pub fn mix(x: u64, y: u64) -> u64 { wrapping_add(wrapping_mul(x, 5), y ^ 11) }\n\
-         pub fn choose(x: u64, y: u64) -> u64 {\n\
-             wrapping_add(\n\
-                 if x < y { if x == 0 { y } else { wrapping_mul(x, 3) } } else { y ^ 8 },\n\
-                 if y >= 2 && x != 0 { x } else { y }\n\
-             )\n\
-         }\n\
-         fn twist(x: u64, y: u64) -> u64 { wrapping_mul(x ^ 5, wrapping_add(y, 1)) }\n\
-         fn factorial(x: u64) -> u64 {\n\
-             if x <= 1 { 1 } else { wrapping_mul(x, factorial(wrapping_sub(x, 1))) }\n\
-         }\n\
-         pub fn calls(x: u64, y: u64) -> u64 {\n\
-             wrapping_add(twist(y, x), wrapping_add(twist(x, y), factorial(x & 7)))\n\
-         }\n\
-         fn stack_sum(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {\n\
-             wrapping_add(twist(a, b), wrapping_add(twist(c, d), wrapping_add(twist(e, f), twist(g, h))))\n\
-         }\n\
-         pub fn stack_args(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {\n\
-             wrapping_add(stack_sum(h, g, f, e, d, c, b, a), if g < h { h } else { g })\n\
-         }\n\
-         fn offset(a: i64, b: i64) -> i64 {\n\
-             if a < b { wrapping_add(a, -7) } else { wrapping_sub(a, -11) }\n\
-         }\n\
-         pub fn select_signed(a: i64, b: u64) -> i64 {\n\
-             let right = wrapping_i64(b);\n\
-             let a = if !(a > right) { offset(a, right) }\n\
-                 else { wrapping_i64(wrapping_u64(a) ^ b) };\n\
-             let _ = wrapping_add(a, 1);\n\
-             a\n\
-         }\n\
-         pub fn mutate(a: i64, b: i64) -> i64 {\n\
-             let mut x = a;\n\
-             let original = x;\n\
-             if b < 0 { x = offset(x, b); } else { x = wrapping_sub(x, b); };\n\
-             if b == 0 { x = -20; };\n\
-             let mut y = x;\n\
-             y = wrapping_add(y, b);\n\
-             x = offset(y, x);\n\
-             wrapping_sub(x, original)\n\
-         }\n\
-         pub fn sum_odd(n: u64, seed: u64) -> u64 {\n\
-             let mut i = n & 31;\n\
-             let mut acc = seed;\n\
-             loop {\n\
-                 if i == 0 { break acc; };\n\
-                 i = wrapping_sub(i, 1);\n\
-                 if (i & 1) == 0 { continue; };\n\
-                 acc = wrapping_add(acc, i);\n\
-             }\n\
-         }\n\
-         pub fn range_score(lo: u64, hi: u64, stop: u64) -> u64 {\n\
-             let mut score: u64 = 0;\n\
-             for i in lo..=hi {\n\
-                 if i == stop { return score; };\n\
-                 score = wrapping_add(score, i);\n\
-             };\n\
-             score\n\
-         }\n\
-         fn invert_truth(value: bool) -> bool { !value }\n\
-         pub fn bit_truth(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, flip: bool) -> bool {\n\
-             let equal = ~a == b;\n\
-             if flip { invert_truth(equal) } else { equal }\n\
-         }\n\
-         fn narrow_call(x: u8, a: u8, b: u8) -> i32 {\n\
-             if a < x { widen_i32(~wrapping_add(a, b)) } else { widen_i32(wrapping_i8(x)) }\n\
-         }\n\
-         pub fn mixed_narrow(a: u8, b: i16, c: u32, d: u8, e: u8, f: u8, g: i8) -> i64 {\n\
-             let x = wrapping_add(a, d);\n\
-             let mut y = widen_i16(g);\n\
-             if y < b { y = wrapping_add(y, b); };\n\
-             let z = wrapping_mul(c, widen_u32(x));\n\
-             wrapping_add(wrapping_add(widen_i64(y), widen_i64(z)), widen_i64(narrow_call(x, e, f)))\n\
-         }\n\
-         fn scale_reply(scale: bool, seed: i64) -> i64 {\n\
-             match scale { true => wrapping_mul(seed, 13), false => wrapping_add(seed, 21) }\n\
-         }\n\
-         pub fn match_score(x: i64, seed: i64, scale: bool) -> i64 {\n\
-             let value = match x {\n\
-                 -9223372036854775808 => return seed,\n\
-                 -9 | -8 => wrapping_add(seed, 3),\n\
-                 0 => 17,\n\
-                 9223372036854775807 => wrapping_add(seed, 5),\n\
-                 fallback => wrapping_sub(fallback, seed),\n\
-             };\n\
-             scale_reply(scale, value)\n\
-         }\n\
-         pub fn integer_ops(x: i16, amount: u64) -> i16 {\n\
-             let quotient = x / -5;\n\
-             let remainder = x % -8;\n\
-             let right = x >> (amount & 15);\n\
-             let left = x << 14;\n\
-             wrapping_add(wrapping_sub(quotient, remainder), left ^ right)\n\
-         }\n\
-         pub fn proven_arithmetic(x: i8) -> i64 {\n\
-             let low: i8 = -128;\n\
-             let product = (x & 1) * low;\n\
-             let negative = -(x & 15);\n\
-             let zero = product - product;\n\
-             let constant = 7 * 3 + 1;\n\
-             wrapping_add(widen_i64(negative),\n\
-                          wrapping_add(widen_i64(product), wrapping_add(widen_i64(zero), constant)))\n\
-         }\n\
-         pub fn factored_bounds(x: i64, amount: i64) -> i8 {\n\
-             let quotient = x / (((amount & 7) * 2) + 1);\n\
-             let remainder = x % ((amount & 3) - 4);\n\
-             let shifted = quotient >> (((amount & 3) * 2) + 1);\n\
-             let low: i64 = -128;\n\
-             narrow_i8(low + ((wrapping_add(shifted, remainder) & 31) * 4))\n\
-         }\n\
-         fn magnitude(a: f32, b: f32) -> f32 { sqrt(a * a + b * b) }\n\
-         pub fn floating_call(scale: f64, mode: i64, a: f32, b: f32) -> f64 {\n\
-             let mut result: f64 = widen_f64(magnitude(a, b));\n\
-             if mode < 0 { result = result / scale; } else { result = result * scale; };\n\
-             result + 2.5\n\
-         }\n\
-         fn apply_delta(inout value: u64, delta: u64, active: bool) {\n\
-             if !active { return (); };\n\
-             value = wrapping_add(value, delta);\n\
-         }\n\
-         pub fn procedure_value(seed: u64, delta: u64, active: bool) -> u64 {\n\
-             let mut value = seed;\n\
-             let prior = value;\n\
-             let done = apply_delta(inout value, delta, active);\n\
-             done;\n\
-             apply_delta(value, 1, true);\n\
-             wrapping_add(wrapping_mul(prior, 3), value)\n\
-         }\n\
-         fn tuple_tick(inout state: i64) -> i64 {\n\
-             let prior = state;\n\
-             state = wrapping_add(state, 1);\n\
-             prior\n\
-         }\n\
-         fn twice_field(value: i64) -> i64 { wrapping_mul(value, 2) }\n\
-         pub fn tuple_value(a: i64, b: i64, flag: bool) -> i64 {\n\
-             let mut state = a;\n\
-             let tuple = (tuple_tick(state), b, tuple_tick(state));\n\
-             let alias = tuple;\n\
-             if flag {\n\
-                 let (first, _, last) = alias;\n\
-                 wrapping_add(wrapping_mul(first, 5), last)\n\
-             } else { wrapping_sub(twice_field(alias.1), state) }\n\
-         }\n\
-         copy struct FieldValues { left: i64, right: i64, bias: i64 }\n\
-         pub fn record_value(a: i64, b: i64, flag: bool) -> i64 {\n\
-             let mut state = a;\n\
-             let record = FieldValues { right: tuple_tick(state), bias: b, left: tuple_tick(state) };\n\
-             let alias = record;\n\
-             if flag { wrapping_add(twice_field(alias.left), alias.bias) }\n\
-             else { wrapping_sub(alias.right, alias.left) }\n\
-         }\n\
-         pub fn constant_after_branch(flag: bool) -> i64 {\n\
-             let base = 9223372036854775799;\n\
-             let step = if flag { 5 } else { 7 };\n\
-             let next = base + 1;\n\
-             wrapping_add(next, step)\n\
-         }\n\
-         fn step_scalars(inout byte: i8, inout active: bool, inout single: f32, inout double: f64, step: f32, scale: f64) {\n\
-             byte = wrapping_sub(byte, 3);\n\
-             active = !active;\n\
-             single = single + step;\n\
-             double = double * scale;\n\
-         }\n\
-         pub fn scalar_inout(inout byte: i8, inout active: bool, inout single: f32, inout double: f64, step: f32, scale: f64, change: bool) -> u64 {\n\
-             if change { step_scalars(byte, active, single, double, step, scale); };\n\
-             let mut local = byte;\n\
-             let mut flipped = active;\n\
-             let mut s = single;\n\
-             let mut d = double;\n\
-             step_scalars(local, flipped, s, d, step, scale);\n\
-             if flipped { to_bits_f64(d) } else {\n\
-                 let bits: u32 = to_bits_f32(s);\n\
-                 wrapping_add(widen_u64(bits), wrapping_u64(widen_i64(local)))\n\
-             }\n\
-         }\n\
-         copy struct NestedFields { pair: FieldValues, ready: bool }\n\
-         pub fn nested_value(a: i64, b: i64, flag: bool) -> i64 {\n\
-             let inner = FieldValues { bias: 3, left: a, right: b };\n\
-             let outer = NestedFields { ready: flag, pair: inner };\n\
-             let holder = (outer, a);\n\
-             let (row, base) = holder;\n\
-             let field = row.pair;\n\
-             if row.ready { wrapping_add(field.left, base) } else {\n\
-                 let right = (NestedFields { ready: true, pair: inner }).pair.right;\n\
-                 wrapping_sub(right, row.pair.bias)\n\
-             }\n\
-         }\n\
-         copy struct ComparableFields { sample: f64, tag: i8, ready: bool }\n\
-         pub fn product_equality(a: u64, b: u64, x: u64, y: u64, flags: u64) -> bool {\n\
-             let left = ComparableFields { sample: from_bits_f64(a), tag: wrapping_i8(x), ready: true };\n\
-             let right = ComparableFields { ready: (flags & 2) != 0, tag: wrapping_i8(y), sample: from_bits_f64(b) };\n\
-             let left = (left, ((), 3));\n\
-             let right = (right, ((), 3));\n\
-             if (flags & 1) != 0 { left == right } else { left != right }\n\
-         }\n\
-         copy struct ResultFields { tag: i8, single: f32, wide: f64 }\n\
-         pub fn result_value(a: i64, b: u64, c: u64, d: u64, e: u64, f: u64, flag: bool, single: f32, wide: f64) -> (u64, ResultFields, (), i64) {\n\
-             let state = ResultFields { wide: wide, single: single, tag: wrapping_i8(a) };\n\
-             if flag { return (wrapping_add(wrapping_add(e, f), b), state, (), wrapping_sub(a, 3)); };\n\
-             (twist(c, d), state, (), wrapping_add(a, 7))\n\
-         }\n\
-         fn literal_shift(value: f32) -> f32 { value + 0.25 }\n\
-         pub fn float_literals(flag: bool) -> (f32, f32, f32, f32, f32, f32, f32) {\n\
-             let even: f32 = 1.000000059604644775390625;\n\
-             let odd: f32 = 1.000000178813934326171875;\n\
-             let subnormal: f32 = 1.401298464324817e-45;\n\
-             let underflow: f32 = -1.0e-50;\n\
-             let finite: f32 = 3.4028234663852886e38;\n\
-             let overflow: f32 = 3.4028236692093846e38;\n\
-             let x: f32 = if flag { 1.5 } else { 1.75 };\n\
-             (even, odd, subnormal, underflow, finite, overflow, literal_shift(x))\n\
-         }\n\
-         copy struct CallFields { tag: i8, sample: f32, active: bool }\n\
-         fn sample_cells(inout state: i64, step: i64, sample: f32, active: bool) -> CallFields {\n\
-             let prior = state;\n\
-             state = wrapping_add(state, step);\n\
-             CallFields { active: active, sample: sample, tag: wrapping_i8(prior) }\n\
-         }\n\
-         fn pair_cells(inout state: i64, step: i64) -> (i16, u64) {\n\
-             let prior = state;\n\
-             state = wrapping_add(state, step);\n\
-             (wrapping_i16(prior), wrapping_u64(state))\n\
-         }\n\
-         pub fn aggregate_calls(seed: i64, choose: bool, sample: f32) -> u64 {\n\
-             let mut state = seed;\n\
-             let first = sample_cells(state, 2, sample, choose);\n\
-             let (short, changed) = pair_cells(state, 5);\n\
-             let last = sample_cells(state, 19, sample, !choose);\n\
-             if first.active {\n\
-                 let bits: u32 = to_bits_f32(first.sample);\n\
-                 wrapping_add(widen_u64(bits), wrapping_u64(widen_i64(last.tag)))\n\
-             } else {\n\
-                 let tag_bits = wrapping_u64(widen_i64(first.tag));\n\
-                 wrapping_add(wrapping_add(tag_bits, wrapping_u64(widen_i64(short))), changed)\n\
-             }\n\
-         }\n\
-         fn remainder_helper(a: f64, b: f64) -> f64 { a % b }\n\
-         pub fn float_remainders(a: f64, b: f64, x: f32, y: f32) -> f64 {\n\
-             let first = a % b;\n\
-             let second = remainder_helper(b, a);\n\
-             (first + second) + widen_f64(x % y)\n\
-         }\n\
-         fn fmod(a: f64, b: f64) -> f64 { a % b }\n\
-         pub fn floating_math(x: f64, y: f32) -> (f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, f32, f32, f32, f32) {\n\
-             let fused64 = fma(1.0000000000000002, 0.9999999999999998, -1.0);\n\
-             let fused32: f32 = fma(1.00000011920928955078125, 0.99999988079071044921875, -1.0);\n\
-             let minimum32 = min(-0.0, y);\n\
-             (floor(x), ceil(x), trunc(x), round(x), min(-0.0, x), max(0.0, x), fused64,\n\
-              floor(y), ceil(y), trunc(y), round(y), minimum32, max(0.0, y), fused32)\n\
-         }\n\
-         pub fn float_conversions(i: i16, u: u64, x: f32, y: f64) -> (u32, u64, u32, u64, i64, u64, i64, u64) {\n\
-             let signed = saturating_i8(y);\n\
-             let unsigned = saturating_u16(x);\n\
-             (to_bits_f32(widen_f32(i)), to_bits_f64(widen_f64(i)),\n\
-              to_bits_f32(nearest_f32(u)), to_bits_f64(nearest_f64(u)),\n\
-              widen_i64(signed), widen_u64(unsigned), saturating_i64(x), saturating_u64(y))\n\
-         }\n\
-         pub fn integer_bits(x: i8, n: i8, y: u16, shift: u16, rotation: i64) -> (i64, u64, u64, u64, i64) {\n\
-             let left = bit_shl(y, shift);\n\
-             let flags = bit_xor(bit_or(bit_and(left, 255), 256), 3);\n\
-             let tag: u32 = 2147483649;\n\
-             (widen_i64(bit_shr(x, n)), widen_u64(flags), widen_u64(rotate_left(y, rotation)),\n\
-              widen_u64(rotate_right(tag, 33)), widen_i64(!x))\n\
-         }\n\
-         copy struct NestedCallMarker {}\n\
-         copy struct NestedCallBits { measurement: (f32, f64), tag: i8, marker: NestedCallMarker }\n\
-         copy struct NestedCallRow { data: NestedCallBits, ready: bool }\n\
-         fn nested_result(x: i64, y: f32, ready: bool) -> (NestedCallRow, ((), i16)) {\n\
-             let data = NestedCallBits { tag: wrapping_i8(x), marker: NestedCallMarker {}, measurement: (y, widen_f64(y) + 0.5) };\n\
-             if ready { return (NestedCallRow { ready: true, data: data }, ((), wrapping_i16(x))); };\n\
-             (NestedCallRow { ready: false, data: data }, ((), wrapping_i16(wrapping_add(x, 1))))\n\
-         }\n\
-         pub fn nested_call_entry(x: i64, y: f32, ready: bool) -> (NestedCallRow, ((), i16), bool, i64) {\n\
-             let (earlier, payload) = nested_result(x, y, ready);\n\
-             let later = nested_result(wrapping_add(x, 1), y + 1.0, !ready);\n\
-             let (later_row, _) = later;\n\
-             let equal = earlier.data == later_row.data;\n\
-             if earlier.ready { return (earlier, payload, equal, widen_i64(earlier.data.tag)); };\n\
-             (earlier, payload, equal, widen_i64(later_row.data.tag))\n\
-         }\n\
-         pub fn product_inputs(a: u64, b: u64, c: u64, d: u64, row: NestedCallRow, sample: (i16, f32), delta: f64)\n\
-             -> (NestedCallRow, (i16, f32), i64, f64, u64) {\n\
-             let (tag, reading) = sample;\n\
-             let signed = widen_i64(row.data.tag);\n\
-             let mixed = if row.ready { wrapping_add(signed, widen_i64(tag)) }\n\
-                 else { wrapping_sub(signed, widen_i64(tag)) };\n\
-             let (_, wide) = row.data.measurement;\n\
-             let scaled = (wide + delta) + widen_f64(reading);\n\
-             let sum = wrapping_add(wrapping_add(a, b), wrapping_add(c, d));\n\
-             (row, sample, mixed, scaled, sum)\n\
-         }\n\
-         pub fn product_caller(x: i64, y: f32, ready: bool) -> (NestedCallRow, (i16, f32), i64, f64, u64) {\n\
-             let (row, _) = nested_result(x, y, ready);\n\
-             let sample = (wrapping_i16(wrapping_add(x, 2)), y + 1.0);\n\
-             if ready { return product_inputs(10, 20, 30, 40, row, sample, 1.5); };\n\
-             product_inputs(1, 2, 3, 4, row, sample, -0.5)\n\
-         }\n\
-         fn adjust_sample(inout sample: f32, delta: f32) {\n\
-             sample += delta;\n\
-             sample *= 2.0;\n\
-             sample -= 1.0;\n\
-             sample /= 2.0;\n\
-             sample %= 3.0;\n\
-         }\n\
-         pub fn compound_values(a: f64, b: f64, x: f32, choose: bool) -> (f64, f32, u64, i8) {\n\
-             let mut wide = a;\n\
-             wide += b;\n\
-             wide -= 0.5;\n\
-             wide *= 2.0;\n\
-             wide /= 4.0;\n\
-             wide %= 3.0;\n\
-             let mut sample = x;\n\
-             if choose { adjust_sample(inout sample, 1.25); } else { sample -= 0.25; };\n\
-             let mut count: u64 = 6;\n\
-             count += 4;\n\
-             count *= 3;\n\
-             count -= 1;\n\
-             count /= 2;\n\
-             count %= 6;\n\
-             let mut signed: i8 = -9;\n\
-             signed /= 2;\n\
-             signed %= -3;\n\
-             (wide, sample, count, signed)\n\
-         }\n\
-         pub fn overflowing_compound(a: u64, b: u64) -> u64 eff [Fail[ArithOverflow]] {\n\
-             let mut value = a;\n\
-             value += b;\n\
-             value\n\
-         }\n\
-         pub fn tuple_match_native(x: i8, y: u16, ready: bool) -> u64 {\n\
-             let pair = (x, (y, ready));\n\
-             match pair {\n\
-                 (-1, (0, true)) | (-2, (1, false)) => 100,\n\
-                 (0, (n, true)) | (1, (n, false)) => wrapping_add(200, widen_u64(n)),\n\
-                 (_, (n, false)) => widen_u64(n),\n\
-                 _ => { let (_, (n, _)) = pair; wrapping_add(1000, widen_u64(n)) },\n\
-             }\n\
-         }\n\
-         copy enum NativeChoice { Empty, Number(i8, bool), Sample { raw: f32, count: u64 } }\n\
-         pub fn enum_packer(pick: u64, tag: i8, raw: f32, ready: bool) -> NativeChoice {\n\
-             if pick == 0 { return NativeChoice::Number(tag, ready); };\n\
-             if pick == 1 { return NativeChoice::Sample { count: 9, raw: raw }; };\n\
-             NativeChoice::Empty\n\
-         }\n\
-         pub fn enum_reader(value: NativeChoice) -> u64 {\n\
-             match value {\n\
-                 NativeChoice::Number(-1, true) => 100,\n\
-                 NativeChoice::Number(tag, ready) => if ready { wrapping_u64(tag) } else { 200 },\n\
-                 NativeChoice::Sample { count: n, raw: x } => wrapping_add(n, widen_u64(to_bits_f32(x))),\n\
-                 NativeChoice::Empty => 300,\n\
-             }\n\
-         }\n\
-         pub fn enum_pipeline(pick: u64, tag: i8, raw: f32, ready: bool) -> u64 {\n\
-             enum_reader(enum_packer(pick, tag, raw, ready))\n\
-         }\n\
-         fn forwarded_source(tag: i8, sample: f32) -> CallFields {\n\
-             CallFields { tag: tag, sample: sample, active: true }\n\
-         }\n\
-         fn forwarded_update(row: CallFields) -> CallFields {\n\
-             CallFields { tag: wrapping_add(row.tag, 1), sample: row.sample + 1.0, active: !row.active }\n\
-         }\n\
-         fn forwarded_fields(a: CallFields, b: CallFields, prior: CallFields) -> (i64, f32, i64, f32, bool) {\n\
-             let same = a.tag == b.tag && to_bits_f32(a.sample) == to_bits_f32(b.sample) && a.active == b.active;\n\
-             (widen_i64(a.tag), a.sample, widen_i64(prior.tag), prior.sample, same && prior.active && !a.active)\n\
-         }\n\
-         pub fn forwarded_results(tag: i8, sample: f32) -> (i64, f32, i64, f32, bool) {\n\
-             let prior = forwarded_source(tag, sample);\n\
-             let alias = prior;\n\
-             let updated = forwarded_update(alias);\n\
-             forwarded_fields(updated, updated, prior)\n\
-         }\n\
-         fn scalar_option(tag: i8, present: bool) -> Option[i8] {\n\
-             if present { return Option::Some(tag); }\n\
-             Option::None\n\
-         }\n\
-         fn scalar_result(sample: f32, tag: i8) -> Result[f32, i16] {\n\
-             if tag < 0 { return Result::Err(widen_i16(tag)); }\n\
-             Result::Ok(sample)\n\
-         }\n\
-         pub fn generic_enum_pipeline(outcome: bool, sample: f32, tag: i8) -> u64 {\n\
-             let option = scalar_option(tag, outcome);\n\
-             let value = match option { Option::Some(n) => n, Option::None => 1 };\n\
-             match scalar_result(sample, value) {\n\
-                 Result::Ok(x) => widen_u64(to_bits_f32(x)),\n\
-                 Result::Err(n) => wrapping_u64(n),\n\
-             }\n\
-         }\n\
-         pub fn aggregate_join(swap: bool, x: i16, y: i16, sample: f32) -> (i16, f32, i16, u64) {\n\
-             let selected: ((i16, f32), Option[i16]) = if swap {\n\
-                 ((y, sample), Option::Some(x))\n\
-             } else {\n\
-                 let option: Option[i16] = if sample == 0.0 { Option::None } else { Option::Some(y) };\n\
-                 ((x, sample), option)\n\
-             };\n\
-             let ((a, b), option) = selected;\n\
-             let result: (i16, u64) = match option {\n\
-                 Option::Some(n) => (n, 17),\n\
-                 Option::None => (0, 9),\n\
-             };\n\
-             let (c, marker) = result;\n\
-             (a, b, c, marker)\n\
-         }\n\
-         fn enum_plain_route(present: bool, tag: i8) -> u64 {\n\
-             let option: Option[i8] = if present { Option::Some(tag) } else { Option::None };\n\
-             match option { Option::None => 17, Option::Some(n) => wrapping_u64(n) }\n\
-         }\n\
-         fn enum_literal_route(present: bool, tag: i8) -> u64 {\n\
-             let option: Option[i8] = if present { Option::Some(tag) } else { Option::None };\n\
-             match option {\n\
-                 Option::Some(-1) => 23,\n\
-                 Option::Some(n) => wrapping_u64(n),\n\
-                 Option::None => 29,\n\
-             }\n\
-         }\n\
-         fn enum_observed_route(inout seen: u64, present: bool, tag: i8) -> u64 {\n\
-             let observed: Option[i8] = if present { Option::Some(tag) } else { Option::None };\n\
-             seen = wrapping_add(seen, 1);\n\
-             match observed { Option::None => 39, Option::Some(n) => wrapping_u64(n) }\n\
-         }\n\
-         fn enum_direct_route(tag: i8) -> u64 {\n\
-             match Option::Some(tag) { Option::None => 31, Option::Some(n) => wrapping_u64(n) }\n\
-         }\n\
-         pub fn enum_routes(inout seen: u64, present: bool, tag: i8) -> (u64, u64, u64, u64) {\n\
-             (enum_direct_route(tag), enum_plain_route(present, tag),\n\
-              enum_literal_route(present, tag), enum_observed_route(inout seen, present, tag))\n\
-         }\n\
-         fn unsupported(x: u64) -> u64 {\n\
-             let value: Option[(u64, u64)] = Option::Some((x, x));\n\
-             match value { Option::Some(_) => 7, _ => 9 }\n\
-         }\n\
-         pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
-    )
-    .unwrap();
-    let object = dir.join("native-scalar.o");
-    let compile = |entry| {
-        stage2
-            .run(&Ctx {
-                args: vec!["stage2", "native-scalar", "/out/native-scalar.o", entry],
-                env: vec![("VESPER_STAGE2_X86_64_ELF", "1")],
-                dirs: vec![(dir.into(), ".".into()), (dir.into(), "/out".into())],
-                fuel: Some(u64::MAX),
-                diag_base: Some(object.clone()),
-                ..Ctx::default()
-            })
-            .expect("Stage 2 native object request")
-    };
-    assert_eq!(
-        compile("mix"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let leaf = dir.join("native-mix.o");
-    std::fs::rename(&object, &leaf).unwrap();
-    assert_eq!(
-        compile("choose"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let branch = dir.join("native-choose.o");
-    std::fs::rename(&object, &branch).unwrap();
-    assert_eq!(
-        compile("calls"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let bytes = std::fs::read(&object).unwrap();
-    let file = object::File::parse(bytes.as_slice()).unwrap();
-    assert_eq!(file.format(), object::BinaryFormat::Elf);
-    assert!(file.symbol_by_name("calls").unwrap().is_global());
-    for name in ["twist", "factorial"] {
-        let symbol = file.symbol_by_name(name).unwrap();
-        assert!(symbol.is_definition() && !symbol.is_global());
-    }
-    assert_eq!(
-        file.section_by_name(".text").unwrap().relocations().count(),
-        4
-    );
-    let calls = dir.join("native-calls.o");
-    std::fs::rename(&object, &calls).unwrap();
-    assert_eq!(
-        compile("stack_args"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let stack = dir.join("native-stack-args.o");
-    std::fs::rename(&object, &stack).unwrap();
-    assert_eq!(
-        compile("select_signed"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let signed = dir.join("native-signed.o");
-    std::fs::rename(&object, &signed).unwrap();
-    assert_eq!(
-        compile("mutate"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let mutable = dir.join("native-mutable.o");
-    std::fs::rename(&object, &mutable).unwrap();
-    assert_eq!(
-        compile("sum_odd"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let loop_object = dir.join("native-loop.o");
-    std::fs::rename(&object, &loop_object).unwrap();
-    assert_eq!(
-        compile("range_score"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let range_object = dir.join("native-range.o");
-    std::fs::rename(&object, &range_object).unwrap();
-    assert_eq!(
-        compile("bit_truth"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let bool_object = dir.join("native-bool.o");
-    std::fs::rename(&object, &bool_object).unwrap();
-    assert_eq!(
-        compile("mixed_narrow"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let narrow_object = dir.join("native-narrow.o");
-    std::fs::rename(&object, &narrow_object).unwrap();
-    assert_eq!(
-        compile("match_score"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let match_object = dir.join("native-match.o");
-    std::fs::rename(&object, &match_object).unwrap();
-    assert_eq!(
-        compile("integer_ops"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let integer_object = dir.join("native-integer.o");
-    std::fs::rename(&object, &integer_object).unwrap();
-    assert_eq!(
-        compile("proven_arithmetic"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let arithmetic_object = dir.join("native-checked-arithmetic.o");
-    std::fs::rename(&object, &arithmetic_object).unwrap();
-    assert_eq!(
-        compile("factored_bounds"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let bounds_object = dir.join("native-bounds.o");
-    std::fs::rename(&object, &bounds_object).unwrap();
-    assert_eq!(
-        compile("floating_call"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let float_object = dir.join("native-float.o");
-    std::fs::rename(&object, &float_object).unwrap();
-    assert_eq!(
-        compile("procedure_value"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let procedure_object = dir.join("native-procedure.o");
-    std::fs::rename(&object, &procedure_object).unwrap();
-    assert_eq!(
-        compile("tuple_value"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let tuple_object = dir.join("native-tuple.o");
-    std::fs::rename(&object, &tuple_object).unwrap();
-    assert_eq!(
-        compile("record_value"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let record_object = dir.join("native-record.o");
-    std::fs::rename(&object, &record_object).unwrap();
-    assert_eq!(
-        compile("constant_after_branch"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let constant_object = dir.join("native-constant.o");
-    std::fs::rename(&object, &constant_object).unwrap();
-    assert_eq!(
-        compile("scalar_inout"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let inout_object = dir.join("native-inout.o");
-    std::fs::rename(&object, &inout_object).unwrap();
-    assert_eq!(
-        compile("nested_value"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let nested_object = dir.join("native-nested.o");
-    std::fs::rename(&object, &nested_object).unwrap();
-    assert_eq!(
-        compile("product_equality"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let equality_object = dir.join("native-equality.o");
-    std::fs::rename(&object, &equality_object).unwrap();
-    assert_eq!(
-        compile("result_value"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let result_object = dir.join("native-result.o");
-    std::fs::rename(&object, &result_object).unwrap();
-    assert_eq!(
-        compile("float_literals"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let literals_object = dir.join("native-literals.o");
-    std::fs::rename(&object, &literals_object).unwrap();
-    assert_eq!(
-        compile("aggregate_calls"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let aggregate_call_object = dir.join("native-aggregate-call.o");
-    std::fs::rename(&object, &aggregate_call_object).unwrap();
-    assert_eq!(
-        compile("float_remainders"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let bytes = std::fs::read(&object).unwrap();
-    let file = object::File::parse(bytes.as_slice()).unwrap();
-    for name in ["fmod", "fmodf"] {
-        let symbol = file.symbol_by_name(name).unwrap();
-        assert!(symbol.is_undefined() && symbol.is_global());
-    }
-    assert!(file.symbol_by_name("remainder_helper").unwrap().is_local());
-    let mut call_symbols = Vec::new();
-    for (_, relocation) in file.section_by_name(".text").unwrap().relocations() {
-        assert_eq!(
-            relocation.flags(),
-            object::RelocationFlags::Elf {
-                r_type: object::elf::R_X86_64_PLT32
-            }
-        );
-        let object::RelocationTarget::Symbol(target) = relocation.target() else {
-            panic!("native call must target a symbol");
-        };
-        call_symbols.push(file.symbol_by_index(target).unwrap().name().unwrap());
-    }
-    assert_eq!(call_symbols, ["fmod", "remainder_helper", "fmodf", "fmod"]);
-    assert_ne!(compile("fmod"), 0);
-    assert_eq!(std::fs::read(&object).unwrap(), bytes);
-    assert_ne!(compile("decline"), 0);
-    assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
-    assert_eq!(std::fs::read(&object).unwrap(), bytes);
-    let remainder_object = dir.join("native-remainder.o");
-    std::fs::rename(&object, &remainder_object).unwrap();
-    assert_eq!(
-        compile("floating_math"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let math_object = dir.join("native-float-math.o");
-    std::fs::rename(&object, &math_object).unwrap();
-    assert_eq!(
-        compile("float_conversions"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let conversions_object = dir.join("native-float-conversions.o");
-    std::fs::rename(&object, &conversions_object).unwrap();
-    assert_eq!(
-        compile("integer_bits"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let bits_object = dir.join("native-integer-bits.o");
-    std::fs::rename(&object, &bits_object).unwrap();
-    assert_eq!(
-        compile("nested_call_entry"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let nested_object = dir.join("native-nested-call.o");
-    std::fs::rename(&object, &nested_object).unwrap();
-    assert_eq!(
-        compile("product_inputs"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let product_inputs_object = dir.join("native-product-inputs.o");
-    std::fs::rename(&object, &product_inputs_object).unwrap();
-    assert_eq!(
-        compile("product_caller"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let product_caller_object = dir.join("native-product-caller.o");
-    std::fs::rename(&object, &product_caller_object).unwrap();
-    assert_eq!(
-        compile("compound_values"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let compound_bytes = std::fs::read(&object).unwrap();
-    assert_ne!(compile("overflowing_compound"), 0);
-    assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
-    assert_eq!(std::fs::read(&object).unwrap(), compound_bytes);
-    let compound_object = dir.join("native-compound-writes.o");
-    std::fs::rename(&object, &compound_object).unwrap();
-    assert_eq!(
-        compile("tuple_match_native"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let tuple_match_object = dir.join("native-tuple-match.o");
-    std::fs::rename(&object, &tuple_match_object).unwrap();
-    assert_eq!(
-        compile("enum_pipeline"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let enum_object = dir.join("native-enum-match.o");
-    std::fs::rename(&object, &enum_object).unwrap();
-    assert_eq!(
-        compile("forwarded_results"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let forwarded_object = dir.join("native-forwarded-results.o");
-    std::fs::rename(&object, &forwarded_object).unwrap();
-    assert_eq!(
-        compile("generic_enum_pipeline"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let generic_enum_object = dir.join("native-generic-enum.o");
-    std::fs::rename(&object, &generic_enum_object).unwrap();
-    assert_eq!(
-        compile("aggregate_join"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-    let aggregate_join_object = dir.join("native-aggregate-join.o");
-    std::fs::rename(&object, &aggregate_join_object).unwrap();
-    assert_eq!(
-        compile("enum_routes"),
-        0,
-        "{:?}",
-        read_stage2_sidecar_notes(&object)
-    );
-
-    let caller = dir.join("native-scalar-caller.c");
-    let binary = dir.join("native-scalar-caller");
-    std::fs::write(
-        &caller,
-        "#include <stdbool.h>\n\
-         #include <stdint.h>\n\
-         #include <math.h>\n\
-         extern uint64_t mix(uint64_t, uint64_t);\n\
-         extern uint64_t choose(uint64_t, uint64_t);\n\
-         extern uint64_t calls(uint64_t, uint64_t);\n\
-         extern uint64_t stack_args(uint64_t, uint64_t, uint64_t, uint64_t,\n\
-                                    uint64_t, uint64_t, uint64_t, uint64_t);\n\
-         extern int64_t select_signed(int64_t, uint64_t);\n\
-         extern int64_t mutate(int64_t, int64_t);\n\
-         extern uint64_t sum_odd(uint64_t, uint64_t);\n\
-         extern uint64_t range_score(uint64_t, uint64_t, uint64_t);\n\
-         extern bool bit_truth(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, bool);\n\
-         extern int64_t mixed_narrow(uint8_t, int16_t, uint32_t, uint8_t, uint8_t, uint8_t, int8_t);\n\
-         extern int64_t match_score(int64_t, int64_t, bool);\n\
-         extern int16_t integer_ops(int16_t, uint64_t);\n\
-         extern int64_t proven_arithmetic(int8_t);\n\
-         extern int8_t factored_bounds(int64_t, int64_t);\n\
-         extern double floating_call(double, int64_t, float, float);\n\
-         extern uint64_t procedure_value(uint64_t, uint64_t, bool);\n\
-         extern int64_t tuple_value(int64_t, int64_t, bool);\n\
-         extern int64_t record_value(int64_t, int64_t, bool);\n\
-         extern int64_t constant_after_branch(bool);\n\
-         extern uint64_t scalar_inout(int64_t *, uint64_t *, float *, double *, float, double, bool);\n\
-         extern int64_t nested_value(int64_t, int64_t, bool);\n\
-         extern bool product_equality(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);\n\
-         extern uint64_t result_value(uint64_t *, int64_t, uint64_t, uint64_t, uint64_t,\n\
-                                      uint64_t, uint64_t, bool, float, double);\n\
-         extern uint64_t float_literals(uint64_t *, bool);\n\
-         extern uint64_t aggregate_calls(int64_t, bool, float);\n\
-         extern double float_remainders(double, double, float, float);\n\
-         extern uint64_t floating_math(uint64_t *, double, float);\n\
-         extern uint64_t float_conversions(uint64_t *, int16_t, uint64_t, float, double);\n\
-         extern uint64_t integer_bits(uint64_t *, int8_t, int8_t, uint16_t, uint16_t, int64_t);\n\
-         extern uint64_t nested_call_entry(uint64_t *, int64_t, float, bool);\n\
-         extern uint64_t product_inputs(uint64_t *, uint64_t, uint64_t, uint64_t, uint64_t, const uint64_t *, const uint64_t *, double);\n\
-         extern uint64_t product_caller(uint64_t *, int64_t, float, bool);\n\
-         extern uint64_t compound_values(uint64_t *, double, double, float, bool);\n\
-         extern uint64_t tuple_match_native(int8_t, uint16_t, bool);\n\
-         extern uint64_t enum_pipeline(uint64_t, int8_t, float, bool);\n\
-         extern uint64_t forwarded_results(uint64_t *, int8_t, float);\n\
-         extern uint64_t generic_enum_pipeline(bool, float, int8_t);\n\
-         extern uint64_t aggregate_join(uint64_t *, bool, int16_t, int16_t, float);\n\
-         extern uint64_t enum_routes(uint64_t *, uint64_t *, bool, int8_t);\n\
-         int main(void) {\n\
-             if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
-             if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
-                 || choose(UINT64_MAX, 2) != 9 || choose(2, UINT64_MAX) != 8) return 2;\n\
-             if (calls(0, 1) != 15 || calls(6, 2) != 778\n\
-                 || calls(UINT64_MAX, UINT64_MAX) != 5040) return 3;\n\
-             if (stack_args(1, 2, 3, 4, 5, 6, 7, 8) != 148\n\
-                 || stack_args(8, 7, 6, 5, 4, 3, 2, 1) != 62) return 4;\n\
-             if (select_signed(-5, 3) != -12 || select_signed(5, UINT64_MAX) != -6\n\
-                 || select_signed(INT64_MIN, 0) != INT64_MAX - 6) return 5;\n\
-             if (mutate(7, -2) != 2 || mutate(7, 2) != 11 || mutate(7, 0) != -16) return 6;\n\
-             if (sum_odd(11, 5) != 30 || sum_odd(32, 42) != 42\n\
-                 || sum_odd(31, UINT64_MAX) != 224) return 7;\n\
-             if (range_score(7, 4, 1) != 0 || range_score(1, 8, 4) != 6\n\
-                 || range_score(UINT64_MAX - 1, UINT64_MAX, 0) != UINT64_MAX - 2) return 8;\n\
-             if (!bit_truth(0, UINT64_MAX, 0, 0, 0, 0, false)\n\
-                 || bit_truth(UINT64_MAX, 0, 0, 0, 0, 0, true)\n\
-                 || !bit_truth(9, 3, 0, 0, 0, 0, true)) return 9;\n\
-             if (mixed_narrow(250, -500, UINT32_MAX, 20, 9, 5, -20) != UINT32_MAX + INT64_C(208)\n\
-                 || mixed_narrow(120, 300, 60, 20, 200, 5, -100) != 8484) return 10;\n\
-             if (match_score(INT64_MIN, -3, false) != -3 || match_score(-9, 4, true) != 91\n\
-                 || match_score(-8, 4, true) != 91 || match_score(0, 4, false) != 38\n\
-                 || match_score(INT64_MAX, 2, true) != 91 || match_score(10, 4, false) != 27) return 11;\n\
-             if (integer_ops(INT16_MIN, 63) != 6552 || integer_ops(7, 0) != -16385) return 12;\n\
-             if (proven_arithmetic(3) != -109 || proven_arithmetic(6) != 16\n\
-                 || proven_arithmetic(-1) != -121) return 13;\n\
-             if (factored_bounds(63, 0) != -120 || factored_bounds(-128, 3) != -4) return 14;\n\
-             if (floating_call(2.0, -1, 3.0f, 4.0f) != 5.0\n\
-                 || floating_call(2.0, 1, 3.0f, 4.0f) != 12.5) return 15;\n\
-             if (procedure_value(1, 8, false) != 5 || procedure_value(10, 4, true) != 45\n\
-                 || procedure_value(UINT64_MAX, 4, true) != 1) return 16;\n\
-             if (tuple_value(3, 11, true) != 19 || tuple_value(3, 11, false) != 17\n\
-                 || tuple_value(INT64_MAX, 0, true) != -5) return 17;\n\
-             if (record_value(3, 11, true) != 19 || record_value(3, 11, false) != -1\n\
-                 || record_value(INT64_MAX, 0, true) != 0) return 18;\n\
-             if (constant_after_branch(true) != INT64_MAX - 2\n\
-                 || constant_after_branch(false) != INT64_MAX) return 19;\n\
-             int64_t byte = 1;\n\
-             uint64_t active = 1;\n\
-             struct { float value; uint32_t guard; } single = {1.0f, UINT32_C(0xdeadbeef)};\n\
-             double dbl = 2.0;\n\
-             uint64_t observed = scalar_inout(&byte, &active, &single.value, &dbl, 0.5f, 2.0, true);\n\
-             if (byte != -2 || active != 0 || single.value != 1.5f || single.guard != UINT32_C(0xdeadbeef)\n\
-                 || dbl != 4.0 || observed != UINT64_C(0x4020000000000000)) return 20;\n\
-             active = 1;\n\
-             observed = scalar_inout(&byte, &active, &single.value, &dbl, 0.5f, 2.0, false);\n\
-             if (byte != -2 || active != 1 || single.value != 1.5f || dbl != 4.0\n\
-                 || observed != UINT64_C(0x3ffffffb)) return 21;\n\
-             if (nested_value(5, -3, true) != 10 || nested_value(5, -3, false) != -6\n\
-                 || nested_value(INT64_MIN, 0, true) != 0) return 22;\n\
-             const uint64_t nan = UINT64_C(0x7ff8000000000042);\n\
-             if (!product_equality(0, UINT64_C(0x8000000000000000), 255, 511, 3)\n\
-                 || product_equality(nan, nan, 1, 1, 3) || !product_equality(nan, nan, 1, 1, 2)\n\
-                 || product_equality(0, 0, 1, 2, 3) || product_equality(0, 0, 1, 1, 1)) return 23;\n\
-             uint64_t cells[] = {0, 0, UINT64_C(0x1234567800000000), 0, 9, 0, 123};\n\
-             if (result_value(cells, -2, 4, 9, 6, 7, 8, true, -2.5f, 3.0) != 0\n\
-                 || cells[0] != 19 || cells[1] != UINT64_MAX - 1\n\
-                 || cells[2] != UINT64_C(0x12345678c0200000) || cells[3] != UINT64_C(0x4008000000000000)\n\
-                 || cells[4] != 0 || cells[5] != UINT64_MAX - 4 || cells[6] != 123) return 24;\n\
-             if (result_value(cells, -2, 4, 9, 6, 7, 8, false, 0.0f, -0.0) != 0\n\
-                 || cells[0] != 84 || cells[1] != UINT64_MAX - 1\n\
-                 || cells[2] != UINT64_C(0x1234567800000000) || cells[3] != UINT64_C(0x8000000000000000)\n\
-                 || cells[4] != 0 || cells[5] != 5 || cells[6] != 123) return 25;\n\
-             uint64_t literals[7] = {0};\n\
-             if (float_literals(literals, true) != 0 || literals[0] != UINT64_C(0x3f800000)\n\
-                 || literals[1] != UINT64_C(0x3f800002) || literals[2] != 1\n\
-                 || literals[3] != UINT64_C(0x80000000) || literals[4] != UINT64_C(0x7f7fffff)\n\
-                 || literals[5] != UINT64_C(0x7f800000) || literals[6] != UINT64_C(0x3fe00000)) return 26;\n\
-             if (float_literals(literals, false) != 0 || literals[6] != UINT64_C(0x40000000)) return 27;\n\
-             if (aggregate_calls(127, true, 1.5f) != UINT64_C(0x3fbfff86)\n\
-                 || aggregate_calls(127, false, 1.5f) != 390 || aggregate_calls(-2, false, 0.0f) != 3) return 28;\n\
-             if (float_remainders(7.5, 2.0, -4.5f, 3.0f) != 2.0\n\
-                 || float_remainders(-7.5, 2.0, 4.5f, 3.0f) != 2.0\n\
-                 || !isnan(float_remainders(7.5, 0.0, 4.5f, 3.0f))) return 29;\n\
-             uint64_t math[14] = {0};\n\
-             if (floating_math(math, -2.5, -0.5f) != 0\n\
-                 || math[0] != UINT64_C(0xc008000000000000) || math[1] != UINT64_C(0xc000000000000000)\n\
-                 || math[2] != math[1] || math[3] != math[0] || math[4] != UINT64_C(0xc004000000000000)\n\
-                 || math[5] != 0 || math[6] != UINT64_C(0xb970000000000000)\n\
-                 || math[7] != UINT64_C(0xbf800000) || math[8] != UINT64_C(0x80000000)\n\
-                 || math[9] != math[8] || math[10] != math[7] || math[11] != UINT64_C(0xbf000000)\n\
-                 || math[12] != 0 || math[13] != UINT64_C(0xa8800000)) return 30;\n\
-             if (floating_math(math, 0.0, 0.0f) != 0 || math[4] != UINT64_C(0x8000000000000000)\n\
-                 || math[5] != 0 || math[11] != UINT64_C(0x80000000) || math[12] != 0) return 31;\n\
-             uint64_t conversions[8] = {0};\n\
-             if (float_conversions(conversions, -257, UINT64_MAX, 65535.75f, -128.75) != 0\n\
-                 || conversions[0] != UINT64_C(0xc3808000) || conversions[1] != UINT64_C(0xc070100000000000)\n\
-                 || conversions[2] != UINT64_C(0x5f800000) || conversions[3] != UINT64_C(0x43f0000000000000)\n\
-                 || (int64_t)conversions[4] != -128 || conversions[5] != UINT16_MAX\n\
-                 || conversions[6] != UINT16_MAX || conversions[7] != 0) return 32;\n\
-             if (float_conversions(conversions, 0, 0, NAN, INFINITY) != 0\n\
-                 || conversions[4] != INT8_MAX || conversions[5] != 0\n\
-                 || conversions[6] != 0 || conversions[7] != UINT64_MAX) return 33;\n\
-             uint64_t bits[5] = {0};\n\
-             if (integer_bits(bits, -80, -7, 0x8001, 17, -3) != 0\n\
-                 || (int64_t)bits[0] != -40 || bits[1] != 257 || bits[2] != 0x3000\n\
-                 || bits[3] != UINT64_C(0xc0000000) || bits[4] != 79) return 34;\n\
-             uint64_t nested[10] = {0};\n\
-             nested[3] = nested[9] = UINT64_MAX;\n\
-             if (nested_call_entry(nested, 127, 1.25f, true) != 0\n\
-                 || nested[0] != UINT64_C(0x3fa00000) || nested[1] != UINT64_C(0x3ffc000000000000)\n\
-                 || nested[2] != 127 || nested[3] != 0 || nested[4] != 1 || nested[5] != 0\n\
-                 || nested[6] != 127 || nested[7] != 0 || nested[8] != 127 || nested[9] != UINT64_MAX) return 35;\n\
-             nested[3] = UINT64_MAX;\n\
-             if (nested_call_entry(nested, -2, 0.25f, false) != 0\n\
-                 || nested[0] != UINT64_C(0x3e800000) || nested[1] != UINT64_C(0x3fe8000000000000)\n\
-                 || (int64_t)nested[2] != -2 || nested[3] != 0 || nested[4] != 0\n\
-                 || nested[5] != 0 || nested[6] != UINT64_MAX || nested[7] != 0 || nested[8] != UINT64_MAX\n\
-                 || nested[9] != UINT64_MAX) return 36;\n\
-             uint64_t product[11] = {0};\n\
-             product[10] = UINT64_MAX;\n\
-             if (product_caller(product, 127, 1.25f, true) != 0\n\
-                 || product[0] != UINT64_C(0x3fa00000) || product[1] != UINT64_C(0x3ffc000000000000)\n\
-                 || product[2] != 127 || product[3] != 0 || product[4] != 1 || product[5] != 129\n\
-                 || product[6] != UINT64_C(0x40100000) || product[7] != 256\n\
-                 || product[8] != UINT64_C(0x4016000000000000) || product[9] != 100\n\
-                 || product[10] != UINT64_MAX) return 37;\n\
-             uint64_t row[12] = {UINT64_C(0x3fa00000), UINT64_C(0x3ffc000000000000), 127, 0, 1};\n\
-             const uint64_t sample[2] = {129, UINT64_C(0x40100000)};\n\
-             row[11] = UINT64_MAX;\n\
-             uint64_t *out = &row[1];\n\
-             if (product_inputs(out, 10, 20, 30, 40, row, sample, 1.5) != 0\n\
-                 || row[0] != UINT64_C(0x3fa00000) || (uint32_t)out[0] != UINT32_C(0x3fa00000)\n\
-                 || out[1] != UINT64_C(0x3ffc000000000000) || out[2] != 127 || out[3] != 0\n\
-                 || out[4] != 1 || out[5] != 129 || out[6] != UINT64_C(0x40100000)\n\
-                 || out[7] != 256 || out[8] != UINT64_C(0x4016000000000000) || out[9] != 100\n\
-                 || out[10] != UINT64_MAX) return 38;\n\
-             uint64_t compound[5] = {0};\n\
-             compound[4] = UINT64_MAX;\n\
-             if (compound_values(compound, 7.5, 2.0, 3.5f, true) != 0\n\
-                 || compound[0] != UINT64_C(0x3ff8000000000000) || compound[1] != UINT64_C(0x3fa00000)\n\
-                 || compound[2] != 2 || compound[3] != UINT64_MAX || compound[4] != UINT64_MAX) return 39;\n\
-             if (compound_values(compound, 7.5, 2.0, 3.5f, false) != 0\n\
-                 || compound[0] != UINT64_C(0x3ff8000000000000) || compound[1] != UINT64_C(0x40500000)\n\
-                 || compound[2] != 2 || compound[3] != UINT64_MAX || compound[4] != UINT64_MAX) return 40;\n\
-             if (tuple_match_native(-1, 0, true) != 100 || tuple_match_native(-2, 1, false) != 100\n\
-                 || tuple_match_native(0, UINT16_MAX, true) != 65735 || tuple_match_native(1, 9, false) != 209\n\
-                 || tuple_match_native(-1, 1, false) != 1 || tuple_match_native(127, 0, true) != 1000) return 41;\n\
-             if (enum_pipeline(0, -1, 0.0f, true) != 100\n\
-                 || enum_pipeline(0, -128, 1.25f, true) != UINT64_MAX - 127\n\
-                 || enum_pipeline(0, -1, 0.0f, false) != 200\n\
-                 || enum_pipeline(1, 0, -0.0f, false) != UINT64_C(0x80000009)\n\
-                 || enum_pipeline(2, 0, 0.0f, false) != 300) return 42;\n\
-             uint64_t forwarded[6] = {0};\n\
-             forwarded[5] = UINT64_MAX;\n\
-             if (forwarded_results(forwarded, 127, -0.0f) != 0\n\
-                 || (int64_t)forwarded[0] != -128 || forwarded[1] != UINT64_C(0x3f800000)\n\
-                 || forwarded[2] != 127 || forwarded[3] != UINT64_C(0x80000000)\n\
-                 || forwarded[4] != 1 || forwarded[5] != UINT64_MAX) return 43;\n\
-             if (generic_enum_pipeline(true, 1.0f, -128) != UINT64_MAX - 127\n\
-                 || generic_enum_pipeline(true, 1.0f, -1) != UINT64_MAX\n\
-                 || generic_enum_pipeline(true, -0.0f, 0) != UINT64_C(0x80000000)\n\
-                 || generic_enum_pipeline(false, -0.0f, -128) != UINT64_C(0x80000000)) return 44;\n\
-             uint64_t joined[5] = {0};\n\
-             joined[4] = UINT64_MAX;\n\
-             if (aggregate_join(joined, true, -32768, 32767, -0.0f) != 0\n\
-                 || joined[0] != 32767 || (int64_t)joined[2] != -32768\n\
-                 || joined[1] != UINT64_C(0x80000000) || joined[3] != 17 || joined[4] != UINT64_MAX) return 45;\n\
-             if (aggregate_join(joined, false, -32768, 32767, 1.0f) != 0\n\
-                 || (int64_t)joined[0] != -32768 || joined[2] != 32767\n\
-                 || joined[1] != UINT64_C(0x3f800000) || joined[3] != 17 || joined[4] != UINT64_MAX) return 46;\n\
-             if (aggregate_join(joined, false, -32768, 32767, -0.0f) != 0\n\
-                 || (int64_t)joined[0] != -32768 || joined[2] != 0\n\
-                 || joined[1] != UINT64_C(0x80000000) || joined[3] != 9 || joined[4] != UINT64_MAX) return 47;\n\
-             uint64_t seen = UINT64_MAX;\n\
-             uint64_t routes[4];\n\
-             if (enum_routes(routes, &seen, true, -1) != 0 || seen != 0\n\
-                 || routes[0] != UINT64_MAX || routes[1] != UINT64_MAX\n\
-                 || routes[2] != 23 || routes[3] != UINT64_MAX) return 48;\n\
-             if (enum_routes(routes, &seen, false, -1) != 0 || seen != 1\n\
-                 || routes[0] != UINT64_MAX || routes[1] != 17 || routes[2] != 29 || routes[3] != 39) return 49;\n\
-             return enum_routes(routes, &seen, true, -128) != 0 || seen != 2\n\
-                 || routes[0] != UINT64_MAX - 127 || routes[1] != UINT64_MAX - 127\n\
-                 || routes[2] != UINT64_MAX - 127 || routes[3] != UINT64_MAX - 127;\n\
-         }\n",
-    )
-    .unwrap();
-    let link = std::process::Command::new("cc")
-        .args([
-            &caller,
-            &leaf,
-            &branch,
-            &calls,
-            &stack,
-            &signed,
-            &mutable,
-            &loop_object,
-            &range_object,
-            &bool_object,
-            &narrow_object,
-            &match_object,
-            &integer_object,
-            &arithmetic_object,
-            &bounds_object,
-            &float_object,
-            &procedure_object,
-            &tuple_object,
-            &record_object,
-            &constant_object,
-            &inout_object,
-            &nested_object,
-            &equality_object,
-            &result_object,
-            &literals_object,
-            &aggregate_call_object,
-            &remainder_object,
-            &math_object,
-            &conversions_object,
-            &bits_object,
-            &nested_object,
-            &product_inputs_object,
-            &product_caller_object,
-            &compound_object,
-            &tuple_match_object,
-            &enum_object,
-            &forwarded_object,
-            &generic_enum_object,
-            &aggregate_join_object,
-            &object,
-        ])
-        .arg("-lm")
-        .arg("-o")
-        .arg(&binary)
-        .output()
-        .expect("link native object");
-    assert!(
-        link.status.success(),
-        "{}",
-        String::from_utf8_lossy(&link.stderr)
-    );
-    assert!(
-        std::process::Command::new(binary)
-            .status()
-            .unwrap()
-            .success()
-    );
-}
-
-#[test]
 fn stage2_compiles_package_under_seed_runner() {
     if !runs_on_shard(2) {
         return;
@@ -3466,1201 +2774,3 @@ fn stage2_compiles_package_under_seed_runner_impl() {
 
     std::fs::remove_dir_all(dir).unwrap();
 }
-
-enum CompilerExecCheck {
-    CompileOnly,
-    Exact(u64),
-    NonZero,
-}
-
-/// Every compiler package Stage 2 builds: (stem, package, path, probe
-/// expression, execution check). Each probe is a one-line wrapper package
-/// whose `main` calls the expression, so Stage 2 compiles the package and
-/// every package it depends on.
-const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
-    (
-        "lsp-format",
-        "@vesper/lsp-format",
-        "packages/vesper-lsp-format",
-        "lsp_formatting(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
-    ),
-    (
-        "front",
-        "@vesper/front",
-        "packages/vesper-front",
-        "parse_tables(in \"fn main() -> u64 { 1 }\").len()",
-        CompilerExecCheck::NonZero,
-    ),
-    (
-        "sugar",
-        "@vesper/sugar",
-        "packages/vesper-sugar",
-        "match_rule_words(in \"a $x:expra 1\", 12884901897, 100000).len()",
-        CompilerExecCheck::NonZero,
-    ),
-    (
-        "backend-checks",
-        "@vesper/backend-checks",
-        "packages/vesper-backend-checks",
-        "backend_verify_count(in \"\")",
-        CompilerExecCheck::Exact(0),
-    ),
-    (
-        "bounds-hoist",
-        "@vesper/bounds-hoist",
-        "packages/vesper-bounds-hoist",
-        "decide_text(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "check-dyn",
-        "@vesper/check-dyn",
-        "packages/vesper-check-dyn",
-        "check_dyn_count(in \"\", 0, 0)",
-        CompilerExecCheck::Exact(0),
-    ),
-    (
-        "check-effects",
-        "@vesper/check-effects",
-        "packages/vesper-check-effects",
-        "check_effects(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "check-fip",
-        "@vesper/check-fip",
-        "packages/vesper-check-fip",
-        "check_fip_count(in \"\")",
-        CompilerExecCheck::Exact(0),
-    ),
-    (
-        "check-loops-atomics",
-        "@vesper/check-loops-atomics",
-        "packages/vesper-check-loops-atomics",
-        "check_loops_control(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "check-pact",
-        "@vesper/check-pact",
-        "packages/vesper-check-pact",
-        "check_pact_mono_plan(in \"\").len()",
-        CompilerExecCheck::Exact(12),
-    ),
-    (
-        "check-regions-seqs",
-        "@vesper/check-regions-seqs",
-        "packages/vesper-check-regions-seqs",
-        "regions_seqs_types(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "check-tensor-types",
-        "@vesper/check-tensor-types",
-        "packages/vesper-check-tensor-types",
-        "check_tensor_types(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
-    ),
-    (
-        "codegen-aggregates",
-        "@vesper/codegen-aggregates",
-        "packages/vesper-codegen-aggregates",
-        "aggregate_decisions(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "codegen-calls",
-        "@vesper/codegen-calls",
-        "packages/vesper-codegen-calls",
-        "codegen_calls_text(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "codegen-control",
-        "@vesper/codegen-control",
-        "packages/vesper-codegen-control",
-        "control_session_plans(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "codegen-export",
-        "@vesper/codegen-export",
-        "packages/vesper-codegen-export",
-        "export_plan(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
-    ),
-    (
-        "codegen-freestanding",
-        "@vesper/codegen-freestanding",
-        "packages/vesper-codegen-freestanding",
-        "freestanding_constants()",
-        CompilerExecCheck::NonZero,
-    ),
-    (
-        "codegen-scalar",
-        "@vesper/codegen-scalar",
-        "packages/vesper-codegen-scalar",
-        "codegen_scalar_decisions(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "codegen-seq",
-        "@vesper/codegen-seq",
-        "packages/vesper-codegen-seq",
-        "codegen_seq_decisions(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "codegen-walk",
-        "@vesper/codegen-walk",
-        "packages/vesper-codegen-walk",
-        "native_walk_decisions(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "driver",
-        "@vesper/driver",
-        "packages/vesper-driver",
-        "widen_u64(cmd_check())",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "ebpf-backend",
-        "@vesper/ebpf-backend",
-        "packages/vesper-ebpf-backend",
-        "ebpf_backend_words(in \"\").len()",
-        CompilerExecCheck::Exact(11),
-    ),
-    (
-        "egraph",
-        "@vesper/egraph",
-        "packages/vesper-egraph",
-        "egraph_math(in \"\").len()",
-        CompilerExecCheck::Exact(0),
-    ),
-    (
-        "ffi-lowering",
-        "@vesper/ffi-lowering",
-        "packages/vesper-ffi-lowering",
-        "{ let _ = s_new(); 0 }",
-        CompilerExecCheck::Exact(0),
-    ),
-    (
-        "ir-check",
-        "@vesper/ir-check",
-        "packages/vesper-ir-check",
-        "{ let _ = paths_new(); 0 }",
-        CompilerExecCheck::Exact(0),
-    ),
-    (
-        "ir-inline",
-        "@vesper/ir-inline",
-        "packages/vesper-ir-inline",
-        "inline_program_words(in \"\".as_bytes()).len()",
-        CompilerExecCheck::NonZero,
-    ),
-    (
-        "ir-opt",
-        "@vesper/ir-opt",
-        "packages/vesper-ir-opt",
-        "ir_opt_words(in \"\".as_bytes()).len()",
-        CompilerExecCheck::NonZero,
-    ),
-    (
-        "ir-opt-policy",
-        "@vesper/ir-opt-policy",
-        "packages/vesper-ir-opt-policy",
-        "ir_opt_policy_entry(in \"\").len()",
-        CompilerExecCheck::NonZero,
-    ),
-    (
-        "optimize",
-        "@vesper/optimize",
-        "packages/vesper-optimize",
-        "optimize_verify(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "doc",
-        "@vesper/doc",
-        "packages/vesper-doc",
-        "format()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "lsp",
-        "@vesper/lsp",
-        "packages/vesper-lsp",
-        "lsp_frames(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
-    ),
-    (
-        "lsp-features",
-        "@vesper/lsp-features",
-        "packages/vesper-lsp-features",
-        "lsp_document_symbols(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
-    ),
-    (
-        "lsp-proof-run",
-        "@vesper/lsp-proof-run",
-        "packages/vesper-lsp-proof-run",
-        "job_obligations(in \"\".as_bytes())",
-        CompilerExecCheck::Exact(0),
-    ),
-    (
-        "memo",
-        "@vesper/memo",
-        "packages/vesper-memo",
-        "memo_replay(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "test-runner",
-        "@vesper/test-runner",
-        "packages/vesper-test-runner",
-        "case_rows_words(in \"\".as_bytes()).len()",
-        CompilerExecCheck::CompileOnly,
-    ),
-    (
-        "lean-extract",
-        "@vesper/lean-extract",
-        "packages/vesper-lean-extract",
-        "extract_head_words(in \"\")",
-        CompilerExecCheck::NonZero,
-    ),
-    (
-        "check-collect",
-        "@vesper/check-collect",
-        "packages/vesper-check-collect",
-        "collect_text(in \"\").len()",
-        CompilerExecCheck::NonZero,
-    ),
-    (
-        "check-world",
-        "@vesper/check-world",
-        "packages/vesper-check-world",
-        "typing_input_words(in \"\").len()",
-        CompilerExecCheck::NonZero,
-    ),
-    (
-        "preludes",
-        "@vesper/preludes",
-        "packages/vesper-preludes",
-        "strings_source().as_bytes().len()",
-        CompilerExecCheck::NonZero,
-    ),
-    (
-        "check-data",
-        "@vesper/check-data",
-        "packages/vesper-check-data",
-        "check_data_sizes(in \"\").len()",
-        CompilerExecCheck::Exact(10),
-    ),
-    (
-        "ast",
-        "@vesper/ast",
-        "packages/vesper-ast",
-        "ast_count(in \"fn main() -> u64 { 1 }\")",
-        CompilerExecCheck::NonZero,
-    ),
-    (
-        "check-layout",
-        "@vesper/check-layout",
-        "packages/vesper-check-layout",
-        "check_layout_words(in \"\").len()",
-        CompilerExecCheck::Exact(8),
-    ),
-    (
-        "check-core-typing",
-        "@vesper/check-core-typing",
-        "packages/vesper-check-core-typing",
-        "core_typing_exprs(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "check-names-packages",
-        "@vesper/check-names-packages",
-        "packages/vesper-check-names-packages",
-        "module_count(in \"\")",
-        CompilerExecCheck::Exact(0),
-    ),
-    (
-        "place-ir",
-        "@vesper/place-ir",
-        "packages/vesper-place-ir",
-        "place_ir_words(in \"\").len()",
-        CompilerExecCheck::NonZero,
-    ),
-    (
-        "place-ir-lower",
-        "@vesper/place-ir-lower",
-        "packages/vesper-place-ir-lower",
-        "ir_lower_words(in \"\").len()",
-        CompilerExecCheck::NonZero,
-    ),
-    (
-        "vsys",
-        "@vesper/vsys",
-        "packages/vesper-vsys",
-        "run_vsys_check(in \"\").len()",
-        CompilerExecCheck::Exact(2),
-    ),
-    (
-        "clif",
-        "@vesper/clif",
-        "packages/vesper-clif",
-        "inc(1)",
-        CompilerExecCheck::Exact(2),
-    ),
-    (
-        "cranelift",
-        "@vesper/cranelift",
-        "packages/vesper-cranelift",
-        "{ let _ = ty_i8(); 0 }",
-        CompilerExecCheck::Exact(0),
-    ),
-    (
-        "crypto",
-        "@vesper/crypto",
-        "packages/vesper-crypto",
-        "zeros(4).len()",
-        CompilerExecCheck::Exact(4),
-    ),
-    (
-        "native-clif-opt",
-        "@vesper/native-clif-opt",
-        "packages/vesper-native-clif-opt",
-        "clif_opt_words(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "native-cold-outline",
-        "@vesper/native-cold-outline",
-        "packages/vesper-native-cold-outline",
-        "outline_words(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "native-vectorize",
-        "@vesper/native-vectorize",
-        "packages/vesper-native-vectorize",
-        "vectorize_words(in \"\").len()",
-        CompilerExecCheck::Exact(2),
-    ),
-    (
-        "verified-codegen",
-        "@vesper/verified-codegen",
-        "packages/vesper-verified-codegen",
-        "select_text(in \"\").len()",
-        CompilerExecCheck::Exact(1),
-    ),
-    (
-        "proof-audit",
-        "@vesper/proof-audit",
-        "packages/vesper-proof-audit",
-        "HELP.len()",
-        CompilerExecCheck::NonZero,
-    ),
-    (
-        "run",
-        "@vesper/run",
-        "packages/vesper-run",
-        "run_words(in \"\".as_bytes()).len()",
-        CompilerExecCheck::Exact(6),
-    ),
-    (
-        "verify",
-        "@vesper/verify",
-        "packages/vesper-verify",
-        "discover(in \"\".as_bytes()).err.len()",
-        CompilerExecCheck::Exact(0),
-    ),
-    (
-        "wasm-backend",
-        "@vesper/wasm-backend",
-        "packages/vesper-wasm-backend",
-        "wasm_backend_compile(in \"\").len()",
-        CompilerExecCheck::Exact(4),
-    ),
-    (
-        "wit-component",
-        "@vesper/wit-component",
-        "packages/vesper-wit-component",
-        "wit_component_wrap(in \"\").len()",
-        CompilerExecCheck::Exact(2),
-    ),
-];
-
-/// Compiler packages over `Ffi[Cranelift]` (native Cranelift glue over
-/// vesper-cranelift-sys): (stem, package, path, probe `src/lib.ves`). Stage 2
-/// declares the `Ffi$Cranelift` operations from cranelift.vsys
-/// (packages/vesper-stage2/src/vcl_decls.ves), and the Wasm backend lowers
-/// them to imports of `vesper:cranelift/vcl@0.1.0` (#2210). The fixed point
-/// only builds them: running one needs the Cranelift component composed in
-/// (crates/vesper-cranelift-component/tests/wasm_imports.rs).
-const STAGE2_CRANELIFT_PACKAGES: &[(&str, &str, &str, &str)] = &[
-    (
-        "codegen-base",
-        "@vesper/codegen-base",
-        "packages/vesper-codegen-base",
-        "use @vesper/codegen-base::word_of;\nuse @vesper/codegen-base::arg_value;\npub fn main() -> u64 eff [Ffi[Cranelift]] { word_of(arg_value(0, 0)) }\n",
-    ),
-    (
-        "codegen-control-emit",
-        "@vesper/codegen-control-emit",
-        "packages/vesper-codegen-control-emit",
-        "use @vesper/codegen-control-emit::control_hook;\npub fn main() -> u64 eff [Ffi[Cranelift]] { control_hook(0) }\n",
-    ),
-    (
-        "codegen-numeric",
-        "@vesper/codegen-numeric",
-        "packages/vesper-codegen-numeric",
-        "use @vesper/codegen-numeric::numeric_hook;\npub fn main() -> u64 eff [Ffi[Cranelift]] { numeric_hook(0) }\n",
-    ),
-];
-
-/// Compiler packages over the WASI host libraries (StdFs, StdEnv,
-/// StdProcess, Blake3 and HybridCommands, whose wasm32-wasip2 sources import
-/// nothing or WASI calls): (stem, package, path, probe `src/lib.ves`, the
-/// probe's exit code). Both Stage 2 compilers must build each one to the same
-/// bytes, and the probe must run to that code. @vesper/driver-commands left
-/// the gaps when its engine calls moved to @vesper/driver-engines (#1996):
-/// `vesper lsp` there is refused, and printing the refusal fails because
-/// @vesper-std/fs has no standard streams on wasm32-wasip2, so the probe ends
-/// as Rust's print panic does ([`DRIVER_PRINT_PANIC_EXIT`]).
-const STAGE2_HOST_PACKAGES: &[(&str, &str, &str, &str, u64)] = &[(
-    "driver-commands",
-    "@vesper/driver-commands",
-    "packages/vesper-driver-commands",
-    "use @vesper/driver-commands::run;\nuse @vesper/driver::{args_new, args_push};\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3], Ffi[HybridCommands]] { let mut a = args_new(); args_push(inout a, in \"lsp\".as_bytes()); wrapping_u64(run(in a)) }\n",
-    DRIVER_PRINT_PANIC_EXIT,
-)];
-
-/// The exit code of @vesper/driver-commands when a print fails (`PANIC_EXIT`,
-/// Rust's 101 for a panic).
-const DRIVER_PRINT_PANIC_EXIT: u64 = 101;
-
-/// Compiler packages Stage 2 cannot build yet: (stem, package, path, probe
-/// `src/lib.ves`, reason). `stage2_self_compilation_fixed_point` checks that
-/// each one still fails, so a gap that closes moves into [`COMPILER_PACKAGES`]
-/// or [`STAGE2_HOST_PACKAGES`]. None is left since #1996.
-const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[];
-
-/// Directories under `packages/` that are in none of [`COMPILER_PACKAGES`],
-/// [`STAGE2_CRANELIFT_PACKAGES`] and [`STAGE2_PACKAGE_GAPS`], with where they
-/// are covered instead.
-const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
-    (
-        "vesper-compiler",
-        "Stage 1 front end, checked as one unit; bootstrap/stage1.lock (tests/stage2_seed_runner.rs)",
-    ),
-    (
-        "vesper-driver-engines",
-        "the command engines still in Rust (#1996), built under Stage 2 as a dependency of the @vesper/driver-commands probe in STAGE2_HOST_PACKAGES (src-wasip2 refuses each engine)",
-    ),
-    (
-        "vesper-export-build",
-        "`vesper build --lib`'s interface and binding from Stage 2's front end (#2270) as a native executable beside the Rust CLI (tests/self_host_codegen_export.rs); it is @vesper/stage2 plus the export packages, built under Stage 2 as one program in bootstrap switch slice 3",
-    ),
-    (
-        "vesper-native-lib",
-        "a library's native object built in Vesper over @vesper/cranelift (bootstrap switch slice 2a, #2349), compared with `vesper build --lib` in the JIT (crates/vesper-codegen-swap-test/tests/self_host_native_lib.rs); built under Stage 2 with the Cranelift component in bootstrap switch slice 3",
-    ),
-    (
-        "vesper-stage2",
-        "Stage 2 itself: stage2.wasm == stage3.wasm",
-    ),
-    (
-        "vesper-std",
-        "standard library packages, built as dependencies of the probes",
-    ),
-];
-
-#[test]
-fn stage2_fixed_point_lists_every_package() {
-    if !runs_on_shard(0) {
-        return;
-    }
-    let mut listed: Vec<String> = COMPILER_PACKAGES
-        .iter()
-        .map(|(_, _, rel, _, _)| *rel)
-        .chain(STAGE2_PACKAGE_GAPS.iter().map(|(_, _, rel, _, _)| *rel))
-        .chain(STAGE2_CRANELIFT_PACKAGES.iter().map(|(_, _, rel, _)| *rel))
-        .chain(STAGE2_HOST_PACKAGES.iter().map(|(_, _, rel, _, _)| *rel))
-        .map(|rel| rel.trim_start_matches("packages/").to_string())
-        .chain(
-            STAGE2_PACKAGES_COVERED_ELSEWHERE
-                .iter()
-                .map(|(d, _)| d.to_string()),
-        )
-        .collect();
-    let n = listed.len();
-    listed.sort();
-    listed.dedup();
-    assert_eq!(n, listed.len(), "a package is listed twice");
-    let mut on_disk: Vec<String> = std::fs::read_dir(repo().join("packages"))
-        .expect("read packages/")
-        .filter_map(|e| {
-            let e = e.ok()?;
-            (e.file_type().ok()?.is_dir() && e.path().join("Loom.toml").is_file()
-                || e.file_name() == "vesper-std")
-                .then(|| e.file_name().to_string_lossy().into_owned())
-        })
-        .collect();
-    on_disk.sort();
-    assert_eq!(
-        listed, on_disk,
-        "every directory under packages/ must be in COMPILER_PACKAGES, STAGE2_CRANELIFT_PACKAGES, STAGE2_HOST_PACKAGES, STAGE2_PACKAGE_GAPS or STAGE2_PACKAGES_COVERED_ELSEWHERE"
-    );
-}
-
-/// The probe wrapper (Loom.toml, src/lib.ves) for one compiler package. Its
-/// dependency path is the package's guest path under `/repo`.
-fn compiler_package_probe(
-    stem: &str,
-    pkg_name: &str,
-    pkg_rel: &str,
-    expr: &str,
-) -> (String, String) {
-    let dep_guest = format!("/repo/{pkg_rel}");
-    let manifest = format!(
-        "[package]\nname = \"@vesper-test/probe-{stem}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n\"{pkg_name}\" = {{ version = \"^0.1\", path = \"{dep_guest}\" }}\n"
-    );
-    let fn_name = expr
-        .split(&['(', ' '][..])
-        .find(|s| !s.is_empty() && *s != "{" && *s != "let" && *s != "_" && *s != "=")
-        .unwrap_or("");
-    let use_line = if expr.starts_with("widen_u64(") {
-        format!("use {pkg_name}::cmd_check;")
-    } else if expr.starts_with('{') {
-        let inner_fn = expr.split("= ").nth(1).unwrap().split('(').next().unwrap();
-        format!("use {pkg_name}::{inner_fn};")
-    } else {
-        format!("use {pkg_name}::{fn_name};")
-    };
-    let lib_src = format!("{use_line}\npub fn main() -> u64 {{ {expr} }}\n");
-    (manifest, lib_src)
-}
-
-/// Runs Stage 2 under the wasmtime CLI with the repository mapped at both
-/// `.` and `/repo`, so a probe wrapper under `/out` resolves its compiler
-/// package dependency the same way it does in process.
-fn run_stage2_probe_wasmtime_cli(cli: &Path, stage2_cwasm: &Path, out_dir: &Path, out_wasm: &Path) {
-    remove_stage2_sidecars(out_wasm);
-    let out_name = out_wasm
-        .file_name()
-        .expect("out filename")
-        .to_string_lossy()
-        .into_owned();
-    let exec = std::process::Command::new(cli)
-        .args(["run", "--allow-precompiled"])
-        .arg("--dir")
-        .arg(format!("{}::.", repo().display()))
-        .arg("--dir")
-        .arg(format!("{}::/repo", repo().display()))
-        .arg("--dir")
-        .arg(format!("{}::/out", out_dir.display()))
-        .args(["--env", "VESPER_STAGE2_SYMS=1"])
-        .args(["--argv0", "stage2"])
-        .arg(stage2_cwasm)
-        .args(["/out/wrap", &format!("/out/{out_name}"), "main"])
-        .output()
-        .expect("run stage2 under wasmtime CLI");
-    let notes = read_stage2_sidecar_notes(out_wasm);
-    assert!(
-        exec.status.success(),
-        "wasmtime CLI stage2 failed (status={}):\nstdout={}\nstderr={}{notes}",
-        exec.status,
-        String::from_utf8_lossy(&exec.stdout),
-        String::from_utf8_lossy(&exec.stderr),
-    );
-}
-
-/// Builds the probe for one compiler package with `compiler` into
-/// `<dir>/out.wasm` and returns the component bytes.
-fn build_compiler_package_probe(
-    compiler: &PreparedComponent,
-    syms: &Path,
-    dir: &Path,
-    label: &str,
-) -> Result<Vec<u8>, String> {
-    let out_wasm = dir.join("out.wasm");
-    remove_stage2_sidecars(&out_wasm);
-    let code = compiler
-        .run(&Ctx {
-            args: vec!["stage2", "/out/wrap", "/out/out.wasm", "main"],
-            env: vec![("VESPER_STAGE2_SYMS", "1")],
-            dirs: vec![
-                (repo(), ".".into()),
-                (repo(), "/repo".into()),
-                (dir.to_path_buf(), "/out".into()),
-            ],
-            fuel: Some(u64::MAX),
-            diag_base: Some(out_wasm.clone()),
-            syms_file: Some(syms.to_path_buf()),
-        })
-        .map_err(|e| format!("{label} trapped: {e}"))?;
-    if code != 0 {
-        return Err(format_stage2_error(label, code, Some(&out_wasm)));
-    }
-    let bytes = std::fs::read(&out_wasm).unwrap_or_default();
-    if !bytes.starts_with(b"\0asm\x0d\x00\x01\x00") {
-        return Err(format!(
-            "{label} wrote no component ({} bytes)",
-            bytes.len()
-        ));
-    }
-    Ok(bytes)
-}
-
-/// The manifest of a probe given as a whole `src/lib.ves`: the package
-/// itself, and each other compiler package the probe `use`s to reach the
-/// code it builds.
-fn source_probe_manifest(stem: &str, pkg_name: &str, pkg_rel: &str, lib_src: &str) -> String {
-    let (mut manifest, _) = compiler_package_probe(stem, pkg_name, pkg_rel, "");
-    for other in lib_src
-        .split("use @vesper/")
-        .skip(1)
-        .filter_map(|rest| rest.split("::").next())
-        .filter(|other| format!("@vesper/{other}") != *pkg_name)
-    {
-        manifest.push_str(&format!(
-            "\"@vesper/{other}\" = {{ version = \"^0.1\", path = \"/repo/packages/vesper-{other}\" }}\n"
-        ));
-    }
-    manifest
-}
-
-fn write_probe(wrap_dir: &Path, manifest: &str, lib_src: &str) {
-    let _ = std::fs::remove_dir_all(wrap_dir);
-    std::fs::create_dir_all(wrap_dir.join("src")).unwrap();
-    std::fs::write(wrap_dir.join("Loom.toml"), manifest).unwrap();
-    std::fs::write(wrap_dir.join("src/lib.ves"), lib_src).unwrap();
-}
-
-/// The Stage 2 fixed point over every compiler package (#1928, part of
-/// #1397).
-///
-/// `stage2.wasm == stage3.wasm` shows that `@vesper/stage2` rebuilds itself.
-/// This extends the fixed point to the packages the compiler is made of:
-/// each one in [`COMPILER_PACKAGES`] is built by the boot component (Stage 2
-/// compiled by the Rust wasm backend) and by `stage2.wasm` (Stage 2 compiled
-/// by itself), and the two components must be byte-identical. The two
-/// compilers come from different backends, so equal bytes mean neither
-/// backend miscompiled Stage 2 in a way these packages exercise. With the
-/// pinned wasmtime CLI (always present under Bazel), the precompiled
-/// `stage2.cwasm` rebuilds every package again and must match too.
-///
-/// Each package in [`STAGE2_CRANELIFT_PACKAGES`] and [`STAGE2_HOST_PACKAGES`]
-/// is built the same way (a host package's probe also runs). Each
-/// package in [`STAGE2_PACKAGE_GAPS`] must still fail to build, so a gap that
-/// closes is moved into [`COMPILER_PACKAGES`] instead of going unnoticed.
-fn check_compiler_packages_fixed_point(
-    dir: &Path,
-    boot: &PreparedComponent,
-    boot_syms: &Path,
-    stage2: &PreparedComponent,
-    stage2_syms: &Path,
-    cli: Option<(&Path, &Path)>,
-) {
-    let wrap_dir = dir.join("wrap");
-    let out_wasm = dir.join("out.wasm");
-    let mut failures = Vec::new();
-    for (stem, pkg_name, pkg_rel, expr, _) in COMPILER_PACKAGES.iter() {
-        let (manifest, lib_src) = compiler_package_probe(stem, pkg_name, pkg_rel, expr);
-        write_probe(&wrap_dir, &manifest, &lib_src);
-        let by_boot = match build_compiler_package_probe(boot, boot_syms, dir, "boot stage2") {
-            Ok(b) => b,
-            Err(e) => {
-                failures.push(format!("{pkg_name}: {e}"));
-                continue;
-            }
-        };
-        match build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm") {
-            Ok(b) if b == by_boot => {}
-            Ok(b) => failures.push(format!(
-                "{pkg_name}: boot stage2 built {} bytes, stage2.wasm built {} different bytes",
-                by_boot.len(),
-                b.len()
-            )),
-            Err(e) => failures.push(format!("{pkg_name}: {e}")),
-        }
-        if let Some((cli, stage2_cwasm)) = cli {
-            run_stage2_probe_wasmtime_cli(cli, stage2_cwasm, dir, &out_wasm);
-            let by_cli = std::fs::read(&out_wasm).unwrap_or_default();
-            if by_cli != by_boot {
-                failures.push(format!(
-                    "{pkg_name}: boot stage2 built {} bytes, stage2.cwasm under the wasmtime CLI built {} different bytes",
-                    by_boot.len(),
-                    by_cli.len()
-                ));
-            }
-        }
-    }
-    for (stem, pkg_name, pkg_rel, lib_src) in STAGE2_CRANELIFT_PACKAGES.iter() {
-        write_probe(
-            &wrap_dir,
-            &source_probe_manifest(stem, pkg_name, pkg_rel, lib_src),
-            lib_src,
-        );
-        let by_boot = match build_compiler_package_probe(boot, boot_syms, dir, "boot stage2") {
-            Ok(b) => b,
-            Err(e) => {
-                failures.push(format!("{pkg_name}: {e}"));
-                continue;
-            }
-        };
-        match build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm") {
-            Ok(b) if b == by_boot => {}
-            Ok(b) => failures.push(format!(
-                "{pkg_name}: boot stage2 built {} bytes, stage2.wasm built {} different bytes",
-                by_boot.len(),
-                b.len()
-            )),
-            Err(e) => failures.push(format!("{pkg_name}: {e}")),
-        }
-        if let Some((cli, stage2_cwasm)) = cli {
-            run_stage2_probe_wasmtime_cli(cli, stage2_cwasm, dir, &out_wasm);
-            let by_cli = std::fs::read(&out_wasm).unwrap_or_default();
-            if by_cli != by_boot {
-                failures.push(format!(
-                    "{pkg_name}: boot stage2 built {} bytes, stage2.cwasm under the wasmtime CLI built {} different bytes",
-                    by_boot.len(),
-                    by_cli.len()
-                ));
-            }
-        }
-    }
-    for (stem, pkg_name, pkg_rel, lib_src, code) in STAGE2_HOST_PACKAGES.iter() {
-        write_probe(
-            &wrap_dir,
-            &source_probe_manifest(stem, pkg_name, pkg_rel, lib_src),
-            lib_src,
-        );
-        let by_boot = match build_compiler_package_probe(boot, boot_syms, dir, "boot stage2") {
-            Ok(b) => b,
-            Err(e) => {
-                failures.push(format!("{pkg_name}: {e}"));
-                continue;
-            }
-        };
-        match build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm") {
-            Ok(b) if b == by_boot => {}
-            Ok(b) => failures.push(format!(
-                "{pkg_name}: boot stage2 built {} bytes, stage2.wasm built {} different bytes",
-                by_boot.len(),
-                b.len()
-            )),
-            Err(e) => failures.push(format!("{pkg_name}: {e}")),
-        }
-        match run(&by_boot, &Ctx::default()) {
-            Ok(got) if got == *code => {}
-            other => failures.push(format!(
-                "{pkg_name}: expected the probe to exit with {code}, got {other:?}"
-            )),
-        }
-    }
-    for (stem, pkg_name, pkg_rel, lib_src, why) in STAGE2_PACKAGE_GAPS.iter() {
-        write_probe(
-            &wrap_dir,
-            &source_probe_manifest(stem, pkg_name, pkg_rel, lib_src),
-            lib_src,
-        );
-        match build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm") {
-            Ok(_) => failures.push(format!(
-                "{pkg_name}: Stage 2 now builds it (listed as a gap: {why}); move it from STAGE2_PACKAGE_GAPS into COMPILER_PACKAGES"
-            )),
-            // Every gap is in the Wasm backend: loading, assembly and the
-            // checks must pass.
-            Err(e) if !e.contains("[wasm-backend WErr") => failures.push(format!(
-                "{pkg_name}: a gap fails before the Wasm backend (listed as: {why}): {e}"
-            )),
-            Err(_) => {}
-        }
-    }
-    // @vesper-std/process on WASI (src-wasip2): a start is refused with
-    // Unsupported (IoKind 11) and `id` is 0, built the same by both Stage 2
-    // compilers.
-    let proc_manifest = "[package]\nname = \"@vesper-test/probe-process-wasi\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n\"@vesper-std/process\" = { version = \"^0.1\", path = \"/repo/packages/vesper-std/process\" }\n";
-    let proc_src = "use @vesper-std/process::{command, arg, spawn, release, id};\n\
-        pub fn main() -> u64 eff [Ffi[StdProcess]] {\n\
-            let mut c = command(in \"cc\");\n\
-            arg(inout c, in \"--version\");\n\
-            let r = match spawn(c) {\n\
-                Result::Ok(ch) => {\n\
-                    release(ch);\n\
-                    1000\n\
-                },\n\
-                Result::Err(e) => widen_u64(e.kind),\n\
-            };\n\
-            wrapping_add(r, id())\n\
-        }\n";
-    write_probe(&wrap_dir, proc_manifest, proc_src);
-    match (
-        build_compiler_package_probe(boot, boot_syms, dir, "boot stage2"),
-        build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm"),
-    ) {
-        (Ok(a), Ok(b)) => {
-            if a != b {
-                failures.push(format!(
-                    "@vesper-std/process (WASI probe): boot stage2 built {} bytes, stage2.wasm built {} different bytes",
-                    a.len(),
-                    b.len()
-                ));
-            }
-            match run(&b, &Ctx::default()) {
-                Ok(11) => {}
-                other => failures.push(format!(
-                    "@vesper-std/process (WASI probe): expected Unsupported (11), got {other:?}"
-                )),
-            }
-        }
-        (a, b) => failures.push(format!(
-            "@vesper-std/process (WASI probe): {:?} / {:?}",
-            a.err(),
-            b.err()
-        )),
-    }
-    // @vesper-std/hash-sys on WASI (src-wasip2, #2323): delegates Ffi[Blake3]
-    // to portable @vesper-std/hash::blake3 with zero Wasm imports, built the
-    // same by both Stage 2 compilers.
-    let hash_manifest = "[package]\nname = \"@vesper-test/probe-hash-sys-wasi\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n\"@vesper-std/hash-sys\" = { version = \"^0.1\", path = \"/repo/packages/vesper-std/hash/sys\" }\n";
-    let hash_src = "use @vesper-std/hash-sys::{hash, derive_key_hash, hasher_new, hasher_new_keyed, hasher_new_derive_key, update, finalize, finalize_xof, hasher_free};\n\
-        pub fn main() -> u64 eff [Ffi[Blake3]] {\n\
-            let d0 = hash(in \"\".as_bytes());\n\
-            let d1 = match hasher_new() {\n\
-                Option::Some(h0) => {\n\
-                    let mut h = h0;\n\
-                    update(inout h, in \"\".as_bytes());\n\
-                    let mut xof = ChunkSeq::new[u8]();\n\
-                    finalize_xof(in h, 4, inout xof);\n\
-                    let d = finalize(in h);\n\
-                    hasher_free(h);\n\
-                    if xof.len() != 4 { return 1; }\n\
-                    d\n\
-                },\n\
-                Option::None => return 2,\n\
-            };\n\
-            if d0.w0 != d1.w0 || d0.w1 != d1.w1 || d0.w2 != d1.w2 || d0.w3 != d1.w3 { return 3; }\n\
-            let bad_key = match hasher_new_keyed(in \"short\".as_bytes()) {\n\
-                Option::Some(h) => { hasher_free(h); false },\n\
-                Option::None => true,\n\
-            };\n\
-            if !bad_key { return 4; }\n\
-            let mut bad_utf8 = ChunkSeq::new[u8]();\n\
-            bad_utf8.push(255);\n\
-            let mut dk_out = ChunkSeq::new[u8]();\n\
-            if derive_key_hash(in bad_utf8.as_slice(), in \"x\".as_bytes(), 8, inout dk_out) { return 5; }\n\
-            if !derive_key_hash(in \"ctx\".as_bytes(), in \"x\".as_bytes(), 8, inout dk_out) { return 6; }\n\
-            if dk_out.len() != 8 { return 7; }\n\
-            let ok_dk = match hasher_new_derive_key(in \"ctx\".as_bytes()) {\n\
-                Option::Some(h) => { hasher_free(h); true },\n\
-                Option::None => false,\n\
-            };\n\
-            if !ok_dk { return 8; }\n\
-            d0.w0 & 255\n\
-        }\n";
-    write_probe(&wrap_dir, hash_manifest, hash_src);
-    match (
-        build_compiler_package_probe(boot, boot_syms, dir, "boot stage2"),
-        build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm"),
-    ) {
-        (Ok(a), Ok(b)) => {
-            if a != b {
-                failures.push(format!(
-                    "@vesper-std/hash-sys (WASI probe): boot stage2 built {} bytes, stage2.wasm built {} different bytes",
-                    a.len(),
-                    b.len()
-                ));
-            }
-            match run(&b, &Ctx::default()) {
-                Ok(175) => {}
-                other => failures.push(format!(
-                    "@vesper-std/hash-sys (WASI probe): expected BLAKE3(\"\")[0] (175 / 0xaf), got {other:?}"
-                )),
-            }
-        }
-        (a, b) => failures.push(format!(
-            "@vesper-std/hash-sys (WASI probe): {:?} / {:?}",
-            a.err(),
-            b.err()
-        )),
-    }
-    remove_stage2_sidecars(&out_wasm);
-    let _ = std::fs::remove_dir_all(&wrap_dir);
-    assert!(
-        failures.is_empty(),
-        "Stage 2 package fixed point broken for {} of {} packages:\n{}",
-        failures.len(),
-        COMPILER_PACKAGES.len()
-            + STAGE2_CRANELIFT_PACKAGES.len()
-            + STAGE2_HOST_PACKAGES.len()
-            + STAGE2_PACKAGE_GAPS.len(),
-        failures.join("\n")
-    );
-}
-
-#[test]
-fn stage2_compiles_compiler_packages() {
-    if !runs_on_shard(1) {
-        return;
-    }
-    with_large_stack(|| {
-        let dir = fresh("stage2-compiler-pkgs");
-        let stage2_pkg = repo().join("packages/vesper-stage2");
-        let assembled =
-            vesper::packages::load_for_target(&stage2_pkg, Some("wasm32-wasip2"), false)
-                .expect("load @vesper/stage2");
-        assert!(assembled.ok(), "{:?}", assembled.diagnostics);
-        let checked =
-            vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
-        let o = stage2_boot_options();
-        let stage2_comp_path = dir.join("stage2_boot.wasm");
-        let syms_path = sidecar_path(&stage2_comp_path, ".boot.syms");
-        let boot_component = port_with_syms(&checked, &o, &syms_path).expect("boot");
-        let boot_prepared =
-            PreparedComponent::new(&boot_component).expect("prepare @vesper/stage2 boot");
-
-        let specs = COMPILER_PACKAGES;
-
-        let wrap_dir = dir.join("wrap");
-        let host_wasm = dir.join("out.wasm");
-        let compile_wrap = |manifest: &str, lib_src: &str| {
-            let _ = std::fs::remove_dir_all(&wrap_dir);
-            std::fs::create_dir_all(wrap_dir.join("src")).unwrap();
-            std::fs::write(wrap_dir.join("Loom.toml"), manifest).unwrap();
-            std::fs::write(wrap_dir.join("src/lib.ves"), lib_src).unwrap();
-            let _ = std::fs::remove_file(&host_wasm);
-            remove_stage2_sidecars(&host_wasm);
-            boot_prepared.run(&Ctx {
-                args: vec!["stage2", "/out/wrap", "/out/out.wasm", "main"],
-                env: vec![("VESPER_STAGE2_SYMS", "1")],
-                dirs: vec![
-                    (repo(), ".".into()),
-                    (repo(), "/repo".into()),
-                    (dir.clone(), "/out".into()),
-                ],
-                fuel: Some(u64::MAX),
-                diag_base: Some(host_wasm.clone()),
-                syms_file: Some(syms_path.clone()),
-            })
-        };
-
-        let mut exec_failures = Vec::new();
-        for (stem, pkg_name, pkg_rel, expr, exec_check) in specs.iter() {
-            let (manifest, lib_src) = compiler_package_probe(stem, pkg_name, pkg_rel, expr);
-            let exit_code = compile_wrap(&manifest, &lib_src)
-                .unwrap_or_else(|e| panic!("stage2 trap on {stem}: {e}"));
-            let err_txt =
-                std::fs::read_to_string(sidecar_path(&host_wasm, ".err.txt")).unwrap_or_default();
-            assert_eq!(
-                exit_code,
-                0,
-                "stage2 failed on {stem}: {}",
-                read_stage2_sidecar_notes(&host_wasm)
-            );
-            assert!(
-                err_txt.trim().is_empty(),
-                "unexpected stage2 error diagnostic on {stem}: {err_txt}"
-            );
-            let bytes = std::fs::read(&host_wasm).unwrap_or_default();
-            assert!(
-                bytes.starts_with(b"\0asm\x0d\x00\x01\x00"),
-                "expected wasm component header for {stem}, got {} bytes",
-                bytes.len()
-            );
-            match exec_check {
-                CompilerExecCheck::CompileOnly => {}
-                CompilerExecCheck::Exact(expected) => match run(&bytes, &Ctx::default()) {
-                    Ok(got) if got == *expected => {}
-                    Ok(got) => {
-                        exec_failures.push(format!("{stem}: expected {expected}, got {got}"))
-                    }
-                    Err(e) => exec_failures.push(format!("{stem}: trap {e}")),
-                },
-                CompilerExecCheck::NonZero => match run(&bytes, &Ctx::default()) {
-                    Ok(got) if got > 0 => {}
-                    Ok(got) => exec_failures.push(format!("{stem}: expected > 0, got {got}")),
-                    Err(e) => exec_failures.push(format!("{stem}: trap {e}")),
-                },
-            }
-            remove_stage2_sidecars(&host_wasm);
-        }
-        assert!(
-            exec_failures.is_empty(),
-            "unexpected compiler package execution results:\n{}",
-            exec_failures.join("\n")
-        );
-
-        // Verify Stage 2 lowering & Wasmtime execution for fixed-array writes,
-        // on-demand `Result` ADTs, integer intrinsics/conversions, and `usize`/`isize`.
-        let smoke_manifest = "[package]\nname = \"@vesper-test/stage2-lowering-smoke\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
-        let smoke_src = "\
-fn res_val(flag: bool) -> u64 {
-    let r: Result[u64, u64] = if flag {
-        Result::Ok(10)
-    } else {
-        Result::Err(3)
-    };
-    match r {
-        Result::Ok(x) => x,
-        Result::Err(e) => e,
-    }
-}
-
-pub fn main() -> u64 {
-    let mut arr: [u32; 4] = [1, 2, 3, 4];
-    let idx: u64 = 2;
-    arr[1] = 20;
-    arr[idx] += 10;
-    let (lo, hi) = mul_wide(3, 5);
-    let sh = wrapping_shl_u8(1, 3);
-    let zero64: i64 = 0;
-    let w32: i32 = wrapping_i32(wrapping_sub(zero64, 5));
-    let neg_adj: u64 = wrapping_u64(wrapping_add(w32, 7));
-    let u: usize = 4;
-    let i: isize = 5;
-    let us_sum: u64 = wrapping_add(wrapping_u64(u), wrapping_u64(i));
-    let arr_sum: u64 = widen_u64(wrapping_add(arr[1], arr[2]));
-    wrapping_add(
-        wrapping_add(wrapping_add(arr_sum, neg_adj), wrapping_add(widen_u64(sh), us_sum)),
-        wrapping_add(wrapping_add(res_val(true), res_val(false)), wrapping_add(lo, hi))
-    )
-}
-";
-        let exit_code = compile_wrap(smoke_manifest, smoke_src).expect("compile lowering smoke");
-        let note = read_stage2_sidecar_notes(&host_wasm);
-        assert_eq!(exit_code, 0, "lowering smoke failed: {note}");
-        let smoke_bytes = std::fs::read(&host_wasm).unwrap_or_default();
-        assert!(smoke_bytes.starts_with(b"\0asm\x0d\x00\x01\x00"));
-        let smoke_got = run(&smoke_bytes, &Ctx::default()).expect("run lowering smoke");
-        assert_eq!(smoke_got, 80);
-        remove_stage2_sidecars(&host_wasm);
-
-        // Verify WErr formatting surfaces symbol context via `werr_syms`.
-        let err_manifest = "[package]\nname = \"@vesper-test/stage2-werr-syms\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
-        let err_src = "pub fn main() -> u64 { unknown_host_fn() }\n";
-        let err_code = compile_wrap(err_manifest, err_src).expect("compile werr syms negative");
-        assert_ne!(err_code, 0, "expected non-zero exit for unresolved call");
-        let err_note = read_stage2_sidecar_notes(&host_wasm);
-        assert!(
-            err_note.contains("ExternalFunction")
-                && err_note.contains("sym=")
-                && err_note.contains("unknown_host_fn"),
-            "expected werr_syms symbol details in diagnostic note, got:\n{err_note}"
-        );
-        remove_stage2_sidecars(&host_wasm);
-
-        // Verify unsuffixed LHS integer literals infer their type from the RHS
-        // in binary operators and same-integer builtins (e.g. `wrapping_sub(0, i128)`).
-        let lhs_lit_manifest = "[package]\nname = \"@vesper-test/stage2-lhs-int-lit\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
-        let lhs_lit_src = "\
-fn neg_i128(x: i128) -> u64 {
-    let n = wrapping_sub(0, x);
-    let shifted = 10 + n;
-    let bonus = if 0 < shifted { 1 } else { 0 };
-    wrapping_add(wrapping_u64(shifted), bonus)
-}
-pub fn main() -> u64 {
-    let neg: i128 = -5;
-    let wide: u128 = 20;
-    let sum = 2 + wide;
-    wrapping_add(neg_i128(neg), wrapping_u64(sum))
-}
-";
-        let lhs_lit_code =
-            compile_wrap(lhs_lit_manifest, lhs_lit_src).expect("compile lhs int lit smoke");
-        let lhs_lit_note = read_stage2_sidecar_notes(&host_wasm);
-        assert_eq!(lhs_lit_code, 0, "lhs int lit smoke failed: {lhs_lit_note}");
-        let lhs_lit_bytes = std::fs::read(&host_wasm).unwrap_or_default();
-        assert!(lhs_lit_bytes.starts_with(b"\0asm\x0d\x00\x01\x00"));
-        let lhs_lit_got = run(&lhs_lit_bytes, &Ctx::default()).expect("run lhs int lit smoke");
-        assert_eq!(lhs_lit_got, 38);
-        remove_stage2_sidecars(&host_wasm);
-
-        // Verify `f32` values, the float conversions and bit
-        // reinterpretations, and the bitwise intrinsics (#2375) against the
-        // evaluator.
-        let float_manifest = "[package]\nname = \"@vesper-test/stage2-floats\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
-        let float_code =
-            compile_wrap(float_manifest, STAGE2_FLOAT_SMOKE).expect("compile float smoke");
-        let float_note = read_stage2_sidecar_notes(&host_wasm);
-        assert_eq!(float_code, 0, "float smoke failed: {float_note}");
-        let float_bytes = std::fs::read(&host_wasm).unwrap_or_default();
-        assert!(float_bytes.starts_with(b"\0asm\x0d\x00\x01\x00"));
-        let float_got = run(&float_bytes, &Ctx::default()).expect("run float smoke");
-        let float_expected = evaluate(check(STAGE2_FLOAT_SMOKE).world());
-        assert_eq!(
-            float_got.to_string(),
-            float_expected,
-            "float smoke vs the evaluator"
-        );
-        remove_stage2_sidecars(&host_wasm);
-
-        let _ = std::fs::remove_file(&syms_path);
-        std::fs::remove_dir_all(dir).unwrap();
-    });
-}
-
-/// `f32` arithmetic, comparisons, `%` and negation, `f32` literals (also on
-/// the left of an operator, and as a bits operand) and literal patterns, `widen_f64`, `nearest_f32`/`nearest_f64` from floats
-/// and integers, `to_bits_*`/`from_bits_*`, and `bit_*` on several kinds
-/// (#2375), folded into one word.
-const STAGE2_FLOAT_SMOKE: &str = "\
-fn mix(acc: u64, x: u64) -> u64 { wrapping_add(wrapping_mul(acc, 1000003), x) }
-fn b32(x: f32) -> u64 { widen_u64(to_bits_f32(x)) }
-fn b64(x: f64) -> u64 { to_bits_f64(x) }
-fn is_half(x: f32) -> u64 { match x { 0.5 => 1, _ => 0 } }
-fn eq32(a: f32, b: f32) -> u64 { if a == b { 1 } else { 0 } }
-pub fn main() -> u64 {
-    let a: f32 = 1.1;
-    let b: f32 = 3.0;
-    let tiny = from_bits_f32(1);
-    let nan = from_bits_f32(2143289344);
-    let neg_zero: f32 = -0.0;
-    let mut h: u64 = 7;
-    h = mix(h, b32(a + b));
-    h = mix(h, b32(a - b));
-    h = mix(h, b32(a * b));
-    h = mix(h, b32(a / b));
-    h = mix(h, b32(b % a));
-    h = mix(h, b32(-a));
-    h = mix(h, b32(tiny * b));
-    h = mix(h, if a < b { 1 } else { 2 });
-    h = mix(h, if a >= b { 3 } else { 4 });
-    h = mix(h, eq32(nan, nan));
-    h = mix(h, eq32(neg_zero, 0.0));
-    h = mix(h, is_half(0.5));
-    h = mix(h, is_half(a));
-    h = mix(h, b64(widen_f64(a)));
-    h = mix(h, if 0.5 == from_bits_f32(1056964608) { 5 } else { 6 });
-    h = mix(h, b32(2.0 * b));
-    h = mix(h, b32(-1.5 + a));
-    h = mix(h, widen_u64(to_bits_f32(1.0)));
-    h = mix(h, b64(from_bits_f64(4607182418800017408) + 1.0));
-    h = mix(h, b32(nearest_f32(0.1)));
-    h = mix(h, b32(nearest_f32(16777217)));
-    let big: u64 = 18446744073709551615;
-    let neg: i64 = -9007199254740993;
-    h = mix(h, b32(nearest_f32(big)));
-    h = mix(h, b64(nearest_f64(big)));
-    h = mix(h, b64(nearest_f64(neg)));
-    h = mix(h, b32(nearest_f32(neg)));
-    h = mix(h, b64(from_bits_f64(4614253070214989087) * 2.0));
-    let x: u32 = 2863311530;
-    let y: u32 = 4042322160;
-    h = mix(h, widen_u64(bit_and(x, y)));
-    h = mix(h, widen_u64(bit_or(x, y)));
-    h = mix(h, widen_u64(bit_xor(x, y)));
-    h = mix(h, widen_u64(bit_shl(x, 36)));
-    h = mix(h, widen_u64(bit_shr(x, 33)));
-    let s: i64 = -12345;
-    h = mix(h, wrapping_u64(bit_shr(s, 65)));
-    h = mix(h, wrapping_u64(bit_shl(s, 3)));
-    let k: u8 = 200;
-    h = mix(h, widen_u64(bit_shl(k, 9)));
-    h
-}
-";

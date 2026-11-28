@@ -34,10 +34,10 @@ use self::load::{
     effect_decl_at, fn_at, item_at, item_name, tr, variant_name
 };
 use self::resolve::{
-    ambiguous, group, is_foreign, local_of, lookup, name_of, no_key, overrides, reexports, shown,
-    use_module
+    ambiguous, group, is_foreign, is_generated, local_of, lookup, name_of, no_key, overrides,
+    reexports, shown, use_module
 };
-use self::rename::{assoc_decl_at, conf_at, item, owner, trait_ref};
+use self::rename::{assoc_decl_at, conf_at, effects, item, owner, trait_ref};
 
 fn text_range(in loader: St, module: u64) -> (u64, u64) {
     let start = match loader.mod_text_start.try_get(module) {
@@ -521,10 +521,26 @@ fn assemble_module(inout loader: St, in input: Str, module: u32) -> AssembledMod
     assemble_module_bytes(inout loader, in input.as_bytes(), module)
 }
 
+// The expanded regions of `module`, for `definition`.
+fn enter_regions(inout loader: St, module: u32) {
+    match loader.sugar_row.get(module) {
+        Option::Some(row) => {
+            loader.cur_region_first = w(at32(in loader.srm_first, w(row)));
+            loader.cur_region_count = w(at32(in loader.srm_count, w(row)));
+            loader.cur_prefix = at32(in loader.srm_prefix, w(row));
+        },
+        Option::None => {
+            loader.cur_region_count = 0;
+            loader.cur_prefix = none();
+        },
+    }
+}
+
 fn assemble_module_bytes(inout loader: St, in input: Slice[u8], module: u32) -> AssembledModule {
     let mut exported: ChunkSeq[u32] = ChunkSeq::new[u32]();
     bind(inout loader, module, inout exported);
     loader.cur_module = module;
+    enter_regions(inout loader, module);
     loader.cur_pkg = at32(in loader.mod_pkg, w(module));
     loader.is_root = module == loader.root_mod;
     let file = at32(in loader.mod_file, w(module));
@@ -602,7 +618,14 @@ fn assemble_module_bytes(inout loader: St, in input: Slice[u8], module: u32) -> 
         model_use.scope_end = wrapping_add(model_use.scope_end, loader.shift);
         lowered.ast.model_uses.set(idx_from_raw[ModelUseNode](model_use_id), model_use);
     }
-    for i in 0..lowered.ast.m_public.len() {
+    // A generated prelude module's items are not the package's public API
+    // (Rust appends the preludes after `Module::public_items` is taken).
+    let listed = if is_generated(in loader, loader.cur_module) {
+        0
+    } else {
+        lowered.ast.m_public.len()
+    };
+    for i in 0..listed {
         let public_name = tr(inout loader, in lowered.ast, at32(in lowered.ast.m_public, i));
         match loader.names.get(public_name) {
             Option::Some(binding) => loader.public_out.push(lo(binding)),
@@ -641,6 +664,9 @@ pub struct AssemblyMetadata {
     qualified: FlatTable[u32, u32],
     file_display: ChunkSeq[u32],
     file_base: ChunkSeq[u64],
+    // File-local sugar contracts: (file, word count, module, author map, regions).
+    pub sugar_policy_words: ChunkSeq[u64],
+    pub sugar_policy_truncated: bool,
     // Assembler diagnostics in the canonical `diag ...` text format.
     diagnostics: ChunkSeq[u8],
     // The same as rows: per diagnostic its file, code (111 for E0111),
@@ -756,6 +782,62 @@ pub fn assemble_next_bytes(
     Option::Some(assemble_module_bytes(inout assembly.loader, in input, module))
 }
 
+// Open sugar policy data while retaining the resolver for the definition-site
+// effect rows. The no-policy path does not copy the file table.
+pub fn assembly_sugar_policy(in assembly: Assembly) -> Option[(ChunkSeq[u64], ChunkSeq[u64])] {
+    if assembly.loader.sugar_policy_truncated {
+        return Option::None;
+    }
+    let mut words = ChunkSeq::new[u64]();
+    let mut bases = ChunkSeq::new[u64]();
+    if assembly.loader.sugar_policy_words.len() != 0 {
+        words.extend(in assembly.loader.sugar_policy_words.as_slice());
+        bases.extend(in assembly.loader.file_base.as_slice());
+    }
+    Option::Some((words, bases))
+}
+
+pub fn assembly_source_size(in assembly: Assembly, module: u64) -> Option[u64] {
+    if module >= assembly.loader.mod_pkg.len() {
+        return Option::None;
+    }
+    let (start, end) = text_range(in assembly.loader, module);
+    if end < start {
+        Option::None
+    } else {
+        Option::Some(wrapping_sub(end, start))
+    }
+}
+
+// Resolve the synthetic signature's effect row without adding the signature
+// to the module's AST, declarations, or exports. Call after draining
+// the ordinary module cursor.
+pub fn resolve_sugar_effect_row(
+    inout assembly: Assembly,
+    author: u64,
+    inout ast: Ast,
+    row: u32
+) -> bool {
+    if author >= assembly.loader.mod_pkg.len() {
+        return false;
+    }
+    let module = n32(author);
+    let diagnostics_before = assembly.loader.diags.len();
+    let mut unused_exports = ChunkSeq::new[u32]();
+    bind(inout assembly.loader, module, inout unused_exports);
+    assembly.loader.cur_module = module;
+    assembly.loader.cur_pkg = at32(in assembly.loader.mod_pkg, author);
+    // The row resolves where the sugar is defined: no region applies.
+    assembly.loader.cur_region_count = 0;
+    assembly.loader.cur_prefix = none();
+    assembly.loader.is_root = module == assembly.loader.root_mod;
+    assembly.loader.types.clear();
+    assembly.loader.values.clear();
+    begin_module(inout assembly.loader);
+    effects(inout assembly.loader, inout ast, row, 0, 0);
+    assembly.loader.diags.len() == diagnostics_before
+}
+
 /// Takes the metadata accumulated so far and releases the resolver tables.
 pub fn assembly_metadata(sink assembly: Assembly) -> AssemblyMetadata {
     AssemblyMetadata {
@@ -764,6 +846,8 @@ pub fn assembly_metadata(sink assembly: Assembly) -> AssemblyMetadata {
         qualified: assembly.loader.qualified,
         file_display: assembly.loader.file_display,
         file_base: assembly.loader.file_base,
+        sugar_policy_words: assembly.loader.sugar_policy_words,
+        sugar_policy_truncated: assembly.loader.sugar_policy_truncated,
         diagnostics: assembly.loader.diags,
         diagnostic_rows: assembly.loader.diag_rows,
         diagnostic_text: assembly.loader.diag_text

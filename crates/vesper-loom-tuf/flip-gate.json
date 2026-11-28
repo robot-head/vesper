@@ -80,6 +80,40 @@
         "--ignored",
         "--nocapture"
       ]
+    },
+    {
+      "workload": "checkpoint_json",
+      "run": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "-p",
+        "vesper-loom-tuf",
+        "--test",
+        "tuf_port",
+        "abba_tuf",
+        "--",
+        "--ignored",
+        "--nocapture"
+      ]
+    },
+    {
+      "workload": "checkpoint_encode",
+      "run": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "-p",
+        "vesper-loom-tuf",
+        "--test",
+        "tuf_port",
+        "abba_tuf",
+        "--",
+        "--ignored",
+        "--nocapture"
+      ]
     }
   ]
 }

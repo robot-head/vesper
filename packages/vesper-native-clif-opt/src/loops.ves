@@ -1,0 +1,772 @@
+// The load and loop steps of src/native_clif_opt.rs in Vesper (#2362
+// part 5): share_invariant_loads and hoist_loop_invariants.
+
+use @vesper/clif::{Func, inc, n32, u32_at, u64_at, w};
+use @vesper/clif::codes::{
+    M_CAN_MOVE, M_NOTRAP, M_READONLY, M_REGION_MASK, NONE, OP_BAND, OP_BITCAST, OP_BNOT, OP_BOR,
+    OP_BRIF, OP_BXOR, OP_F32CONST, OP_F64CONST, OP_FABS, OP_FADD, OP_FCMP, OP_FCVT_FROM_SINT,
+    OP_FCVT_FROM_UINT, OP_FMUL, OP_FNEG, OP_FSUB, OP_IADD, OP_IADD_IMM, OP_ICMP, OP_ICMP_IMM,
+    OP_ICONST, OP_IMUL, OP_IMUL_IMM, OP_INEG, OP_IREDUCE, OP_ISHL, OP_ISUB, OP_JUMP, OP_LOAD,
+    OP_SELECT, OP_SEXTEND, OP_SLOAD16, OP_SLOAD32, OP_SLOAD8, OP_SSHR, OP_UEXTEND, OP_ULOAD16,
+    OP_ULOAD32, OP_ULOAD8, OP_USHR, TY_F128, TY_F32X4, TY_F64X2, TY_I16X8, TY_I32X4, TY_I64X2,
+    TY_I8X16, TY_OTHER
+};
+use super::{layout_blocks, layout_insts};
+use super::branches::{Cfg, Dom, block_insts, cfg_of, dom_of, pred_hi, pred_lo, values_of};
+use super::cleanup::{common};
+
+// "No rank": a block not reachable from the entry.
+const NO_RANK: u64 = 18446744073709551615;
+// The flags a shared load needs.
+const SHAREABLE: u64 = M_READONLY | M_CAN_MOVE | M_NOTRAP;
+// A load's address argument.
+const LOAD_ADDR_ARG: u64 = 0;
+// An i32 offset's sign bit, flipped so that offsets order as signed.
+const I32_SIGN: u64 = 2147483648;
+const LOW_32: u64 = 4294967295;
+const SHIFT_32: u64 = 32;
+// The type rank and the region share the second key word.
+const TYPE_RANK_SHIFT: u64 = 8;
+
+fn g64(in s: ChunkSeq[u64], i: u64) -> u64 {
+    s.try_get(i).unwrap_or(0)
+}
+
+fn g8(in s: ChunkSeq[u8], i: u64) -> u8 {
+    s.try_get(i).unwrap_or(0)
+}
+
+// The order of `Type::index()` over the type codes: the scalars in code
+// order, then the vectors by lane count (these ranks).
+const RANK_I64X2: u64 = 10;
+const RANK_F64X2: u64 = 11;
+const RANK_I32X4: u64 = 12;
+const RANK_F32X4: u64 = 13;
+const RANK_I16X8: u64 = 14;
+const RANK_I8X16: u64 = 15;
+
+fn type_rank(ty: u64) -> u64 {
+    if ty <= TY_F128 {
+        ty
+    } else if ty == TY_I64X2 {
+        RANK_I64X2
+    } else if ty == TY_F64X2 {
+        RANK_F64X2
+    } else if ty == TY_I32X4 {
+        RANK_I32X4
+    } else if ty == TY_F32X4 {
+        RANK_F32X4
+    } else if ty == TY_I16X8 {
+        RANK_I16X8
+    } else if ty == TY_I8X16 {
+        RANK_I8X16
+    } else {
+        TY_OTHER
+    }
+}
+
+// Whether entry `a` orders before entry `b` by the two key words.
+fn key_less(in k1: ChunkSeq[u64], in k2: ChunkSeq[u64], a: u64, b: u64) -> bool {
+    let a1 = u64_at(in k1, a);
+    let b1 = u64_at(in k1, b);
+    if a1 != b1 {
+        return a1 < b1;
+    }
+    u64_at(in k2, a) < u64_at(in k2, b)
+}
+
+// The entries 0..n in key order, equal keys in entry order (a stable
+// bottom-up merge sort).
+fn sort_keys(in k1: ChunkSeq[u64], in k2: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let n = k1.len();
+    let mut a = ChunkSeq::new[u64]();
+    for i in 0..n {
+        a.push(i);
+    }
+    let mut b = ChunkSeq::new[u64]();
+    b.resize(n, 0);
+    let mut width = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        let mut lo = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = if wrapping_add(lo, width) < n {
+                wrapping_add(lo, width)
+            } else {
+                n
+            };
+            let two = wrapping_add(width, width);
+            let hi = if wrapping_add(lo, two) < n {
+                wrapping_add(lo, two)
+            } else {
+                n
+            };
+            let mut i = lo;
+            let mut j = mid;
+            let mut o = lo;
+            loop {
+                if o >= hi {
+                    break;
+                }
+                let take_left = if i >= mid {
+                    false
+                } else if j >= hi {
+                    true
+                } else {
+                    !key_less(in k1, in k2, u64_at(in a, j), u64_at(in a, i))
+                };
+                if take_left {
+                    let ok = b.try_set(o, u64_at(in a, i));
+                    i = inc(i);
+                } else {
+                    let ok = b.try_set(o, u64_at(in a, j));
+                    j = inc(j);
+                }
+                o = inc(o);
+            }
+            lo = hi;
+        }
+        swap(inout a, inout b);
+        width = wrapping_add(width, width);
+    }
+    a
+}
+
+// `share_invariant_loads`: a readonly, movable, non-trapping word loaded
+// more than once is loaded once, at the top of the members' nearest
+// common dominator, and the others become aliases of it.
+pub fn share_invariant_loads(inout f: Func) {
+    if f.first_block() == NONE {
+        return;
+    }
+    let cfg = cfg_of(in f);
+    let dom = dom_of(in f, in cfg);
+    let mut rank = ChunkSeq::new[u64]();
+    rank.resize(f.nblocks(), NO_RANK);
+    let np = dom.post.len();
+    for k in 0..np {
+        let b = u32_at(in dom.post, k);
+        let ok = rank.try_set(w(b), wrapping_sub(wrapping_sub(np, 1), k));
+    }
+    let mut member = ChunkSeq::new[u8]();
+    member.resize(f.ninsts(), 0);
+    loop {
+        let all = layout_insts(in f);
+        let mut insts = ChunkSeq::new[u32]();
+        let mut blocks = ChunkSeq::new[u32]();
+        let mut k1 = ChunkSeq::new[u64]();
+        let mut k2 = ChunkSeq::new[u64]();
+        for q in 0..all.len() {
+            let inst = u32_at(in all, q);
+            if f.op(inst) != OP_LOAD {
+                continue;
+            }
+            let row = f.inst(w(inst));
+            if row.mem & SHAREABLE != SHAREABLE || g64(in rank, w(row.block)) == NO_RANK {
+                continue;
+            }
+            let tr = type_rank(f.value_type(f.result(inst, 0)));
+            if tr == TY_OTHER {
+                continue;
+            }
+            let addr = w(f.resolve(f.arg(inst, LOAD_ADDR_ARG)));
+            let off = (row.off & LOW_32) ^ I32_SIGN;
+            insts.push(inst);
+            blocks.push(row.block);
+            k1.push((addr << SHIFT_32) | off);
+            k2.push((tr << TYPE_RANK_SHIFT) | (row.mem & M_REGION_MASK));
+        }
+        let order = sort_keys(in k1, in k2);
+        let n = order.len();
+        let mut changed = false;
+        let mut lo = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let first = u64_at(in order, lo);
+            let mut hi = inc(lo);
+            loop {
+                if hi >= n {
+                    break;
+                }
+                let e = u64_at(in order, hi);
+                if u64_at(in k1, e) != u64_at(in k1, first)
+                    || u64_at(in k2, e) != u64_at(in k2, first)
+                {
+                    break;
+                }
+                hi = inc(hi);
+            }
+            if wrapping_sub(hi, lo) >= 2 {
+                share(
+                    inout f,
+                    in dom,
+                    in rank,
+                    inout member,
+                    in order,
+                    in insts,
+                    in blocks,
+                    lo,
+                    hi
+                );
+                changed = true;
+            }
+            lo = hi;
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+// One group `order[lo..hi]` of loads of the same word.
+fn share(
+    inout f: Func,
+    in dom: Dom,
+    in rank: ChunkSeq[u64],
+    inout member: ChunkSeq[u8],
+    in order: ChunkSeq[u64],
+    in insts: ChunkSeq[u32],
+    in blocks: ChunkSeq[u32],
+    lo: u64,
+    hi: u64
+) {
+    let kept = u32_at(in insts, u64_at(in order, lo));
+    let mut target = u32_at(in blocks, u64_at(in order, lo));
+    for k in lo..hi {
+        let e = u64_at(in order, k);
+        let ok = member.try_set(w(u32_at(in insts, e)), 1);
+        target = common(in dom, in rank, target, u32_at(in blocks, e));
+    }
+    let mut before = NONE;
+    let mut i = f.first_inst(target);
+    loop {
+        if i == NONE {
+            break;
+        }
+        if g8(in member, w(i)) != 0 {
+            before = i;
+            break;
+        }
+        i = f.next_inst(i);
+    }
+    if before == NONE {
+        before = f.last_inst(target);
+    }
+    if before != kept {
+        f.move_before(kept, before);
+    }
+    f.trust_load(kept);
+    let shared = f.result(kept, 0);
+    for k in inc(lo)..hi {
+        let inst = u32_at(in insts, u64_at(in order, k));
+        let result = f.result(inst, 0);
+        f.remove_inst(inst);
+        f.detach_results(inst);
+        f.alias(result, shared);
+    }
+    for k in lo..hi {
+        let ok = member.try_set(w(u32_at(in insts, u64_at(in order, k))), 0);
+    }
+}
+
+// ----- hoist_loop_invariants -------------------------------------------------
+
+// `hoist_loop_invariants` makes at most this many rounds over a loop.
+const MAX_HOIST_ROUNDS: u64 = 4;
+// The arguments of a binary instruction and of a unary one.
+const ARG_A: u64 = 0;
+const ARG_B: u64 = 1;
+
+// The ranks (reverse postorder numbers) of the reachable blocks.
+pub fn ranks(in f: Func, in dom: Dom) -> ChunkSeq[u64] {
+    let mut rank = ChunkSeq::new[u64]();
+    rank.resize(f.nblocks(), NO_RANK);
+    let np = dom.post.len();
+    for k in 0..np {
+        let b = u32_at(in dom.post, k);
+        let ok = rank.try_set(w(b), wrapping_sub(wrapping_sub(np, 1), k));
+    }
+    rank
+}
+
+// `DominatorTree::block_dominates(a, b)` for a reachable `b`: false when
+// either block is unreachable.
+pub fn dominates(in dom: Dom, in rank: ChunkSeq[u64], a: u32, b: u32) -> bool {
+    let ra = g64(in rank, w(a));
+    if ra == NO_RANK || g64(in rank, w(b)) == NO_RANK {
+        return false;
+    }
+    let mut x = b;
+    loop {
+        if x == a {
+            return true;
+        }
+        if g64(in rank, w(x)) <= ra {
+            return false;
+        }
+        x = u32_at(in dom.idom, w(x));
+    }
+}
+
+// `LoopAnalysis`: loops by number, with their headers and parents, and
+// each block's innermost loop (NONE for none).
+pub struct Loops {
+    header: ChunkSeq[u32],
+    parent: ChunkSeq[u32],
+    innermost: ChunkSeq[u32],
+}
+
+// The block of predecessor branch `k` of the CFG.
+pub fn pred_block(in f: Func, in cfg: Cfg, k: u64) -> u32 {
+    f.inst(w(u32_at(in cfg.inst, k))).block
+}
+
+// `LoopAnalysis::compute`: headers in reverse postorder (a block that
+// dominates one of its predecessors), then each loop's blocks found
+// backwards from its back edges, the last loop first.
+pub fn loops_of(in f: Func, in cfg: Cfg, in dom: Dom, in rank: ChunkSeq[u64]) -> Loops {
+    let mut l = Loops {
+        header: ChunkSeq::new[u32](),
+        parent: ChunkSeq::new[u32](),
+        innermost: ChunkSeq::new[u32]()
+    };
+    l.innermost.resize(f.nblocks(), NONE);
+    let np = dom.post.len();
+    for k in 0..np {
+        let block = u32_at(in dom.post, wrapping_sub(wrapping_sub(np, 1), k));
+        let mut header = false;
+        for p in pred_lo(in cfg, block)..pred_hi(in cfg, block) {
+            if dominates(in dom, in rank, block, pred_block(in f, in cfg, p)) {
+                header = true;
+                break;
+            }
+        }
+        if header {
+            let ok = l.innermost.try_set(w(block), n32(l.header.len()));
+            l.header.push(block);
+            l.parent.push(NONE);
+        }
+    }
+    let nl = l.header.len();
+    let mut stack = ChunkSeq::new[u32]();
+    for r in 0..nl {
+        let lp = n32(wrapping_sub(wrapping_sub(nl, 1), r));
+        let h = u32_at(in l.header, w(lp));
+        for p in pred_lo(in cfg, h)..pred_hi(in cfg, h) {
+            let pb = pred_block(in f, in cfg, p);
+            if dominates(in dom, in rank, h, pb) {
+                stack.push(pb);
+            }
+        }
+        loop {
+            let node = match stack.pop() {
+                Option::Some(x) => x,
+                Option::None => break,
+            };
+            let mut next = NONE;
+            let at = u32_at(in l.innermost, w(node));
+            if at == NONE {
+                let ok = l.innermost.try_set(w(node), lp);
+                next = node;
+            } else {
+                let mut nl2 = at;
+                let mut up = u32_at(in l.parent, w(nl2));
+                loop {
+                    if up == NONE || up == lp {
+                        break;
+                    }
+                    nl2 = up;
+                    up = u32_at(in l.parent, w(nl2));
+                }
+                if up == NONE && nl2 != lp {
+                    let ok = l.parent.try_set(w(nl2), lp);
+                    next = u32_at(in l.header, w(nl2));
+                }
+            }
+            if next != NONE {
+                for p in pred_lo(in cfg, next)..pred_hi(in cfg, next) {
+                    stack.push(pred_block(in f, in cfg, p));
+                }
+            }
+        }
+    }
+    l
+}
+
+pub fn has(in s: ChunkSeq[u32], x: u32) -> bool {
+    for k in 0..s.len() {
+        if u32_at(in s, k) == x {
+            return true;
+        }
+    }
+    false
+}
+
+// Whether block `b` is in loop `lp` or one of its inner loops.
+pub fn in_loop(in l: Loops, b: u32, lp: u32) -> bool {
+    if b == NONE {
+        return false;
+    }
+    let mut cur = u32_at(in l.innermost, w(b));
+    loop {
+        if cur == NONE {
+            return false;
+        }
+        if cur == lp {
+            return true;
+        }
+        cur = u32_at(in l.parent, w(cur));
+    }
+}
+
+// The loops in the order the layout's blocks first name them, walking
+// from each block's innermost loop out.
+pub fn loops_found(in f: Func, in l: Loops) -> ChunkSeq[u32] {
+    let mut seen = ChunkSeq::new[u8]();
+    seen.resize(l.header.len(), 0);
+    let mut found = ChunkSeq::new[u32]();
+    let blocks = layout_blocks(in f);
+    for q in 0..blocks.len() {
+        let mut cur = u32_at(in l.innermost, w(u32_at(in blocks, q)));
+        loop {
+            if cur == NONE {
+                break;
+            }
+            if g8(in seen, w(cur)) == 0 {
+                let ok = seen.try_set(w(cur), 1);
+                found.push(cur);
+            }
+            cur = u32_at(in l.parent, w(cur));
+        }
+    }
+    found
+}
+
+// The loops in the order `hoist_loop_invariants` visits them: deepest
+// first, ties in the order the layout's blocks first name them.
+fn loop_order(in f: Func, in l: Loops) -> ChunkSeq[u32] {
+    let nl = l.header.len();
+    let mut seen = ChunkSeq::new[u8]();
+    seen.resize(nl, 0);
+    let mut found = ChunkSeq::new[u32]();
+    let mut depth = ChunkSeq::new[u64]();
+    let mut deepest: u64 = 0;
+    let blocks = layout_blocks(in f);
+    for q in 0..blocks.len() {
+        let mut cur = u32_at(in l.innermost, w(u32_at(in blocks, q)));
+        loop {
+            if cur == NONE {
+                break;
+            }
+            if g8(in seen, w(cur)) == 0 {
+                let ok = seen.try_set(w(cur), 1);
+                let mut d: u64 = 0;
+                let mut p = u32_at(in l.parent, w(cur));
+                loop {
+                    if p == NONE {
+                        break;
+                    }
+                    d = inc(d);
+                    p = u32_at(in l.parent, w(p));
+                }
+                found.push(cur);
+                depth.push(d);
+                if d > deepest {
+                    deepest = d;
+                }
+            }
+            cur = u32_at(in l.parent, w(cur));
+        }
+    }
+    let mut out = ChunkSeq::new[u32]();
+    for r in 0..inc(deepest) {
+        let d = wrapping_sub(deepest, r);
+        for k in 0..found.len() {
+            if u64_at(in depth, k) == d {
+                out.push(u32_at(in found, k));
+            }
+        }
+    }
+    out
+}
+
+fn is_hoist_load(op: u64) -> bool {
+    op == OP_LOAD
+        || op == OP_ULOAD8
+        || op == OP_SLOAD8
+        || op == OP_ULOAD16
+        || op == OP_SLOAD16
+        || op == OP_ULOAD32
+        || op == OP_SLOAD32
+}
+
+fn is_hoist_pure(op: u64) -> bool {
+    op == OP_ICONST
+        || op == OP_F32CONST
+        || op == OP_F64CONST
+        || op == OP_IADD
+        || op == OP_IADD_IMM
+        || op == OP_ISUB
+        || op == OP_IMUL
+        || op == OP_IMUL_IMM
+        || op == OP_ISHL
+        || op == OP_USHR
+        || op == OP_SSHR
+        || op == OP_BAND
+        || op == OP_BOR
+        || op == OP_BXOR
+        || op == OP_BNOT
+        || op == OP_INEG
+        || op == OP_UEXTEND
+        || op == OP_SEXTEND
+        || op == OP_IREDUCE
+        || op == OP_FADD
+        || op == OP_FSUB
+        || op == OP_FMUL
+        || op == OP_FNEG
+        || op == OP_FABS
+        || op == OP_BITCAST
+        || op == OP_FCVT_FROM_UINT
+        || op == OP_FCVT_FROM_SINT
+        || op == OP_ICMP
+        || op == OP_ICMP_IMM
+        || op == OP_FCMP
+        || op == OP_SELECT
+}
+
+// One loop being hoisted out of: the analyses, the loop and its preheader.
+struct Hoist {
+    dom: Dom,
+    rank: ChunkSeq[u64],
+    loops: Loops,
+}
+
+// `value_is_loop_invariant`: `v` is defined outside loop `lp` in a block
+// that dominates the preheader.
+fn invariant(in f: Func, in h: Hoist, lp: u32, preheader: u32, v: u32) -> bool {
+    let db = f.def_block(v);
+    db != NONE && !in_loop(in h.loops, db, lp) && dominates(in h.dom, in h.rank, db, preheader)
+}
+
+// The instruction defining `v` as its first result, or NONE.
+fn first_result_def(in f: Func, v: u32) -> u32 {
+    let d = f.def_inst(v);
+    if d == NONE || f.def_num(v) != 0 {
+        return NONE;
+    }
+    d
+}
+
+// The (invariant, variant) arguments of an `iadd` with exactly one
+// invariant argument, or NONE for both.
+copy struct Split {
+    inv: u32,
+    var: u32,
+}
+
+fn split_iadd(in f: Func, in h: Hoist, lp: u32, preheader: u32, inst: u32) -> Split {
+    let none = Split { inv: NONE, var: NONE };
+    if inst == NONE || f.op(inst) != OP_IADD {
+        return none;
+    }
+    let c = f.resolve(f.arg(inst, ARG_A));
+    let d = f.resolve(f.arg(inst, ARG_B));
+    let c_inv = invariant(in f, in h, lp, preheader, c);
+    let d_inv = invariant(in f, in h, lp, preheader, d);
+    if c_inv && !d_inv {
+        Split { inv: c, var: d }
+    } else if d_inv && !c_inv {
+        Split { inv: d, var: c }
+    } else {
+        none
+    }
+}
+
+// The reassociations of an instruction with a variant argument: whether
+// it changed the function.
+fn reassociate(inout f: Func, in h: Hoist, lp: u32, preheader: u32, inst: u32) -> bool {
+    let term = f.last_inst(preheader);
+    let none_dests = ChunkSeq::new[u32]();
+    let op = f.op(inst);
+    if op == OP_IADD {
+        let a = f.resolve(f.arg(inst, ARG_A));
+        let b = f.resolve(f.arg(inst, ARG_B));
+        let mut inv1 = NONE;
+        let mut inner = NONE;
+        if invariant(in f, in h, lp, preheader, a) {
+            inv1 = a;
+            inner = b;
+        } else if invariant(in f, in h, lp, preheader, b) {
+            inv1 = b;
+            inner = a;
+        }
+        if inv1 == NONE {
+            return false;
+        }
+        let ii = first_result_def(in f, f.resolve(inner));
+        if ii == NONE {
+            return false;
+        }
+        let iop = f.op(ii);
+        if iop == OP_IADD {
+            let s = split_iadd(in f, in h, lp, preheader, ii);
+            if s.inv == NONE || f.value_type(inv1) != f.value_type(s.inv) {
+                return false;
+            }
+            let mut args = ChunkSeq::new[u32]();
+            args.push(inv1);
+            args.push(s.inv);
+            let made = f.ins_before(term, OP_IADD, TY_OTHER, 0, 0, 0, 0, in args, in none_dests);
+            let base = f.result(made, 0);
+            f.set_binary(inst, OP_IADD, base, s.var);
+            return true;
+        }
+        if iop == OP_IADD_IMM {
+            let arg = f.arg(ii, ARG_A);
+            if invariant(in f, in h, lp, preheader, arg) {
+                return false;
+            }
+            let imm = f.inst(w(ii)).imm;
+            let var = f.resolve(arg);
+            let mut args = ChunkSeq::new[u32]();
+            args.push(inv1);
+            let made = f.ins_before(
+                term,
+                OP_IADD_IMM,
+                TY_OTHER,
+                0,
+                imm,
+                0,
+                0,
+                in args,
+                in none_dests
+            );
+            let base = f.result(made, 0);
+            f.set_binary(inst, OP_IADD, base, var);
+            return true;
+        }
+        return false;
+    }
+    if op != OP_IMUL_IMM {
+        return false;
+    }
+    let arg = f.resolve(f.arg(inst, ARG_A));
+    if invariant(in f, in h, lp, preheader, arg) {
+        return false;
+    }
+    let s = split_iadd(in f, in h, lp, preheader, first_result_def(in f, arg));
+    if s.inv == NONE {
+        return false;
+    }
+    let imm = f.inst(w(inst)).imm;
+    let mut ia = ChunkSeq::new[u32]();
+    ia.push(s.inv);
+    let inv_scaled = f.ins_before(term, OP_IMUL_IMM, TY_OTHER, 0, imm, 0, 0, in ia, in none_dests);
+    let mut va = ChunkSeq::new[u32]();
+    va.push(s.var);
+    let var_scaled = f.ins_before(inst, OP_IMUL_IMM, TY_OTHER, 0, imm, 0, 0, in va, in none_dests);
+    let x = f.result(inv_scaled, 0);
+    let y = f.result(var_scaled, 0);
+    f.set_binary(inst, OP_IADD, x, y);
+    true
+}
+
+// `hoist_loop_invariants`: pure loop-invariant instructions (and
+// non-trapping readonly movable loads, when the preheader ends in a
+// `jump`) move to the end of the loop's preheader, deepest loops first;
+// invariant offsets and scales are reassociated out of address
+// arithmetic so that they hoist too.
+pub fn hoist_loop_invariants(inout f: Func) {
+    if f.first_block() == NONE {
+        return;
+    }
+    let cfg = cfg_of(in f);
+    let dom = dom_of(in f, in cfg);
+    let rank = ranks(in f, in dom);
+    let loops = loops_of(in f, in cfg, in dom, in rank);
+    let order = loop_order(in f, in loops);
+    let h = Hoist { dom: dom, rank: rank, loops: loops };
+    let blocks = layout_blocks(in f);
+    for o in 0..order.len() {
+        let lp = u32_at(in order, o);
+        let header = u32_at(in h.loops.header, w(lp));
+        let mut outside = ChunkSeq::new[u32]();
+        for p in pred_lo(in cfg, header)..pred_hi(in cfg, header) {
+            let pb = pred_block(in f, in cfg, p);
+            if !in_loop(in h.loops, pb, lp) && !has(in outside, pb) {
+                outside.push(pb);
+            }
+        }
+        if outside.len() != 1 {
+            continue;
+        }
+        let preheader = u32_at(in outside, 0);
+        if !dominates(in h.dom, in h.rank, preheader, header) {
+            continue;
+        }
+        let term = f.last_inst(preheader);
+        if term == NONE {
+            continue;
+        }
+        let top = f.op(term);
+        if top != OP_JUMP && top != OP_BRIF {
+            continue;
+        }
+        let jump_preheader = top == OP_JUMP;
+        let mut loop_blocks = ChunkSeq::new[u32]();
+        for q in 0..blocks.len() {
+            let b = u32_at(in blocks, q);
+            if in_loop(in h.loops, b, lp) {
+                loop_blocks.push(b);
+            }
+        }
+        for _ in 0..MAX_HOIST_ROUNDS {
+            let mut changed = false;
+            for q in 0..loop_blocks.len() {
+                let body = block_insts(in f, u32_at(in loop_blocks, q));
+                for k in 0..body.len() {
+                    let inst = u32_at(in body, k);
+                    if f.nresults(inst) == 0 {
+                        continue;
+                    }
+                    let op = f.op(inst);
+                    let hoistable = if is_hoist_load(op) {
+                        jump_preheader && f.inst(w(inst)).mem & SHAREABLE == SHAREABLE
+                    } else {
+                        is_hoist_pure(op)
+                    };
+                    if !hoistable {
+                        continue;
+                    }
+                    let vals = values_of(in f, inst);
+                    let mut all_outside = true;
+                    for v in 0..vals.len() {
+                        if !invariant(in f, in h, lp, preheader, u32_at(in vals, v)) {
+                            all_outside = false;
+                            break;
+                        }
+                    }
+                    if !all_outside {
+                        if reassociate(inout f, in h, lp, preheader, inst) {
+                            changed = true;
+                        }
+                        continue;
+                    }
+                    let at = f.last_inst(preheader);
+                    f.move_before(inst, at);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+}

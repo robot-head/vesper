@@ -1,5 +1,27 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
 
+# The corpus-wide codegen differentials (the "long" ones below). At the
+# 6144 MiB self-host default BuildBuddy killed a different one each run
+# (native_walk_body on #2719 and #2718, walk_state on #2718, codegen_swap
+# on main at 4754445, codegen_control and codegen_seq on #2686), so each
+# reserves 8192 MiB: two fit the ci_tests budget side by side.
+_HEAVY_CODEGEN_MEMORY = "resources:memory:8192"
+
+_HEAVY_CODEGEN_TESTS = [
+    "test/self_host_codegen_aggregates_drops",
+    "test/self_host_codegen_calls_emit",
+    "test/self_host_codegen_control",
+    "test/self_host_codegen_numeric_swap",
+    "test/self_host_codegen_scalar_emit",
+    "test/self_host_codegen_seq",
+    "test/self_host_codegen_swap",
+    "test/self_host_ffi_emission",
+    "test/self_host_library_ir",
+    "test/self_host_native_walk_body",
+    "test/self_host_native_walk_calls",
+    "test/self_host_walk_state",
+]
+
 # The SH4 codegen swap differential (#1275). The tests include the root
 # package's tests/common/check_harness.rs by path and read the corpus
 # (examples/, packages/, tests/fixtures/) and @vesper/codegen-base's
@@ -12,11 +34,16 @@ vesper_crate(
         # BUILD file, so //:files leaves it out.
         "//packages/vesper-codegen-numeric:files",
         "//packages/vesper-cranelift:files",
+        # Stage 2 slice 3 (#2662): self_host_library_ir reads the hybrid's
+        # port libraries (crates/vesper-hybrid/modules).
+        "//crates/vesper-hybrid:files",
+        # backend_checks and ebpf_backend depend on the Loom packages in
+        # vesper-resonance and vesper-ebpf, whose BUILD files keep them out
+        # of //:files.
+        "//crates/vesper-ebpf:files",
+        "//crates/vesper-resonance:files",
     ],
-    test_tags = {
-        # Runs whole-body Vesper emissions across the corpus in Self-host codegen differentials.
-        "test/self_host_native_walk_body": ["resources:memory:6144"],
-    },
+    test_tags = {test: [_HEAVY_CODEGEN_MEMORY] for test in _HEAVY_CODEGEN_TESTS},
     test_timeouts = {
         "test/self_host_codegen_calls_emit": "long",
         "test/self_host_codegen_control": "long",
@@ -32,5 +59,10 @@ vesper_crate(
         "test/self_host_codegen_scalar_emit": "long",
         # Native walk part 6a (#2094): whole scalar bodies from Vesper.
         "test/self_host_native_walk_body": "long",
+        # Stage 2 slice 3b (#2660): direct callee words from Vesper.
+        "test/self_host_native_walk_calls": "long",
+        # Stage 2 slice 3 (#2662): the library IR pipeline over the port
+        # libraries.
+        "test/self_host_library_ir": "long",
     },
 )

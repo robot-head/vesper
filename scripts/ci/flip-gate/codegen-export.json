@@ -1,0 +1,80 @@
+{
+  "notes": [
+    "Flip gate for the export binding generator (`native::export::binding`),",
+    "ported as @vesper/codegen-export (SH4 lane 12, #1286) and installed as the",
+    "hybrid's `export` swap (crates/vesper-hybrid/src/swap/codegen_export.rs).",
+    "A compiler module: its Rust goes at the Rust compiler's retirement (SH6 lane 2),",
+    "not by this flip."
+  ],
+  "name": "codegen-export",
+  "lane": "SH4-12",
+  "rust": [
+    "src/native_export.rs"
+  ],
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0"
+  },
+  "build": [
+    [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "--test",
+      "self_host_codegen_export",
+      "--no-run"
+    ]
+  ],
+  "tests": [
+    {
+      "run": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--test",
+        "self_host_codegen_export"
+      ]
+    }
+  ],
+  "differential": {
+    "run": {
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--test",
+        "self_host_codegen_export",
+        "--",
+        "--nocapture"
+      ]
+    }
+  },
+  "abba": [
+    {
+      "workload": "binding-generator-with-encode-and-unpack",
+      "run": {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_codegen_export",
+          "binding_cost",
+          "--",
+          "--exact",
+          "--ignored",
+          "--nocapture"
+        ],
+        "env": {
+          "FLIP_GATE": "1",
+          "CHECK_HARNESS_SPEED": "1"
+        }
+      }
+    }
+  ]
+}

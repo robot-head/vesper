@@ -3,7 +3,10 @@ load("//tools/bazel:vesper_hybrid.bzl", "vesper_hybrid")
 filegroup(
     name = "native_backend_package",
     srcs = glob(["modules/native_backend/**"]),
-    visibility = ["//:__pkg__"],
+    visibility = [
+        "//:__pkg__",
+        "//crates/vesper-stage2-gate:__pkg__",
+    ],
 )
 
 # The hybrid Stage 2 compiler (self-hosting SH0 lane 1, #1123): the default
@@ -210,7 +213,8 @@ vesper_hybrid(
         # (#1895) those backends and wit-component; the package load
         # (#1986) the package assembler; driver-commands' `vesper
         # proof-audit` @vesper/proof-audit and `vesper verify SOURCE
-        # --format` @vesper/verify and @vesper/lean-syntax (#1341, #1996).
+        # --format` @vesper/verify and @vesper/lean-syntax (#1341, #1996);
+        # `vesper lsp` @vesper/lsp-server and @vesper/lsp (#1828).
         "hybrid_driver": [
             ":hybrid_parse_package",
             "//:ast_package",
@@ -222,6 +226,8 @@ vesper_hybrid(
             "//:driver_package",
             "//:ebpf_backend_package",
             "//:front_package",
+            "//:lsp_package",
+            "//:lsp_server_package",
             "//:place_ir_package",
             "//:proof_audit_package",
             "//:std_collections_package",
@@ -335,6 +341,7 @@ vesper_hybrid(
         # The `vesper run` evaluator (#2053) builds on @vesper/run.
         "hybrid_run": [
             "//:check_data_package",
+            "//:check_layout_package",
             "//:place_ir_package",
             "//:run_package",
             "//crates/vesper-alloc:port_package",

@@ -16,6 +16,12 @@
 // a stack slot, so each local's entry carries the kind its stores coerce
 // to.
 //
+// `inout` scalar parameters (#2563) arrive with their addresses in the
+// request, so the emitter loads and stores them as it does a spilled
+// local. A direct call of a pure function may borrow whole scalar locals
+// `inout` (`INST_INOUT_CALL`): each is passed by its address, a scratch
+// word for a register, and loaded back after the call.
+//
 // Failure records (#2425): a `fail_only` function (`Fail[E]` instances and
 // erased capabilities only) takes its failure record as one more
 // parameter. Its plan names the row's `Fail` count and the result lane a
@@ -28,9 +34,10 @@
 // again. A body with any other raise (`Fail::raise`, checked compound
 // writes, negations, narrowing or shifts) stays on the Rust walk.
 
-use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at};
 use @vesper/check-data::types::{TyKind, default_type};
 use @vesper/check-layout::{L_ENUM, L_PRODUCT, layout_of};
+use @vesper/codegen-aggregates::{short_name};
 use @vesper/place-ir::{FnRow, InstRow};
 use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
 use super::{
@@ -40,6 +47,7 @@ use super::{
     kind_unsigned
 };
 use super::blocks::{layout};
+use super::handlers::{CallSlots, HANDLER_HOME};
 use @vesper/check-layout::{L_PRODUCT, layout_of};
 
 // The plan's lane codes (`native::scalar` of a value's type).
@@ -50,10 +58,18 @@ pub const LANE_I128: u64 = 4;
 // A struct or tuple of scalar fields (#2411): its register holds a
 // pointer to its storage, a word on the 64-bit targets.
 pub const LANE_PRODUCT: u64 = 5;
+// A small enum the optimize path keeps as words (#2581,
+// `aggregates::scalar_enums`): its own register holds a word the walk
+// never reads; its words are values of their own.
+pub const LANE_WORDS: u64 = 6;
 
 // A local's entry: a lane code for a local the body declares, or
 // `LOCAL_PARAM` plus the parameter's index for one of the parameters.
 pub const LOCAL_PARAM: u64 = 16;
+pub const LOCAL_PARAM_PRODUCT: u64 = 65536;
+// Added to a local's entry when it keeps a home slot on the optimize path
+// too (`body_homed`, #2614).
+pub const LOCAL_HOME: u64 = 4294967296;
 
 // The instruction kinds of the plan.
 pub const INST_PLANNED: u64 = 1;
@@ -76,6 +92,52 @@ pub const INST_WIDE_BINARY: u64 = 15;
 pub const INST_CHECKED: u64 = 40;
 // A direct call of a `fail_only` function, whose failure is raised again.
 pub const INST_FAIL_CALL: u64 = 41;
+// A direct call of a pure function that borrows scalar locals `inout`
+// (#2563); codes from 48 leave room for the failure-record slice.
+pub const INST_INOUT_CALL: u64 = 48;
+// A direct call whose small enum result comes back as words in registers
+// (#2581); codes from 56 leave room for the other body slices.
+pub const INST_WORDS_CALL: u64 = 56;
+// A sequence or string operation (`Op::Seq`, #2653): one of the `SEQ_*`
+// forms below, then its words.
+pub const INST_SEQ: u64 = 80;
+// `INST_SEQ`'s forms: a header word loaded at an offset (`Str::len`,
+// `Slice::len`); the operand itself (`as_str`); a byte view of a string
+// (`as_bytes`); a checked byte (`byte_at`); a checked slice element
+// (`s[i]`).
+const SEQ_WORD: u64 = 1;
+const SEQ_SAME: u64 = 2;
+const SEQ_AS_BYTES: u64 = 3;
+const SEQ_BYTE_AT: u64 = 4;
+const SEQ_GET: u64 = 5;
+// A slice view's header word (`seq_word`): read-only memory when the
+// view is a parameter read once at entry.
+const SEQ_VIEW_WORD: u64 = 6;
+// A slice's `last`, its `Option` kept as words.
+const SEQ_LAST: u64 = 7;
+// The words a small `Option` is kept as: its tag and its payload.
+const OPTION_WORDS: u64 = 2;
+// A string literal (`Codegen::string_literal`): its byte count, then its
+// bytes packed little-endian into words.
+const SEQ_LITERAL: u64 = 8;
+// The bits of a literal byte and of the word it is packed into.
+const BYTE_BITS: u32 = 8;
+const WORD_BITS: u32 = 64;
+// The header words (src/strings/native.rs, src/seq/native.rs): a
+// string's `{len, cap, data}`, a slice view's `{handle, start, len}`.
+const STR_LEN_OFFSET: u64 = 0;
+const SLICE_LEN_OFFSET: u64 = 16;
+// `seq::elem_bytes`: the strides of a slice's one-word elements.
+const STRIDE_BYTE: u64 = 1;
+const STRIDE_HALF: u64 = 2;
+const STRIDE_QUARTER: u64 = 4;
+const STRIDE_WORD: u64 = 8;
+// A `Fail` handler (#2657): its handled body and clauses as nested graphs;
+// codes from 60 leave room for the other body slices.
+pub const INST_HANDLE: u64 = 60;
+// A `Bind` of a struct or tuple pattern over a product of scalar fields
+// (#2654, `Codegen::bind_ir`): the pattern's nodes follow.
+pub const INST_BIND_FIELDS: u64 = 72;
 
 // A failure record's tag word, and the word its payload is rounded to
 // (`fail_record_size`).
@@ -98,6 +160,9 @@ pub const INST_F64CONST: u64 = 17;
 // A struct or tuple built from scalar fields (`Op::Data`, `Op::Tuple`;
 // `Codegen::data_into`), #2411.
 pub const INST_DATA: u64 = 32;
+pub const INST_PROJECT: u64 = 33;
+pub const INST_READ_FIELD: u64 = 34;
+pub const INST_READ_COPY: u64 = 35;
 
 // Sub-operations of `INST_FLOAT_UNARY` and 1-arg `CB_FLOAT_UNARY`.
 const FUN_FNEG: u64 = 1;
@@ -195,6 +260,21 @@ const MATCH_INT: u64 = 2;
 const MATCH_F32: u64 = 3;
 const MATCH_F64: u64 = 4;
 const MATCH_WIDE: u64 = 5;
+// A struct or tuple pattern over a product (#2654, `pattern_condition`):
+// the arm's target, then the pattern's nodes.
+const MATCH_FIELDS: u64 = 16;
+
+// The nodes of a product pattern (#2654), in the walk's order: a leaf that
+// binds nothing (the condition `pattern_true`), a local bound to the value,
+// an integer or `bool` literal the value is compared with, or the fields
+// (count, then per field its offset, the lane it loads as and its node).
+pub const PNODE_NONE: u64 = 0;
+pub const PNODE_LOCAL: u64 = 1;
+pub const PNODE_INT: u64 = 2;
+pub const PNODE_FIELDS: u64 = 3;
+// An enum constructor's condition (#2654): the tag, the field count, then
+// the fields as `PNODE_FIELDS` has them.
+pub const PNODE_TAG: u64 = 4;
 
 // Sub-operations of `INST_WIDE_UNARY`.
 const WUN_BNOT: u64 = 1;
@@ -230,7 +310,13 @@ const PAT_LIT_HI_OFFSET: u64 = 5;
 const CALL_ARGS: u64 = 2;
 const CALL_ARG_WORDS: u64 = 4;
 const CALL_ARG_ROOT_OFFSET: u64 = 2;
+const CALL_ARG_PATH_OFFSET: u64 = 3;
 const PASS_IN: u64 = 0;
+const PASS_INOUT: u64 = 1;
+const PASS_SINK: u64 = 2;
+// `INST_INOUT_CALL`'s argument tags.
+pub const ARG_IN: u64 = 0;
+pub const ARG_INOUT: u64 = 1;
 
 // A `Bind` of the wildcard pattern binds no local.
 pub const NO_LOCAL: u64 = 18446744073709551615;
@@ -246,9 +332,12 @@ const TERM_MATCH: u64 = 3;
 const TERM_UNREACHABLE: u64 = 4;
 // `return` of a struct result through the result pointer (#2411).
 const TERM_RETURN_SRET: u64 = 32;
+// `return` of a small enum's words in registers (#2581).
+const TERM_RETURN_WORDS: u64 = 33;
 
 // `Codegen::data_into`'s word step, and its smallest storage.
 const WORD_BYTES: u64 = 8;
+pub const STORE_AGGREGATE: u64 = 65536;
 
 // `Op::Data`'s operands: a header of name and count, then one
 // (field name, value) pair per field.
@@ -259,6 +348,15 @@ const DATA_PAIR_WORDS: u64 = 2;
 const PAT_WILD_WORDS: u64 = 3;
 const PAT_BIND_WORDS: u64 = 4;
 const PAT_LIT_WORDS: u64 = 6;
+// A tuple pattern's words: kind, span, count, then its parts; a
+// constructor's: kind, span, name, the named flag, count, then (field,
+// part) pairs.
+const PAT_TUPLE_COUNT_OFFSET: u64 = 3;
+const PAT_TUPLE_WORDS: u64 = 4;
+const PAT_CTOR_COUNT_OFFSET: u64 = 5;
+const PAT_CTOR_WORDS: u64 = 6;
+const PAT_CTOR_NAME_OFFSET: u64 = 3;
+const PAT_BIND_NAME_OFFSET: u64 = 3;
 const PAT_LIT_KIND_OFFSET: u64 = 3;
 const PAT_LIT_LO_OFFSET: u64 = 4;
 const TABLE_KIND_MASK: u32 = 15;
@@ -310,17 +408,22 @@ fn set(inout s: ChunkSeq[u64], i: u64, x: u64) {
     let ok = s.try_set(i, x);
 }
 
+pub fn grow_set(inout s: ChunkSeq[u64], i: u64, x: u64) {
+    set(inout s, i, x);
+}
+
 fn at(in s: ChunkSeq[u64], i: u64) -> u64 {
     if i < s.len() { u64_at(in s, i) } else { 0 }
 }
 
 // One function's header, as the body plan reads it.
-struct Header {
+pub struct Header {
     // parameter names, in order
     params: ChunkSeq[u64],
     result: u32,
-    // value id -> its index + 1 (0: not a value of the graph)
+    // value id -> its index + 1 (0: not a value of the graph), and back
     index: ChunkSeq[u64],
+    vid: ChunkSeq[u64],
     // value index -> its type
     vty: ChunkSeq[u64],
     // local index -> its name and type
@@ -334,6 +437,9 @@ struct Header {
     // the header names no bounds, captures, or effects other than `Fail`
     // instances and erased capabilities
     plain: bool,
+    // the names and handler capabilities the graph takes from outside
+    // (a nested graph's)
+    captures: u64,
 }
 
 impl Gen {
@@ -354,10 +460,19 @@ impl Gen {
         if n.kind == TyKind::Tuple {
             return self.body_product_lane(d);
         }
-        if n.kind != TyKind::Named || n.n != 0 {
+        let k = self.ctx.world.k;
+        // A slice is its view `{handle, start, len}` (#2653).
+        if n.kind == TyKind::Named && n.n == 1 && n.name == k.slice {
+            return self.body_product_lane(d);
+        }
+        // An instance of a generic struct or enum, such as `Secret[u64]`
+        // or `Option[i64]` (#2654), kept in memory when its layout is one.
+        if n.kind == TyKind::Named && n.n != 0 {
+            return self.body_product_lane(d);
+        }
+        if n.kind != TyKind::Named {
             return 0;
         }
-        let k = self.ctx.world.k;
         if n.name == k.f32_ {
             LANE_F32
         } else if n.name == k.f64_ {
@@ -377,6 +492,62 @@ impl Gen {
 
     // LANE_PRODUCT for a struct or tuple whose fields are all scalars
     // (`Layout::of` a product with no aggregate field), else 0.
+    fn body_product_layout_ok(inout self, l: u32) -> bool {
+        if l != NONE32 && self.layouts.node(l).kind == L_ENUM {
+            return self.body_enum_layout_ok(l);
+        }
+        if l == NONE32 || self.layouts.node(l).kind != L_PRODUCT {
+            return false;
+        }
+        let node = self.layouts.node(l);
+        for k in 0..widen_u64(node.n) {
+            let field = self.layouts.lfield(add(widen_u64(node.a), k));
+            if self.layouts.aggregate(field.layout) {
+                if !self.body_product_layout_ok(field.layout) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    // An enum kept in memory (#2654) whose variants' fields are register
+    // scalars or products of them: its register holds a pointer to its
+    // storage, as a product's does.
+    fn body_enum_layout_ok(inout self, l: u32) -> bool {
+        let node = self.layouts.node(l);
+        for k in 0..widen_u64(node.n) {
+            let v = self.layouts.lvariant(add(widen_u64(node.a), k));
+            for j in 0..widen_u64(v.fc) {
+                let field = self.layouts.lfield(add(widen_u64(v.fa), j));
+                let fine = if self.layouts.aggregate(field.layout) {
+                    self.layouts.node(field.layout).kind == L_PRODUCT
+                        && self.body_product_layout_ok(field.layout)
+                        && self.body_plain_product(field.ty)
+                } else {
+                    self.body_register(field.ty)
+                };
+                if !fine {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    // The index of the variant of enum layout `l` that constructor or
+    // pattern name `name` names (`Layout::variant`), or NONE64.
+    fn body_variant(inout self, l: u32, name: u32) -> u64 {
+        let short = short_name(inout self.ctx.names, name);
+        let node = self.layouts.node(l);
+        for k in 0..widen_u64(node.n) {
+            if self.layouts.lvariant(add(widen_u64(node.a), k)).name == short {
+                return k;
+            }
+        }
+        NONE64
+    }
+
     fn body_product_lane(inout self, d: u32) -> u64 {
         let mark = self.layouts.mark();
         let l = layout_of(
@@ -386,17 +557,11 @@ impl Gen {
             in self.ctx.world,
             d
         );
-        let mut lane: u64 = 0;
-        if l != NONE32 && self.layouts.node(l).kind == L_PRODUCT {
-            let node = self.layouts.node(l);
-            lane = LANE_PRODUCT;
-            for k in 0..widen_u64(node.n) {
-                let field = self.layouts.lfield(add(widen_u64(node.a), k));
-                if self.layouts.aggregate(field.layout) {
-                    lane = 0;
-                }
-            }
-        }
+        let lane: u64 = if self.body_product_layout_ok(l) {
+            LANE_PRODUCT
+        } else {
+            0
+        };
         self.layouts.reset(mark);
         lane
     }
@@ -430,6 +595,25 @@ impl Gen {
         // `Op::Data`: name, count, (field, value) pairs; `Op::Tuple`:
         // count, values.
         let data = i.op == Op::Data;
+        // An enum's constructor (#2654): its tag, and its variant's fields.
+        let mut tag = NO_TAG;
+        let mut field_base = widen_u64(node.a);
+        let mut field_count = widen_u64(node.n);
+        if node.kind == L_ENUM {
+            let variant = if data {
+                self.body_variant(l, n32(self.program.op(i.a)))
+            } else {
+                NONE64
+            };
+            if variant == NONE64 {
+                self.layouts.reset(mark);
+                return false;
+            }
+            let v = self.layouts.lvariant(add(widen_u64(node.a), variant));
+            tag = variant;
+            field_base = widen_u64(v.fa);
+            field_count = widen_u64(v.fc);
+        }
         let n = if data {
             self.program.op(inc(i.a))
         } else {
@@ -441,24 +625,42 @@ impl Gen {
         for k in 0..n {
             let (field, at) = if data {
                 let pair = add(add(i.a, DATA_HEADER_WORDS), wrapping_mul(k, DATA_PAIR_WORDS));
-                (self.layouts.field_named(l, n32(self.program.op(pair))), inc(pair))
+                let name = n32(self.program.op(pair));
+                let mut index = NONE64;
+                for j in 0..field_count {
+                    if self.layouts.lfield(add(field_base, j)).name == name {
+                        index = j;
+                    }
+                }
+                (index, inc(pair))
             } else {
-                (wrapping_u32(k), add(inc(i.a), k))
+                (k, add(inc(i.a), k))
             };
-            if field == NONE32
-                || widen_u64(field) >= widen_u64(node.n)
-                || !self.body_operand(in h, at, inout ops)
-            {
+            if field == NONE64 || field >= field_count || !self.body_operand(in h, at, inout ops) {
                 ok = false;
                 break;
             }
-            let lf = self.layouts.lfield(add(widen_u64(node.a), widen_u64(field)));
+            let lf = self.layouts.lfield(add(field_base, field));
             let start = wrapping_u64(widen_i64(lf.offset));
             let size = widen_u64(self.layouts.node(lf.layout).size);
             let vt = n32(u64_at(in h.vty, u64_at(in ops, k)));
             if self.body_lane(vt) == LANE_PRODUCT {
-                ok = false;
-                break;
+                if size % WORD_BYTES != 0 {
+                    ok = false;
+                    break;
+                }
+                let mut off = start;
+                loop {
+                    if off >= add(start, size) {
+                        break;
+                    }
+                    covered.push(off);
+                    off = add(off, WORD_BYTES);
+                }
+                fields.push(start);
+                fields.push(0);
+                fields.push(add(STORE_AGGREGATE, size));
+                continue;
             }
             let ft = default_type(inout self.ctx.types, lf.ty);
             let fnode = self.ctx.types.node(ft);
@@ -483,12 +685,31 @@ impl Gen {
             fields.push(store);
         }
         let size = widen_u64(node.size);
+        // An enum's zeroing ends at its variant's last field (the words
+        // past it are inactive payload, §16.6), its tag word written.
+        let mut end = if size < WORD_BYTES { WORD_BYTES } else { size };
+        if tag != NO_TAG {
+            covered.push(0);
+            end = 0;
+            for j in 0..field_count {
+                let lf = self.layouts.lfield(add(field_base, j));
+                let last = add(
+                    wrapping_u64(widen_i64(lf.offset)),
+                    widen_u64(self.layouts.node(lf.layout).size)
+                );
+                if last > end {
+                    end = last;
+                }
+            }
+            if field_count == 0 {
+                end = WORD_BYTES;
+            }
+        }
         self.layouts.reset(mark);
         if !ok {
             return false;
         }
         extra.push(size);
-        let end = if size < WORD_BYTES { WORD_BYTES } else { size };
         let mut zeroed: ChunkSeq[u64] = ChunkSeq::new[u64]();
         let mut off: u64 = 0;
         loop {
@@ -508,6 +729,7 @@ impl Gen {
         }
         extra.push(zeroed.len());
         extra.extend(in zeroed.as_slice());
+        extra.push(tag);
         extra.extend(in fields.as_slice());
         true
     }
@@ -578,12 +800,14 @@ impl Gen {
             params: ChunkSeq::new[u64](),
             result: NONE32,
             index: ChunkSeq::new[u64](),
+            vid: ChunkSeq::new[u64](),
             vty: ChunkSeq::new[u64](),
             lname: ChunkSeq::new[u64](),
             lty: ChunkSeq::new[u64](),
             pty: ChunkSeq::new[u64](),
             fails: ChunkSeq::new[u64](),
-            plain: true
+            plain: true,
+            captures: 0
         };
         let mut i = f.ha;
         let np = self.program.op(i);
@@ -610,6 +834,11 @@ impl Gen {
                     // `native::fail_only`'s `Fail[E]`: a failure exit.
                     let e = u32_at(in self.ctx.types.items, widen_u64(eff.a));
                     h.fails.push(widen_u64(default_type(inout self.ctx.types, e)));
+                } else if eff_name == ops_s.fail_ && eff.label != 0 && eff.n == 1 {
+                    // A handler's lexical capability (#2657): a nested
+                    // graph raises to the handler in scope; `body`
+                    // refuses it.
+                    h.captures = inc(h.captures);
                 } else if eff_name != ops_s.const_time
                     && eff_name != ops_s.realtime
                     && eff_name != ops_s.det_float
@@ -624,13 +853,17 @@ impl Gen {
         i = add(inc(i), wrapping_mul(nb, 2));
         let nc = self.program.op(i);
         i = add(inc(i), nc);
-        if nb != 0 || nc != 0 {
+        // A handler's nested graph reads the names it captures from the
+        // scope it is emitted in (#2657); `body` refuses them.
+        h.captures = add(h.captures, nc);
+        if nb != 0 {
             h.plain = false;
         }
         let nv = self.program.op(i);
         i = inc(i);
         for k in 0..nv {
             set(inout h.index, self.program.op(i), inc(k));
+            h.vid.push(self.program.op(i));
             h.vty.push(self.program.op(inc(i)));
             i = add(i, 2);
         }
@@ -642,6 +875,21 @@ impl Gen {
             i = add(i, 2);
         }
         h
+    }
+
+    // How many words value index `v` of the function being planned is kept
+    // as (#2581), 0 when it is not.
+    fn body_words(in self, in h: Header, v: u64) -> u64 {
+        if v >= h.vid.len() {
+            return 0;
+        }
+        self.enums.count(self.fi, u64_at(in h.vid, v))
+    }
+
+    // The index of the `k`-th word value of kept value index `v`, or
+    // NONE64.
+    fn body_word(in self, in h: Header, v: u64, k: u64) -> u64 {
+        self.body_value(in h, self.enums.word(self.fi, u64_at(in h.vid, v), k))
     }
 
     // The index of value `v`, or NONE64.
@@ -1279,6 +1527,18 @@ impl Gen {
                 extra.push(rk);
                 return true;
             }
+        } else if op == ops_s.eq || op == ops_s.ne {
+            let n0 = self.ctx.types.node(d0);
+            if n0.kind == TyKind::Named && n0.n == 0 && n0.name == self.ctx.world.k.bool_ {
+                kind = INST_INT_EXTRA;
+                extra.push(IEX_WORD_BIN);
+                extra.push(if op == ops_s.eq { WBIN_EQ } else { WBIN_NE });
+                extra.push(0);
+                extra.push(k0);
+                extra.push(k1);
+                extra.push(rk);
+                return true;
+            }
         }
         false
     }
@@ -1354,6 +1614,13 @@ impl Gen {
                 ty = t;
             }
         }
+        // A handler in scope takes the raise first (#2657).
+        let named = self.ctx.types.named0(ty_name);
+        let handled = self.handled_raise(named);
+        if handled != NONE64 {
+            index = handled;
+            ty = named;
+        }
         if index == NONE64 {
             return false;
         }
@@ -1392,6 +1659,31 @@ impl Gen {
         true
     }
 
+    // Whether the function being planned has a struct or enum it knows
+    // nothing of the words of (#2654): a call's result, or one joined at a
+    // block parameter. The walk coerces a narrow field read from such
+    // storage once more where it is used, which the plan does not model.
+    fn body_opaque_products(inout self, in h: Header) -> bool {
+        let f = self.program.function(self.fi);
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            let pa = self.body_params_at(row.ha);
+            for k in 0..self.program.op(pa) {
+                let v = self.body_value(in h, self.program.op(add(inc(pa), k)));
+                if v != NONE64 && self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT {
+                    return true;
+                }
+            }
+            for ii in 0..row.ic {
+                let x = self.program.inst(add(row.i0, ii));
+                if x.op == Op::Call && self.body_lane(x.ty) == LANE_PRODUCT {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     // The function named `name` (place-ir row index), or NONE64.
     fn body_function(in self, name: u32) -> u64 {
         for k in 0..self.program.fn_count() {
@@ -1423,6 +1715,11 @@ impl Gen {
                 if n32(u64_at(in h.fails, j)) == t {
                     index = j;
                 }
+            }
+            // A handler in scope takes the raise first (#2657).
+            let handled = self.handled_raise(t);
+            if handled != NONE64 {
+                index = handled;
             }
             if index == NONE64 {
                 return false;
@@ -1467,6 +1764,167 @@ impl Gen {
         extra.push(callee_fails.len());
         extra.extend(in words.as_slice());
         true
+    }
+
+    // Whether product type `t` holds only register scalars and products of
+    // them (#2654): a pattern over it loads its fields and binds no `Box`
+    // or handle the walk would drop.
+    fn body_plain_product(inout self, t: u32) -> bool {
+        let mark = self.layouts.mark();
+        let d = default_type(inout self.ctx.types, t);
+        let l = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            d
+        );
+        let mut ok = l != NONE32 && self.layouts.node(l).kind == L_PRODUCT;
+        if ok {
+            let node = self.layouts.node(l);
+            for k in 0..widen_u64(node.n) {
+                let lf = self.layouts.lfield(add(widen_u64(node.a), k));
+                let fine = if self.layouts.aggregate(lf.layout) {
+                    self.body_plain_product(lf.ty)
+                } else {
+                    self.body_register(lf.ty)
+                };
+                if !fine {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        self.layouts.reset(mark);
+        ok
+    }
+
+    // The nodes of pattern `p` (place-ir words, prefix order) over a value
+    // of type `t` (#2654), appended to `o`: the walk's `bind_ir` when
+    // `bind`, else its `pattern_condition`. Answers the word after the
+    // pattern, or NONE64 to leave the function to the walk.
+    fn body_pattern(
+        inout self,
+        in h: Header,
+        p: u64,
+        t: u32,
+        bind: bool,
+        inout o: ChunkSeq[u64]
+    ) -> u64 {
+        let pkind = self.program.op(p);
+        if pkind == Pat::Wild {
+            o.push(PNODE_NONE);
+            return add(p, PAT_WILD_WORDS);
+        }
+        if pkind == Pat::Bind {
+            if bind {
+                let k = self.body_local(in h, self.program.op(add(p, PAT_BIND_NAME_OFFSET)));
+                if k == NONE64 {
+                    return NONE64;
+                }
+                o.push(PNODE_LOCAL);
+                o.push(k);
+            } else {
+                o.push(PNODE_NONE);
+            }
+            return add(p, PAT_BIND_WORDS);
+        }
+        if pkind == Pat::Literal {
+            if bind {
+                o.push(PNODE_NONE);
+                return add(p, PAT_LIT_WORDS);
+            }
+            let lkind = self.program.op(add(p, PAT_LIT_KIND_OFFSET));
+            if (lkind != Lit::Int && lkind != Lit::Bool) || self.body_lane(t) != LANE_I64 {
+                return NONE64;
+            }
+            o.push(PNODE_INT);
+            o.push(self.program.op(add(p, PAT_LIT_LO_OFFSET)));
+            return add(p, PAT_LIT_WORDS);
+        }
+        let tuple = pkind == Pat::Tuple;
+        if (!tuple && pkind != Pat::Constructor) || self.body_lane(t) != LANE_PRODUCT {
+            return NONE64;
+        }
+        let n = if tuple {
+            self.program.op(add(p, PAT_TUPLE_COUNT_OFFSET))
+        } else {
+            self.program.op(add(p, PAT_CTOR_COUNT_OFFSET))
+        };
+        let mut q = if tuple {
+            add(p, PAT_TUPLE_WORDS)
+        } else {
+            add(p, PAT_CTOR_WORDS)
+        };
+        let mark = self.layouts.mark();
+        let d = default_type(inout self.ctx.types, t);
+        let l = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            d
+        );
+        let node = self.layouts.node(l);
+        let mut field_base = widen_u64(node.a);
+        let mut field_count = widen_u64(node.n);
+        if node.kind == L_ENUM {
+            // An enum constructor (#2654): its variant's fields, tested
+            // against its tag first when it is an arm's condition.
+            let variant = if tuple {
+                NONE64
+            } else {
+                self.body_variant(l, n32(self.program.op(add(p, PAT_CTOR_NAME_OFFSET))))
+            };
+            if variant == NONE64 {
+                self.layouts.reset(mark);
+                return NONE64;
+            }
+            let v = self.layouts.lvariant(add(widen_u64(node.a), variant));
+            field_base = widen_u64(v.fa);
+            field_count = widen_u64(v.fc);
+            if bind {
+                o.push(PNODE_FIELDS);
+            } else {
+                o.push(PNODE_TAG);
+                o.push(variant);
+            }
+        } else {
+            // `pattern_condition` of `()` is no product: left to the walk.
+            if !self.body_plain_product(t) || (tuple && (n == 0 || n > field_count)) {
+                self.layouts.reset(mark);
+                return NONE64;
+            }
+            o.push(PNODE_FIELDS);
+        }
+        o.push(n);
+        for k in 0..n {
+            let mut index = NONE64;
+            if tuple {
+                index = k;
+            } else {
+                let name = n32(self.program.op(q));
+                q = inc(q);
+                for j in 0..field_count {
+                    if self.layouts.lfield(add(field_base, j)).name == name {
+                        index = j;
+                    }
+                }
+            }
+            if index == NONE64 {
+                q = NONE64;
+                break;
+            }
+            let lf = self.layouts.lfield(add(field_base, index));
+            o.push(wrapping_u64(widen_i64(lf.offset)));
+            o.push(self.body_lane(lf.ty));
+            q = self.body_pattern(in h, q, lf.ty, bind, inout o);
+            if q == NONE64 {
+                break;
+            }
+        }
+        self.layouts.reset(mark);
+        q
     }
 
     fn body_write(
@@ -1846,7 +2304,11 @@ impl Gen {
         }
         let ty = default_type(inout self.ctx.types, i.ty);
         let post = self.body_kind(ty);
-        if post == NONE64 || self.body_lane(i.ty) == 0 {
+        // A small enum kept as words is only made by a call (#2581).
+        let kept = self.body_words(in h, dest);
+        if post == NONE64
+            || (self.body_lane(i.ty) == 0 && !(kept != 0 && (i.op == Op::Call || i.op == Op::Seq)))
+        {
             return false;
         }
         // `ir_inline::operands`, which the walk reads before the arm.
@@ -1855,7 +2317,7 @@ impl Gen {
         let mut extra: ChunkSeq[u64] = ChunkSeq::new[u64]();
         if i.op == Op::Const || i.op == Op::Unit || i.op == Op::Loop {
             if planned == NONE64 {
-                if i.op == Op::Unit {
+                if i.op == Op::Unit || i.op == Op::Loop {
                     kind = INST_ICONST;
                     extra.push(0);
                 } else if i.op != Op::Const {
@@ -1894,6 +2356,9 @@ impl Gen {
                             kind = INST_F64CONST;
                             extra.push(self.program.op(inc(i.a)));
                         }
+                    } else if lit == Lit::String {
+                        kind = INST_SEQ;
+                        self.body_literal(n32(self.program.op(inc(i.a))), inout extra);
                     } else {
                         return false;
                     }
@@ -1915,20 +2380,95 @@ impl Gen {
                 return false;
             }
         } else if i.op == Op::Read {
-            kind = INST_READ;
             let root = self.program.op(i.a);
-            let path = self.program.path(self.program.op(inc(i.a)));
+            let path_id = self.program.op(inc(i.a));
+            let path = self.program.path(path_id);
             let nproj = self.program.op(add(i.a, 3));
             let k = self.body_local(in h, root);
-            if k == NONE64 || path.n != 0 || nproj != 0 {
+            if k == NONE64 || nproj != 0 {
                 return false;
             }
-            let read = self.body_kind(self.body_local_type(in h, k));
-            if read == NONE64 {
-                return false;
+            if path.n == 0 {
+                let local_ty = self.body_local_type(in h, k);
+                if self.body_lane(local_ty) == LANE_PRODUCT {
+                    let pass = self.program.op(add(i.a, 2));
+                    if pass == PASS_IN {
+                        kind = INST_READ;
+                        extra.push(k);
+                        extra.push(0);
+                    } else if pass == PASS_SINK {
+                        let size = self.body_product_size(local_ty);
+                        if size == 0 || size % WORD_BYTES != 0 {
+                            return false;
+                        }
+                        kind = INST_READ_COPY;
+                        extra.push(k);
+                        extra.push(size);
+                    } else {
+                        return false;
+                    }
+                } else {
+                    let read = self.body_kind(local_ty);
+                    if read == NONE64 {
+                        return false;
+                    }
+                    kind = INST_READ;
+                    extra.push(k);
+                    extra.push(read);
+                }
+            } else {
+                let res_lane = self.body_lane(i.ty);
+                if res_lane == 0 || res_lane == LANE_PRODUCT || post != 0 {
+                    return false;
+                }
+                let mut cur_ty = self.body_local_type(in h, k);
+                let mut offs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                let mut ok = true;
+                for s in 0..path.n {
+                    let field_sym = self.program.path_name(path_id, s);
+                    let mark = self.layouts.mark();
+                    let d = default_type(inout self.ctx.types, cur_ty);
+                    let l = layout_of(
+                        inout self.layouts,
+                        inout self.ctx.types,
+                        inout self.ctx.names,
+                        in self.ctx.world,
+                        d
+                    );
+                    let mut found = false;
+                    let mut off: u64 = 0;
+                    let mut next_ty: u32 = NONE32;
+                    if l != NONE32 && self.layouts.node(l).kind == L_PRODUCT {
+                        let node = self.layouts.node(l);
+                        for fi in 0..widen_u64(node.n) {
+                            let lf = self.layouts.lfield(add(widen_u64(node.a), fi));
+                            if lf.name == field_sym {
+                                off = wrapping_u64(widen_i64(lf.offset));
+                                next_ty = lf.ty;
+                                found = true;
+                            }
+                        }
+                    }
+                    self.layouts.reset(mark);
+                    if !found {
+                        ok = false;
+                        break;
+                    }
+                    offs.push(off);
+                    cur_ty = next_ty;
+                }
+                if !ok {
+                    return false;
+                }
+                if self.body_kind(i.ty) != 0 && self.body_opaque_products(in h) {
+                    return false;
+                }
+                kind = INST_READ_FIELD;
+                extra.push(k);
+                extra.push(res_lane);
+                extra.push(offs.len());
+                extra.extend(in offs.as_slice());
             }
-            extra.push(k);
-            extra.push(read);
         } else if i.op == Op::Bind {
             kind = INST_BIND;
             if !self.body_operand(in h, i.a, inout ops) {
@@ -1944,6 +2484,13 @@ impl Gen {
                     return false;
                 }
                 extra.push(k);
+            } else if pat == Pat::Tuple || pat == Pat::Constructor {
+                // A struct or tuple destructured (#2654).
+                kind = INST_BIND_FIELDS;
+                let vt = n32(u64_at(in h.vty, u64_at(in ops, 0)));
+                if self.body_pattern(in h, inc(i.a), vt, true, inout extra) == NONE64 {
+                    return false;
+                }
             } else {
                 return false;
             }
@@ -1954,6 +2501,62 @@ impl Gen {
         } else if i.op == Op::Data || i.op == Op::Tuple {
             kind = INST_DATA;
             if !self.body_data(in h, i, inout ops, inout extra) {
+                return false;
+            }
+        } else if i.op == Op::Project {
+            if !self.body_operand(in h, i.a, inout ops) {
+                return false;
+            }
+            let base_ty = n32(u64_at(in h.vty, u64_at(in ops, 0)));
+            let res_lane = self.body_lane(i.ty);
+            if self.body_lane(base_ty) != LANE_PRODUCT
+                || res_lane == 0
+                || res_lane == LANE_PRODUCT
+            {
+                return false;
+            }
+            let field_sym = n32(self.program.op(inc(i.a)));
+            let mark = self.layouts.mark();
+            let d = default_type(inout self.ctx.types, base_ty);
+            let l = layout_of(
+                inout self.layouts,
+                inout self.ctx.types,
+                inout self.ctx.names,
+                in self.ctx.world,
+                d
+            );
+            let mut found = false;
+            let mut off: u64 = 0;
+            if l != NONE32 && self.layouts.node(l).kind == L_PRODUCT {
+                let node = self.layouts.node(l);
+                for k in 0..widen_u64(node.n) {
+                    let lf = self.layouts.lfield(add(widen_u64(node.a), k));
+                    if lf.name == field_sym {
+                        off = wrapping_u64(lf.offset);
+                        found = true;
+                    }
+                }
+            }
+            self.layouts.reset(mark);
+            if !found {
+                return false;
+            }
+            if self.body_kind(i.ty) != 0 && self.body_opaque_products(in h) {
+                return false;
+            }
+            kind = INST_PROJECT;
+            extra.push(off);
+            extra.push(res_lane);
+        } else if i.op == Op::Seq {
+            kind = INST_SEQ;
+            if !self.body_seq(in h, i, dest, kept, inout ops, inout extra) {
+                return false;
+            }
+        } else if i.op == Op::Handle {
+            kind = INST_HANDLE;
+            let row = self.handle_row;
+            let base = self.handle_base;
+            if !self.body_handle(in h, i, row, base, inout builtin_calls, inout extra) {
                 return false;
             }
         } else if i.op == Op::Call {
@@ -1971,7 +2574,7 @@ impl Gen {
             } else {
                 // Part 6b: a direct call (`Codegen::plain_call`); a
                 // `fail_only` callee's failures raised again (#2425).
-                let callee = if h.fails.len() == 0 {
+                let callee = if h.fails.len() == 0 && self.hstack.len() == 0 {
                     NONE64
                 } else {
                     self.body_function(n32(self.program.op(i.a)))
@@ -1981,13 +2584,34 @@ impl Gen {
                     let ch = self.body_header(self.program.function(callee));
                     callee_fails = ch.fails;
                 }
-                kind = if callee_fails.len() == 0 {
-                    INST_CALL
-                } else {
+                kind = if callee_fails.len() != 0 {
                     INST_FAIL_CALL
+                } else if kept != 0 {
+                    INST_WORDS_CALL
+                } else {
+                    INST_CALL
                 };
+                if kind == INST_FAIL_CALL && kept != 0 {
+                    return false;
+                }
                 extra.push(call);
-                let n = self.program.op(inc(i.a));
+                let mut n = self.program.op(inc(i.a));
+                if self.body_has_inout(i, n) {
+                    // A pure callee that borrows scalar locals `inout`
+                    // (#2563): the `In` arguments are operands; each
+                    // `inout` one names its local and lane.
+                    // A `fail_only` callee also takes a failure record,
+                    // whose failure is raised again (#2614).
+                    let fails = kind == INST_FAIL_CALL;
+                    kind = INST_INOUT_CALL;
+                    if !self.body_inout_args(in h, i, n, inout ops, inout extra) {
+                        return false;
+                    }
+                    if fails && !self.body_reraise(in h, in callee_fails, inout extra) {
+                        return false;
+                    }
+                    n = 0;
+                }
                 for k in 0..n {
                     let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
                     if !self.body_operand(in h, inc(at), inout ops) {
@@ -2004,19 +2628,65 @@ impl Gen {
                 {
                     return false;
                 }
+                // A struct or enum result (#2654): its size, which the
+                // caller's storage for it takes (0 for a scalar result).
+                if kind == INST_CALL {
+                    extra.push(
+                        if self.body_lane(i.ty) == LANE_PRODUCT {
+                            self.body_product_size(i.ty)
+                        } else {
+                            0
+                        }
+                    );
+                }
+                // The result's words (`Codegen::scalar_call_words`): each
+                // word value and the kind it is coerced to.
+                if kind == INST_WORDS_CALL {
+                    extra.push(kept);
+                    for k in 0..kept {
+                        let word = self.body_word(in h, dest, k);
+                        if word == NONE64 {
+                            return false;
+                        }
+                        extra.push(word);
+                        extra.push(self.body_kind(n32(u64_at(in h.vty, word))));
+                    }
+                }
             }
         } else {
             return false;
         }
-        // A product is only built (INST_DATA) and returned: any other
-        // instruction that makes or reads one is left to the walk.
-        if kind != INST_DATA {
-            if self.body_lane(i.ty) == LANE_PRODUCT {
+        // A kept enum is only made by a call and returned: any other
+        // instruction that names one is left to the walk.
+        if kept != 0 && kind != INST_WORDS_CALL && kind != INST_SEQ {
+            return false;
+        }
+        for k in 0..ops.len() {
+            if self.body_words(in h, u64_at(in ops, k)) != 0 {
                 return false;
             }
-            for k in 0..ops.len() {
-                if self.body_lane(n32(u64_at(in h.vty, u64_at(in ops, k)))) == LANE_PRODUCT {
-                    return false;
+        }
+        // A product is only built (INST_DATA) and returned: any other
+        // instruction that makes or reads one is left to the walk.
+        // A sequence operation reads its view and may make one
+        // (`body_seq`).
+        if kind != INST_DATA && kind != INST_WORDS_CALL && kind != INST_SEQ {
+            if self.body_lane(i.ty) == LANE_PRODUCT
+                && kind != INST_READ
+                && kind != INST_READ_COPY
+                && kind != INST_CALL
+            {
+                return false;
+            }
+            if kind != INST_PROJECT
+                && kind != INST_BIND
+                && kind != INST_BIND_FIELDS
+                && kind != INST_CALL
+            {
+                for k in 0..ops.len() {
+                    if self.body_lane(n32(u64_at(in h.vty, u64_at(in ops, k)))) == LANE_PRODUCT {
+                        return false;
+                    }
                 }
             }
         }
@@ -2049,6 +2719,216 @@ impl Gen {
         true
     }
 
+    // `Codegen::seq_op` of a string or slice operation (#2653) that reads
+    // its operands only: `Str`/`String` `len`, `as_str`, `as_bytes` and
+    // `byte_at`, and `Slice` `len` and `get` of a one-word integer, `bool`
+    // or `f64` element. The operands go in `ops`, the form and its words
+    // in `extra`: a word's offset, or for a checked access the raise of
+    // `RuntimeError::IndexOutOfBounds` (`seq_guard`) and, for a slice
+    // element, its stride and lane. False for any other operation.
+    // A string literal's words (`SEQ_LITERAL`): its byte count, then its
+    // bytes eight to a word, little-endian, the last word zero-padded.
+    fn body_literal(in self, symbol: u32, inout extra: ChunkSeq[u64]) {
+        let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        self.ctx.names.write(symbol, inout bytes);
+        extra.push(SEQ_LITERAL);
+        extra.push(bytes.len());
+        let mut word: u64 = 0;
+        let mut shift: u32 = 0;
+        for k in 0..bytes.len() {
+            word = word | wrapping_shl_u64(widen_u64(u8_at(in bytes, k)), shift);
+            shift = wrapping_add(shift, BYTE_BITS);
+            if shift == WORD_BITS {
+                extra.push(word);
+                word = 0;
+                shift = 0;
+            }
+        }
+        if shift != 0 {
+            extra.push(word);
+        }
+    }
+
+    fn body_seq(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        dest: u64,
+        kept: u64,
+        inout ops: ChunkSeq[u64],
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        // pool row, count, then each argument's call-style words
+        let label = self.program.pool_row(self.program.op(i.a)).label;
+        let n = self.program.op(inc(i.a));
+        for k in 0..n {
+            let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
+            if !self.body_operand(in h, inc(at), inout ops) {
+                return false;
+            }
+        }
+        if n == 0 {
+            return false;
+        }
+        let receiver = default_type(inout self.ctx.types, n32(u64_at(in h.vty, u64_at(in ops, 0))));
+        let node = self.ctx.types.node(receiver);
+        let k = self.ctx.world.k;
+        let text = node.kind == TyKind::Named
+            && node.n == 0
+            && (node.name == k.string || node.name == k.str_);
+        let slice = node.kind == TyKind::Named && node.n == 1 && node.name == k.slice;
+        let ops_s = self.ops;
+        // An `Option` result kept as its tag and payload words (#2653).
+        if slice && n == 1 && label == ops_s.seq_last {
+            return self.body_seq_option(in h, i, dest, kept, receiver, inout extra);
+        }
+        if kept != 0 {
+            return false;
+        }
+        if text && n == 1 && label == ops_s.seq_str_len {
+            extra.push(SEQ_WORD);
+            extra.push(STR_LEN_OFFSET);
+            return true;
+        }
+        if text && n == 1 && label == ops_s.seq_str_as_str {
+            extra.push(SEQ_SAME);
+            return true;
+        }
+        if text && n == 1 && label == ops_s.seq_str_as_bytes {
+            extra.push(SEQ_AS_BYTES);
+            return true;
+        }
+        if slice && n == 1 && label == ops_s.seq_slice_len {
+            extra.push(SEQ_VIEW_WORD);
+            extra.push(SLICE_LEN_OFFSET);
+            return true;
+        }
+        if text && n == 2 && label == ops_s.seq_str_byte_at {
+            extra.push(SEQ_BYTE_AT);
+            return self.body_raise(
+                in h,
+                ops_s.runtime_error,
+                ops_s.index_out_of_bounds,
+                inout extra
+            );
+        }
+        if slice && n == 2 && label == ops_s.seq_slice_get {
+            let (stride, lane) = self.body_elem(receiver);
+            if stride == 0 {
+                return false;
+            }
+            extra.push(SEQ_GET);
+            extra.push(stride);
+            extra.push(lane);
+            return self.body_raise(
+                in h,
+                ops_s.runtime_error,
+                ops_s.index_out_of_bounds,
+                inout extra
+            );
+        }
+        false
+    }
+
+    // A slice's element as `seq_load_elem` loads it: its stride
+    // (`seq::elem_bytes`) and lane, for a one-word integer, `bool` or
+    // `f64`; stride 0 for any other element.
+    fn body_elem(inout self, receiver: u32) -> (u64, u64) {
+        let k = self.ctx.world.k;
+        let elem = default_type(inout self.ctx.types, self.ctx.types.arg(receiver, 0));
+        let lane = self.body_lane(elem);
+        let en = self.ctx.types.node(elem);
+        if en.kind != TyKind::Named || en.n != 0 || (lane != LANE_I64 && lane != LANE_F64) {
+            return (0, 0);
+        }
+        let stride = if en.name == k.u8_ || en.name == k.bool_ {
+            STRIDE_BYTE
+        } else if en.name == k.u16_ {
+            STRIDE_HALF
+        } else if en.name == k.u32_ {
+            STRIDE_QUARTER
+        } else {
+            self.body_product_size(elem)
+        };
+        if stride != STRIDE_BYTE
+            && stride != STRIDE_HALF
+            && stride != STRIDE_QUARTER
+            && stride != STRIDE_WORD
+        {
+            return (0, 0);
+        }
+        // A four-byte float loads as a zero-extended word.
+        if lane == LANE_F64 && stride != STRIDE_WORD {
+            return (0, 0);
+        }
+        (stride, lane)
+    }
+
+    // A slice's `last` (#2653), whose `Option` result the optimize path
+    // keeps as its tag and payload words (`aggregates::scalar_enums`,
+    // `seq_option` with a two-word request): the form, the element's
+    // stride, the `None` and `Some` tags, then each word's value and the
+    // kind it is coerced to. False when the result is kept in memory, or
+    // its element is a float (the payload word is an integer).
+    fn body_seq_option(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        dest: u64,
+        kept: u64,
+        receiver: u32,
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        if kept != OPTION_WORDS {
+            return false;
+        }
+        let ops_s = self.ops;
+        let (stride, lane) = self.body_elem(receiver);
+        if stride == 0 || lane != LANE_I64 {
+            return false;
+        }
+        extra.push(SEQ_LAST);
+        extra.push(stride);
+        // The tags of `Option`'s variants (`Layout::variant`).
+        let mark = self.layouts.mark();
+        let d = default_type(inout self.ctx.types, i.ty);
+        let l = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            d
+        );
+        let mut none_tag = NONE64;
+        let mut some_tag = NONE64;
+        if l != NONE32 && self.layouts.node(l).kind == L_ENUM {
+            let node = self.layouts.node(l);
+            for k in 0..widen_u64(node.n) {
+                let v = self.layouts.lvariant(add(widen_u64(node.a), k));
+                if v.name == ops_s.option_none {
+                    none_tag = k;
+                } else if v.name == ops_s.option_some {
+                    some_tag = k;
+                }
+            }
+        }
+        self.layouts.reset(mark);
+        if none_tag == NONE64 || some_tag == NONE64 {
+            return false;
+        }
+        extra.push(none_tag);
+        extra.push(some_tag);
+        for k in 0..kept {
+            let word = self.body_word(in h, dest, k);
+            if word == NONE64 {
+                return false;
+            }
+            extra.push(word);
+            extra.push(self.body_kind(n32(u64_at(in h.vty, word))));
+        }
+        true
+    }
+
     // The default a `Never` value of type `t` stands for (`default_value`
     // of the type it flows to): 0 when the value is not `Never`.
     fn body_default(inout self, value_type: u32, target: u32) -> u64 {
@@ -2073,6 +2953,27 @@ impl Gen {
             let v = self.body_value(in h, self.program.op(ta));
             if v == NONE64 {
                 return false;
+            }
+            // A small enum result returned as words (#2581): each word's
+            // register; any other return of such a function reads its words
+            // from memory, which the walk does.
+            let returned = self.enums.returns(self.fi);
+            let kept = self.body_words(in h, v);
+            if returned != 0 || kept != 0 {
+                if kept != returned {
+                    return false;
+                }
+                o.push(TERM_RETURN_WORDS);
+                o.push(v);
+                o.push(kept);
+                for k in 0..kept {
+                    let word = self.body_word(in h, v, k);
+                    if word == NONE64 {
+                        return false;
+                    }
+                    o.push(word);
+                }
+                return true;
             }
             let vt = n32(u64_at(in h.vty, v));
             let d = self.body_default(vt, h.result);
@@ -2101,14 +3002,17 @@ impl Gen {
             for k in 0..n {
                 let v = self.body_value(in h, self.program.op(add(add(ta, 2), k)));
                 let param = self.body_block_param(in h, trow.ha, k);
-                if v == NONE64
-                    || param == NONE64
-                    || self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT
-                {
+                if v == NONE64 || param == NONE64 || self.body_words(in h, v) != 0 {
+                    return false;
+                }
+                // A product joined at a block parameter passes its pointer
+                // (#2654); a `Never` one would need fresh storage.
+                let d = self.body_default(n32(u64_at(in h.vty, v)), n32(u64_at(in h.vty, param)));
+                if d == LANE_PRODUCT {
                     return false;
                 }
                 o.push(v);
-                o.push(self.body_default(n32(u64_at(in h.vty, v)), n32(u64_at(in h.vty, param))));
+                o.push(d);
             }
             return true;
         }
@@ -2130,7 +3034,7 @@ impl Gen {
             }
             let vty = n32(u64_at(in h.vty, v));
             let vlane = self.body_lane(vty);
-            if vlane == 0 || vlane == LANE_PRODUCT {
+            if vlane == 0 {
                 return false;
             }
             let narms = self.program.op(inc(ta));
@@ -2146,6 +3050,27 @@ impl Gen {
                 } else if pkind == Pat::Bind {
                     akind = MATCH_TRUE;
                     p = add(p, PAT_BIND_WORDS);
+                } else if (pkind == Pat::Tuple || pkind == Pat::Constructor)
+                    && vlane == LANE_PRODUCT
+                {
+                    // A struct or tuple pattern (#2654): its target, then
+                    // its nodes.
+                    let mut nodes: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                    let after = self.body_pattern(in h, p, vty, false, inout nodes);
+                    if after == NONE64 {
+                        return false;
+                    }
+                    let target = self.program.op(after);
+                    p = inc(after);
+                    let trow = self.program.block(add(f.b0, target));
+                    if self.program.op(self.body_params_at(trow.ha)) != 0 {
+                        return false;
+                    }
+                    arms_words.push(MATCH_FIELDS);
+                    arms_words.push(0);
+                    arms_words.push(target);
+                    arms_words.extend(in nodes.as_slice());
+                    continue;
                 } else if pkind == Pat::Literal {
                     let lkind = self.program.op(add(p, PAT_LIT_KIND_OFFSET));
                     let lo = self.program.op(add(p, PAT_LIT_LO_OFFSET));
@@ -2205,6 +3130,106 @@ impl Gen {
         false
     }
 
+    // The locals that keep a home slot on the optimize path as well
+    // (`register_locals`): those lent `inout` or `sink` to a call that may
+    // fail, which writes through the slot before it can leave (#2614).
+    fn body_homed(inout self, f: FnRow) -> ChunkSeq[u64] {
+        let mut homed: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            for ii in 0..row.ic {
+                let i = self.program.inst(add(row.i0, ii));
+                if i.op != Op::Call {
+                    continue;
+                }
+                let n = self.program.op(inc(i.a));
+                if !self.body_has_inout(i, n) {
+                    continue;
+                }
+                let callee = self.body_function(n32(self.program.op(i.a)));
+                if callee == NONE64 {
+                    continue;
+                }
+                let ch = self.body_header(self.program.function(callee));
+                if ch.fails.len() == 0 {
+                    continue;
+                }
+                for k in 0..n {
+                    let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
+                    let root = self.program.op(add(at, CALL_ARG_ROOT_OFFSET));
+                    if self.program.op(at) != PASS_IN && root != 0 {
+                        homed.push(wrapping_sub(root, 1));
+                    }
+                }
+            }
+        }
+        homed
+    }
+
+    // Whether one of call `i`'s `n` arguments is not passed `in`.
+    fn body_has_inout(in self, i: InstRow, n: u64) -> bool {
+        for k in 0..n {
+            let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
+            if self.program.op(at) != PASS_IN {
+                return true;
+            }
+        }
+        false
+    }
+
+    // The arguments of a direct call with `inout` scalar locals (#2563),
+    // after the argument count: `[ARG_IN, kind]` for an `in` argument
+    // (whose value joins `ops`), `[ARG_INOUT, local, lane]` for a local
+    // lent `inout` (`Codegen::address`, restored after the call).
+    fn body_inout_args(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        n: u64,
+        inout ops: ChunkSeq[u64],
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        extra.push(n);
+        for k in 0..n {
+            let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
+            let pass = self.program.op(at);
+            if pass == PASS_IN {
+                if !self.body_operand(in h, inc(at), inout ops) {
+                    return false;
+                }
+                let read = self.body_kind(n32(u64_at(
+                    in h.vty,
+                    u64_at(in ops, wrapping_sub(ops.len(), 1))
+                )));
+                if read == NONE64 {
+                    return false;
+                }
+                extra.push(ARG_IN);
+                extra.push(read);
+            } else if pass == PASS_INOUT {
+                let root = self.program.op(add(at, CALL_ARG_ROOT_OFFSET));
+                let path = self.program.path(self.program.op(add(at, CALL_ARG_PATH_OFFSET)));
+                if root == 0 || path.n != 0 {
+                    return false;
+                }
+                let l = self.body_local(in h, wrapping_sub(root, 1));
+                if l == NONE64 {
+                    return false;
+                }
+                let lane = self.body_lane(self.body_local_type(in h, l));
+                if lane == 0 || lane == LANE_PRODUCT {
+                    return false;
+                }
+                extra.push(ARG_INOUT);
+                extra.push(l);
+                extra.push(lane);
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
     // The start of a block's parameter words (place-ir `read_block`:
     // entry, the token pairs, out, then the parameter values).
     fn body_params_at(in self, ha: u64) -> u64 {
@@ -2231,48 +3256,14 @@ impl Gen {
         true
     }
 
-    // The body plan of function `fi`, whose instruction plan records start
-    // at `from` in `self.plan`, appended to `out` as `[fi, n, n words]`.
-    pub fn body(inout self, fi: u64, from: u64, inout out: ChunkSeq[u64]) {
-        let f = self.program.function(fi);
-        let h = self.body_header(f);
-        if !h.plain || f.bc == 0 || !self.body_no_trailer(f) || self.body_lane(h.result) == 0 {
-            return;
-        }
-        let mut graph_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        // `ir_graph_at`'s locals, in name order: a parameter has its
-        // variable; every other local gets a zeroed one. Each has its kind.
-        graph_words.push(h.lname.len());
-        for k in 0..h.lname.len() {
-            let t = n32(u64_at(in h.lty, k));
-            if !self.body_register(t) {
-                return;
-            }
-            let name = u64_at(in h.lname, k);
-            let mut entry = self.body_lane(t);
-            for j in 0..h.params.len() {
-                if u64_at(in h.params, j) == name {
-                    entry = add(LOCAL_PARAM, j);
-                }
-            }
-            if entry == 0 {
-                return;
-            }
-            graph_words.push(entry);
-            // The kind its stores coerce to, on the unoptimized path that
-            // keeps every local in a stack slot.
-            graph_words.push(self.body_kind(t));
-        }
-        // Each value's register.
-        graph_words.push(h.vty.len());
-        for k in 0..h.vty.len() {
-            let lane = self.body_lane(n32(u64_at(in h.vty, k)));
-            if lane == 0 {
-                return;
-            }
-            graph_words.push(lane);
-        }
-        // Each block's parameters.
+    // Each block's parameters, then the lowering order and the blocks
+    // sealed on the way; false for a parameter the plan does not carry.
+    pub fn body_layout(
+        inout self,
+        in h: Header,
+        f: FnRow,
+        inout graph_words: ChunkSeq[u64]
+    ) -> bool {
         for bi in 0..f.bc {
             let row = self.program.block(add(f.b0, bi));
             let pa = self.body_params_at(row.ha);
@@ -2280,15 +3271,15 @@ impl Gen {
             graph_words.push(np);
             for k in 0..np {
                 let v = self.body_value(in h, self.program.op(add(inc(pa), k)));
-                // A product joined at a block parameter has a home of its
-                // own (`aggregates::plan`), left to the walk.
-                if v == NONE64 || self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT {
-                    return;
+                // A product joined at a block parameter is its pointer
+                // (#2654); on the optimize path it has a home of its own
+                // (`aggregates::plan`), which the walk's request declines.
+                if v == NONE64 || self.body_words(in h, v) != 0 {
+                    return false;
                 }
                 graph_words.push(v);
             }
         }
-        // The lowering order and the blocks sealed on the way.
         let l = layout(in self.program, f);
         let mut sealed: ChunkSeq[u64] = ChunkSeq::new[u64]();
         for k in 0..l.sealed.len() {
@@ -2299,26 +3290,29 @@ impl Gen {
             graph_words.push(b);
             graph_words.push(at(in sealed, b));
         }
-        // The plan's record of each instruction, by its index in `f`.
+        true
+    }
+
+    // Each block's instructions and terminator, in the lowering order,
+    // with the request's call index of each call (`slots`); false for an
+    // instruction or terminator the plan does not carry.
+    pub fn body_blocks(
+        inout self,
+        in h: Header,
+        f: FnRow,
+        in slots: CallSlots,
+        inout builtin_calls: ChunkSeq[u64],
+        inout block_words: ChunkSeq[u64]
+    ) -> bool {
+        let fi = self.fi;
+        let l = layout(in self.program, f);
         let first = self.program.block(f.b0).i0;
-        // Each call's position among the function's calls, in block and
-        // instruction order (the order of the request's callee words).
-        let mut calls: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        let mut ncalls: u64 = 0;
-        for bi in 0..f.bc {
-            let row = self.program.block(add(f.b0, bi));
-            for ii in 0..row.ic {
-                let x = add(row.i0, ii);
-                if self.program.inst(x).op == Op::Call {
-                    set(inout calls, wrapping_sub(x, first), ncalls);
-                    ncalls = inc(ncalls);
-                }
-            }
-        }
+        // The plan's record of each instruction, by its index in `f`.
         let mut record: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        let mut r = from;
+        let mut r = u64_at(in self.plan_from, fi);
+        let to = u64_at(in self.plan_to, fi);
         loop {
-            if r >= self.plan.len() {
+            if r >= to {
                 break;
             }
             let bi = u64_at(in self.plan, inc(r));
@@ -2327,21 +3321,22 @@ impl Gen {
             set(inout record, wrapping_sub(add(row.i0, ii), first), inc(r));
             r = add(r, PLAN_RECORD_WORDS);
         }
-        let mut builtin_calls: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        let mut block_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
         for k in 0..l.order.len() {
             let bi = u64_at(in l.order, k);
             let row = self.program.block(add(f.b0, bi));
             block_words.push(row.ic);
             for ii in 0..row.ic {
                 let x = add(row.i0, ii);
-                let rec = at(in record, wrapping_sub(x, first));
+                let off = wrapping_sub(x, first);
+                let rec = at(in record, off);
                 let planned = if rec == 0 {
                     NONE64
                 } else {
                     wrapping_sub(rec, 1)
                 };
-                let call = at(in calls, wrapping_sub(x, first));
+                let call = at(in slots.calls, off);
+                self.handle_row = at(in slots.rows, off);
+                self.handle_base = at(in slots.bases, off);
                 if !self.body_inst(
                     in h,
                     f.name,
@@ -2351,12 +3346,95 @@ impl Gen {
                     inout builtin_calls,
                     inout block_words
                 ) {
-                    return;
+                    return false;
                 }
             }
             if !self.body_terminator(in h, f, bi, inout block_words) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // The body plan of function `fi`, whose instruction plan records start
+    // at `from` in `self.plan`, appended to `out` as `[fi, n, n words]`.
+    pub fn body(inout self, fi: u64, from: u64, inout out: ChunkSeq[u64]) {
+        self.fi = fi;
+        let f = self.program.function(fi);
+        let h = self.body_header(f);
+        if !h.plain
+            || h.captures != 0
+            || f.bc == 0
+            || !self.body_no_trailer(f)
+            || (self.body_lane(h.result) == 0 && self.enums.returns(fi) == 0)
+        {
+            return;
+        }
+        let mut graph_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        // `ir_graph_at`'s locals, in name order: a parameter has its
+        // variable; every other local gets a zeroed one. Each has its kind.
+        let homed = self.body_homed(f);
+        graph_words.push(h.lname.len());
+        for k in 0..h.lname.len() {
+            let t = n32(u64_at(in h.lty, k));
+            let name = u64_at(in h.lname, k);
+            let mut is_param = false;
+            let mut entry = self.body_lane(t);
+            for j in 0..h.params.len() {
+                if u64_at(in h.params, j) == name {
+                    entry = if self.body_lane(t) == LANE_PRODUCT {
+                        add(LOCAL_PARAM_PRODUCT, j)
+                    } else {
+                        add(LOCAL_PARAM, j)
+                    };
+                    is_param = true;
+                }
+            }
+            if !self.body_register(t) && self.body_lane(t) != LANE_PRODUCT {
                 return;
             }
+            if entry == 0 {
+                return;
+            }
+            for j in 0..homed.len() {
+                if u64_at(in homed, j) == name {
+                    entry = add(entry, LOCAL_HOME);
+                    break;
+                }
+            }
+            graph_words.push(entry);
+            // The kind its stores coerce to, on the unoptimized path that
+            // keeps every local in a stack slot; a local a handler names
+            // keeps its slot on the optimize path too (#2657).
+            let home = if self.handler_home(fi, name) {
+                HANDLER_HOME
+            } else {
+                0
+            };
+            graph_words.push(self.body_kind(t) | home);
+        }
+        // Each value's register.
+        graph_words.push(h.vty.len());
+        for k in 0..h.vty.len() {
+            // A small enum kept as words before one kept in memory (#2654).
+            let lane = if self.body_words(in h, k) != 0 {
+                LANE_WORDS
+            } else {
+                self.body_lane(n32(u64_at(in h.vty, k)))
+            };
+            if lane == 0 {
+                return;
+            }
+            graph_words.push(lane);
+        }
+        if !self.body_layout(in h, f, inout graph_words) {
+            return;
+        }
+        let mut builtin_calls: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut block_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let slots = self.body_call_slots(fi);
+        if !self.body_blocks(in h, f, in slots, inout builtin_calls, inout block_words) {
+            return;
         }
         let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
         o.push(f.bc);
@@ -2373,11 +3451,17 @@ impl Gen {
         o.push(builtin_calls.len());
         o.extend(in builtin_calls.as_slice());
         // The failure header: the row's `Fail` count, then (when there is
-        // one) the lane of the result a failure exit returns a zero of.
+        // one) the lane of the result a failure exit returns a zero of: a
+        // struct result's function returns the word 0 beside its result
+        // pointer (#2581).
         o.push(nfail);
         if nfail != 0 {
-            o.push(self.body_lane(h.result));
+            let lane = self.body_lane(h.result);
+            o.push(if lane == LANE_PRODUCT { LANE_I64 } else { lane });
         }
+        // The words a small enum result is returned as (#2581), 0 for any
+        // other result: the request's frame must agree.
+        o.push(self.enums.returns(fi));
         o.extend(in graph_words.as_slice());
         o.extend(in block_words.as_slice());
         out.push(fi);

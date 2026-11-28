@@ -1,0 +1,253 @@
+// The CLIF seam from Vesper (#2606): a finalized builder's function read
+// back as the words of crates/vesper-cranelift-sys/src/clif_words.rs, and
+// an edit script replayed on it before the builder is defined. Built by
+// Stage 2 and run through the Cranelift component (tests/seam.rs).
+
+// Edit ops of clif_words.rs.
+fn e_end() -> u64 {
+    0
+}
+fn e_block() -> u64 {
+    1
+}
+fn e_place() -> u64 {
+    3
+}
+fn e_remove_block() -> u64 {
+    10
+}
+// The blocks `build_f` makes (entry, then, else): a new block is the next.
+fn made_blocks() -> u64 {
+    3
+}
+// The words' hash multiplier (FNV-1a's 64-bit prime).
+fn hash_prime() -> u64 {
+    1099511628211
+}
+// The bytes of one function word.
+fn word_bytes() -> u64 {
+    8
+}
+
+fn seam_sig(inout m: Module) -> SigId eff [Ffi[Cranelift]] {
+    let s = sig_new(inout m, call_conv_default());
+    sig_param(inout m, s, ty_i64());
+    sig_return(inout m, s, ty_i64());
+    s
+}
+
+// f(x) = if x > 0 { x + 1 } else { x * x }, finalized for the seam.
+fn build_f(in m: Module, s: SigId) -> Option[Builder] eff [Ffi[Cranelift]] {
+    let mut b = match builder_new(in m, s) {
+        Some(b) => b,
+        None => return None,
+    };
+    let entry = create_block(inout b);
+    let yes = create_block(inout b);
+    let no = create_block(inout b);
+    let x = append_block_param(inout b, entry, ty_i64());
+    switch_to_block(inout b, entry);
+    let c = ins_icmp_imm(inout b, cc_sgt(), x, 0);
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    ins_brif(inout b, c, yes, in none.as_slice(), no, in none.as_slice());
+    switch_to_block(inout b, yes);
+    let y = ins_iadd_imm(inout b, x, 1);
+    ins_return1(inout b, y);
+    switch_to_block(inout b, no);
+    let z = ins_imul(inout b, x, x);
+    ins_return1(inout b, z);
+    seal_all_blocks(inout b);
+    if builder_finalize(inout b) {
+        Some(b)
+    } else {
+        builder_free(b);
+        None
+    }
+}
+
+// A hash of the words, so a host can compare them as one answer word.
+fn words_hash(in bytes: Slice[u8]) -> u64 {
+    let mut h: u64 = bytes.len();
+    for i in 0..bytes.len() / word_bytes() {
+        let w = bytes.try_read_u64_le(wrapping_mul(i, word_bytes())).unwrap_or(0);
+        h = wrapping_mul(h ^ w, hash_prime());
+    }
+    h
+}
+
+// The hash of the words of `f` with the vectorizer's flag and an i64
+// pointer type (0 when the seam failed).
+pub fn seam_words() -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(in "".as_bytes(), in "".as_bytes(), in "seam".as_bytes()) {
+        Some(m) => m,
+        None => return 0,
+    };
+    let s = seam_sig(inout m);
+    let mut b = match build_f(in m, s) {
+        Some(b) => b,
+        None => {
+            module_free(m);
+            return 0;
+        },
+    };
+    let words = function_words(inout b, words_simd(), ty_i64().code);
+    builder_free(b);
+    module_free(m);
+    words_hash(in words.as_slice())
+}
+
+// `f` with a block made, placed and removed again by edit scripts, then
+// defined: the published object's id (0 when a step failed).
+pub fn seam() -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(
+        in "".as_bytes(),
+        in "opt_level=speed;is_pic=true".as_bytes(),
+        in "seam".as_bytes()
+    ) {
+        Some(m) => m,
+        None => return 0,
+    };
+    let s = seam_sig(inout m);
+    let f = declare_function(inout m, in "seam_f".as_bytes(), linkage_export(), s);
+    let mut b = match build_f(in m, s) {
+        Some(b) => b,
+        None => {
+            module_free(m);
+            return 0;
+        },
+    };
+    let blk = made_blocks();
+    let mut place: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    place.push(e_block());
+    place.push(blk);
+    place.push(e_place());
+    place.push(blk);
+    place.push(wrapping_sub(blk, 1));
+    place.push(e_end());
+    let mut undo: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    undo.push(e_remove_block());
+    undo.push(blk);
+    undo.push(e_end());
+    let placed = apply_edits(inout b, in place.as_slice());
+    let words = function_words(inout b, 0, 0);
+    let edited = placed && words.len() > 0 && apply_edits(inout b, in undo.as_slice());
+    if !edited {
+        builder_free(b);
+        module_free(m);
+        return 0;
+    }
+    if !define_function(inout m, f, b) {
+        module_free(m);
+        return 0;
+    }
+    match module_finish(m) {
+        Some(o) => object_publish(o),
+        None => 0,
+    }
+}
+
+// The cold outliner's op (clif_words.rs `E_OUTLINE`).
+fn e_outline() -> u64 {
+    7
+}
+
+// `f` with its else arm (block 2, `x * x` returned) outlined into a cold
+// helper taking `x`, the parent and then the helper defined as
+// src/native.rs defines them: the published object's id (0 when a step
+// failed).
+pub fn seam_outline() -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(
+        in "".as_bytes(),
+        in "opt_level=speed;is_pic=true".as_bytes(),
+        in "seam_outline".as_bytes()
+    ) {
+        Some(m) => m,
+        None => return 0,
+    };
+    let s = seam_sig(inout m);
+    let f = declare_function(inout m, in "seam_f".as_bytes(), linkage_export(), s);
+    let mut b = match build_f(in m, s) {
+        Some(b) => b,
+        None => {
+            module_free(m);
+            return 0;
+        },
+    };
+    let mut plan: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    // idx 0, root block 2 owning only itself, no shared blocks, returning,
+    // no trap, live in value 0, nothing rematerialized, no slots, no
+    // other blocks.
+    plan.push(e_outline());
+    for w in [0, 2, 1, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0] {
+        plan.push(w);
+    }
+    plan.push(e_end());
+    if outline_cold(inout b, inout m, in plan.as_slice()) != 1 {
+        builder_free(b);
+        module_free(m);
+        return 0;
+    }
+    let helper = match take_cold_helper(inout b) {
+        Some(h) => h,
+        None => {
+            builder_free(b);
+            module_free(m);
+            return 0;
+        },
+    };
+    let helper_func = cold_helper_func(in helper);
+    if !define_function(inout m, f, b) {
+        builder_free(helper);
+        module_free(m);
+        return 0;
+    }
+    if !define_function(inout m, helper_func, helper) {
+        module_free(m);
+        return 0;
+    }
+    match module_finish(m) {
+        Some(o) => object_publish(o),
+        None => 0,
+    }
+}
+
+// `seam_outline` with the parent and its helper defined in one call: the
+// published object's id (0 when a step failed).
+pub fn seam_outline_together() -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(
+        in "".as_bytes(),
+        in "opt_level=speed;is_pic=true".as_bytes(),
+        in "seam_outline".as_bytes()
+    ) {
+        Some(m) => m,
+        None => return 0,
+    };
+    let s = seam_sig(inout m);
+    let f = declare_function(inout m, in "seam_f".as_bytes(), linkage_export(), s);
+    let mut b = match build_f(in m, s) {
+        Some(b) => b,
+        None => {
+            module_free(m);
+            return 0;
+        },
+    };
+    let mut plan: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    plan.push(e_outline());
+    for w in [0, 2, 1, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0] {
+        plan.push(w);
+    }
+    plan.push(e_end());
+    if outline_cold(inout b, inout m, in plan.as_slice()) != 1 {
+        builder_free(b);
+        module_free(m);
+        return 0;
+    }
+    if !define_with_cold_helpers(inout m, f, b) {
+        module_free(m);
+        return 0;
+    }
+    match module_finish(m) {
+        Some(o) => object_publish(o),
+        None => 0,
+    }
+}

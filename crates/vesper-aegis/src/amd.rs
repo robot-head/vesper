@@ -28,7 +28,6 @@ use crate::error::AttestError;
 use crate::intel::TcbStatus;
 use crate::roots::{AmdProduct, AmdSigningKey, amd_intermediate};
 use crate::snp::SnpReport;
-use x509_parser::der_parser::der::parse_der;
 
 /// AMD's arc for VCEK/VLEK extensions.
 pub const AMD_EXT_ARC: &str = "1.3.6.1.4.1.3704.1";
@@ -156,27 +155,6 @@ fn ext_err(reason: impl Into<String>) -> AttestError {
     }
 }
 
-fn ext_u8(value: &[u8], what: &str) -> Result<u8, AttestError> {
-    let (rest, obj) = parse_der(value).map_err(|_| ext_err(format!("{what}: malformed DER")))?;
-    if !rest.is_empty() {
-        return Err(ext_err(format!("{what}: trailing bytes")));
-    }
-    let v = obj
-        .as_u32()
-        .map_err(|_| ext_err(format!("{what}: not an INTEGER")))?;
-    u8::try_from(v).map_err(|_| ext_err(format!("{what}: out of range")))
-}
-
-fn ext_string(value: &[u8], what: &str) -> Result<String, AttestError> {
-    let (rest, obj) = parse_der(value).map_err(|_| ext_err(format!("{what}: malformed DER")))?;
-    if !rest.is_empty() {
-        return Err(ext_err(format!("{what}: trailing bytes")));
-    }
-    obj.as_str()
-        .map(str::to_owned)
-        .map_err(|_| ext_err(format!("{what}: not a string")))
-}
-
 /// The KDS `hwID` length: 8 bytes on Turin, the 64-byte chip ID before.
 const TURIN_HW_ID_LEN: usize = 8;
 const HW_ID_LEN: usize = 64;
@@ -189,99 +167,115 @@ fn hw_id_len(product: AmdProduct) -> usize {
     }
 }
 
-/// The hwID extension value: raw chip ID bytes, or a DER `OCTET STRING`
-/// holding them. Any other length is an error (reported by the caller).
-fn hw_id_value(value: &[u8], product: AmdProduct) -> Result<Vec<u8>, AttestError> {
-    let n = hw_id_len(product);
-    if value.len() == n + 2 && value[0] == 0x04 && usize::from(value[1]) == n {
-        return Ok(value[2..].to_vec());
-    }
-    Ok(value.to_vec())
-}
+const AMD_OUT_FLAGS: usize = 0;
+const AMD_OUT_BL: usize = 1;
+const AMD_OUT_TEE: usize = 2;
+const AMD_OUT_SNP: usize = 3;
+const AMD_OUT_UCODE: usize = 4;
+const AMD_OUT_FMC: usize = 5;
+const AMD_OUT_PROD_START: usize = 6;
+const AMD_OUT_PROD_END: usize = 7;
+const AMD_OUT_HWID_START: usize = 8;
+const AMD_OUT_HWID_END: usize = 9;
+const AMD_OUT_CSP_START: usize = 10;
+const AMD_OUT_CSP_END: usize = 11;
+const AMD_OUT_LEN: usize = 12;
+
+const AMD_FLAG_PROD: u64 = 1;
+const AMD_FLAG_BL: u64 = 2;
+const AMD_FLAG_TEE: u64 = 4;
+const AMD_FLAG_SNP: u64 = 8;
+const AMD_FLAG_UCODE: u64 = 16;
+const AMD_FLAG_FMC: u64 = 32;
+const AMD_FLAG_HWID: u64 = 64;
+const AMD_FLAG_CSP: u64 = 128;
+
+const AMD_ERR_OK: u64 = 0;
+const AMD_ERR_TRAILING: u64 = 2;
+const AMD_ERR_RESERVED_SPL: u64 = 4;
+const AMD_ERR_UNKNOWN_EXT: u64 = 5;
+const AMD_ERR_DUP_EXT: u64 = 6;
 
 /// Parse the AMD extensions of a VCEK/VLEK certificate (DER).
 pub fn parse_amd_cert_extensions(
     cert_der: &[u8],
     product: AmdProduct,
 ) -> Result<AmdCertExtensions, AttestError> {
-    let (rest, cert) = x509_parser::parse_x509_certificate(cert_der)
-        .map_err(|e| ext_err(format!("certificate: {e}")))?;
-    if !rest.is_empty() {
-        return Err(ext_err("certificate: trailing bytes"));
+    let want_hwid = hw_id_len(product);
+    let mut out = [0u64; AMD_OUT_LEN];
+    match crate::port::vesper::parse_amd_cert_ext(cert_der, want_hwid as u64, &mut out) {
+        AMD_ERR_OK => {}
+        AMD_ERR_TRAILING => return Err(ext_err("certificate: trailing bytes")),
+        AMD_ERR_RESERVED_SPL => return Err(ext_err("reserved SPL is not zero")),
+        AMD_ERR_UNKNOWN_EXT => return Err(ext_err("unknown AMD extension")),
+        AMD_ERR_DUP_EXT => return Err(ext_err("duplicated AMD extension")),
+        _ => return Err(ext_err("certificate: malformed DER")),
     }
-    let mut product_name = None;
-    let mut bl = None;
-    let mut tee = None;
-    let mut snp = None;
-    let mut ucode = None;
-    let mut fmc = None;
-    let mut hw_id = None;
-    let mut csp_id = None;
-    for e in cert.extensions() {
-        let oid = e.oid.to_id_string();
-        let Some(suffix) = oid
-            .strip_prefix(AMD_EXT_ARC)
-            .and_then(|s| s.strip_prefix('.'))
-        else {
-            continue;
-        };
-        let dup = match suffix {
-            "1" => false, // structVersion
-            "2" => product_name
-                .replace(ext_string(e.value, "productName")?)
-                .is_some(),
-            "3.1" => bl.replace(ext_u8(e.value, "blSPL")?).is_some(),
-            "3.2" => tee.replace(ext_u8(e.value, "teeSPL")?).is_some(),
-            "3.3" => snp.replace(ext_u8(e.value, "snpSPL")?).is_some(),
-            "3.4" | "3.5" | "3.6" | "3.7" => {
-                if ext_u8(e.value, "reserved SPL")? != 0 {
-                    return Err(ext_err("reserved SPL is not zero"));
-                }
-                false
-            }
-            "3.8" => ucode.replace(ext_u8(e.value, "ucodeSPL")?).is_some(),
-            "3.9" => fmc.replace(ext_u8(e.value, "fmcSPL")?).is_some(),
-            // hwID: the chip ID, either as the raw extension value (AMD's
-            // KDS certificates) or wrapped in a DER OCTET STRING (as some
-            // later issuers encode it); the two are told apart by length.
-            "4" => hw_id.replace(hw_id_value(e.value, product)?).is_some(),
-            "5" => csp_id.replace(ext_string(e.value, "cspID")?).is_some(),
-            other => return Err(ext_err(format!("unknown AMD extension .{other}"))),
-        };
-        if dup {
-            return Err(ext_err(format!("duplicated extension .{suffix}")));
-        }
+    let flags = out[AMD_OUT_FLAGS];
+    if (flags & AMD_FLAG_PROD) == 0 {
+        return Err(ext_err("missing productName"));
     }
-    let product_name = product_name.ok_or_else(|| ext_err("missing productName"))?;
+    let product_name = std::str::from_utf8(
+        &cert_der[out[AMD_OUT_PROD_START] as usize..out[AMD_OUT_PROD_END] as usize],
+    )
+    .map_err(|_| ext_err("productName: invalid UTF-8"))?
+    .to_owned();
     let family = product_name.split('-').next().unwrap_or("");
     if family != product.name() {
         return Err(AttestError::CollateralMismatch {
             what: "AMD certificate product name",
         });
     }
-    let fmc = match (product, fmc) {
-        (AmdProduct::Turin, Some(f)) => Some(f),
-        (AmdProduct::Turin, None) => return Err(ext_err("missing fmcSPL")),
-        (_, Some(_)) => return Err(ext_err("fmcSPL outside Turin")),
-        (_, None) => None,
+    let has_fmc = (flags & AMD_FLAG_FMC) != 0;
+    let fmc = match (product, has_fmc) {
+        (AmdProduct::Turin, true) => Some(out[AMD_OUT_FMC] as u8),
+        (AmdProduct::Turin, false) => return Err(ext_err("missing fmcSPL")),
+        (_, true) => return Err(ext_err("fmcSPL outside Turin")),
+        (_, false) => None,
     };
-    if let Some(id) = &hw_id {
-        let want = hw_id_len(product);
-        if id.len() != want {
+    let hw_id = if (flags & AMD_FLAG_HWID) != 0 {
+        let slice = &cert_der[out[AMD_OUT_HWID_START] as usize..out[AMD_OUT_HWID_END] as usize];
+        if slice.len() != want_hwid {
             return Err(ext_err(format!(
-                "hwID is {} bytes, expected {want}",
-                id.len()
+                "hwID is {} bytes, expected {want_hwid}",
+                slice.len()
             )));
         }
+        Some(slice.to_vec())
+    } else {
+        None
+    };
+    let csp_id = if (flags & AMD_FLAG_CSP) != 0 {
+        Some(
+            std::str::from_utf8(
+                &cert_der[out[AMD_OUT_CSP_START] as usize..out[AMD_OUT_CSP_END] as usize],
+            )
+            .map_err(|_| ext_err("cspID: invalid UTF-8"))?
+            .to_owned(),
+        )
+    } else {
+        None
+    };
+    if (flags & AMD_FLAG_BL) == 0 {
+        return Err(ext_err("missing blSPL"));
+    }
+    if (flags & AMD_FLAG_TEE) == 0 {
+        return Err(ext_err("missing teeSPL"));
+    }
+    if (flags & AMD_FLAG_SNP) == 0 {
+        return Err(ext_err("missing snpSPL"));
+    }
+    if (flags & AMD_FLAG_UCODE) == 0 {
+        return Err(ext_err("missing ucodeSPL"));
     }
     Ok(AmdCertExtensions {
         product_name,
         tcb: AmdTcb {
             fmc,
-            bootloader: bl.ok_or_else(|| ext_err("missing blSPL"))?,
-            tee: tee.ok_or_else(|| ext_err("missing teeSPL"))?,
-            snp: snp.ok_or_else(|| ext_err("missing snpSPL"))?,
-            microcode: ucode.ok_or_else(|| ext_err("missing ucodeSPL"))?,
+            bootloader: out[AMD_OUT_BL] as u8,
+            tee: out[AMD_OUT_TEE] as u8,
+            snp: out[AMD_OUT_SNP] as u8,
+            microcode: out[AMD_OUT_UCODE] as u8,
         },
         hw_id,
         csp_id,

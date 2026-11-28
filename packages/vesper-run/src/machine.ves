@@ -19,7 +19,8 @@
 use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{TyKind, Types};
-use @vesper/check-data::world::{constructor};
+use @vesper/check-data::world::{Adt, constructor};
+use @vesper/check-layout::{Layouts, layout_of, layouts_new};
 use @vesper/check-data::input::{Ctx, Reader};
 use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
 use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program};
@@ -91,6 +92,10 @@ const F32_EXPONENT: u64 = 2139095040;
 const F32_FRACTION: u64 = 8388607;
 // The bits of a binary32 (`f32::from_bits` of the low half).
 const F32_BITS: u64 = 4294967295;
+// The canonical quiet NaNs a DetFloat program's canonicalising operations
+// return (`canonical_value`).
+const F64_CANONICAL_NAN: u64 = 9221120237041090560;
+const F32_CANONICAL_NAN: u64 = 2143289344;
 
 // Frame kinds (`Frame::IrResume`, `Frame::Try`).
 const FR_IR: u8 = 0;
@@ -359,6 +364,14 @@ pub struct M {
     rmarks: ChunkSeq[Rm],
     region_sym: u32,
     index_field_sym: u32,
+    // Layouts of region payloads whose call type does not fix their size.
+    layouts: Layouts,
+    // The float modes (`FloatMode`): DetFloat NaN canonicalisation, and per
+    // instruction whether it is `eff [ConstDenorm]` code (flushes
+    // subnormals); `float_modes` when either applies anywhere.
+    canonical_nans: bool,
+    flushes: ChunkSeq[bool],
+    float_modes: bool,
 }
 
 fn fr_zero() -> Fr {
@@ -464,6 +477,10 @@ pub fn machine_new(sink ctx: Ctx, sink program: Program, fuel: u64) -> M {
         rmarks: ChunkSeq::new[Rm](),
         region_sym: 0,
         index_field_sym: 0,
+        layouts: layouts_new(),
+        canonical_nans: false,
+        flushes: ChunkSeq::new[bool](),
+        float_modes: false,
     }
 }
 
@@ -557,7 +574,8 @@ const EC_KEY: u64 = 4;
 // A labelled operation's capability label + 1 (`stop.raise(x)`), or 0.
 const EC_LABEL: u64 = 5;
 // A region operation's `RO_*` code, or 0; a `box`'s payload layout size + 1
-// from the call's `RegionBox[r, T]` type, or 0 when the type does not fix it.
+// from the call's `RegionBox[r, T]` type, or 0 when the type does not fix it
+// (the value's type then gives the size, `value_layout_size`).
 const EC_REGION: u64 = 6;
 const EC_PAYLOAD: u64 = 7;
 // try: instance key + 1.
@@ -713,6 +731,13 @@ pub fn read_sites(inout machine: M, inout reader: Reader, in bytes: Slice[u8]) {
             machine.sites.push(reader.word(in bytes));
         }
     }
+    machine.canonical_nans = reader.word(in bytes) != 0;
+    machine.flushes.resize(machine.program.insts.len(), false);
+    let flush_count = reader.word(in bytes);
+    for i in 0..flush_count {
+        let ok = machine.flushes.try_set(reader.word(in bytes), true);
+    }
+    machine.float_modes = machine.canonical_nans || flush_count != 0;
 }
 
 // The site of instruction `inst_id` of kind `kind`, or NONE64.
@@ -3014,6 +3039,103 @@ fn binary(inout machine: M, code: u64, lhs: Val, rhs: Val, inout failure: u8) ->
     undef()
 }
 
+// ----- float modes -------------------------------------------------------------
+
+// `flush_value`: in `eff [ConstDenorm]` code (instruction `inst_id`), a
+// subnormal float becomes a zero of the same sign.
+fn flush_val(in machine: M, inst_id: u64, value: Val) -> Val {
+    let flushes = match machine.flushes.try_get(inst_id) {
+        Option::Some(found) => found,
+        Option::None => false,
+    };
+    if !flushes {
+        return value;
+    }
+    if value.tag == T_F64
+        && value.payload & F64_EXPONENT == 0
+        && value.payload & F64_FRACTION != 0
+    {
+        return Val { tag: T_F64, payload: value.payload & F64_SIGN };
+    }
+    if value.tag == T_F32
+        && value.payload & F32_EXPONENT == 0
+        && value.payload & F32_FRACTION != 0
+    {
+        return Val { tag: T_F32, payload: value.payload & F32_SIGN };
+    }
+    value
+}
+
+// `canonical_value` of a canonicalising operation's result: a NaN becomes
+// the canonical NaN of its kind in a DetFloat program.
+fn canonical_val(in machine: M, value: Val) -> Val {
+    if !machine.canonical_nans {
+        return value;
+    }
+    if value.tag == T_F64
+        && value.payload & F64_EXPONENT == F64_EXPONENT
+        && value.payload & F64_FRACTION != 0
+    {
+        return Val { tag: T_F64, payload: F64_CANONICAL_NAN };
+    }
+    if value.tag == T_F32
+        && value.payload & F32_EXPONENT == F32_EXPONENT
+        && value.payload & F32_FRACTION != 0
+    {
+        return Val { tag: T_F32, payload: F32_CANONICAL_NAN };
+    }
+    value
+}
+
+// `binary_at`: `binary` under instruction `inst_id`'s float mode. The
+// arithmetic operators canonicalise; `%` (a library call) does not.
+fn binary_at(
+    inout machine: M,
+    inst_id: u64,
+    code: u64,
+    lhs: Val,
+    rhs: Val,
+    inout failure: u8
+) -> Val {
+    if !machine.float_modes {
+        return binary(inout machine, code, lhs, rhs, inout failure);
+    }
+    let a = flush_val(in machine, inst_id, lhs);
+    let b = flush_val(in machine, inst_id, rhs);
+    let mut result = binary(inout machine, code, a, b, inout failure);
+    let op = wrapping_u8(code);
+    if is_float(a) && (op == B_ADD || op == B_SUB || op == B_MUL || op == B_DIV) {
+        result = canonical_val(in machine, result);
+    }
+    flush_val(in machine, inst_id, result)
+}
+
+// `unary_at`: `unary` under instruction `inst_id`'s float mode. A bit
+// reinterpretation is exact; a conversion between `f32` and `f64`
+// canonicalises; `-x` is a sign-bit operation.
+fn unary_at(inout machine: M, inst_id: u64, code: u64, value: Val, inout failure: u8) -> Val {
+    if !machine.float_modes {
+        return unary(inout machine, code, value, inout failure);
+    }
+    let conversion = if code >= U_FLOAT {
+        wrapping_sub(code, U_FLOAT) / FLOAT_KINDS
+    } else {
+        NONE64
+    };
+    if conversion == FC_TO_BITS || conversion == FC_FROM_BITS {
+        return unary(inout machine, code, value, inout failure);
+    }
+    let operand = flush_val(in machine, inst_id, value);
+    let mut result = unary(inout machine, code, operand, inout failure);
+    if conversion == FC_WIDEN || conversion == FC_NEAREST {
+        let kind = wrapping_sub(code, U_FLOAT) % FLOAT_KINDS;
+        if (operand.tag == T_F32 && kind == FK_F64) || (operand.tag == T_F64 && kind == FK_F32) {
+            result = canonical_val(in machine, result);
+        }
+    }
+    flush_val(in machine, inst_id, result)
+}
+
 // `binary` of two `f64` values.
 fn f64_binary(inout machine: M, op: u8, a: f64, b: f64) -> Val {
     if op == B_ADD {
@@ -3547,7 +3669,7 @@ fn step(inout machine: M) {
             if machine.failed {
                 return;
             }
-            new = binary(inout machine, write_row.code, old, value, inout failure);
+            new = binary_at(inout machine, inst_id, write_row.code, old, value, inout failure);
             if failure != F_OK {
                 suspend(inout machine, inst.dest, inst.ty);
                 raise(inout machine, failure);
@@ -3564,14 +3686,27 @@ fn step(inout machine: M) {
         if machine.failed {
             return;
         }
-        result = unary(inout machine, u64_at(in machine.aux, inst_id), value, inout failure);
+        result = unary_at(
+            inout machine,
+            inst_id,
+            u64_at(in machine.aux, inst_id),
+            value,
+            inout failure
+        );
     } else if op == Op::Binary {
         let lhs = get(inout machine, machine.program.op(inc(operand_at)));
         let rhs = get(inout machine, machine.program.op(add(operand_at, 2)));
         if machine.failed {
             return;
         }
-        result = binary(inout machine, u64_at(in machine.aux, inst_id), lhs, rhs, inout failure);
+        result = binary_at(
+            inout machine,
+            inst_id,
+            u64_at(in machine.aux, inst_id),
+            lhs,
+            rhs,
+            inout failure
+        );
     } else if op == Op::Tuple {
         let n = machine.program.op(operand_at);
         let kid_start = machine.kids.len();
@@ -5551,11 +5686,15 @@ fn region_op(inout machine: M, inout book: Book, at: u64, code: u64, id: u64) ->
     let mark_sym = machine.ctx.world.k.watermark;
     if code == RO_BOX {
         let payload = site_word(in machine, add(at, EC_PAYLOAD));
-        if payload == 0 {
-            decline(inout machine, "a region payload whose type does not fix its size", NONE32);
+        let size = if payload == 0 {
+            value_layout_size(inout machine, arg)
+        } else {
+            wrapping_sub(payload, 1)
+        };
+        if size == NONE64 {
             return unit();
         }
-        let bytes = slot_bytes(wrapping_sub(payload, 1));
+        let bytes = slot_bytes(size);
         let mut placed = book_alloc(inout book, bytes, SLOT_ALIGN, KIND_BYTES, 0, false, 0, 0);
         match placed {
             Placed::Need { cap, align } => {
@@ -5666,4 +5805,198 @@ fn region_op(inout machine: M, inout book: Book, at: u64, code: u64, id: u64) ->
     }
     fail(inout machine, "unknown region operation");
     unit()
+}
+
+// ----- region payload layouts ----------------------------------------------------
+
+// `eval::value_type`: the type of a region payload whose call type does not
+// fix it (inside a generic function), as a type id, or NONE32 when the
+// value's data type is not in the world. Type arguments of generic data
+// come from the fields the value holds; one the value does not determine
+// (the `T` of `Option::None`) is a machine word, as are functions, closures
+// and the other machine values.
+fn value_type(inout machine: M, value: Val, depth: u64) -> u32 {
+    let known = machine.ctx.world.k;
+    if depth > TYPE_DEPTH_LIMIT {
+        return NONE32;
+    }
+    if value.tag == K_I64 {
+        return machine.ctx.types.named0(known.i64_);
+    } else if value.tag == K_U8 {
+        return machine.ctx.types.named0(known.u8_);
+    } else if value.tag == K_U16 {
+        return machine.ctx.types.named0(known.u16_);
+    } else if value.tag == K_U32 {
+        return machine.ctx.types.named0(known.u32_);
+    } else if value.tag == K_I8 {
+        return machine.ctx.types.named0(known.i8_);
+    } else if value.tag == K_I16 {
+        return machine.ctx.types.named0(known.i16_);
+    } else if value.tag == K_I32 {
+        return machine.ctx.types.named0(known.i32_);
+    } else if value.tag == T_F64 {
+        return machine.ctx.types.named0(known.f64_);
+    } else if value.tag == T_F32 {
+        return machine.ctx.types.named0(known.f32_);
+    } else if value.tag == T_BOOL {
+        return machine.ctx.types.named0(known.bool_);
+    } else if value.tag == T_STR {
+        return machine.ctx.types.named0(known.string);
+    } else if value.tag == T_TUPLE {
+        let aggregate = agg(in machine, value);
+        let mut items: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..aggregate.kid_count {
+            let item = value_type(
+                inout machine,
+                kid(in machine, add(aggregate.kid_start, i)),
+                inc(depth)
+            );
+            if item == NONE32 {
+                return NONE32;
+            }
+            items.push(item);
+        }
+        return machine.ctx.types.tuple(in items);
+    } else if value.tag == T_DATA {
+        return data_type(inout machine, value, depth);
+    }
+    // `u64` itself, functions, closures, sequences and the rest: one word.
+    machine.ctx.types.named0(known.u64_)
+}
+
+// The `Type::Named` of a data value: its ADT (the only one with a variant
+// of that name), with each generic bound from a field that determines it.
+fn data_type(inout machine: M, value: Val, depth: u64) -> u32 {
+    let aggregate = agg(in machine, value);
+    let mut adt_index = NONE64;
+    let mut variant_index = NONE64;
+    for i in 0..machine.ctx.world.adts.len() {
+        let adt = machine.ctx.world.adt(n32(i));
+        for j in 0..w(adt.vn) {
+            if machine.ctx.world.variant(add(w(adt.va), j)).name == aggregate.ctor {
+                if adt_index != NONE64 {
+                    decline(inout machine, "a region payload of an ambiguous variant", NONE32);
+                    return NONE32;
+                }
+                adt_index = i;
+                variant_index = add(w(adt.va), j);
+            }
+        }
+    }
+    if adt_index == NONE64 {
+        return NONE32;
+    }
+    let adt = machine.ctx.world.adt(n32(adt_index));
+    let variant = machine.ctx.world.variant(variant_index);
+    // Per generic: its bound type id, or NONE32.
+    let mut bound: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for g in 0..w(adt.gn) {
+        bound.push(NONE32);
+    }
+    for f in 0..w(variant.fc) {
+        let field = machine.ctx.world.field(add(w(variant.fa), f));
+        let at = field_index(in machine, aggregate, field.name);
+        if at != NONE64 {
+            let actual = value_type(
+                inout machine,
+                kid(in machine, add(aggregate.kid_start, at)),
+                inc(depth)
+            );
+            if actual != NONE32 {
+                bind_generics(in machine, adt, field.ty, actual, inout bound, 0);
+            }
+        }
+    }
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for g in 0..w(adt.gn) {
+        let found = u32_at(in bound, g);
+        args.push(
+            if found == NONE32 {
+                machine.ctx.types.named0(machine.ctx.world.k.u64_)
+            } else {
+                found
+            }
+        );
+    }
+    machine.ctx.types.named(adt.name, in args)
+}
+
+// `eval::bind_generics`: binds the generics of `adt` that `actual`
+// determines in the declared field type `declared` (first binding wins).
+fn bind_generics(
+    in machine: M,
+    adt: Adt,
+    declared: u32,
+    actual: u32,
+    inout bound: ChunkSeq[u32],
+    depth: u64
+) {
+    if depth > TYPE_DEPTH_LIMIT {
+        return;
+    }
+    let kind = machine.ctx.types.kind(declared);
+    if kind == TyKind::Named && machine.ctx.types.arity(declared) == 0 {
+        for g in 0..w(adt.gn) {
+            if machine.ctx.world.generic(add(w(adt.ga), g)).name
+                == machine.ctx.types.name(declared)
+            {
+                if u32_at(in bound, g) == NONE32 {
+                    let ok = bound.try_set(g, actual);
+                }
+                return;
+            }
+        }
+    }
+    if kind != machine.ctx.types.kind(actual)
+        || machine.ctx.types.arity(declared) != machine.ctx.types.arity(actual)
+    {
+        return;
+    }
+    if kind == TyKind::Named && machine.ctx.types.name(declared) != machine.ctx.types.name(actual) {
+        return;
+    }
+    if kind == TyKind::Named || kind == TyKind::Tuple {
+        for i in 0..machine.ctx.types.arity(declared) {
+            bind_generics(
+                in machine,
+                adt,
+                machine.ctx.types.arg(declared, i),
+                machine.ctx.types.arg(actual, i),
+                inout bound,
+                inc(depth)
+            );
+        }
+    }
+}
+
+// `region_payload_size` from the value: its layout's size, or NONE64 after
+// failing as `Layout::of` or `value_type` does.
+fn value_layout_size(inout machine: M, value: Val) -> u64 {
+    let ty = value_type(inout machine, value, 0);
+    if machine.declined {
+        return NONE64;
+    }
+    if ty == NONE32 {
+        fail(inout machine, "the size of this region payload is not known");
+        return NONE64;
+    }
+    let l = layout_of(
+        inout machine.layouts,
+        inout machine.ctx.types,
+        inout machine.ctx.names,
+        in machine.ctx.world,
+        ty
+    );
+    if l == NONE32 {
+        if !machine.failed {
+            machine.failed = true;
+            machine.message.clear();
+            machine.message.extend(in machine.layouts.err[0..machine.layouts.err.len()]);
+        }
+        return NONE64;
+    }
+    match machine.layouts.nodes.try_get(w(l)) {
+        Option::Some(node) => w(node.size),
+        Option::None => NONE64,
+    }
 }

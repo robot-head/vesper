@@ -4,17 +4,32 @@
 
 use @vesper/wasm-backend::tables::{stage2_heap_mark, stage2_heap_reset, stage2_heap_swap};
 use @vesper/check-core-typing::relations::{infer};
+use @vesper/check-data::input::{Ctx};
 use @vesper/check-data::names::{Names, names_new};
-use @vesper/check-data::types::{TyKind, Types, Vars, types_new, default_type, substitute, vars_new};
+use @vesper/check-data::types::{
+    EffNode, TyKind, TyMode, TyPass, Types, Vars, types_new, default_type, substitute,
+    substitute_row, vars_new
+};
 use @vesper/check-data::util::{n32, u32_at, u64_at, w};
-use @vesper/check-data::world::{Known, SpanRow, World, constructor, field_step, world_new};
+use @vesper/check-data::world::{
+    Known, SpanRow, World, bounds_new, constructor, field_step, mode_of, world_new
+};
 use @vesper/place-ir::codes::{Lit, Pat};
 use @vesper/wasm-backend::ir::{CallRow, Pair};
-use @vesper/place-ir-lower::ast::{Ast, Ex, FnR, Pm, Pt};
+use @vesper/place-ir-lower::ast::{Ast, Ef, Eop, Ex, FnR, Hd, Pm, Pt};
 use self::float_math::{FloatMath, NEAREST_PREFIX, SATURATING_PREFIX, math_op};
+use self::ffi::{OPEN_TYPE};
+use self::facts::{loop_breaks, loop_never_breaks, loop_plain_breaks};
+use self::sugar_policy::{
+    POLICY_BAD_METADATA, POLICY_OK, PolicyFailure, PolicyInputs, PolicySpan, caller_supplied,
+    captured_value_fault, contains, diagnose_policy_fault, effect_failure, empty_inputs,
+    failure_row, has_policy_at, primitive_failure, resolved_place_failure, resolved_span
+};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
+// Name prefix of the effects Stage 2 declares for foreign imports.
+const FOREIGN_EFFECT_PREFIX: Str = "Ffi$";
 
 const X_LITERAL: u8 = 1;
 const X_NAME: u8 = 2;
@@ -41,7 +56,25 @@ const X_HANDLE: u8 = 22;
 copy struct Binding {
     name: u32,
     ty: u32,
+    pass: u8,
+    // The pattern of an open binding (a literal-initialized `let` or a
+    // `for` over a literal range, typed from its uses as in
+    // src/integer_widths/literal_typing.rs), or NONE64.
+    open: u64,
 }
+
+// One kind a use of an open binding settled to, or the hint it gives.
+copy struct LitUse {
+    pid: u64,
+    ty: u32,
+}
+
+// How many probe runs may refine the hints (`PROBE_ROUNDS`).
+const LITERAL_PROBE_ROUNDS: u64 = 4;
+// The literal-typing rows reserved before the functions are checked.
+const LITERAL_RESERVE: u64 = 1024;
+// `fill(start, end, value)`, Rust's `FillRange`; `copy_within` takes as many.
+const SEQ_FILL_RANGE_ARGS: u64 = 3;
 
 struct Tc {
     names: Names,
@@ -62,23 +95,38 @@ struct Tc {
     calls: ChunkSeq[CallRow],
     pairs: ChunkSeq[Pair],
     scratch1: ChunkSeq[u32],
+    sugar: PolicyInputs,
+    sugar_violation: u64,
+    sugar_checked_calls: ChunkSeq[bool],
+    sugar_ambient_row: u32,
+    sugar_handler_row: u32,
+    sugar_generic_start: u64,
+    sugar_generic_count: u64,
+    lit_open: ChunkSeq[u64],
+    lit_uses: ChunkSeq[LitUse],
+    lit_hints: ChunkSeq[LitUse],
+    lit_probe: bool,
+    lit_mismatch: bool,
+    lit_peak: u64,
 }
 
-fn tc_new(sink names: Names, sink types: Types, sink world: World) -> Tc {
+fn tc_new(sink names: Names, sink types: Types, sink world: World, sink sugar: PolicyInputs) -> Tc {
     let empty = ChunkSeq::new[u32]();
     let empty_p = ChunkSeq::new[u8]();
     let mut t = types;
-    let mut n = names;
     let infer_ty = t.mk_with(TyKind::Infer, 0, 0, in empty, in empty_p, 0, 0, 0);
-    let unit_ty = t.named0(world.k.unit);
+    // Rust's `Type::unit()`, `Tuple([])`: the type of a block without a tail,
+    // an `if` without `else`, assignments, loops and unit-valued methods.
+    let unit_ty = t.unit;
     let bool_ty = t.named0(world.k.bool_);
     let i64_ty = t.named0(world.k.i64_);
     let u64_ty = t.named0(world.k.u64_);
     let f64_ty = t.named0(world.k.f64_);
     let str_ty = t.named0(world.k.str_);
     let never_ty = t.named0(world.k.never);
+    let empty_row = t.empty_row;
     Tc {
-        names: n,
+        names: names,
         types: t,
         world: world,
         env: ChunkSeq::new[Binding](),
@@ -95,7 +143,20 @@ fn tc_new(sink names: Names, sink types: Types, sink world: World) -> Tc {
         never_ty: never_ty,
         calls: ChunkSeq::new[CallRow](),
         pairs: ChunkSeq::new[Pair](),
-        scratch1: ChunkSeq::new[u32]()
+        scratch1: ChunkSeq::new[u32](),
+        sugar: sugar,
+        sugar_violation: POLICY_OK,
+        sugar_checked_calls: ChunkSeq::new[bool](),
+        sugar_ambient_row: empty_row,
+        sugar_handler_row: empty_row,
+        sugar_generic_start: 0,
+        sugar_generic_count: 0,
+        lit_open: ChunkSeq::new[u64](),
+        lit_uses: ChunkSeq::new[LitUse](),
+        lit_hints: ChunkSeq::new[LitUse](),
+        lit_probe: false,
+        lit_mismatch: false,
+        lit_peak: 0
     }
 }
 
@@ -121,7 +182,106 @@ fn pop_scope(inout tc: Tc) {
 }
 
 fn bind_var(inout tc: Tc, name: u32, ty: u32) {
-    tc.env.push(Binding { name: name, ty: ty });
+    tc.env.push(Binding { name: name, ty: ty, pass: TyPass::Sink, open: NONE64 });
+}
+
+// The open pattern of the binding `name` reads, or NONE64.
+fn open_pid(in tc: Tc, name: u32) -> u64 {
+    let mut i = tc.env.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        match tc.env.try_get(i) {
+            Option::Some(b) => {
+                if b.name == name {
+                    return b.open;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    NONE64
+}
+
+// Marks the binding just bound by pattern `pid` open.
+fn open_last(inout tc: Tc, pid: u64) {
+    if tc.env.len() == 0 {
+        return;
+    }
+    let top = wrapping_sub(tc.env.len(), 1);
+    match tc.env.try_get(top) {
+        Option::Some(b) => {
+            let _ = tc.env
+                .try_set(top, Binding { name: b.name, ty: b.ty, pass: b.pass, open: pid });
+            tc.lit_open.push(pid);
+        },
+        Option::None => {},
+    }
+}
+
+// The kind the hints give the open pattern `pid`, or NONE32.
+fn lit_hint(in tc: Tc, pid: u64) -> u32 {
+    for i in 0..tc.lit_hints.len() {
+        match tc.lit_hints.try_get(i) {
+            Option::Some(h) => {
+                if h.pid == pid {
+                    return h.ty;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    NONE32
+}
+
+fn is_int_ty(in tc: Tc, ty: u32) -> bool {
+    tc.types.kind(ty) == TyKind::Named && tc.world.k.is_integer(tc.types.name(ty))
+}
+
+// In a probe run, a use of an open binding that settled to `ty`.
+fn note_lit_use(inout tc: Tc, pid: u64, ty: u32) {
+    if is_int_ty(in tc, ty) && ty != tc.i64_ty {
+        tc.lit_uses.push(LitUse { pid: pid, ty: ty });
+    }
+}
+
+// Adds a hint for each open binding whose uses settled to exactly one kind
+// other than the default (`settled_kinds`); whether any was added.
+fn settle_lit_hints(inout tc: Tc) -> bool {
+    let mut added = false;
+    for i in 0..tc.lit_uses.len() {
+        let u = match tc.lit_uses.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        if lit_hint(in tc, u.pid) != NONE32 {
+            continue;
+        }
+        let mut one = true;
+        let mut first = true;
+        for j in 0..tc.lit_uses.len() {
+            match tc.lit_uses.try_get(j) {
+                Option::Some(o) => {
+                    if o.pid == u.pid {
+                        if j < i {
+                            first = false;
+                        }
+                        if o.ty != u.ty {
+                            one = false;
+                        }
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        if one && first {
+            tc.lit_hints.push(LitUse { pid: u.pid, ty: u.ty });
+            added = true;
+        }
+    }
+    added
 }
 
 fn lookup_var(in tc: Tc, name: u32) -> u32 {
@@ -153,14 +313,18 @@ fn find_fn(in a: Ast, name: u32) -> Option[FnR] {
     Option::None
 }
 
-fn find_eop_result(in a: Ast, inout names: Names, cname: u32) -> u32 {
+fn find_eop(in a: Ast, inout names: Names, cname: u32) -> Option[(Ef, Eop)] {
     let (ename, opname) = split_last_colon(inout names, cname);
+    find_effect_method(in a, ename, opname)
+}
+
+fn find_effect_method(in a: Ast, ename: u32, opname: u32) -> Option[(Ef, Eop)] {
     if ename == NONE32 || w(ename) >= a.eff_by_name.len() {
-        return NONE32;
+        return Option::None;
     }
     let idx = u32_at(in a.eff_by_name, w(ename));
     if idx == 0 {
-        return NONE32;
+        return Option::None;
     }
     match a.effs.try_get(wrapping_sub(w(idx), 1)) {
         Option::Some(ef) => {
@@ -168,15 +332,15 @@ fn find_eop_result(in a: Ast, inout names: Names, cname: u32) -> u32 {
                 match a.eops.try_get(wrapping_add(ef.op_start, oi)) {
                     Option::Some(op) => {
                         if op.name == opname {
-                            return op.result;
+                            return Option::Some((ef, op));
                         }
                     },
                     Option::None => {},
                 }
             }
-            NONE32
+            Option::None
         },
-        Option::None => NONE32,
+        Option::None => Option::None,
     }
 }
 
@@ -256,6 +420,8 @@ fn bind_pat(inout tc: Tc, in a: Ast, pid: u64, ty: u32) {
         Option::None => return,
     };
     if p.kind == Pat::Bind {
+        // The binding's type, for the linearity pass (linear.ves).
+        record_span(inout tc, p.s0, p.s1, ty);
         bind_var(inout tc, n32(p.a), ty);
         return;
     }
@@ -292,6 +458,173 @@ fn bind_pat(inout tc: Tc, in a: Ast, pid: u64, ty: u32) {
             }
         }
     }
+}
+
+// Whether symbol `sym` spells `lit` from byte `at` on.
+fn spells_at(in tc: Tc, sym: u32, at: u64, in lit: Str) -> bool {
+    let b = lit.as_bytes();
+    if tc.names.size(sym) < wrapping_add(at, b.len()) {
+        return false;
+    }
+    for i in 0..b.len() {
+        let want = match b.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if tc.names.byte(sym, wrapping_add(at, i)) != want {
+            return false;
+        }
+    }
+    true
+}
+
+// The integer type a wide access (Rust's `WIDE_NAMES`: `read_`/`write_`,
+// or `try_` of either, then `u16`/`u32`/`u64` and `_le`/`_be`) reads or
+// writes (`Wide::int_type`), or NONE32 for any other method.
+fn wide_int_ty(inout tc: Tc, mname: u32) -> u32 {
+    let mut at: u64 = 0;
+    if spells_at(in tc, mname, at, in "try_") {
+        at = wrapping_add(at, "try_".len());
+    }
+    if spells_at(in tc, mname, at, in "read_") {
+        at = wrapping_add(at, "read_".len());
+    } else if spells_at(in tc, mname, at, in "write_") {
+        at = wrapping_add(at, "write_".len());
+    } else {
+        return NONE32;
+    }
+    let width = if spells_at(in tc, mname, at, in "u16") {
+        tc.world.k.u16_
+    } else if spells_at(in tc, mname, at, in "u32") {
+        tc.world.k.u32_
+    } else if spells_at(in tc, mname, at, in "u64") {
+        tc.world.k.u64_
+    } else {
+        return NONE32;
+    };
+    at = wrapping_add(at, "u16".len());
+    let endian = spells_at(in tc, mname, at, in "_le") || spells_at(in tc, mname, at, in "_be");
+    if !endian || tc.names.size(mname) != wrapping_add(at, "_le".len()) {
+        return NONE32;
+    }
+    tc.types.named0(width)
+}
+
+// Whether `mname` is a wide write (`write_u32_le`, `try_write_u64_be`, ...).
+fn is_wide_write(in tc: Tc, mname: u32) -> bool {
+    tc.names.has_prefix(mname, in "write_".as_bytes())
+        || tc.names.has_prefix(mname, in "try_write_".as_bytes())
+}
+
+// The result of the sequence and slice block operations Rust's
+// `seq_method` types apart from the other builtin methods: the plain ones
+// are `Unit`, their total (`try_`) forms and the comparisons `bool`;
+// NONE32 for any other method or receiver.
+fn seq_method_result(inout tc: Tc, bt: u32, mname: u32) -> u32 {
+    if tc.types.arity(bt) == 0 {
+        return NONE32;
+    }
+    let tname = tc.types.name(bt);
+    if tname != tc.world.k.chunk_seq && tname != tc.world.k.slice {
+        return NONE32;
+    }
+    let wide = wide_int_ty(inout tc, mname);
+    let total_wide_write = wide != NONE32 && tc.names.has_prefix(mname, in "try_write_".as_bytes());
+    let plain_wide_write = wide != NONE32 && tc.names.has_prefix(mname, in "write_".as_bytes());
+    if is_op(in tc, mname, in "set")
+        || is_op(in tc, mname, in "copy_from")
+        || is_op(in tc, mname, in "copy_within")
+        || is_op(in tc, mname, in "extend_from_within")
+        || is_op(in tc, mname, in "make_ascii_lowercase")
+        || is_op(in tc, mname, in "extend_ascii_lowercase")
+        || is_op(in tc, mname, in "extend_reversed")
+        || plain_wide_write
+    {
+        tc.unit_ty
+    } else if is_op(in tc, mname, in "try_copy_from")
+        || is_op(in tc, mname, in "try_copy_within")
+        || is_op(in tc, mname, in "try_extend_from_within")
+        || is_op(in tc, mname, in "try_make_ascii_lowercase")
+        || is_op(in tc, mname, in "eq_ignore_ascii_case")
+        || total_wide_write
+    {
+        tc.bool_ty
+    } else if is_op(in tc, mname, in "sum_be16") {
+        tc.u64_ty
+    } else {
+        NONE32
+    }
+}
+
+// The type a sequence or slice method expects of argument `ai` of `n`, as
+// Rust's `seq_method` checks it: indices and lengths are `u64`, elements
+// the element type, a wide write's value its width; otherwise no goal.
+fn seq_arg_goal(inout tc: Tc, bt: u32, mname: u32, ai: u64, n: u64) -> u32 {
+    if tc.types.arity(bt) == 0 {
+        return tc.infer_ty;
+    }
+    let tname = tc.types.name(bt);
+    if tname != tc.world.k.chunk_seq && tname != tc.world.k.slice {
+        return tc.infer_ty;
+    }
+    let elem = tc.types.arg(bt, 0);
+    let wide = wide_int_ty(inout tc, mname);
+    let first_index = is_op(in tc, mname, in "get")
+        || is_op(in tc, mname, in "set")
+        || is_op(in tc, mname, in "try_get")
+        || is_op(in tc, mname, in "try_get_mut")
+        || is_op(in tc, mname, in "try_set")
+        || is_op(in tc, mname, in "truncate")
+        || is_op(in tc, mname, in "reserve")
+        || is_op(in tc, mname, in "copy_from")
+        || is_op(in tc, mname, in "try_copy_from")
+        || is_op(in tc, mname, in "resize")
+        || wide != NONE32
+        || is_op(in tc, mname, in "try_atomic_load")
+        || is_op(in tc, mname, in "try_atomic_load_u32")
+        || is_op(in tc, mname, in "try_atomic_load_u64")
+        || is_op(in tc, mname, in "try_atomic_store")
+        || is_op(in tc, mname, in "try_atomic_store_u32")
+        || is_op(in tc, mname, in "try_atomic_store_u64");
+    let two_index = is_op(in tc, mname, in "extend_from_within")
+        || is_op(in tc, mname, in "try_extend_from_within")
+        || is_op(in tc, mname, in "make_ascii_lowercase")
+        || is_op(in tc, mname, in "try_make_ascii_lowercase")
+        || is_op(in tc, mname, in "try_fill")
+        || is_op(in tc, mname, in "find_not_in")
+        || (is_op(in tc, mname, in "fill") && n == SEQ_FILL_RANGE_ARGS);
+    let three_index = is_op(in tc, mname, in "copy_within")
+        || is_op(in tc, mname, in "try_copy_within");
+    if (ai == 0 && first_index)
+        || (ai < 2 && two_index)
+        || (ai < SEQ_FILL_RANGE_ARGS && three_index)
+    {
+        return tc.u64_ty;
+    }
+    if is_op(in tc, mname, in "find_not_in") {
+        return tc.bool_ty;
+    }
+    if ai == 1 && wide != NONE32 && is_wide_write(in tc, mname) {
+        return wide;
+    }
+    if ai == 1 && is_op(in tc, mname, in "try_atomic_store_u32") {
+        return tc.types.named0(tc.world.k.u32_);
+    }
+    if ai == 1 && is_op(in tc, mname, in "try_atomic_store_u64") {
+        return tc.u64_ty;
+    }
+    let elem_arg = ((is_op(in tc, mname, in "push")
+        || is_op(in tc, mname, in "fill")
+        || is_op(in tc, mname, in "find_byte"))
+        && ai == 0)
+        || ((is_op(in tc, mname, in "set")
+            || is_op(in tc, mname, in "try_set")
+            || is_op(in tc, mname, in "resize")
+            || is_op(in tc, mname, in "try_atomic_store"))
+            && ai == 1)
+        || (is_op(in tc, mname, in "find_either") && ai < 2)
+        || ((is_op(in tc, mname, in "try_fill") || is_op(in tc, mname, in "fill")) && ai == 2);
+    if elem_arg { elem } else { tc.infer_ty }
 }
 
 fn is_op(in tc: Tc, sym: u32, in lit: Str) -> bool {
@@ -475,8 +808,459 @@ fn join_method_sym(inout names: Names, tname: u32, mname: u32) -> u32 {
     names.intern(in buf.as_slice())
 }
 
-fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: Ex) -> u32 {
+fn sugar_operation_span(inout tc: Tc, e: Ex) -> Option[PolicySpan] {
+    match resolved_span(in tc.sugar, e.s0, e.s1) {
+        Option::Some(span) => Option::Some(span),
+        Option::None => {
+            if has_policy_at(in tc.sugar, e.s0) || has_policy_at(in tc.sugar, e.s1) {
+                // A malformed span cannot establish that the operation was
+                // outside its expansion or inside a caller hole.
+                note_sugar_violation(inout tc, POLICY_BAD_METADATA);
+            }
+            Option::None
+        },
+    }
+}
+
+fn sugar_applies(inout tc: Tc, e: Ex) -> bool {
+    if tc.sugar.policies.regions.len() == 0 {
+        return false;
+    }
+    let operation = match sugar_operation_span(inout tc, e) {
+        Option::Some(span) => span,
+        Option::None => return false,
+    };
+    for i in 0..tc.sugar.policies.regions.len() {
+        match tc.sugar.policies.regions.try_get(i) {
+            Option::Some(region) => {
+                if contains(region.span, operation)
+                    && !caller_supplied(in tc.sugar.policies, region, operation)
+                {
+                    return true;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    false
+}
+
+// An unnamed operation with no explicit type arguments takes its
+// instance from the innermost matching handler, then the function row.
+fn effect_with_name(in types: Types, row: u32, name: u32) -> Option[EffNode] {
+    let effects = types.row(row);
+    let mut i = w(effects.n);
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let effect = types.effect_at(wrapping_add(w(effects.a), i));
+        if effect.name == name {
+            return Option::Some(effect);
+        }
+    }
+    Option::None
+}
+
+fn effect_with_label(in types: Types, row: u32, label: u32) -> Option[EffNode] {
+    let effects = types.row(row);
+    let mut i = w(effects.n);
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let effect = types.effect_at(wrapping_add(w(effects.a), i));
+        if effect.label == label {
+            return Option::Some(effect);
+        }
+    }
+    Option::None
+}
+
+fn contextual_effect(in tc: Tc, name: u32) -> Option[EffNode] {
+    match effect_with_name(in tc.types, tc.sugar_handler_row, name) {
+        Option::Some(effect) => Option::Some(effect),
+        Option::None => effect_with_name(in tc.types, tc.sugar_ambient_row, name),
+    }
+}
+
+fn push_effect_args(in types: Types, effect: EffNode, inout args: ChunkSeq[u32]) {
+    for i in 0..w(effect.n) {
+        args.push(u32_at(in types.items, wrapping_add(w(effect.a), i)));
+    }
+}
+
+// Only the handled body has the new capability in scope. A row id is
+// restored on exit so there is no separately allocated lexical stack.
+fn policy_handler_row(inout tc: Tc, in a: Ast, handler: Hd) -> u32 {
+    let previous = tc.sugar_handler_row;
+    if tc.sugar.policies.regions.len() == 0 {
+        return previous;
+    }
+    let row = tc.types.row(previous);
+    let mut effects = ChunkSeq::new[EffNode]();
+    let mut args = ChunkSeq::new[u32]();
+    for i in 0..w(row.n) {
+        let effect = tc.types.effect_at(wrapping_add(w(row.a), i));
+        let start = n32(args.len());
+        push_effect_args(in tc.types, effect, inout args);
+        effects.push(EffNode { label: effect.label, name: effect.name, a: start, n: effect.n });
+    }
+    let start = n32(args.len());
+    for i in 0..handler.arg_ty_count {
+        args.push(n32(u64_at(in a.xs, wrapping_add(handler.arg_ty_start, i))));
+    }
+    effects.push(EffNode {
+        label: handler.label,
+        name: handler.eff_name,
+        a: start,
+        n: n32(handler.arg_ty_count)
+    });
+    tc.types.mk_row(in effects, in args, 0)
+}
+
+fn check_sugar_effect_operation(
+    inout tc: Tc,
+    in a: Ast,
+    ef: Ef,
+    op: Eop,
+    e: Ex,
+    ce: Ex,
+    context: Option[EffNode],
+    label: u32
+) -> u32 {
+    check_sugar_call_access(inout tc, in a, op.param_start, op.param_count, false, e, ce);
+    let mut generics = ChunkSeq::new[u32]();
+    let mut inferred = vars_new();
+    for i in 0..ef.generic_count {
+        let name = a.egen(wrapping_add(ef.generic_start, i));
+        generics.push(name);
+        if i < e.m {
+            inferred.set(name, n32(u64_at(in a.xs, wrapping_add(e.c, i))));
+        } else {
+            match context {
+                Option::Some(effect) => {
+                    if i < w(effect.n) {
+                        inferred.set(name, u32_at(in tc.types.items, wrapping_add(w(effect.a), i)));
+                    }
+                },
+                Option::None => {},
+            }
+        }
+    }
+    for i in 0..e.n {
+        let param = if i < op.param_count {
+            a.param(wrapping_add(op.param_start, i)).ty
+        } else {
+            tc.infer_ty
+        };
+        let wanted = substitute(inout tc.types, param, in inferred);
+        let actual = check_expr(inout tc, in a, call_arg_expr(in a, e, i), wanted);
+        infer(inout tc.types, tc.world.k, param, actual, in generics, inout inferred);
+    }
+    let mut args = ChunkSeq::new[u32]();
+    for i in 0..generics.len() {
+        let ty = inferred.get(u32_at(in generics, i));
+        args.push(
+            if ty == NONE32 {
+                tc.infer_ty
+            } else {
+                default_type(inout tc.types, ty)
+            }
+        );
+    }
+    let mut effects = ChunkSeq::new[EffNode]();
+    effects.push(EffNode { label: label, name: ef.name, a: 0, n: n32(args.len()) });
+    let row = tc.types.mk_row(in effects, in args, 0);
+    check_sugar_call_row(inout tc, e, row);
+    let result = substitute(inout tc.types, op.result, in inferred);
+    record_span(inout tc, ce.s0, ce.s1, result);
+    record_span(inout tc, e.s0, e.s1, result);
+    result
+}
+
+fn check_direct_effect(inout tc: Tc, in a: Ast, ef: Ef, op: Eop, e: Ex, ce: Ex) -> u32 {
+    let context = if e.m == 0 {
+        contextual_effect(in tc, ef.name)
+    } else {
+        Option::None
+    };
+    check_sugar_effect_operation(inout tc, in a, ef, op, e, ce, context, 0)
+}
+
+fn check_labeled_sugar_effect(inout tc: Tc, in a: Ast, e: Ex, ce: Ex) -> Option[u32] {
+    let receiver = a.ex(ce.a);
+    if receiver.kind != X_NAME
+        || lookup_var(in tc, n32(receiver.a)) != NONE32
+        || !sugar_applies(inout tc, e)
+    {
+        return Option::None;
+    }
+    let label = wrapping_add(n32(receiver.a), 1);
+    let active = effect_with_label(in tc.types, tc.sugar_handler_row, label);
+    let (effect, handled) = match active {
+        Option::Some(effect) => (effect, true),
+        Option::None => match effect_with_label(in tc.types, tc.sugar_ambient_row, label) {
+            Option::Some(effect) => (effect, false),
+            Option::None => return Option::None,
+        },
+    };
+    let (ef, op) = match find_effect_method(in a, effect.name, n32(ce.b)) {
+        Option::Some(operation) => operation,
+        Option::None => return Option::None,
+    };
+    // An active handler's lexical alias names a fresh capability, not a
+    // user-spellable label. Its nominal effect can still be authorized
+    // by an unlabeled declaration. This marker is only used in the audit.
+    let actual_label = if handled {
+        wrapping_add(tc.names.intern(in "$stage2_handled_cap".as_bytes()), 1)
+    } else {
+        label
+    };
+    Option::Some(check_sugar_effect_operation(
+        inout tc,
+        in a,
+        ef,
+        op,
+        e,
+        ce,
+        Option::Some(effect),
+        actual_label
+    ))
+}
+
+// These lexically resolved primitives do not have package signatures.
+fn check_sugar_named_sequence(inout tc: Tc, in a: Ast, e: Ex, ce: Ex) -> Option[u32] {
+    let name = n32(ce.a);
+    if lookup_var(in tc, name) != NONE32 {
+        return Option::None;
+    }
+    let swap = is_op(in tc, name, in "swap");
+    let replace = is_op(in tc, name, in "replace");
+    let finish = is_op(in tc, name, in "ChunkSeq::finish");
+    if !(swap || replace || finish) {
+        return Option::None;
+    }
+    let arguments: u64 = if finish { 1 } else { 2 };
+    if e.n != arguments {
+        note_sugar_violation(inout tc, POLICY_BAD_METADATA);
+        return Option::Some(tc.infer_ty);
+    }
+    let site = sugar_operation_span(inout tc, e);
+    let first = call_arg_expr(in a, e, 0);
+    let first_ty = check_expr(inout tc, in a, first, tc.infer_ty);
+    let first_pass = if finish { TyPass::Sink } else { TyPass::Inout };
+    match site {
+        Option::Some(site) => check_sugar_resolved_place(inout tc, in a, site, first, first_pass),
+        Option::None => {},
+    }
+    if finish {
+        let runtime = tc.names.intern(in "RuntimeError".as_bytes());
+        let ty = tc.types.named0(runtime);
+        let row = failure_row(inout tc.names, inout tc.types, ty);
+        check_sugar_call_row(inout tc, e, row);
+    } else {
+        let second = call_arg_expr(in a, e, 1);
+        let second_ty = check_expr(inout tc, in a, second, first_ty);
+        let pass = if swap {
+            TyPass::Inout
+        } else {
+            // replace takes the new value by value, not by an explicit
+            // sink if it is known to be Copy.
+            let bounds = bounds_new();
+            if tc.types.kind(second_ty) != TyKind::Infer
+                && mode_of(inout tc.types, in tc.names, in tc.world, second_ty, in bounds)
+                    == TyMode::Copy
+            {
+                TyPass::In
+            } else {
+                TyPass::Sink
+            }
+        };
+        match site {
+            Option::Some(site) => check_sugar_resolved_place(inout tc, in a, site, second, pass),
+            Option::None => {},
+        }
+    }
+    let result = if replace { first_ty } else { tc.unit_ty };
+    record_span(inout tc, ce.s0, ce.s1, result);
+    record_span(inout tc, e.s0, e.s1, result);
+    Option::Some(result)
+}
+
+fn note_sugar_violation(inout tc: Tc, violation: u64) {
+    if tc.sugar_violation == POLICY_OK {
+        tc.sugar_violation = violation;
+    }
+}
+
+fn check_sugar_call_row(inout tc: Tc, e: Ex, actual: u32) {
+    if tc.sugar.policies.regions.len() == 0 {
+        return;
+    }
+    let site = match sugar_operation_span(inout tc, e) {
+        Option::Some(site) => site,
+        Option::None => return,
+    };
+    let denied = effect_failure(in tc.names, in tc.types, in tc.sugar, site, actual);
+    note_sugar_violation(inout tc, denied);
+}
+
+fn check_sugar_resolved_place(inout tc: Tc, in a: Ast, site: PolicySpan, place: u64, mode: u8) {
+    let denied = resolved_place_failure(in tc.sugar, in a, site, place, mode);
+    note_sugar_violation(inout tc, denied);
+}
+
+fn check_sugar_call_access(
+    inout tc: Tc,
+    in a: Ast,
+    param_start: u64,
+    param_count: u64,
+    recv: bool,
+    e: Ex,
+    ce: Ex
+) {
+    if tc.sugar.policies.regions.len() == 0 {
+        return;
+    }
+    let site = match sugar_operation_span(inout tc, e) {
+        Option::Some(site) => site,
+        Option::None => return,
+    };
+    let offset: u64 = if recv { 1 } else { 0 };
+    if recv {
+        match a.pms.try_get(param_start) {
+            Option::Some(pm) => check_sugar_resolved_place(inout tc, in a, site, ce.a, pm.pass),
+            Option::None => {},
+        }
+    }
+    for i in 0..e.n {
+        let p = wrapping_add(i, offset);
+        if p >= param_count {
+            break;
+        }
+        match a.pms.try_get(wrapping_add(param_start, p)) {
+            Option::Some(pm) => check_sugar_resolved_place(
+                inout tc,
+                in a,
+                site,
+                call_arg_expr(in a, e, i),
+                pm.pass
+            ),
+            Option::None => {},
+        }
+    }
+}
+
+// A lexical callable is not a package-level function, but its resolved
+// function type still specifies the actual row and parameter passes.
+// A call of a local function value: the callee reads as the function and
+// the call has its signature's result (`apply` of a value callee).
+fn check_value_call(inout tc: Tc, in a: Ast, callable: u32, e: Ex) -> u32 {
+    let signature = tc.types.node(callable);
+    let _ct = check_expr(inout tc, in a, e.a, callable);
+    for i in 0..e.n {
+        let want = if i < w(signature.n) {
+            tc.types.arg(callable, i)
+        } else {
+            tc.infer_ty
+        };
+        let _actual = check_expr(inout tc, in a, call_arg_expr(in a, e, i), want);
+    }
+    record_span(inout tc, e.s0, e.s1, signature.r);
+    signature.r
+}
+
+fn check_sugar_value_call(inout tc: Tc, in a: Ast, callable: u32, e: Ex, ce: Ex) -> u32 {
+    let signature = tc.types.node(callable);
+    check_sugar_call_row(inout tc, e, signature.r2);
+    let site = sugar_operation_span(inout tc, e);
+    for i in 0..e.n {
+        let arg = call_arg_expr(in a, e, i);
+        let want = if i < w(signature.n) {
+            let mode = tc.types.param_pass(callable, i);
+            match site {
+                Option::Some(site) => check_sugar_resolved_place(inout tc, in a, site, arg, mode),
+                Option::None => {},
+            }
+            tc.types.arg(callable, i)
+        } else {
+            tc.infer_ty
+        };
+        let _actual = check_expr(inout tc, in a, arg, want);
+    }
+    record_span(inout tc, ce.s0, ce.s1, callable);
+    record_span(inout tc, e.s0, e.s1, signature.r);
+    signature.r
+}
+
+// Rust's `apply`: a generic callee's arguments are first inferred from the
+// type its context expects of the result, then from its arguments.
+// Whether `sym` names an operation of a `.vsys` library's effect
+// (`Ffi$Lib::f`, ffi.ves `rename_foreign_calls`).
+fn is_foreign_op(in tc: Tc, sym: u32) -> bool {
+    let p = FOREIGN_EFFECT_PREFIX.as_bytes();
+    if tc.names.size(sym) < p.len() {
+        return false;
+    }
+    for i in 0..p.len() {
+        if tc.names.byte(sym, i) != p.try_get(i).unwrap_or(0) {
+            return false;
+        }
+    }
+    true
+}
+
+// A call of a `.vsys` operation as `ffi_lowering::check_module`'s pass 1
+// checks it: each argument against its parameter, and a slice parameter
+// (`$open`) records the argument's own type, which ffi.ves
+// `close_foreign_ops` reads the slice lengths from.
+fn check_foreign_call(inout tc: Tc, in a: Ast, op: Eop, e: Ex, ce: Ex) -> u32 {
+    let open = tc.names.intern(in OPEN_TYPE.as_bytes());
+    for ai in 0..e.n {
+        let av = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1)));
+        let mut pt = tc.infer_ty;
+        if ai < op.param_count {
+            match a.pms.try_get(wrapping_add(op.param_start, ai)) {
+                Option::Some(pm) => {
+                    pt = pm.ty;
+                },
+                Option::None => {},
+            }
+        }
+        if tc.types.kind(pt) == TyKind::Named && tc.types.name(pt) == open {
+            pt = tc.infer_ty;
+        }
+        let _at = check_expr(inout tc, in a, av, pt);
+        constrain_literals(inout tc, in a, av, pt);
+    }
+    record_span(inout tc, ce.s0, ce.s1, op.result);
+    record_span(inout tc, e.s0, e.s1, op.result);
+    op.result
+}
+
+fn check_fn_call(
+    inout tc: Tc,
+    in a: Ast,
+    f: FnR,
+    receiver_ty: u32,
+    e: Ex,
+    ce: Ex,
+    expected: u32
+) -> u32 {
+    check_sugar_call_access(
+        inout tc,
+        in a,
+        f.param_start,
+        f.param_count,
+        receiver_ty != NONE32,
+        e,
+        ce
+    );
     if f.generic_count == 0 {
+        check_sugar_call_row(inout tc, e, f.effects);
         let p_off: u64 = if receiver_ty != NONE32 { 1 } else { 0 };
         for ai in 0..e.n {
             let av = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1)));
@@ -490,6 +1274,7 @@ fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: E
                 tc.infer_ty
             };
             let _at = check_expr(inout tc, in a, av, pt);
+            constrain_literals(inout tc, in a, av, pt);
         }
         record_span(inout tc, ce.s0, ce.s1, f.result);
         record_span(inout tc, e.s0, e.s1, f.result);
@@ -508,6 +1293,9 @@ fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: E
             },
             Option::None => {},
         }
+    }
+    if e.m == 0 && tc.types.kind(expected) != TyKind::Infer {
+        infer(inout tc.types, tc.world.k, f.result, expected, in gnames, inout vars);
     }
     let has_recv = receiver_ty != NONE32;
     let mut p_off: u64 = 0;
@@ -534,6 +1322,8 @@ fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: E
                     if f.generic_count > 0 && e.m == 0 {
                         infer(inout tc.types, tc.world.k, pm.ty, at, in gnames, inout vars);
                     }
+                    let target = substitute(inout tc.types, pm.ty, in vars);
+                    constrain_literals(inout tc, in a, av, target);
                 },
                 Option::None => {
                     let _at = check_expr(inout tc, in a, av, pt);
@@ -558,6 +1348,10 @@ fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: E
             tc.calls.push(CallRow { s0: e.s0, s1: e.s1, v0: v0, vn: vn });
         }
     }
+    if tc.sugar.policies.regions.len() != 0 {
+        let call_row = substitute_row(inout tc.types, f.effects, in vars);
+        check_sugar_call_row(inout tc, e, call_row);
+    }
     let rty = substitute(inout tc.types, f.result, in vars);
     record_span(inout tc, ce.s0, ce.s1, rty);
     record_span(inout tc, e.s0, e.s1, rty);
@@ -570,6 +1364,116 @@ fn call_arg_expr(in a: Ast, e: Ex, ai: u64) -> u64 {
     u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, CALL_ARG_STRIDE), 1)))
 }
 
+// Rust's `constrain_literals`: the integer literals of `eid` (through
+// tuples) take their kinds from `target`, the type their context settled.
+fn constrain_literals(inout tc: Tc, in a: Ast, eid: u64, target: u32) {
+    let e = match a.exs.try_get(eid) {
+        Option::Some(v) => v,
+        Option::None => return,
+    };
+    if e.kind == X_TUPLE {
+        let dt = default_type(inout tc.types, target);
+        if tc.types.kind(dt) == TyKind::Tuple && tc.types.arity(dt) == e.n {
+            let mut same = !tc.lit_probe;
+            for i in 0..e.n {
+                let sub = u64_at(in a.xs, wrapping_add(e.a, i));
+                constrain_literals(inout tc, in a, sub, tc.types.arg(dt, i));
+                match a.exs.try_get(sub) {
+                    Option::Some(se) => {
+                        if span_ty(in tc, se.s0, se.s1) != tc.types.arg(dt, i) {
+                            same = false;
+                        }
+                    },
+                    Option::None => {
+                        same = false;
+                    },
+                }
+            }
+            // The tuple takes the target once its elements do
+            // (`refine_annotation` of a compatible tuple).
+            if same {
+                retype_span(inout tc, e.s0, e.s1, dt);
+            }
+        }
+    } else if is_int_ty(in tc, target)
+        && !tc.lit_probe
+        && e.kind == X_LITERAL
+        && (e.a == Lit::Int || e.a == Lit::WideInt)
+    {
+        retype_span(inout tc, e.s0, e.s1, target);
+    } else if target != tc.never_ty
+        && tc.types.kind(target) != TyKind::Infer
+        && span_ty(in tc, e.s0, e.s1) == tc.never_ty
+    {
+        // A diverging branch takes its context's type (`refine_annotation`
+        // of a compatible `Never`).
+        retype_span(inout tc, e.s0, e.s1, target);
+    }
+    if e.kind == X_BLOCK && e.b != NONE64 {
+        constrain_literals(inout tc, in a, e.b, target);
+    } else if e.kind == X_IF {
+        constrain_literals(inout tc, in a, e.b, target);
+        if e.c != NONE64 {
+            constrain_literals(inout tc, in a, e.c, target);
+        }
+    } else if e.kind == X_MATCH {
+        for i in 0..e.n {
+            let body = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
+            constrain_literals(inout tc, in a, body, target);
+        }
+    }
+}
+
+// The type recorded last at `s0..s1`, or NONE32.
+fn span_ty(in tc: Tc, s0: u64, s1: u64) -> u32 {
+    let mut i = tc.spans.len();
+    loop {
+        if i == 0 {
+            return NONE32;
+        }
+        i = wrapping_sub(i, 1);
+        match tc.spans.try_get(i) {
+            Option::Some(r) => {
+                if r.start == s0 && r.end == s1 {
+                    return r.ty;
+                }
+            },
+            Option::None => return NONE32,
+        }
+    }
+}
+
+// Replaces the type recorded last at `s0..s1`.
+fn retype_span(inout tc: Tc, s0: u64, s1: u64, ty: u32) {
+    let mut i = tc.spans.len();
+    loop {
+        if i == 0 {
+            return;
+        }
+        i = wrapping_sub(i, 1);
+        match tc.spans.try_get(i) {
+            Option::Some(r) => {
+                if r.start == s0 && r.end == s1 {
+                    let _ = tc.spans.try_set(i, SpanRow { start: s0, end: s1, ty: ty });
+                    return;
+                }
+            },
+            Option::None => return,
+        }
+    }
+}
+
+// Whether `e` assigns a whole open binding in a probe run.
+fn assigns_open(in tc: Tc, in a: Ast, e: Ex) -> bool {
+    if !tc.lit_probe || tc.names.has_prefix(n32(e.a), in "[]".as_bytes()) {
+        return false;
+    }
+    match a.exs.try_get(e.b) {
+        Option::Some(t) => t.kind == X_NAME && open_pid(in tc, n32(t.a)) != NONE64,
+        Option::None => false,
+    }
+}
+
 fn is_int_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
     match a.exs.try_get(eid) {
         Option::Some(ex) => {
@@ -577,6 +1481,29 @@ fn is_int_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
                 ex.a == Lit::Int || ex.a == Lit::WideInt
             } else if ex.kind == X_UNARY && is_op(in tc, n32(ex.a), in "-") {
                 is_int_lit_expr(in tc, in a, ex.b)
+            } else if ex.kind == X_NAME {
+                // In a probe run an open binding reads as a literal.
+                tc.lit_probe && open_pid(in tc, n32(ex.a)) != NONE64
+            } else if ex.kind == X_BLOCK {
+                // A block, `if` or `match` of literals joins them into a
+                // literal (`IntLiteral`).
+                ex.b != NONE64 && is_int_lit_expr(in tc, in a, ex.b)
+            } else if ex.kind == X_IF {
+                ex.c != NONE64
+                    && is_int_lit_expr(in tc, in a, ex.b)
+                    && is_int_lit_expr(in tc, in a, ex.c)
+            } else if ex.kind == X_MATCH {
+                let mut all = ex.n > 0;
+                for i in 0..ex.n {
+                    let body = u64_at(
+                        in a.xs,
+                        wrapping_add(ex.b, wrapping_add(wrapping_mul(i, 2), 1))
+                    );
+                    if !is_int_lit_expr(in tc, in a, body) {
+                        all = false;
+                    }
+                }
+                all
             } else {
                 false
             }
@@ -658,6 +1585,165 @@ fn check_math_call(inout tc: Tc, in a: Ast, e: Ex, callee: Ex, expected: u32) ->
     ty
 }
 
+fn check_sugar_try(inout tc: Tc, in a: Ast, e: Ex, expected: u32) -> u32 {
+    let result = tc.names.intern(in "Result".as_bytes());
+    let target = if tc.types.kind(expected) == TyKind::Infer {
+        tc.infer_ty
+    } else {
+        let mut args = ChunkSeq::new[u32]();
+        args.push(expected);
+        args.push(tc.infer_ty);
+        tc.types.named(result, in args)
+    };
+    let operand = check_owned_expr(inout tc, in a, e.a, target);
+    let name = tc.types.name(operand);
+    let argc = tc.types.arity(operand);
+    if name == result && argc == 2 {
+        let err = tc.types.arg(operand, 1);
+        let actual = failure_row(inout tc.names, inout tc.types, err);
+        check_sugar_call_row(inout tc, e, actual);
+        let ok = tc.types.arg(operand, 0);
+        if tc.types.kind(ok) == TyKind::Infer {
+            tc.unit_ty
+        } else {
+            ok
+        }
+    } else if argc == 1
+        && tc.names.spells(name, in "Option".as_bytes())
+        && tc.names.spells(tc.types.name(tc.ret_ty), in "Option".as_bytes())
+    {
+        // Option propagation returns to the enclosing function; only
+        // Result propagation performs a Fail effect.
+        tc.types.arg(operand, 0)
+    } else {
+        note_sugar_violation(inout tc, POLICY_BAD_METADATA);
+        expected
+    }
+}
+
+fn certify_sugar_call(inout tc: Tc, id: u64) {
+    if id < tc.sugar_checked_calls.len() {
+        let _ = tc.sugar_checked_calls.try_set(id, true);
+    }
+}
+
+fn total_named_builtin(in tc: Tc, name: u32, conv: u32, argc: u64) -> bool {
+    if argc == 0 {
+        return is_op(in tc, name, in "ChunkSeq::new") || is_op(in tc, name, in "String::new");
+    }
+    if argc == 1 {
+        return conv != NONE32
+            || is_op(in tc, name, in "inc32")
+            || is_op(in tc, name, in "ChunkSeq::with_capacity")
+            || is_op(in tc, name, in "String::from_utf8");
+    }
+    if argc != 2 {
+        return false;
+    }
+    is_op(in tc, name, in "wrapping_add")
+        || is_op(in tc, name, in "wrapping_sub")
+        || is_op(in tc, name, in "wrapping_mul")
+        || is_op(in tc, name, in "wrapping_shl_u64")
+        || is_op(in tc, name, in "wrapping_shr_u64")
+        || is_op(in tc, name, in "wrapping_shl")
+        || is_op(in tc, name, in "wrapping_shr")
+        || is_op(in tc, name, in "rotate_left")
+        || is_op(in tc, name, in "rotate_right")
+        || is_op(in tc, name, in "min_u64")
+        || is_op(in tc, name, in "max_u64")
+        || is_op(in tc, name, in "bit_and")
+        || is_op(in tc, name, in "bit_or")
+        || is_op(in tc, name, in "bit_xor")
+        || is_op(in tc, name, in "bit_shl")
+        || is_op(in tc, name, in "bit_shr")
+}
+
+// Where the syntax consumes a value, a captured Copy value is a read
+// and a non-Copy value is a sink. The call/sequence paths separately
+// choose their resolved borrow modes and must not use this wrapper.
+fn check_owned_expr(inout tc: Tc, in a: Ast, id: u64, expected: u32) -> u32 {
+    let ty = check_expr(inout tc, in a, id, expected);
+    check_value_place(inout tc, in a, id, ty, true);
+    ty
+}
+
+fn check_value_place(inout tc: Tc, in a: Ast, id: u64, ty: u32, owned: bool) {
+    if tc.sugar.policies.regions.len() == 0 || id == NONE64 {
+        return;
+    }
+    let e = a.ex(id);
+    if e.kind != X_NAME && e.kind != X_FIELD && e.kind != X_INDEX {
+        return;
+    }
+    if e.kind == X_INDEX {
+        let index = a.ex(e.b);
+        if index.kind == X_RANGE
+            || (index.kind == X_BINARY && is_op(in tc, n32(index.a), in ".."))
+        {
+            // A slice view remains a borrow even as a let initializer.
+            return;
+        }
+    }
+    let site = match sugar_operation_span(inout tc, e) {
+        Option::Some(site) => site,
+        Option::None => return,
+    };
+    if !owned {
+        let fault = captured_value_fault(in tc.sugar.policies, site, TyPass::In);
+        note_sugar_violation(inout tc, fault);
+        return;
+    }
+    let moving = captured_value_fault(in tc.sugar.policies, site, TyPass::Sink);
+    if moving == POLICY_OK {
+        return;
+    }
+    let mut bounds = bounds_new();
+    for i in 0..tc.sugar_generic_count {
+        let generic = a.generic(wrapping_add(tc.sugar_generic_start, i));
+        if !generic.is_row {
+            bounds.set(generic.name, generic.bound);
+        }
+    }
+    let fault = if tc.types.kind(ty) != TyKind::Infer
+        && mode_of(inout tc.types, in tc.names, in tc.world, ty, in bounds) == TyMode::Copy
+    {
+        captured_value_fault(in tc.sugar.policies, site, TyPass::In)
+    } else {
+        moving
+    };
+    note_sugar_violation(inout tc, fault);
+}
+
+fn borrowed_match_place(in tc: Tc, in a: Ast, id: u64) -> bool {
+    let mut e = a.ex(id);
+    loop {
+        if e.kind != X_FIELD {
+            break;
+        }
+        e = a.ex(e.a);
+    }
+    if e.kind != X_NAME {
+        return false;
+    }
+    let name = n32(e.a);
+    let mut i = tc.env.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        match tc.env.try_get(i) {
+            Option::Some(binding) => {
+                if binding.name == name {
+                    return binding.pass != TyPass::Sink;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    false
+}
+
 fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
     if eid == NONE64 {
         return tc.unit_ty;
@@ -678,10 +1764,12 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                 tc.f64_ty
             }
         } else if e.a == Lit::String {
-            if expected == tc.types.named0(tc.world.k.string) {
-                expected
-            } else {
+            // A string literal is a `String`, except as static text: a `Str`
+            // where a `-> Str` function expects one (`static_text`).
+            if expected == tc.str_ty && tc.ret_ty == tc.str_ty {
                 tc.str_ty
+            } else {
+                tc.types.named0(tc.world.k.string)
             }
         } else if tc.types.kind(expected) == TyKind::Named
             && tc.world.k.is_integer(tc.types.name(expected))
@@ -698,7 +1786,19 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         let nm = n32(e.a);
         let lv = lookup_var(in tc, nm);
         if lv != NONE32 {
-            lv
+            let pid = open_pid(in tc, nm);
+            let goal = is_int_ty(in tc, expected);
+            if tc.lit_probe && pid != NONE64 && is_int_ty(in tc, lv) {
+                // A use of an open binding reads as a literal (`literal_use`).
+                let t = if goal { expected } else { lv };
+                note_lit_use(inout tc, pid, t);
+                t
+            } else {
+                if goal && lv != expected && is_int_ty(in tc, lv) {
+                    tc.lit_mismatch = true;
+                }
+                lv
+            }
         } else {
             let dt = default_type(inout tc.types, expected);
             let (adt, _vi, _vars) = ctor_info(inout tc, nm, dt);
@@ -718,12 +1818,23 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         let dt = default_type(inout tc.types, expected);
         for i in 0..e.n {
             let sub = u64_at(in a.xs, wrapping_add(e.a, i));
+            // Rust's goal for an element: the expected element type only
+            // when it is a float or a tuple; integer literals settle later
+            // (`constrain_literals`).
             let exp_i = if tc.types.kind(dt) == TyKind::Tuple && i < tc.types.arity(dt) {
-                tc.types.arg(dt, i)
+                let et = tc.types.arg(dt, i);
+                let float = tc.types.kind(et) == TyKind::Named
+                    && (tc.types.name(et) == tc.world.k.f64_
+                        || tc.types.name(et) == tc.world.k.f32_);
+                if float || tc.types.kind(et) == TyKind::Tuple {
+                    et
+                } else {
+                    tc.infer_ty
+                }
             } else {
-                expected
+                tc.infer_ty
             };
-            elems.push(check_expr(inout tc, in a, sub, exp_i));
+            elems.push(check_owned_expr(inout tc, in a, sub, exp_i));
         }
         tc.types.tuple(in elems)
     } else if e.kind == X_STRUCT {
@@ -744,7 +1855,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                     }
                 }
             }
-            let _t = check_expr(inout tc, in a, sub, fty);
+            let _t = check_owned_expr(inout tc, in a, sub, fty);
         }
         if adt != NONE32
             && tc.types.kind(dt) == TyKind::Named
@@ -762,7 +1873,19 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         if ft == NONE32 { expected } else { ft }
     } else if e.kind == X_INDEX {
         let bt = check_expr(inout tc, in a, e.a, tc.infer_ty);
-        let _it = check_expr(inout tc, in a, e.b, tc.infer_ty);
+        // A sequence or slice element index is a `u64` (`seq_index`).
+        let seq_base = tc.types.kind(bt) == TyKind::Named
+            && (tc.types.name(bt) == tc.world.k.chunk_seq || tc.types.name(bt) == tc.world.k.slice);
+        let range_index = match a.exs.try_get(e.b) {
+            Option::Some(ix) => ix.kind == X_RANGE,
+            Option::None => false,
+        };
+        let index_goal = if seq_base || range_index {
+            tc.u64_ty
+        } else {
+            tc.infer_ty
+        };
+        let _it = check_expr(inout tc, in a, e.b, index_goal);
         let is_rng = match a.exs.try_get(e.b) {
             Option::Some(ix) => ix.kind == X_RANGE
                 || (ix.kind == X_BINARY && tc.names.spells(n32(ix.a), in "..".as_bytes())),
@@ -825,6 +1948,17 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             } else {
                 rt
             }
+        } else if is_op(in tc, op, in "<<") || is_op(in tc, op, in ">>") {
+            // A shift amount takes no kind from its operand: an unsuffixed
+            // literal amount is a `u32` (`shift_amount`).
+            let lt = check_expr(inout tc, in a, e.b, expected);
+            let amount_goal = if is_int_lit_expr(in tc, in a, e.c) {
+                tc.types.named0(tc.world.k.u32_)
+            } else {
+                tc.infer_ty
+            };
+            let _rt = check_expr(inout tc, in a, e.c, amount_goal);
+            lt
         } else {
             let lt = check_expr(inout tc, in a, e.b, expected);
             let rt = check_expr(inout tc, in a, e.c, lt);
@@ -834,6 +1968,17 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                 lt
             }
         }
+    } else if e.kind == X_ASSIGN && assigns_open(in tc, in a, e) {
+        // In a probe run, a value assigned to an open binding is one of its
+        // uses, typed from its own operands (`literal_assignment`).
+        let pid = match a.exs.try_get(e.b) {
+            Option::Some(t) => open_pid(in tc, n32(t.a)),
+            Option::None => NONE64,
+        };
+        let _lt = check_expr(inout tc, in a, e.b, tc.infer_ty);
+        let rt = check_owned_expr(inout tc, in a, e.c, tc.infer_ty);
+        note_lit_use(inout tc, pid, rt);
+        tc.unit_ty
     } else if e.kind == X_ASSIGN {
         let op = n32(e.a);
         let lt = check_expr(inout tc, in a, e.b, tc.infer_ty);
@@ -850,15 +1995,25 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         } else {
             lt
         };
-        let _rt = check_expr(inout tc, in a, e.c, rhs_exp);
+        let rt = check_owned_expr(inout tc, in a, e.c, rhs_exp);
+        if is_int_ty(in tc, rhs_exp) && is_int_ty(in tc, rt) && rt != rhs_exp {
+            tc.lit_mismatch = true;
+        }
         tc.unit_ty
     } else if e.kind == X_BLOCK {
         push_scope(inout tc);
+        // Rust's block: once an expression statement has type `Never`, the
+        // rest of the block goes unchecked and the block is `Never`.
+        let mut diverged = false;
         for i in 0..e.n {
+            if diverged {
+                break;
+            }
             let is_let = u64_at(in a.xs, wrapping_add(e.a, wrapping_mul(i, 3)));
             let pt = u64_at(in a.xs, wrapping_add(e.a, wrapping_add(wrapping_mul(i, 3), 1)));
             let val = u64_at(in a.xs, wrapping_add(e.a, wrapping_add(wrapping_mul(i, 3), 2)));
             let mut exp = tc.infer_ty;
+            let mut plain = false;
             if is_let != 0 {
                 match a.pts.try_get(pt) {
                     Option::Some(pv) => {
@@ -868,74 +2023,205 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 exp = ann;
                             }
                         }
+                        plain = pv.kind == Pat::Bind;
                     },
                     Option::None => {},
                 }
             }
-            let vt = check_expr(inout tc, in a, val, exp);
+            // An unannotated binding of a literal takes the kind its uses
+            // gave it (`literal_annotation`), or is open.
+            let hint = if plain && tc.types.kind(exp) == TyKind::Infer {
+                lit_hint(in tc, pt)
+            } else {
+                NONE32
+            };
+            let open = plain
+                && hint == NONE32
+                && tc.types.kind(exp) == TyKind::Infer
+                && is_int_lit_expr(in tc, in a, val);
+            if hint != NONE32 {
+                exp = hint;
+            }
+            let vt = check_owned_expr(inout tc, in a, val, exp);
             if is_let != 0 {
-                bind_pat(inout tc, in a, pt, vt);
+                // An annotated binding has its annotation's type
+                // (`refine_annotation`), whatever its literals settled to.
+                let bound = if tc.types.kind(exp) == TyKind::Infer {
+                    vt
+                } else {
+                    exp
+                };
+                bind_pat(inout tc, in a, pt, bound);
+                if open && is_int_ty(in tc, bound) {
+                    open_last(inout tc, pt);
+                }
+            } else if vt == tc.never_ty {
+                diverged = true;
             }
         }
-        let tail_ty = if e.b == NONE64 {
+        let tail_ty = if diverged {
+            tc.never_ty
+        } else if e.b == NONE64 {
             tc.unit_ty
         } else {
-            check_expr(inout tc, in a, e.b, expected)
+            check_owned_expr(inout tc, in a, e.b, expected)
         };
         pop_scope(inout tc);
         tail_ty
+    } else if e.kind == X_TRY && sugar_applies(inout tc, e) {
+        check_sugar_try(inout tc, in a, e, expected)
     } else if e.kind == X_IF {
-        let _ct = check_expr(inout tc, in a, e.a, tc.bool_ty);
-        let tt = check_expr(inout tc, in a, e.b, expected);
+        let _ct = check_owned_expr(inout tc, in a, e.a, tc.bool_ty);
+        let tt = check_owned_expr(inout tc, in a, e.b, expected);
         if e.c == NONE64 {
+            constrain_literals(inout tc, in a, e.b, tc.unit_ty);
             tc.unit_ty
         } else {
-            let exp_e = if tt == tc.never_ty { expected } else { tt };
-            let et = check_expr(inout tc, in a, e.c, exp_e);
-            if tt == tc.never_ty || tc.types.kind(tt) == TyKind::Infer {
+            // A literal branch joins as a literal (`IntLiteral`): the other
+            // branch's integer kind wins.
+            let then_lit = is_int_lit_expr(in tc, in a, e.b);
+            let exp_e = if tt == tc.never_ty || then_lit {
+                expected
+            } else {
+                tt
+            };
+            let et = check_owned_expr(inout tc, in a, e.c, exp_e);
+            let result = if tt == tc.never_ty || tc.types.kind(tt) == TyKind::Infer {
+                et
+            } else if then_lit && !is_int_lit_expr(in tc, in a, e.c) && is_int_ty(in tc, et) {
                 et
             } else {
                 tt
-            }
+            };
+            constrain_literals(inout tc, in a, e.b, result);
+            constrain_literals(inout tc, in a, e.c, result);
+            result
         }
     } else if e.kind == X_MATCH {
         let vt = check_expr(inout tc, in a, e.a, tc.infer_ty);
-        let mut res = expected;
+        if tc.sugar.policies.regions.len() != 0 {
+            let borrowed = borrowed_match_place(in tc, in a, e.a);
+            check_value_place(inout tc, in a, e.a, vt, !borrowed);
+        }
+        // Rust's match type: `Never` joined with each arm's.
+        let mut res = tc.never_ty;
+        // Whether `res` is a literal arm's, which a typed arm overrides.
+        let mut res_lit = false;
         for i in 0..e.n {
             let pt = u64_at(in a.xs, wrapping_add(e.b, wrapping_mul(i, 2)));
             let body = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
             push_scope(inout tc);
             bind_pat(inout tc, in a, pt, vt);
-            let exp_b = if res == tc.never_ty { expected } else { res };
-            let bt = check_expr(inout tc, in a, body, exp_b);
-            if (tc.types.kind(res) == TyKind::Infer || res == tc.never_ty) && bt != tc.never_ty {
+            let exp_b = if res == tc.never_ty || res_lit {
+                expected
+            } else {
+                res
+            };
+            let bt = check_owned_expr(inout tc, in a, body, exp_b);
+            let body_lit = is_int_lit_expr(in tc, in a, body);
+            if res == tc.never_ty || (tc.types.kind(res) == TyKind::Infer && bt != tc.never_ty) {
                 res = bt;
+                res_lit = body_lit;
+            } else if res_lit && !body_lit && is_int_ty(in tc, bt) {
+                res = bt;
+                res_lit = false;
             }
             pop_scope(inout tc);
+        }
+        if tc.types.kind(res) == TyKind::Infer {
+            res = expected;
+        }
+        for i in 0..e.n {
+            let body = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
+            constrain_literals(inout tc, in a, body, res);
         }
         res
     } else if e.kind == X_LOOP {
         let _bt = check_expr(inout tc, in a, e.a, tc.unit_ty);
-        expected
+        // Rust's loop type: the join of its `break` values, `Unit` for
+        // plain `break`s and `Never` without any.
+        let breaks = loop_breaks(in a, e.a);
+        if breaks == loop_never_breaks() {
+            tc.never_ty
+        } else if breaks == loop_plain_breaks() {
+            tc.unit_ty
+        } else {
+            expected
+        }
     } else if e.kind == X_FOR {
-        let it = check_expr(inout tc, in a, e.b, tc.infer_ty);
+        // A `for` over a range of literals takes its binding's hinted kind
+        // (`literal_element`), or its binding is open.
+        let literal_range = match a.exs.try_get(e.b) {
+            Option::Some(r) => r.kind == X_RANGE
+                && is_int_lit_expr(in tc, in a, r.a)
+                && is_int_lit_expr(in tc, in a, r.b),
+            Option::None => false,
+        };
+        let plain = match a.pts.try_get(e.a) {
+            Option::Some(p) => p.kind == Pat::Bind,
+            Option::None => false,
+        };
+        let hint = if literal_range && plain {
+            lit_hint(in tc, e.a)
+        } else {
+            NONE32
+        };
+        let goal = if hint == NONE32 { tc.infer_ty } else { hint };
+        let it = check_expr(inout tc, in a, e.b, goal);
+        let ranged = match a.exs.try_get(e.b) {
+            Option::Some(ix) => ix.kind == X_RANGE,
+            Option::None => false,
+        };
+        // Over a fixed array (a tuple), a `ChunkSeq` or a `Slice`, the
+        // pattern binds an element (#2703).
+        let sequence = tc.types.kind(it) == TyKind::Named
+            && tc.types.arity(it) == 1
+            && (tc.types.name(it) == tc.world.k.chunk_seq || tc.types.name(it) == tc.world.k.slice);
+        let elem = if ranged {
+            it
+        } else if (tc.types.kind(it) == TyKind::Tuple && tc.types.arity(it) > 0) || sequence {
+            default_type(inout tc.types, tc.types.arg(it, 0))
+        } else {
+            it
+        };
         push_scope(inout tc);
-        bind_pat(inout tc, in a, e.a, it);
+        bind_pat(inout tc, in a, e.a, elem);
+        if literal_range && plain && hint == NONE32 && is_int_ty(in tc, it) {
+            open_last(inout tc, e.a);
+        }
         let _bt = check_expr(inout tc, in a, e.c, tc.unit_ty);
         pop_scope(inout tc);
         tc.unit_ty
     } else if e.kind == X_RANGE {
-        let st = check_expr(inout tc, in a, e.a, tc.u64_ty);
-        let _en = check_expr(inout tc, in a, e.b, st);
-        st
+        // A `for` range of unsuffixed literals defaults like a literal; an
+        // unsuffixed start takes the end's kind (`for_expr`). Elsewhere a
+        // range bounds a view, in `u64`.
+        let integer_goal = tc.types.kind(expected) == TyKind::Named
+            && tc.world.k.is_integer(tc.types.name(expected));
+        if !integer_goal
+            && is_int_lit_expr(in tc, in a, e.a)
+            && !is_int_lit_expr(in tc, in a, e.b)
+        {
+            let en = check_expr(inout tc, in a, e.b, tc.infer_ty);
+            check_expr(inout tc, in a, e.a, en)
+        } else {
+            let goal = if integer_goal { expected } else { tc.infer_ty };
+            let st = check_expr(inout tc, in a, e.a, goal);
+            let _en = check_expr(inout tc, in a, e.b, st);
+            st
+        }
     } else if e.kind == X_BREAK {
         if e.a != NONE64 {
-            let _vt = check_expr(inout tc, in a, e.a, tc.infer_ty);
+            let _vt = check_owned_expr(inout tc, in a, e.a, tc.infer_ty);
         }
         tc.never_ty
     } else if e.kind == X_RETURN {
         if e.a != NONE64 {
-            let _vt = check_expr(inout tc, in a, e.a, tc.ret_ty);
+            let _vt = check_owned_expr(inout tc, in a, e.a, tc.ret_ty);
+            // `return_expr`: the value's literals take the result type.
+            if tc.types.kind(tc.ret_ty) != TyKind::Infer {
+                constrain_literals(inout tc, in a, e.a, tc.ret_ty);
+            }
         }
         tc.never_ty
     } else if e.kind == X_CONTINUE {
@@ -944,10 +2230,13 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         match a.hds.try_get(e.a) {
             Option::Some(h) => {
                 if h.has_state {
-                    let st = check_expr(inout tc, in a, h.state_expr, tc.infer_ty);
+                    let st = check_owned_expr(inout tc, in a, h.state_expr, tc.infer_ty);
                     bind_pat(inout tc, in a, h.state_pattern, st);
                 }
-                let bt = check_expr(inout tc, in a, h.body, expected);
+                let outer_handler_row = tc.sugar_handler_row;
+                tc.sugar_handler_row = policy_handler_row(inout tc, in a, h);
+                let bt = check_owned_expr(inout tc, in a, h.body, expected);
+                tc.sugar_handler_row = outer_handler_row;
                 let mut rt = expected;
                 match a.cls.try_get(h.return_clause) {
                     Option::Some(rc) => {
@@ -955,7 +2244,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                         if rc.pattern_count > 0 {
                             bind_pat(inout tc, in a, u64_at(in a.xs, rc.pattern_start), bt);
                         }
-                        rt = check_expr(inout tc, in a, rc.body, expected);
+                        rt = check_owned_expr(inout tc, in a, rc.body, expected);
                         pop_scope(inout tc);
                     },
                     Option::None => {},
@@ -977,7 +2266,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                     pty
                                 );
                             }
-                            let _ot = check_expr(inout tc, in a, oc.body, rt);
+                            let _ot = check_owned_expr(inout tc, in a, oc.body, rt);
                             pop_scope(inout tc);
                         },
                         Option::None => {},
@@ -992,24 +2281,73 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             Option::Some(ce) => {
                 if ce.kind == X_NAME {
                     let cname = n32(ce.a);
-                    let fn_opt = match find_fn(in a, cname) {
-                        Option::Some(f) => Option::Some(f),
-                        Option::None => {
-                            let (qf, sf) = split_last_colon(inout tc.names, cname);
-                            if qf != NONE32 {
-                                find_fn(in a, sf)
-                            } else {
-                                Option::None
-                            }
-                        },
+                    // A `.vsys` operation (`Lib::f`, renamed by ffi.ves).
+                    if is_foreign_op(in tc, cname) && lookup_var(in tc, cname) == NONE32 {
+                        match find_eop(in a, inout tc.names, cname) {
+                            Option::Some((_ef, op)) => {
+                                return check_foreign_call(inout tc, in a, op, e, ce);
+                            },
+                            Option::None => {},
+                        }
+                    }
+                    if tc.sugar.policies.regions.len() != 0 {
+                        let callable = lookup_var(in tc, cname);
+                        if callable != NONE32
+                            && tc.types.kind(callable) == TyKind::Fn
+                            && sugar_applies(inout tc, e)
+                        {
+                            certify_sugar_call(inout tc, eid);
+                            return check_sugar_value_call(inout tc, in a, callable, e, ce);
+                        }
+                    }
+                    let authored = sugar_applies(inout tc, e);
+                    let fn_opt = if authored && lookup_var(in tc, cname) != NONE32 {
+                        Option::None
+                    } else {
+                        match find_fn(in a, cname) {
+                            Option::Some(f) => Option::Some(f),
+                            Option::None => {
+                                if authored {
+                                    Option::None
+                                } else {
+                                    let (qf, sf) = split_last_colon(inout tc.names, cname);
+                                    if qf != NONE32 {
+                                        find_fn(in a, sf)
+                                    } else {
+                                        Option::None
+                                    }
+                                }
+                            },
+                        }
                     };
                     match fn_opt {
                         Option::Some(f) => {
-                            return check_fn_call(inout tc, in a, f, NONE32, e, ce);
+                            certify_sugar_call(inout tc, eid);
+                            return check_fn_call(inout tc, in a, f, NONE32, e, ce, expected);
                         },
                         Option::None => {
+                            let local = lookup_var(in tc, cname);
+                            if local != NONE32 && tc.types.kind(local) == TyKind::Fn {
+                                return check_value_call(inout tc, in a, local, e);
+                            }
                             if math_op(in tc.names, cname) != FloatMath::None {
                                 return check_math_call(inout tc, in a, e, ce, expected);
+                            }
+                            if authored && lookup_var(in tc, cname) == NONE32 {
+                                match find_eop(in a, inout tc.names, cname) {
+                                    Option::Some((ef, op)) => {
+                                        certify_sugar_call(inout tc, eid);
+                                        return check_direct_effect(inout tc, in a, ef, op, e, ce);
+                                    },
+                                    Option::None => {},
+                                }
+                                match check_sugar_named_sequence(inout tc, in a, e, ce) {
+                                    Option::Some(result) => {
+                                        certify_sugar_call(inout tc, eid);
+                                        return result;
+                                    },
+                                    Option::None => {},
+                                }
                             }
                             let conv_ty = conv_target_type(inout tc, cname);
                             let same_int = is_same_int_op(in tc, cname);
@@ -1026,6 +2364,13 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                             } else {
                                 ctor_info(inout tc, cname, dt)
                             };
+                            if authored
+                                && lookup_var(in tc, cname) == NONE32
+                                && (adt != NONE32
+                                    || total_named_builtin(in tc, cname, conv_ty, e.n))
+                            {
+                                certify_sugar_call(inout tc, eid);
+                            }
                             let mut vars = vars0;
                             let mut gnames = ChunkSeq::new[u32]();
                             if adt != NONE32 {
@@ -1081,6 +2426,12 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                             pt = operand_ty;
                                         }
                                     }
+                                    // A capacity is a `u64` (`SeqOp::WithCapacity`).
+                                    if is_op(in tc, cname, in "ChunkSeq::with_capacity")
+                                        || is_op(in tc, cname, in "String::with_capacity")
+                                    {
+                                        pt = tc.u64_ty;
+                                    }
                                     if adt != NONE32 {
                                         let v = tc.world.variant(vi);
                                         if ai < w(v.fc) {
@@ -1133,6 +2484,11 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                             {
                                 let cs_nm = tc.names.intern(in "ChunkSeq".as_bytes());
                                 named1(inout tc, cs_nm, n32(u64_at(in a.xs, e.c)))
+                            } else if is_op(in tc, cname, in "swap") {
+                                // The place primitives (`SeqOp::Swap`, `SeqOp::Replace`).
+                                tc.unit_ty
+                            } else if is_op(in tc, cname, in "replace") {
+                                arg0_ty
                             } else if is_op(in tc, cname, in "String::new") {
                                 tc.types.named0(tc.names.intern(in "String".as_bytes()))
                             } else if is_op(in tc, cname, in "String::from_utf8") {
@@ -1152,8 +2508,10 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                     tc.u64_ty
                                 }
                             } else {
-                                let eres = find_eop_result(in a, inout tc.names, cname);
-                                if eres != NONE32 { eres } else { expected }
+                                match find_eop(in a, inout tc.names, cname) {
+                                    Option::Some((_, op)) => op.result,
+                                    Option::None => expected,
+                                }
                             };
                             record_span(inout tc, ce.s0, ce.s1, rty);
                             record_span(inout tc, e.s0, e.s1, rty);
@@ -1161,37 +2519,49 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                         },
                     }
                 } else if ce.kind == X_FIELD {
+                    match check_labeled_sugar_effect(inout tc, in a, e, ce) {
+                        Option::Some(result) => {
+                            certify_sugar_call(inout tc, eid);
+                            return result;
+                        },
+                        Option::None => {},
+                    }
                     let bt = check_expr(inout tc, in a, ce.a, tc.infer_ty);
                     let mname = n32(ce.b);
                     let tname = tc.types.name(bt);
                     let cname = join_method_sym(inout tc.names, tname, mname);
                     match find_fn(in a, cname) {
                         Option::Some(f) => {
-                            return check_fn_call(inout tc, in a, f, bt, e, ce);
+                            certify_sugar_call(inout tc, eid);
+                            return check_fn_call(inout tc, in a, f, bt, e, ce, expected);
                         },
                         Option::None => {
+                            if sugar_applies(inout tc, e) {
+                                let callable = field_step(
+                                    inout tc.types,
+                                    inout tc.names,
+                                    in tc.world,
+                                    bt,
+                                    mname,
+                                    false
+                                );
+                                if callable != NONE32 && tc.types.kind(callable) == TyKind::Fn {
+                                    certify_sugar_call(inout tc, eid);
+                                    return check_sugar_value_call(inout tc, in a, callable, e, ce);
+                                }
+                            }
                             for ai in 0..e.n {
                                 let av = u64_at(
                                     in a.xs,
                                     wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1))
                                 );
-                                let mut pt = tc.infer_ty;
-                                if tc.types.arity(bt) > 0 {
-                                    if (is_op(in tc, mname, in "push")
-                                        || is_op(in tc, mname, in "fill"))
-                                        && ai == 0
-                                    {
-                                        pt = tc.types.arg(bt, 0);
-                                    } else if (is_op(in tc, mname, in "try_set")
-                                        || is_op(in tc, mname, in "set"))
-                                        && ai == 1
-                                    {
-                                        pt = tc.types.arg(bt, 0);
-                                    }
-                                }
+                                let pt = seq_arg_goal(inout tc, bt, mname, ai, e.n);
                                 let _at = check_expr(inout tc, in a, av, pt);
                             }
-                            let rty = if is_op(in tc, mname, in "len") {
+                            let seq_result = seq_method_result(inout tc, bt, mname);
+                            let rty = if seq_result != NONE32 {
+                                seq_result
+                            } else if is_op(in tc, mname, in "len") {
                                 tc.u64_ty
                             } else if is_op(in tc, mname, in "is_empty")
                                 || is_op(in tc, mname, in "try_set")
@@ -1243,6 +2613,12 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 let u8t = tc.types.named0(tc.world.k.u8_);
                                 let opt_nm = tc.names.intern(in "Option".as_bytes());
                                 named1(inout tc, opt_nm, u8t)
+                            } else if is_op(in tc, mname, in "get")
+                                && (tname == tc.world.k.chunk_seq || tname == tc.world.k.slice)
+                                && tc.types.arity(bt) > 0
+                            {
+                                // A sequence or slice element (`SeqOp::Get`).
+                                tc.types.arg(bt, 0)
                             } else if (is_op(in tc, mname, in "try_get")
                                 || is_op(in tc, mname, in "try_get_mut")
                                 || is_op(in tc, mname, in "get")
@@ -1282,14 +2658,23 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                             {
                                 tc.bool_ty
                             } else {
-                                let eres = find_eop_result(in a, inout tc.names, cname);
-                                if eres != NONE32 { eres } else { expected }
+                                match find_eop(in a, inout tc.names, cname) {
+                                    Option::Some((_, op)) => op.result,
+                                    Option::None => expected,
+                                }
                             };
                             record_span(inout tc, ce.s0, ce.s1, rty);
                             record_span(inout tc, e.s0, e.s1, rty);
                             return rty;
                         },
                     }
+                } else if sugar_applies(inout tc, e) {
+                    let callable = check_expr(inout tc, in a, e.a, tc.infer_ty);
+                    if tc.types.kind(callable) == TyKind::Fn {
+                        certify_sugar_call(inout tc, eid);
+                        return check_sugar_value_call(inout tc, in a, callable, e, ce);
+                    }
+                    note_sugar_violation(inout tc, POLICY_BAD_METADATA);
                 }
             },
             Option::None => {},
@@ -1361,7 +2746,7 @@ fn sort_spans_slice(inout s: Slice[SpanRow]) eff [Fail[RuntimeError]] {
     }
 }
 
-fn sort_spans(inout spans: ChunkSeq[SpanRow]) {
+pub fn sort_spans(inout spans: ChunkSeq[SpanRow]) {
     handle Fail[RuntimeError] in {
         sort_spans_slice(inout spans.as_slice_mut());
     } with {
@@ -1438,10 +2823,80 @@ fn sort_calls(inout calls: ChunkSeq[CallRow]) {
     };
 }
 
+fn check_fn_body(inout tc: Tc, in a: Ast, f: FnR) {
+    push_scope(inout tc);
+    for pi in 0..f.param_count {
+        match a.pms.try_get(wrapping_add(f.param_start, pi)) {
+            Option::Some(pm) => tc.env
+                .push(Binding { name: pm.name, ty: pm.ty, pass: pm.pass, open: NONE64 }),
+            Option::None => {},
+        }
+    }
+    tc.ret_ty = f.result;
+    tc.sugar_ambient_row = f.effects;
+    tc.sugar_generic_start = f.generic_start;
+    tc.sugar_generic_count = f.generic_count;
+    let _rt = check_owned_expr(inout tc, in a, f.body, f.result);
+    pop_scope(inout tc);
+    let peak = max_u64(max_u64(tc.lit_open.len(), tc.lit_uses.len()), tc.lit_hints.len());
+    tc.lit_peak = max_u64(tc.lit_peak, peak);
+}
+
+fn max_u64(x: u64, y: u64) -> u64 {
+    if x > y { x } else { y }
+}
+
+// Forgets what a run of the function recorded past the marks.
+fn undo_fn_run(inout tc: Tc, n_spans: u64, n_calls: u64, n_pairs: u64) {
+    tc.spans.truncate(n_spans);
+    tc.calls.truncate(n_calls);
+    tc.pairs.truncate(n_pairs);
+    tc.lit_open.clear();
+    tc.lit_uses.clear();
+}
+
+// Checks `f`, then, when it has open bindings and an integer use of the
+// wrong kind (where Rust's checker fails), types those bindings from their
+// uses and checks it again (`function_with_literal_typing`).
+fn check_fn_with_literal_typing(
+    inout tc: Tc,
+    in a: Ast,
+    f: FnR,
+    n_spans: u64,
+    n_calls: u64,
+    n_pairs: u64
+) {
+    tc.lit_open.clear();
+    tc.lit_uses.clear();
+    tc.lit_hints.clear();
+    tc.lit_probe = false;
+    tc.lit_mismatch = false;
+    let violation = tc.sugar_violation;
+    check_fn_body(inout tc, in a, f);
+    if tc.lit_open.len() == 0 || !tc.lit_mismatch {
+        return;
+    }
+    for _round in 0..LITERAL_PROBE_ROUNDS {
+        undo_fn_run(inout tc, n_spans, n_calls, n_pairs);
+        tc.lit_probe = true;
+        tc.sugar_violation = violation;
+        check_fn_body(inout tc, in a, f);
+        if !settle_lit_hints(inout tc) {
+            break;
+        }
+    }
+    tc.lit_probe = false;
+    undo_fn_run(inout tc, n_spans, n_calls, n_pairs);
+    tc.sugar_violation = violation;
+    check_fn_body(inout tc, in a, f);
+    tc.lit_hints.clear();
+}
+
 fn dummy_tc(k: Known) -> Tc {
     let mut dn = names_new();
     let dt = types_new(inout dn);
     let dw = world_new(k);
+    let empty_row = dt.empty_row;
     Tc {
         names: dn,
         types: dt,
@@ -1461,6 +2916,19 @@ fn dummy_tc(k: Known) -> Tc {
         calls: ChunkSeq::new[CallRow](),
         pairs: ChunkSeq::new[Pair](),
         scratch1: ChunkSeq::new[u32](),
+        sugar: empty_inputs(),
+        sugar_violation: POLICY_OK,
+        sugar_checked_calls: ChunkSeq::new[bool](),
+        sugar_ambient_row: empty_row,
+        sugar_handler_row: empty_row,
+        sugar_generic_start: 0,
+        sugar_generic_count: 0,
+        lit_open: ChunkSeq::new[u64](),
+        lit_uses: ChunkSeq::new[LitUse](),
+        lit_hints: ChunkSeq::new[LitUse](),
+        lit_probe: false,
+        lit_mismatch: false,
+        lit_peak: 0,
     }
 }
 
@@ -1495,6 +2963,19 @@ fn rebuild_tc(
         calls: tc_calls_in,
         pairs: tc_pairs_in,
         scratch1: tc_scratch1,
+        sugar: tc_sugar,
+        sugar_violation: tc_sugar_violation,
+        sugar_checked_calls: tc_sugar_checked_calls,
+        sugar_ambient_row: tc_sugar_ambient_row,
+        sugar_handler_row: tc_sugar_handler_row,
+        sugar_generic_start: tc_sugar_generic_start,
+        sugar_generic_count: tc_sugar_generic_count,
+        lit_open: tc_lit_open,
+        lit_uses: tc_lit_uses,
+        lit_hints: tc_lit_hints,
+        lit_probe: tc_lit_probe,
+        lit_mismatch: tc_lit_mismatch,
+        lit_peak: tc_lit_peak,
     } = old_tc;
     let mut tc_spans = tc_spans_in;
     let mut tc_calls = tc_calls_in;
@@ -1572,6 +3053,19 @@ fn rebuild_tc(
         calls: tc_calls,
         pairs: tc_pairs,
         scratch1: tc_scratch1,
+        sugar: tc_sugar,
+        sugar_violation: tc_sugar_violation,
+        sugar_checked_calls: tc_sugar_checked_calls,
+        sugar_ambient_row: tc_sugar_ambient_row,
+        sugar_handler_row: tc_sugar_handler_row,
+        sugar_generic_start: tc_sugar_generic_start,
+        sugar_generic_count: tc_sugar_generic_count,
+        lit_open: tc_lit_open,
+        lit_uses: tc_lit_uses,
+        lit_hints: tc_lit_hints,
+        lit_probe: tc_lit_probe,
+        lit_mismatch: tc_lit_mismatch,
+        lit_peak: tc_lit_peak,
     };
     let next_perm = stage2_heap_swap(s_rb);
     if next_perm < tc_perm_end {
@@ -1586,9 +3080,13 @@ pub fn typecheck_ast(
     in a: Ast,
     sink names: Names,
     sink types: Types,
-    sink world: World
-) -> (Names, Types, World, ChunkSeq[CallRow], ChunkSeq[Pair]) {
-    let mut tc = tc_new(sink names, sink types, sink world);
+    sink world: World,
+    sink sugar: PolicyInputs
+) -> (Names, Types, World, ChunkSeq[CallRow], ChunkSeq[Pair], Option[PolicyFailure]) {
+    let mut tc = tc_new(sink names, sink types, sink world, sink sugar);
+    if tc.sugar.policies.regions.len() != 0 {
+        tc.sugar_checked_calls.resize(a.exs.len(), false);
+    }
     let mut max_spans = 262144;
     let mut max_calls = 131072;
     let mut max_pairs = 131072;
@@ -1598,6 +3096,10 @@ pub fn typecheck_ast(
     tc.env.reserve(1024);
     tc.marks.reserve(256);
     tc.scratch1.reserve(1024);
+    let mut max_lit = LITERAL_RESERVE;
+    tc.lit_open.reserve(max_lit);
+    tc.lit_uses.reserve(max_lit);
+    tc.lit_hints.reserve(max_lit);
     let mut max_names = wrapping_add(tc.names.len(), 16384);
     let mut max_text = wrapping_add(tc.names.text_len(), 262144);
     tc.names.reserve_names(max_names, max_text);
@@ -1633,16 +3135,7 @@ pub fn typecheck_ast(
         let n_nodes = tc.types.nodes.len();
         let n_rows = tc.types.rows.len();
         let n_effs = tc.types.effs_len();
-        push_scope(inout tc);
-        for pi in 0..f.param_count {
-            match a.pms.try_get(wrapping_add(f.param_start, pi)) {
-                Option::Some(pm) => bind_var(inout tc, pm.name, pm.ty),
-                Option::None => {},
-            }
-        }
-        tc.ret_ty = f.result;
-        let _rt = check_expr(inout tc, in a, f.body, f.result);
-        pop_scope(inout tc);
+        check_fn_with_literal_typing(inout tc, in a, f, n_spans, n_calls, n_pairs);
         tc.scratch1.clear();
         if tc.names.mask_val() == n_mask
             && tc.names.len() < max_names
@@ -1656,6 +3149,7 @@ pub fn typecheck_ast(
             && tc.env.len() == n_env
             && tc.marks.len() == n_marks
             && tc.scratch1.len() == 0
+            && tc.lit_peak <= max_lit
             && tc.spans.len() < max_spans
             && tc.calls.len() < max_calls
             && tc.pairs.len() < max_pairs
@@ -1688,6 +3182,12 @@ pub fn typecheck_ast(
             } else {
                 0
             };
+            if tc.lit_peak > max_lit {
+                max_lit = wrapping_add(tc.lit_peak, LITERAL_RESERVE);
+                tc.lit_open.reserve(max_lit);
+                tc.lit_uses.reserve(max_lit);
+                tc.lit_hints.reserve(max_lit);
+            }
             max_spans = wrapping_add(tc.spans.len(), 131072);
             max_calls = wrapping_add(tc.calls.len(), 65536);
             max_pairs = wrapping_add(tc.pairs.len(), 65536);
@@ -1715,5 +3215,18 @@ pub fn typecheck_ast(
     sort_spans(inout tc.spans);
     sort_calls(inout tc.calls);
     tc.world.expr_types = tc.spans;
-    (tc.names, tc.types, tc.world, tc.calls, tc.pairs)
+    let mut context = Ctx {
+        names: tc.names,
+        types: tc.types,
+        world: tc.world,
+        tmap: ChunkSeq::new[u32](),
+        nmap: ChunkSeq::new[u32]()
+    };
+    let fault = if tc.sugar_violation != POLICY_OK {
+        tc.sugar_violation
+    } else {
+        primitive_failure(inout context, in a, in tc.sugar, in tc.sugar_checked_calls)
+    };
+    let violation = diagnose_policy_fault(in tc.sugar, fault);
+    (context.names, context.types, context.world, tc.calls, tc.pairs, violation)
 }

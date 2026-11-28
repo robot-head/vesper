@@ -3,7 +3,8 @@
 //
 // `native_clif_opt::STEPS` is the flattened sequence `run` applies. The
 // entry takes one step's code and one function in the words of
-// tests/common/clif_words.rs, runs that step on @vesper/clif tables and
+// crates/vesper-cranelift-sys/src/clif_words.rs,
+// runs that step on @vesper/clif tables and
 // answers with the edit script that `clif_words::apply` replays on the
 // Rust function. A step not ported yet answers `NOT_PORTED`, and the
 // caller runs Rust's.
@@ -11,14 +12,31 @@
 // Part 1: remove_unreachable, float_constants, fold_constant_branches,
 // shrink_unused_slots. Part 2: merge_blocks, remove_constant_params.
 // branches.ves (#2423): the branch-threading steps. folds.ves (#2423):
-// canonicalize_imm_ops, fold_load_store_offsets, cse_dom_pure.
+// canonicalize_imm_ops, fold_load_store_offsets, cse_dom_pure. Part 3:
+// extends.ves, fold_narrow_extends and fold_trivial_arith_and_bool_extends;
+// slots.ves, split_join_slots and promote_slots. Part 4: vector.ves,
+// vector_registers; cleanup.ves, remove_dead and sink_slot_inits. Part 5:
+// loops.ves, share_invariant_loads and hoist_loop_invariants; tails.ves,
+// merge_tails (with the shapes section of the words). Part 6: guards.ves,
+// eliminate_guarded_loop_add_overflows; seqloads.ves, reuse_seq_header_loads.
+// diamonds.ves (#2605): if_convert_pure_diamonds and
+// dense_icmp_chains_to_br_table.
 
+use self::extends::{fold_narrow_extends, fold_trivial_arith_and_bool_extends};
+use self::vector::{vector_registers};
+use self::cleanup::{remove_dead, sink_slot_inits};
+use self::loops::{hoist_loop_invariants, share_invariant_loads};
+use self::tails::{merge_tails};
+use self::guards::{eliminate_guarded_loop_add_overflows};
+use self::seqloads::{reuse_seq_header_loads};
+use self::diamonds::{dense_icmp_chains_to_br_table, if_convert_pure_diamonds};
+use self::slots::{promote_slots, split_join_slots};
 use self::folds::{canonicalize_imm_ops, cse_dom_pure, fold_load_store_offsets};
 use self::branches::{
     propagate_branch_conditions, sink_compares, thread_branches, thread_constant_param_jumps,
     thread_decided_branches
 };
-use @vesper/clif::{Func, inc, n32, read_func, u32_at, w};
+use @vesper/clif::{Func, inc, n32, read_func, u32_at, u64_at, w};
 use @vesper/clif::codes::{
     CC_EQ, CC_NE, F_STACK_SLOT, NONE, OP_BAND, OP_BITCAST, OP_BOR, OP_BRIF, OP_BXOR, OP_F32CONST,
     OP_F64CONST, OP_FADD, OP_FMUL, OP_ICMP_IMM, OP_ICONST, OP_IREDUCE, OP_JUMP, OP_UEXTEND, TY_F128,
@@ -33,6 +51,18 @@ pub const STEP_FOLD_CONSTANT_BRANCHES: u64 = 3;
 pub const STEP_SHRINK_UNUSED_SLOTS: u64 = 4;
 pub const STEP_MERGE_BLOCKS: u64 = 5;
 pub const STEP_REMOVE_CONSTANT_PARAMS: u64 = 6;
+pub const STEP_FOLD_NARROW_EXTENDS: u64 = 7;
+pub const STEP_FOLD_TRIVIAL_ARITH_AND_BOOL_EXTENDS: u64 = 8;
+pub const STEP_SPLIT_JOIN_SLOTS: u64 = 9;
+pub const STEP_PROMOTE_SLOTS: u64 = 10;
+pub const STEP_VECTOR_REGISTERS: u64 = 11;
+pub const STEP_REMOVE_DEAD: u64 = 12;
+pub const STEP_SINK_SLOT_INITS: u64 = 13;
+pub const STEP_SHARE_INVARIANT_LOADS: u64 = 14;
+pub const STEP_HOIST_LOOP_INVARIANTS: u64 = 15;
+pub const STEP_MERGE_TAILS: u64 = 16;
+pub const STEP_ELIMINATE_GUARDED_LOOP_ADD_OVERFLOWS: u64 = 17;
+pub const STEP_REUSE_SEQ_HEADER_LOADS: u64 = 18;
 // 32 up: the branch-threading steps of #2423 (branches.ves).
 pub const STEP_SINK_COMPARES: u64 = 32;
 pub const STEP_THREAD_BRANCHES: u64 = 33;
@@ -43,6 +73,9 @@ pub const STEP_PROPAGATE_BRANCH_CONDITIONS: u64 = 36;
 pub const STEP_CANONICALIZE_IMM_OPS: u64 = 37;
 pub const STEP_FOLD_LOAD_STORE_OFFSETS: u64 = 38;
 pub const STEP_CSE_DOM_PURE: u64 = 39;
+// 40 up: if-conversion and the br_table chains (#2605, diamonds.ves).
+pub const STEP_IF_CONVERT_PURE_DIAMONDS: u64 = 40;
+pub const STEP_DENSE_ICMP_CHAINS_TO_BR_TABLE: u64 = 41;
 
 // The answer's first word.
 pub const PORTED: u64 = 1;
@@ -50,6 +83,11 @@ pub const NOT_PORTED: u64 = 0;
 
 // The bytes of the step word ahead of the function words.
 const STEP_BYTES: u64 = 8;
+
+// The merge, fold and prune rounds of `STEPS` around
+// eliminate_guarded_loop_add_overflows.
+const CLEANUP_ROUNDS_BEFORE_GUARDS: u64 = 3;
+const CLEANUP_ROUNDS_AFTER_GUARDS: u64 = 2;
 
 // `remove_constant_params` stops after this many rounds.
 const MAX_CONST_PARAM_ROUNDS: u64 = 16;
@@ -625,18 +663,26 @@ fn remove_constant_params(inout f: Func) {
     }
 }
 
-// One step on one function: the step code, then the function's words.
-// Answers `PORTED` and the edit script, or `NOT_PORTED`.
-pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
-    let bytes = input.as_bytes();
-    let step = bytes.try_read_u64_le(0).unwrap_or(NOT_PORTED);
-    let mut out = ChunkSeq::new[u64]();
-    let ported = step == STEP_REMOVE_UNREACHABLE
+// Whether `step` runs in Vesper.
+pub fn is_ported(step: u64) -> bool {
+    step == STEP_REMOVE_UNREACHABLE
         || step == STEP_FLOAT_CONSTANTS
         || step == STEP_FOLD_CONSTANT_BRANCHES
         || step == STEP_SHRINK_UNUSED_SLOTS
         || step == STEP_MERGE_BLOCKS
         || step == STEP_REMOVE_CONSTANT_PARAMS
+        || step == STEP_FOLD_NARROW_EXTENDS
+        || step == STEP_FOLD_TRIVIAL_ARITH_AND_BOOL_EXTENDS
+        || step == STEP_SPLIT_JOIN_SLOTS
+        || step == STEP_PROMOTE_SLOTS
+        || step == STEP_VECTOR_REGISTERS
+        || step == STEP_REMOVE_DEAD
+        || step == STEP_SINK_SLOT_INITS
+        || step == STEP_SHARE_INVARIANT_LOADS
+        || step == STEP_HOIST_LOOP_INVARIANTS
+        || step == STEP_MERGE_TAILS
+        || step == STEP_ELIMINATE_GUARDED_LOOP_ADD_OVERFLOWS
+        || step == STEP_REUSE_SEQ_HEADER_LOADS
         || step == STEP_SINK_COMPARES
         || step == STEP_THREAD_BRANCHES
         || step == STEP_THREAD_DECIDED_BRANCHES
@@ -644,14 +690,13 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         || step == STEP_PROPAGATE_BRANCH_CONDITIONS
         || step == STEP_CANONICALIZE_IMM_OPS
         || step == STEP_FOLD_LOAD_STORE_OFFSETS
-        || step == STEP_CSE_DOM_PURE;
-    if !ported || bytes.len() < STEP_BYTES {
-        out.push(NOT_PORTED);
-        return out;
-    }
-    let start = STEP_BYTES;
-    let end = bytes.len();
-    let mut f = read_func(in bytes[start..end]);
+        || step == STEP_CSE_DOM_PURE
+        || step == STEP_IF_CONVERT_PURE_DIAMONDS
+        || step == STEP_DENSE_ICMP_CHAINS_TO_BR_TABLE
+}
+
+// Step `step` on `f` (a ported one).
+fn run_step(inout f: Func, step: u64) {
     if step == STEP_REMOVE_UNREACHABLE {
         remove_unreachable(inout f);
     } else if step == STEP_FLOAT_CONSTANTS {
@@ -662,6 +707,30 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         shrink_unused_slots(inout f);
     } else if step == STEP_MERGE_BLOCKS {
         merge_blocks(inout f);
+    } else if step == STEP_FOLD_NARROW_EXTENDS {
+        fold_narrow_extends(inout f);
+    } else if step == STEP_FOLD_TRIVIAL_ARITH_AND_BOOL_EXTENDS {
+        fold_trivial_arith_and_bool_extends(inout f);
+    } else if step == STEP_SPLIT_JOIN_SLOTS {
+        split_join_slots(inout f);
+    } else if step == STEP_PROMOTE_SLOTS {
+        promote_slots(inout f);
+    } else if step == STEP_VECTOR_REGISTERS {
+        vector_registers(inout f);
+    } else if step == STEP_REMOVE_DEAD {
+        remove_dead(inout f);
+    } else if step == STEP_SINK_SLOT_INITS {
+        sink_slot_inits(inout f);
+    } else if step == STEP_SHARE_INVARIANT_LOADS {
+        share_invariant_loads(inout f);
+    } else if step == STEP_HOIST_LOOP_INVARIANTS {
+        hoist_loop_invariants(inout f);
+    } else if step == STEP_REUSE_SEQ_HEADER_LOADS {
+        reuse_seq_header_loads(inout f);
+    } else if step == STEP_ELIMINATE_GUARDED_LOOP_ADD_OVERFLOWS {
+        eliminate_guarded_loop_add_overflows(inout f);
+    } else if step == STEP_MERGE_TAILS {
+        merge_tails(inout f);
     } else if step == STEP_SINK_COMPARES {
         sink_compares(inout f);
     } else if step == STEP_THREAD_BRANCHES {
@@ -678,8 +747,127 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         fold_load_store_offsets(inout f);
     } else if step == STEP_CSE_DOM_PURE {
         cse_dom_pure(inout f);
+    } else if step == STEP_IF_CONVERT_PURE_DIAMONDS {
+        if_convert_pure_diamonds(inout f);
+    } else if step == STEP_DENSE_ICMP_CHAINS_TO_BR_TABLE {
+        dense_icmp_chains_to_br_table(inout f);
     } else {
         remove_constant_params(inout f);
+    }
+}
+
+// One step on one function: the step code, then the function's words.
+// Answers `PORTED` and the edit script, or `NOT_PORTED`.
+pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
+    let bytes = input.as_bytes();
+    let step = bytes.try_read_u64_le(0).unwrap_or(NOT_PORTED);
+    let mut out = ChunkSeq::new[u64]();
+    if !is_ported(step) || bytes.len() < STEP_BYTES {
+        out.push(NOT_PORTED);
+        return out;
+    }
+    let start = STEP_BYTES;
+    let end = bytes.len();
+    let mut f = read_func(in bytes[start..end]);
+    run_step(inout f, step);
+    out.push(PORTED);
+    let script = f.script();
+    out.extend(in script.as_slice());
+    out
+}
+
+// `native_clif_opt::STEPS` by step code, in the order `run` applies them.
+pub fn pass_steps() -> ChunkSeq[u64] {
+    let mut s = ChunkSeq::new[u64]();
+    s.push(STEP_REMOVE_UNREACHABLE);
+    s.push(STEP_MERGE_BLOCKS);
+    s.push(STEP_REMOVE_CONSTANT_PARAMS);
+    s.push(STEP_FLOAT_CONSTANTS);
+    s.push(STEP_VECTOR_REGISTERS);
+    s.push(STEP_SPLIT_JOIN_SLOTS);
+    s.push(STEP_PROMOTE_SLOTS);
+    s.push(STEP_REMOVE_CONSTANT_PARAMS);
+    s.push(STEP_FOLD_NARROW_EXTENDS);
+    s.push(STEP_FOLD_TRIVIAL_ARITH_AND_BOOL_EXTENDS);
+    s.push(STEP_SINK_COMPARES);
+    s.push(STEP_THREAD_BRANCHES);
+    s.push(STEP_THREAD_DECIDED_BRANCHES);
+    for _ in 0..CLEANUP_ROUNDS_BEFORE_GUARDS {
+        s.push(STEP_MERGE_BLOCKS);
+        s.push(STEP_FOLD_CONSTANT_BRANCHES);
+        s.push(STEP_REMOVE_UNREACHABLE);
+    }
+    s.push(STEP_ELIMINATE_GUARDED_LOOP_ADD_OVERFLOWS);
+    for _ in 0..CLEANUP_ROUNDS_AFTER_GUARDS {
+        s.push(STEP_MERGE_BLOCKS);
+        s.push(STEP_FOLD_CONSTANT_BRANCHES);
+        s.push(STEP_REMOVE_UNREACHABLE);
+    }
+    s.push(STEP_REMOVE_DEAD);
+    s.push(STEP_HOIST_LOOP_INVARIANTS);
+    s.push(STEP_SHARE_INVARIANT_LOADS);
+    s.push(STEP_HOIST_LOOP_INVARIANTS);
+    s.push(STEP_REUSE_SEQ_HEADER_LOADS);
+    s.push(STEP_IF_CONVERT_PURE_DIAMONDS);
+    s.push(STEP_THREAD_CONSTANT_PARAM_JUMPS);
+    s.push(STEP_PROPAGATE_BRANCH_CONDITIONS);
+    s.push(STEP_REMOVE_CONSTANT_PARAMS);
+    s.push(STEP_FOLD_NARROW_EXTENDS);
+    s.push(STEP_FOLD_TRIVIAL_ARITH_AND_BOOL_EXTENDS);
+    s.push(STEP_FOLD_CONSTANT_BRANCHES);
+    s.push(STEP_MERGE_BLOCKS);
+    s.push(STEP_CANONICALIZE_IMM_OPS);
+    s.push(STEP_FOLD_LOAD_STORE_OFFSETS);
+    s.push(STEP_CSE_DOM_PURE);
+    s.push(STEP_DENSE_ICMP_CHAINS_TO_BR_TABLE);
+    s.push(STEP_REMOVE_DEAD);
+    s.push(STEP_SINK_SLOT_INITS);
+    s.push(STEP_MERGE_TAILS);
+    s.push(STEP_SHRINK_UNUSED_SLOTS);
+    s
+}
+
+// The entry over `pass_steps` (its input is ignored): the step codes.
+pub fn clif_opt_pass_steps_words(in input: Str) -> ChunkSeq[u64] {
+    pass_steps()
+}
+
+// `steps` (all ported) in order on the function `words` encodes: the edit
+// script.
+pub fn run_steps(in words: Slice[u8], in steps: Slice[u64]) -> ChunkSeq[u64] {
+    let mut f = read_func(in words);
+    for k in 0..steps.len() {
+        run_step(inout f, steps.try_get(k).unwrap_or(STEP_REMOVE_UNREACHABLE));
+    }
+    f.script()
+}
+
+// Several steps in order on one function, with one edit script: the
+// number of steps, their codes, then the function's words. Answers
+// `PORTED` and the script, or `NOT_PORTED` when a step is not ported.
+pub fn clif_opt_run_words(in input: Str) -> ChunkSeq[u64] {
+    let bytes = input.as_bytes();
+    let mut out = ChunkSeq::new[u64]();
+    let n = bytes.try_read_u64_le(0).unwrap_or(0);
+    let mut steps = ChunkSeq::new[u64]();
+    for k in 0..n {
+        let at = wrapping_mul(inc(k), STEP_BYTES);
+        let step = bytes.try_read_u64_le(at).unwrap_or(NOT_PORTED);
+        if !is_ported(step) {
+            out.push(NOT_PORTED);
+            return out;
+        }
+        steps.push(step);
+    }
+    let start = wrapping_mul(inc(n), STEP_BYTES);
+    let end = bytes.len();
+    if start > end {
+        out.push(NOT_PORTED);
+        return out;
+    }
+    let mut f = read_func(in bytes[start..end]);
+    for k in 0..steps.len() {
+        run_step(inout f, u64_at(in steps, k));
     }
     out.push(PORTED);
     let script = f.script();

@@ -155,7 +155,7 @@ pub fn sort_u64(inout s: ChunkSeq[u64], n: u64) {
     if n < 2 {
         return;
     }
-    let mut i = n / 2;
+    let mut i = wrapping_shr_u64(n, 1);
     loop {
         if i == 0 {
             break;
@@ -207,7 +207,7 @@ pub fn sort_w(inout s: ChunkSeq[W], n: u64, unsigned: bool) {
     if n < 2 {
         return;
     }
-    let mut i = n / 2;
+    let mut i = wrapping_shr_u64(n, 1);
     loop {
         if i == 0 {
             break;

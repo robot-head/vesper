@@ -7,9 +7,13 @@
 //! Coverage feedback is coarse: the outcome class and the result value are
 //! reported as probe edges. With `--native-coverage` the target instead runs
 //! as Cranelift code instrumented with edge counters and comparison-operand
-//! logging ([`vesper::native_coverage`], lane 23), which feed Crucible's
+//! logging (the compiler's `native_coverage`, lane 23), which feed Crucible's
 //! corpus selection and input-to-state solver; the evaluator still runs every
 //! input and must agree on success or failure.
+//!
+//! The checker, the evaluator and the native backends are the shipped
+//! `vesper`'s: one `vesper tool-facts fuzz-serve` process per campaign answers
+//! every call (#2670), so the tool does not link the compiler library.
 //!
 //! * `fuzz` fails when the evaluator returns an error (an escaping `Fail`,
 //!   an abort, fuel exhaustion is *not* a failure but an invalid run), when
@@ -24,20 +28,18 @@
 //! that calls the target with the shrunk arguments) into a user-named file:
 //! the file is the input module followed by the regression cases, so it
 //! checks on its own, and is canonically formatted.
+use serde::{Deserialize, Serialize};
+use serde_json::{Value as Json, json};
 use std::{
-    fs,
+    cell::RefCell,
+    fmt, fs,
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-};
-use vesper::{
-    ast::{Function, Type},
-    check::{self, World},
-    parser,
-    runtime::{Runtime, Value},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
 use vesper_crucible::{
-    ChoiceTape, FuzzConfig, Invalid, PropError, Refutation, Source, Strategy, Verdict,
+    ChoiceTape, CmpKind, FuzzConfig, Invalid, PropError, Refutation, Source, Strategy, Verdict,
 };
-
 const FUZZ_HELP: &str = "Usage: vesper fuzz <file.ves> --target <fn> [options]\n\nRun Crucible coverage-guided fuzzing over a source function in the evaluator.\nParameters must be i64, u64, u32, u8 or bool.\n\nOptions:\n  --target <fn>          Function to fuzz (required)\n  --native               Also run each input through the Cranelift JIT and compare\n  --native-coverage      Run the target as instrumented native code: edge counters\n                         and comparison operands guide the corpus and solver\n                         (with --differential, the shadow runs natively too)\n  --differential <fn>    Compare every outcome with a shadow implementation\n  --corpus <dir>         Replay saved tapes first, then save the campaign corpus\n  --regressions <file>   Write found failures as @test regression cases\n  --execs <n>            Execution budget (default 2000, 200 with --native)\n  --seed <n>             Campaign seed (default 0xc0ffee)\n  --fuel <steps>         Evaluator step limit per run (default 100000); with\n                         --native-coverage also the native block-entry budget\n  --random               Unguided random search\n";
 const REFUTE_HELP: &str = "Usage: vesper verify --refute <file.ves> --contract <fn> [options]\n\nSearch for a counterexample to a bool-returning contract with Crucible before Lean proving.\n\nOptions:\n  --contract <fn>        Contract predicate (alias --target, required)\n  --requires <fn>        Precondition predicate over the same parameters\n  --native-coverage      Run the contract as instrumented native code whose edges\n                         and comparison operands guide the search; every result\n                         is cross-checked with the evaluator\n  --regressions <file>   Write a refutation as an @test regression case\n  --execs <n>            Execution budget (default 5000)\n  --seed <n>             Campaign seed (default 0xc0ffee)\n  --fuel <steps>         Evaluator step limit per run (default 100000)\n";
 
@@ -51,9 +53,14 @@ enum Carrier {
     Bool,
 }
 
+/// The bits of each unsigned carrier.
+const U64_BITS: u32 = 64;
+const U32_BITS: u32 = 32;
+const U8_BITS: u32 = 8;
+
 impl Carrier {
-    fn of(ty: &Type) -> Option<Self> {
-        match ty.name() {
+    fn of(name: &str) -> Option<Self> {
+        match name {
             "i64" => Some(Carrier::I64),
             "u64" => Some(Carrier::U64),
             "u32" => Some(Carrier::U32),
@@ -62,59 +69,286 @@ impl Carrier {
             _ => None,
         }
     }
+    /// The carrier's source type name, as the compiler names it.
+    fn name(self) -> &'static str {
+        match self {
+            Carrier::I64 => "i64",
+            Carrier::U64 => "u64",
+            Carrier::U32 => "u32",
+            Carrier::U8 => "u8",
+            Carrier::Bool => "bool",
+        }
+    }
     fn draw(self, src: &mut Source) -> Result<Value, Invalid> {
         use vesper_crucible::Arbitrary;
         Ok(match self {
             Carrier::I64 => Value::Int(i64::arbitrary(src)?),
-            Carrier::U64 => Value::UInt(src.draw_u64()?, 64),
-            Carrier::U32 => Value::UInt(u64::from(src.draw_u32()?), 32),
-            Carrier::U8 => Value::UInt(u64::from(src.draw_u8()?), 8),
+            Carrier::U64 => Value::UInt(src.draw_u64()?, U64_BITS),
+            Carrier::U32 => Value::UInt(u64::from(src.draw_u32()?), U32_BITS),
+            Carrier::U8 => Value::UInt(u64::from(src.draw_u8()?), U8_BITS),
             Carrier::Bool => Value::Bool(src.draw_bool()?),
         })
     }
 }
 
+/// A drawn argument: an integer or a boolean of one carrier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Value {
+    Int(i64),
+    UInt(u64, u32),
+    Bool(bool),
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Int(n) => write!(f, "{n}"),
+            Value::UInt(n, _) => write!(f, "{n}"),
+            Value::Bool(b) => write!(f, "{b}"),
+        }
+    }
+}
+
+impl Value {
+    fn carrier(&self) -> Carrier {
+        match self {
+            Value::Int(_) => Carrier::I64,
+            Value::UInt(_, U64_BITS) => Carrier::U64,
+            Value::UInt(_, U32_BITS) => Carrier::U32,
+            Value::UInt(..) => Carrier::U8,
+            Value::Bool(_) => Carrier::Bool,
+        }
+    }
+    /// The argument as the compiler reads it: its carrier and machine value.
+    fn wire(&self) -> WireArg {
+        WireArg {
+            carrier: self.carrier().name(),
+            value: machine_value(self),
+        }
+    }
+}
+
 /// Source literal of a drawn argument.
 fn literal(value: &Value) -> String {
-    match value {
-        Value::Int(n) => n.to_string(),
-        Value::UInt(n, _) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        other => other.to_string(),
+    value.to_string()
+}
+
+/// What one evaluator or native call returned: the value's display text and,
+/// for an integer or a boolean, its machine value.
+#[derive(Clone, Debug)]
+struct Returned {
+    text: String,
+    machine: Option<u64>,
+    boolean: Option<bool>,
+}
+
+impl fmt::Display for Returned {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+/// An argument as the compiler reads it (`Arg::Wire` in the root package's
+/// `src/tool_facts_fuzz.rs`).
+#[derive(Serialize)]
+struct WireArg {
+    carrier: &'static str,
+    value: u64,
+}
+
+/// The `eval` request.
+#[derive(Serialize)]
+struct EvalRequest<'a> {
+    op: &'static str,
+    name: &'a str,
+    args: Vec<WireArg>,
+}
+
+/// A call's answer (`Call` in the root package's `src/tool_facts_fuzz.rs`),
+/// or the compiler's panic while making it.
+#[derive(Deserialize)]
+struct CallAnswer {
+    ok: Option<String>,
+    machine: Option<u64>,
+    bool: Option<bool>,
+    err: Option<String>,
+    panic: Option<String>,
+}
+
+impl CallAnswer {
+    fn outcome(self) -> Result<Returned, String> {
+        if let Some(error) = self.err {
+            return Err(error);
+        }
+        Ok(Returned {
+            text: self.ok.unwrap_or_default(),
+            machine: self.machine,
+            boolean: self.bool,
+        })
+    }
+}
+
+/// A call's outcome as the compiler reported it (`outcome` in the root
+/// package's `src/tool_facts_fuzz.rs`).
+fn call_outcome(answer: &Json) -> Result<Returned, String> {
+    if let Some(error) = answer.get("err") {
+        return Err(error.as_str().unwrap_or_default().to_owned());
+    }
+    Ok(Returned {
+        text: answer["ok"].as_str().unwrap_or_default().to_owned(),
+        machine: answer["machine"].as_u64(),
+        boolean: answer["bool"].as_bool(),
+    })
+}
+
+/// The compiler service a campaign keeps running (`KIND` in the root
+/// package's `src/tool_facts_fuzz.rs`).
+const SERVE: &str = "fuzz-serve";
+
+/// The shipped `vesper`, checking the module once and then answering every
+/// call of the campaign over its standard streams.
+struct Compiler {
+    io: RefCell<Pipe>,
+}
+
+struct Pipe {
+    child: Child,
+    /// `None` once closed.
+    stdin: Option<ChildStdin>,
+    stdout: BufReader<SpinRead>,
+    /// The last answer line, reused.
+    line: String,
+}
+
+impl Compiler {
+    /// Start the compiler on `path`; it checks the module first.
+    fn start(path: &Path, fuel: usize) -> Result<Self, String> {
+        let vesper = crate::compiler::locate()?;
+        let mut child = Command::new(&vesper)
+            .args([crate::compiler::FACTS_COMMAND, SERVE, "--source"])
+            .arg(path)
+            .args(["--fuel", &fuel.to_string()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("{}: {e}", vesper.display()))?;
+        let stdin = child.stdin.take().ok_or("compiler stdin")?;
+        let stdout = BufReader::new(
+            SpinRead::new(child.stdout.take().ok_or("compiler stdout")?)
+                .map_err(|e| format!("{SERVE}: {e}"))?,
+        );
+        let compiler = Self {
+            io: RefCell::new(Pipe {
+                child,
+                stdin: Some(stdin),
+                stdout,
+                line: String::new(),
+            }),
+        };
+        let ready: Json = compiler.receive()?;
+        if let Some(error) = ready.get("error") {
+            return Err(error.as_str().unwrap_or_default().to_owned());
+        }
+        Ok(compiler)
+    }
+
+    fn receive<T: serde::de::DeserializeOwned>(&self) -> Result<T, String> {
+        let mut io = self.io.borrow_mut();
+        let io = &mut *io;
+        io.line.clear();
+        let read = io
+            .stdout
+            .read_line(&mut io.line)
+            .map_err(|e| format!("{SERVE}: {e}"))?;
+        if read == 0 {
+            return Err(format!("{SERVE}: the vesper compiler stopped answering"));
+        }
+        serde_json::from_str(&io.line).map_err(|e| format!("{SERVE}: invalid answer: {e}"))
+    }
+
+    fn send(&self, request: &impl Serialize) -> Result<(), String> {
+        let mut io = self.io.borrow_mut();
+        let mut line = serde_json::to_vec(request).map_err(|e| e.to_string())?;
+        line.push(b'\n');
+        let stdin = io.stdin.as_mut().ok_or("compiler stdin closed")?;
+        stdin
+            .write_all(&line)
+            .and_then(|()| stdin.flush())
+            .map_err(|e| format!("{SERVE}: {e}"))
+    }
+
+    /// One request and its answer. A request the compiler could not read is
+    /// an `error`; a panic in the compiler panics here with its message, as
+    /// it did when the tool ran the compiler in process.
+    fn ask(&self, request: Json) -> Result<Json, String> {
+        self.send(&request)?;
+        let answer: Json = self.receive()?;
+        if let Some(message) = answer.get("panic") {
+            panic!("{}", message.as_str().unwrap_or_default());
+        }
+        Ok(answer)
+    }
+
+    /// [`Self::ask`] inside a campaign, where the transport cannot fail
+    /// without ending it.
+    fn must(&self, request: Json) -> Json {
+        self.ask(request).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// One evaluator call, the campaign's hot path: typed both ways rather
+    /// than through JSON trees.
+    fn eval(&self, name: &str, args: &[Value]) -> Result<Returned, String> {
+        let args: Vec<WireArg> = args.iter().map(Value::wire).collect();
+        let answer: CallAnswer = self
+            .send(&EvalRequest {
+                op: "eval",
+                name,
+                args,
+            })
+            .and_then(|()| self.receive())
+            .unwrap_or_else(|e| panic!("{e}"));
+        if let Some(message) = answer.panic {
+            panic!("{message}");
+        }
+        answer.outcome()
+    }
+
+    /// Whether `text` checks, with its function names.
+    fn check(&self, text: &str) -> Result<Vec<String>, String> {
+        let answer = self.ask(json!({ "op": "check", "text": text }))?;
+        if let Some(error) = answer.get("error") {
+            return Err(error.as_str().unwrap_or_default().to_owned());
+        }
+        Ok(answer["functions"]
+            .as_array()
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|n| n.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+}
+
+impl Drop for Compiler {
+    fn drop(&mut self) {
+        let io = self.io.get_mut();
+        // Closing stdin ends the compiler's request loop.
+        drop(io.stdin.take());
+        let _ = io.child.wait();
     }
 }
 
 struct Loaded {
     source: String,
-    world: World,
+    compiler: Compiler,
 }
 
-fn load(path: &Path) -> Result<Loaded, String> {
+fn load(path: &Path, fuel: usize) -> Result<Loaded, String> {
     let source = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let world = check_source(&source).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(Loaded { source, world })
-}
-
-fn check_source(source: &str) -> Result<World, String> {
-    let parsed = parser::parse(source);
-    if let Some(d) = parsed.diagnostics.first() {
-        return Err(format!(
-            "{} syntax error(s); first: {} {}",
-            parsed.diagnostics.len(),
-            d.code,
-            d.message
-        ));
-    }
-    let checked = check::check(&parsed.module);
-    if let Some(d) = checked.diagnostics.first() {
-        return Err(format!(
-            "{} semantic error(s); first: {} {}",
-            checked.diagnostics.len(),
-            d.code,
-            d.message
-        ));
-    }
-    Ok(checked.world)
+    let compiler = Compiler::start(path, fuel).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Loaded { source, compiler })
 }
 
 /// A function's signature reduced to drawable carriers.
@@ -125,88 +359,47 @@ struct Target {
     effectful: bool,
 }
 
-fn target(world: &World, name: &str, role: &str) -> Result<Target, String> {
-    let f: &Function = world
-        .functions
-        .get(name)
-        .ok_or_else(|| format!("{role} '{name}' is not a function of the module"))?;
-    if !f.generics.is_empty() {
-        return Err(format!(
-            "{role} '{name}' is generic; fuzz a concrete instance"
-        ));
+fn target(compiler: &Compiler, name: &str, role: &str) -> Result<Target, String> {
+    let answer = compiler.ask(json!({ "op": "target", "name": name, "role": role }))?;
+    if let Some(error) = answer.get("error") {
+        return Err(error.as_str().unwrap_or_default().to_owned());
     }
-    let mut carriers = Vec::new();
-    for p in &f.params {
-        if p.pass != vesper::ast::Pass::In {
-            return Err(format!(
-                "{role} '{name}' parameter '{}' is not passed by value",
-                p.name
-            ));
-        }
-        carriers.push(Carrier::of(&p.ty).ok_or_else(|| {
-            format!(
-                "{role} '{name}' parameter '{}' has type {}; supported: i64, u64, u32, u8, bool",
-                p.name,
-                p.ty.name()
-            )
-        })?);
-    }
-    if f.body.is_none() {
-        return Err(format!("{role} '{name}' has no body"));
-    }
+    let carriers = answer["carriers"]
+        .as_array()
+        .ok_or("the compiler sent no carriers")?
+        .iter()
+        .map(|c| c.as_str().and_then(Carrier::of).ok_or("unknown carrier"))
+        .collect::<Result<_, _>>()?;
     Ok(Target {
         name: name.to_string(),
         carriers,
-        result: f.result.name().to_string(),
-        effectful: !f.effects.instances.is_empty() || f.effects.tail.is_some(),
+        result: answer["result"].as_str().unwrap_or_default().to_owned(),
+        effectful: answer["effectful"].as_bool().unwrap_or(false),
     })
 }
 
 /// The signature text after the parameter list (`-> T eff [...]`), taken
 /// from the source so regression cases carry the target's effect row.
-fn signature_tail(source: &str, world: &World, name: &str) -> Result<String, String> {
-    let f = &world.functions[name];
-    let body = f.body.as_ref().ok_or("target has no body")?;
-    let header = source
-        .get(f.span.start..body.span.start)
-        .ok_or("target span is outside the source")?;
-    let open = header
-        .find('(')
-        .ok_or("target header has no parameter list")?;
-    let mut depth = 0usize;
-    for (i, c) in header[open..].char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Ok(header[open + i + 1..].trim().to_string());
-                }
-            }
-            _ => {}
-        }
+fn signature_tail(compiler: &Compiler, name: &str) -> Result<String, String> {
+    let answer = compiler.ask(json!({ "op": "tail", "name": name }))?;
+    if let Some(error) = answer.get("error") {
+        return Err(error.as_str().unwrap_or_default().to_owned());
     }
-    Err("unbalanced target parameter list".into())
+    Ok(answer["tail"].as_str().unwrap_or_default().to_owned())
 }
 
-/// One evaluator reused across executions (lowering and optimizing the
-/// module once); fuel is reset before every call.
+/// The campaign's evaluator: the compiler's, which checks and lowers the
+/// module once and resets the fuel before every call.
 struct Evaluator<'a> {
-    runtime: std::cell::RefCell<Runtime<'a>>,
-    fuel: u64,
+    compiler: &'a Compiler,
 }
 
 impl<'a> Evaluator<'a> {
-    fn new(world: &'a World, fuel: usize) -> Self {
-        Self {
-            runtime: std::cell::RefCell::new(Runtime::new(world)),
-            fuel: fuel as u64,
-        }
+    fn new(compiler: &'a Compiler) -> Self {
+        Self { compiler }
     }
-    fn call(&self, name: &str, args: Vec<Value>) -> Result<Value, String> {
-        let mut runtime = self.runtime.borrow_mut();
-        runtime.fuel = self.fuel;
-        runtime.run(name, args)
+    fn call(&self, name: &str, args: Vec<Value>) -> Result<Returned, String> {
+        self.compiler.eval(name, &args)
     }
 }
 
@@ -313,7 +506,7 @@ fn report_literals(
     }
 }
 
-fn edge_of(outcome: &Result<Value, String>) -> u32 {
+fn edge_of(outcome: &Result<Returned, String>) -> u32 {
     let text = match outcome {
         Ok(v) => format!("ok:{v}"),
         Err(e) => format!("err:{e}"),
@@ -416,27 +609,23 @@ fn args_of(carriers: &[Carrier], tape: &ChoiceTape) -> Result<Vec<Value>, String
 }
 
 /// Native JIT outcome of `name(args)` through a synthesized zero-argument
-/// wrapper compiled by the native batch backend.
+/// wrapper the compiler builds with the native batch backend.
 /// `tail` is the target's signature after its parameter list (`-> T`, or
 /// empty for an implicit `Unit`), taken from the source.
 fn native_outcome(
-    source: &str,
+    compiler: &Compiler,
     target: &Target,
     tail: &str,
     args: &[Value],
-) -> Result<Result<Value, String>, String> {
-    let call = args.iter().map(literal).collect::<Vec<_>>().join(", ");
-    let wrapped = format!(
-        "{source}\nfn __vesper_fuzz_case() {tail} {{\n    {}({call})\n}}\n",
-        target.name
-    );
-    let world = check_source(&wrapped)?;
-    let mut batch = vesper::native::batch::NativeBatch::compile(
-        &world,
-        &["__vesper_fuzz_case"],
-        vesper::native::batch::BatchLimits::default(),
-    )?;
-    Ok(batch.run("__vesper_fuzz_case"))
+) -> Result<Result<Returned, String>, String> {
+    let args: Vec<WireArg> = args.iter().map(Value::wire).collect();
+    let answer = compiler.ask(json!({
+        "op": "native", "name": target.name, "tail": tail, "args": args,
+    }))?;
+    if let Some(error) = answer.get("compile_error") {
+        return Err(error.as_str().unwrap_or_default().to_owned());
+    }
+    Ok(call_outcome(&answer))
 }
 
 /// Machine value of a drawn argument (`i64` as its two's-complement bits).
@@ -445,7 +634,6 @@ fn machine_value(value: &Value) -> u64 {
         Value::Int(n) => *n as u64,
         Value::UInt(n, _) => *n,
         Value::Bool(b) => u64::from(*b),
-        _ => unreachable!("carriers draw only integers and booleans"),
     }
 }
 
@@ -454,6 +642,121 @@ fn machine_value(value: &Value) -> u64 {
 /// `Fail[..]` instance.
 type NativeResult = Result<Option<u64>, String>;
 
+/// How one native coverage run ended.
+enum NativeOutcome {
+    Returned,
+    /// The target raised `Fail` instance `effect`.
+    Failed {
+        effect: String,
+    },
+    /// The run used up its fuel or stack budget; its result and coverage
+    /// past that point are meaningless.
+    Exhausted,
+}
+
+/// The comparison kinds a feed reports, matched by name.
+const CMP_KINDS: [CmpKind; 6] = [
+    CmpKind::Eq,
+    CmpKind::Ne,
+    CmpKind::Lt,
+    CmpKind::Le,
+    CmpKind::Gt,
+    CmpKind::Ge,
+];
+
+/// The fields of one edge feed event (`[slot, hits]`) and one comparison
+/// event (`[site, kind, lhs, rhs]`).
+const EDGE_EVENT_FIELDS: usize = 2;
+const CMP_EVENT_FIELDS: usize = 4;
+
+/// One run of a target the compiler compiled with native coverage
+/// instrumentation: how it ended, its scalar result and its feed.
+struct CoverageRun {
+    outcome: NativeOutcome,
+    result: Option<u64>,
+    feed: Json,
+}
+
+impl CoverageRun {
+    /// Report the run's coverage to Crucible, as the compiler's
+    /// `NativeCoverage::feed` would have in process.
+    fn feed(&self, probe: &mut vesper_crucible::Probe) {
+        let Some(events) = self.feed.as_array() else {
+            return;
+        };
+        for event in events {
+            let Some(fields) = event.as_array() else {
+                continue;
+            };
+            let word = |i: usize| fields.get(i).and_then(Json::as_u64).unwrap_or_default();
+            match fields.len() {
+                EDGE_EVENT_FIELDS => {
+                    for _ in 0..word(1) {
+                        probe.edge(word(0) as u32);
+                    }
+                }
+                CMP_EVENT_FIELDS => {
+                    let name = fields[1].as_str().unwrap_or_default();
+                    if let Some(kind) = CMP_KINDS.iter().find(|k| format!("{k:?}") == name) {
+                        probe.cmp(word(0) as u32, *kind, word(2), word(3));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// A fuzz target compiled once with coverage instrumentation, in the
+/// compiler process.
+struct NativeCoverage<'a> {
+    compiler: &'a Compiler,
+    id: u64,
+    functions: u64,
+    edges: u64,
+    comparisons: u64,
+}
+
+impl<'a> NativeCoverage<'a> {
+    fn compile(compiler: &'a Compiler, target: &str) -> Result<Self, String> {
+        let answer = compiler.ask(json!({ "op": "coverage", "name": target }))?;
+        if let Some(error) = answer.get("error") {
+            return Err(error.as_str().unwrap_or_default().to_owned());
+        }
+        let count = |field: &str| answer[field].as_u64().unwrap_or_default();
+        Ok(Self {
+            compiler,
+            id: count("id"),
+            functions: count("functions"),
+            edges: count("edges"),
+            comparisons: count("comparisons"),
+        })
+    }
+
+    /// Run the target on machine-value `args`; `shadow` labels the feed as
+    /// the second target of a differential campaign.
+    fn run(&self, args: &[u64], shadow: bool) -> Result<CoverageRun, String> {
+        let mut answer = self.compiler.must(json!({
+            "op": "coverage_run", "id": self.id, "args": args, "shadow": shadow,
+        }));
+        if let Some(error) = answer.get("run_error") {
+            return Err(error.as_str().unwrap_or_default().to_owned());
+        }
+        let outcome = match answer["outcome"].as_str() {
+            Some("returned") => NativeOutcome::Returned,
+            Some("failed") => NativeOutcome::Failed {
+                effect: answer["effect"].as_str().unwrap_or_default().to_owned(),
+            },
+            _ => NativeOutcome::Exhausted,
+        };
+        Ok(CoverageRun {
+            outcome,
+            result: answer["result"].as_u64(),
+            feed: answer["feed"].take(),
+        })
+    }
+}
+
 /// One `--native-coverage` execution: run the instrumented native code,
 /// feed its edges and comparison operands to Crucible, and cross-check the
 /// outcome class and, for scalar results, the value against the evaluator.
@@ -461,24 +764,19 @@ type NativeResult = Result<Option<u64>, String>;
 /// differential campaign compares for results native code does not report.
 /// Native fuel or stack exhaustion is an invalid run, like evaluator fuel.
 fn native_coverage_run(
-    coverage: &mut vesper::native_coverage::NativeCoverage,
+    coverage: &NativeCoverage<'_>,
     evaluator: &Evaluator<'_>,
     name: &str,
     args: &[Value],
     src: &mut Source,
     shadow: bool,
-) -> Result<(NativeResult, Result<Value, String>), PropError> {
-    use vesper::native_coverage::NativeOutcome;
+) -> Result<(NativeResult, Result<Returned, String>), PropError> {
     let machine: Vec<u64> = args.iter().map(machine_value).collect();
-    let outcome = coverage
-        .run(&machine)
+    let run = coverage
+        .run(&machine, shadow)
         .map_err(|e| PropError::fail("native-run", e))?;
-    if shadow {
-        coverage.feed_shadow(src.probe());
-    } else {
-        coverage.feed(src.probe());
-    }
-    if matches!(outcome, NativeOutcome::Exhausted { .. }) {
+    run.feed(src.probe());
+    if matches!(run.outcome, NativeOutcome::Exhausted) {
         return Err(PropError::Invalid(Invalid::Rejected));
     }
     let reference = evaluator.call(name, args.to_vec());
@@ -487,12 +785,11 @@ fn native_coverage_run(
     {
         return Err(PropError::Invalid(Invalid::Rejected));
     }
-    match (outcome, reference) {
+    match (run.outcome, reference) {
         (NativeOutcome::Returned, Ok(v)) => {
-            let native = coverage.last_result();
+            let native = run.result;
             if let Some(n) = native
-                && matches!(v, Value::Int(_) | Value::UInt(..) | Value::Bool(_))
-                && machine_value(&v) != n
+                && v.machine.is_some_and(|m| m != n)
             {
                 return Err(PropError::fail(
                     "native-divergence",
@@ -510,7 +807,7 @@ fn native_coverage_run(
             "native-divergence",
             format!("{name}: native code raised {effect}, evaluator returned {v}"),
         )),
-        (NativeOutcome::Exhausted { .. }, _) => Err(PropError::Invalid(Invalid::Rejected)),
+        (NativeOutcome::Exhausted, _) => Err(PropError::Invalid(Invalid::Rejected)),
     }
 }
 
@@ -520,31 +817,32 @@ fn native_coverage_run(
 /// stops the campaign). A run that exhausts its native fuel or stack keeps
 /// the evaluator's result and reports no native coverage.
 fn native_contract(
-    coverage: &mut vesper::native_coverage::NativeCoverage,
+    coverage: &NativeCoverage<'_>,
     evaluator: &Evaluator<'_>,
     name: &str,
     args: &[Value],
     probe: &mut vesper_crucible::Probe,
 ) -> bool {
-    use vesper::native_coverage::NativeOutcome;
     let machine: Vec<u64> = args.iter().map(machine_value).collect();
-    let outcome = match coverage.run(&machine) {
-        Ok(o) => o,
+    let run = match coverage.run(&machine, false) {
+        Ok(run) => run,
         Err(e) => panic!("native contract run failed: {e}"),
     };
-    let exhausted = matches!(outcome, NativeOutcome::Exhausted { .. });
+    let exhausted = matches!(run.outcome, NativeOutcome::Exhausted);
     if !exhausted {
-        coverage.feed(probe);
+        run.feed(probe);
     }
     let reference = evaluator.call(name, args.to_vec());
     let holds = match &reference {
-        Ok(Value::Bool(b)) => *b,
-        Ok(other) => panic!("contract returned {other}"),
+        Ok(v) => match v.boolean {
+            Some(b) => b,
+            None => panic!("contract returned {v}"),
+        },
         Err(e) => panic!("contract evaluation failed: {e}"),
     };
-    match outcome {
+    match run.outcome {
         NativeOutcome::Returned => {
-            let native = coverage.last_result().map(|v| v != 0);
+            let native = run.result.map(|v| v != 0);
             if native.is_some_and(|n| n != holds) {
                 panic!(
                     "native-divergence: native code says {name} is {}, evaluator says {holds}",
@@ -555,7 +853,7 @@ fn native_contract(
         NativeOutcome::Failed { effect } => {
             panic!("native-divergence: native code raised {effect}, evaluator returned {holds}")
         }
-        NativeOutcome::Exhausted { .. } => {}
+        NativeOutcome::Exhausted => {}
     }
     holds
 }
@@ -568,7 +866,7 @@ fn native_result_text(r: &NativeResult) -> String {
     }
 }
 
-fn same_outcome(a: &Result<Value, String>, b: &Result<Value, String>) -> bool {
+fn same_outcome(a: &Result<Returned, String>, b: &Result<Returned, String>) -> bool {
     match (a, b) {
         (Ok(x), Ok(y)) => x.to_string() == y.to_string(),
         (Err(x), Err(y)) => error_kind("", x) == error_kind("", y),
@@ -576,7 +874,7 @@ fn same_outcome(a: &Result<Value, String>, b: &Result<Value, String>) -> bool {
     }
 }
 
-fn outcome_text(o: &Result<Value, String>) -> String {
+fn outcome_text(o: &Result<Returned, String>) -> String {
     match o {
         Ok(v) => format!("returned {v}"),
         Err(e) => format!("failed: {e}"),
@@ -597,13 +895,13 @@ fn write_regressions(
     };
     let mut text = base.trim_end().to_string();
     text.push('\n');
-    let existing = check_source(&text).map_err(|e| {
+    let existing = loaded.compiler.check(&text).map_err(|e| {
         format!(
             "{}: regression file does not check before appending: {e}",
             out.display()
         )
     })?;
-    let mut used: std::collections::BTreeSet<String> = existing.functions.keys().cloned().collect();
+    let mut used: std::collections::BTreeSet<String> = existing.into_iter().collect();
     for (stem, comment, body) in cases {
         let mut n = 1;
         let name = loop {
@@ -620,7 +918,10 @@ fn write_regressions(
     let formatted = vesper_fmt::format_source(&text, vesper_fmt::Limits::default())
         .map_err(|e| format!("formatting regression cases: {e:?}"))?
         .output;
-    check_source(&formatted).map_err(|e| format!("regression cases do not check: {e}"))?;
+    loaded
+        .compiler
+        .check(&formatted)
+        .map_err(|e| format!("regression cases do not check: {e}"))?;
     fs::write(out, formatted).map_err(|e| format!("{}: {e}", out.display()))?;
     println!(
         "wrote {} regression case(s) to {}",
@@ -696,12 +997,12 @@ pub fn fuzz(args: Vec<String>) -> Result<(), String> {
         .target
         .clone()
         .ok_or("fuzz requires --target <fn>; see vesper fuzz --help")?;
-    let loaded = load(&input)?;
-    let target = target(&loaded.world, &name, "fuzz target")?;
-    let tail = signature_tail(&loaded.source, &loaded.world, &name)?;
+    let loaded = load(&input, common.fuel)?;
+    let target = target(&loaded.compiler, &name, "fuzz target")?;
+    let tail = signature_tail(&loaded.compiler, &name)?;
     let shadow = match &differential {
         Some(shadow) => {
-            let s = self::target(&loaded.world, shadow, "differential shadow")?;
+            let s = self::target(&loaded.compiler, shadow, "differential shadow")?;
             if s.carriers != target.carriers || s.result != target.result {
                 return Err(format!(
                     "differential shadow '{shadow}' must have the same parameter and result types as '{name}'"
@@ -722,24 +1023,18 @@ pub fn fuzz(args: Vec<String>) -> Result<(), String> {
             .iter()
             .map(|c| match c {
                 Carrier::I64 => Value::Int(0),
-                Carrier::U64 => Value::UInt(0, 64),
-                Carrier::U32 => Value::UInt(0, 32),
-                Carrier::U8 => Value::UInt(0, 8),
+                Carrier::U64 => Value::UInt(0, U64_BITS),
+                Carrier::U32 => Value::UInt(0, U32_BITS),
+                Carrier::U8 => Value::UInt(0, U8_BITS),
                 Carrier::Bool => Value::Bool(false),
             })
             .collect();
-        native_outcome(&loaded.source, &target, &tail, &zeros)
+        native_outcome(&loaded.compiler, &target, &tail, &zeros)
             .map_err(|e| format!("--native: '{name}' is outside the native batch subset: {e}"))?
             .map_err(|e| format!("--native: '{name}' failed natively on zero arguments: {e}"))?;
     }
     let compile_coverage = |target: &str| {
-        let mut compiled = vesper::native_coverage::NativeCoverage::compile(
-            &loaded.source,
-            &loaded.world,
-            target,
-        )?;
-        compiled.set_fuel(common.fuel as u64);
-        let stats = compiled.stats();
+        let compiled = NativeCoverage::compile(&loaded.compiler, target)?;
         println!(
             "native coverage{}: {} function(s), {} edge counter(s), {} comparison site(s), fuel {} block(s)",
             if target == name {
@@ -747,33 +1042,33 @@ pub fn fuzz(args: Vec<String>) -> Result<(), String> {
             } else {
                 format!(" (shadow {target})")
             },
-            stats.functions,
-            stats.edges,
-            stats.comparisons,
+            compiled.functions,
+            compiled.edges,
+            compiled.comparisons,
             common.fuel
         );
         Ok::<_, String>(compiled)
     };
-    let mut coverage = if native_coverage {
+    let coverage = if native_coverage {
         Some(compile_coverage(&name)?)
     } else {
         None
     };
     // `--native-coverage --differential`: the shadow runs natively too.
-    let mut shadow_coverage = match (&coverage, &shadow) {
+    let shadow_coverage = match (&coverage, &shadow) {
         (Some(_), Some(s)) => Some(compile_coverage(&s.name)?),
         _ => None,
     };
     let execs = common.execs.unwrap_or(if native { 200 } else { 2000 });
-    let evaluator = Evaluator::new(&loaded.world, common.fuel);
+    let evaluator = Evaluator::new(&loaded.compiler);
     let source = &loaded.source;
     let constants = literals(source);
     let mut property = |src: &mut Source| -> Result<(), PropError> {
         let args = draw_args(&target.carriers, src)?;
-        if let Some(coverage) = coverage.as_mut() {
+        if let Some(coverage) = coverage.as_ref() {
             let (ours, our_value) =
                 native_coverage_run(coverage, &evaluator, &name, &args, src, false)?;
-            let (Some(other), Some(s)) = (shadow_coverage.as_mut(), &shadow) else {
+            let (Some(other), Some(s)) = (shadow_coverage.as_ref(), &shadow) else {
                 return match ours {
                     Ok(_) => Ok(()),
                     Err(effect) => Err(PropError::fail(
@@ -832,7 +1127,7 @@ pub fn fuzz(args: Vec<String>) -> Result<(), String> {
             return Err(PropError::fail(error_kind("evaluator", e), e.clone()));
         }
         if native {
-            let jit = native_outcome(source, &target, &tail, &args)
+            let jit = native_outcome(&loaded.compiler, &target, &tail, &args)
                 .map_err(|e| PropError::fail("native-compile", e))?;
             if !same_outcome(&outcome, &jit) {
                 return Err(PropError::fail(
@@ -996,8 +1291,8 @@ pub fn refute(args: Vec<String>) -> Result<(), String> {
         .target
         .clone()
         .ok_or("verify --refute requires --contract <fn>")?;
-    let loaded = load(&input)?;
-    let contract = target(&loaded.world, &name, "contract")?;
+    let loaded = load(&input, common.fuel)?;
+    let contract = target(&loaded.compiler, &name, "contract")?;
     if contract.result != "bool" {
         return Err(format!(
             "contract '{name}' must return bool, not {}",
@@ -1006,7 +1301,7 @@ pub fn refute(args: Vec<String>) -> Result<(), String> {
     }
     let precondition = match &requires {
         Some(r) => {
-            let p = target(&loaded.world, r, "precondition")?;
+            let p = target(&loaded.compiler, r, "precondition")?;
             if p.carriers != contract.carriers || p.result != "bool" {
                 return Err(format!(
                     "precondition '{r}' must take the contract's parameters and return bool"
@@ -1017,18 +1312,15 @@ pub fn refute(args: Vec<String>) -> Result<(), String> {
         None => None,
     };
     let execs = common.execs.unwrap_or(5000);
-    let evaluator = Evaluator::new(&loaded.world, common.fuel);
+    let evaluator = Evaluator::new(&loaded.compiler);
     let constants = literals(&loaded.source);
     let coverage = if native_coverage {
-        let mut compiled =
-            vesper::native_coverage::NativeCoverage::compile(&loaded.source, &loaded.world, &name)?;
-        compiled.set_fuel(common.fuel as u64);
-        let stats = compiled.stats();
+        let compiled = NativeCoverage::compile(&loaded.compiler, &name)?;
         println!(
             "native coverage: {} function(s), {} edge counter(s), {} comparison site(s), fuel {} block(s)",
-            stats.functions, stats.edges, stats.comparisons, common.fuel
+            compiled.functions, compiled.edges, compiled.comparisons, common.fuel
         );
-        Some(std::cell::RefCell::new(compiled))
+        Some(compiled)
     } else {
         None
     };
@@ -1039,7 +1331,10 @@ pub fn refute(args: Vec<String>) -> Result<(), String> {
             let args = draw_args(&contract.carriers, src)?;
             if let Some(p) = &precondition {
                 match evaluator.call(&p.name, args.clone()) {
-                    Ok(Value::Bool(holds)) => src.assume(holds)?,
+                    Ok(Returned {
+                        boolean: Some(holds),
+                        ..
+                    }) => src.assume(holds)?,
                     Ok(other) => panic!("precondition returned {other}"),
                     Err(e) if is_fuel(&e) => src.assume(false)?,
                     Err(e) => panic!("precondition failed: {e}"),
@@ -1049,13 +1344,15 @@ pub fn refute(args: Vec<String>) -> Result<(), String> {
         },
         |args: &Vec<Value>, probe| {
             if let Some(coverage) = &coverage {
-                return native_contract(&mut coverage.borrow_mut(), &evaluator, &name, args, probe);
+                return native_contract(coverage, &evaluator, &name, args, probe);
             }
             let outcome = evaluator.call(&name, args.clone());
             probe.edge(edge_of(&outcome));
             report_literals(probe, &contract.carriers, args, &constants);
             match outcome {
-                Ok(Value::Bool(b)) => b,
+                Ok(Returned {
+                    boolean: Some(b), ..
+                }) => b,
                 Ok(other) => panic!("contract returned {other}"),
                 Err(e) => panic!("contract evaluation failed: {e}"),
             }
@@ -1083,7 +1380,7 @@ pub fn refute(args: Vec<String>) -> Result<(), String> {
             if let Some(out) = &common.regressions {
                 // Keep the contract's effect row: calling it needs it even
                 // where this input does not raise.
-                let tail = signature_tail(&loaded.source, &loaded.world, &name)?;
+                let tail = signature_tail(&loaded.compiler, &name)?;
                 let body = format!("fn {{name}}() {tail} {{\n    {name}({call})\n}}\n");
                 write_regressions(
                     &loaded,
@@ -1113,5 +1410,93 @@ pub fn refute(args: Vec<String>) -> Result<(), String> {
             "verify --refute: a counterexample to '{name}' did not reproduce ({error:?}); tape {}",
             tape_inline(&counterexample.tape)
         )),
+    }
+}
+
+/// How long a read of the request pipe spins before it sleeps. A campaign
+/// answers its next request within microseconds of an answer, and waking a
+/// sleeping reader costs tens of microseconds on some hosts, more than the
+/// call itself (#2670), so each side polls the pipe briefly first.
+#[cfg(unix)]
+const SPIN: std::time::Duration = std::time::Duration::from_micros(200);
+
+/// The compiler's answers: a pipe read that spins for [`SPIN`] before
+/// blocking in `poll` (`SpinRead` in the root package's
+/// `src/tool_facts_fuzz.rs`).
+#[cfg(unix)]
+struct SpinRead(ChildStdout);
+
+#[cfg(unix)]
+impl SpinRead {
+    /// Make `fd` non-blocking and read it through the spin.
+    fn new(pipe: ChildStdout) -> std::io::Result<Self> {
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&pipe);
+        // SAFETY: `fd` is an open descriptor this process owns for its
+        // lifetime (the child's stdout, held by the result).
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self(pipe))
+    }
+}
+
+#[cfg(unix)]
+impl std::io::Read for SpinRead {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let started = std::time::Instant::now();
+        loop {
+            // SAFETY: `buf` is valid for `buf.len()` bytes.
+            let n = unsafe {
+                libc::read(
+                    std::os::fd::AsRawFd::as_raw_fd(&self.0),
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                )
+            };
+            if n >= 0 {
+                return Ok(n as usize);
+            }
+            let error = std::io::Error::last_os_error();
+            match error.kind() {
+                std::io::ErrorKind::Interrupted => {}
+                std::io::ErrorKind::WouldBlock if started.elapsed() < SPIN => {
+                    std::hint::spin_loop();
+                }
+                std::io::ErrorKind::WouldBlock => {
+                    let mut ready = libc::pollfd {
+                        fd: std::os::fd::AsRawFd::as_raw_fd(&self.0),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: one valid pollfd; -1 waits without a timeout.
+                    if unsafe { libc::poll(&mut ready, 1, -1) } < 0 {
+                        let error = std::io::Error::last_os_error();
+                        if error.kind() != std::io::ErrorKind::Interrupted {
+                            return Err(error);
+                        }
+                    }
+                }
+                _ => return Err(error),
+            }
+        }
+    }
+}
+
+/// The compiler's answers where pipes cannot be polled: plain reads.
+#[cfg(not(unix))]
+struct SpinRead(ChildStdout);
+
+#[cfg(not(unix))]
+impl SpinRead {
+    fn new(pipe: ChildStdout) -> std::io::Result<Self> {
+        Ok(Self(pipe))
+    }
+}
+
+#[cfg(not(unix))]
+impl std::io::Read for SpinRead {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(&mut self.0, buf)
     }
 }

@@ -5,7 +5,7 @@
 //! and `ir_words` next to this module (as does vesper-hybrid).
 #![allow(dead_code)]
 
-use super::check_words::{Enc, encodable, pass_word};
+use super::check_words::{Enc, encodable_with, pass_word};
 use super::ir_words::{self, Payload, Tables};
 use vesper::ast::{Expr, ExprKind, Function, Statement, Type};
 use vesper::check::World;
@@ -123,10 +123,11 @@ fn function_types(f: &Function) -> Vec<Type> {
 }
 
 /// Whether every type the calls section writes fits the decoder.
-fn calls_encodable(w: &World) -> bool {
+fn calls_encodable(w: &World, wide: bool) -> bool {
+    let encodable = |t: &Type| encodable_with(t, wide);
     w.functions
         .values()
-        .all(|f| function_types(f).iter().all(encodable))
+        .all(|f| function_types(f).iter().all(&encodable))
         && w.calls.values().flatten().all(|(_, t)| encodable(t))
         && w.dyn_objects
             .params
@@ -139,13 +140,24 @@ fn calls_encodable(w: &World) -> bool {
                 && v.methods
                     .iter()
                     .flat_map(|(_, vs)| vs.values())
-                    .all(encodable)
+                    .all(&encodable)
         })
 }
 
+/// The calls section's world flags (packages/vesper-codegen-calls/src/data.ves).
+const WORLD_TRACE_ACTIVE: u64 = 1;
+const WORLD_CONST_DENORM: u64 = 2;
+
 /// The calls section (packages/vesper-codegen-calls/src/data.ves).
 fn calls_section(e: &mut Enc, w: &World, tasks: &[(String, u64)]) -> Vec<u64> {
-    let mut out = vec![vesper::trace_effects::active(w) as u64];
+    let mut flags = 0;
+    if vesper::trace_effects::active(w) {
+        flags |= WORLD_TRACE_ACTIVE;
+    }
+    if !vesper::capability_effects::const_denorm_spans(w).is_empty() {
+        flags |= WORLD_CONST_DENORM;
+    }
+    let mut out = vec![flags];
     let mut exprs = vec![];
     out.push(w.functions.len() as u64);
     for f in w.functions.values() {
@@ -244,7 +256,40 @@ pub fn calls_input(w: &World, program: &Program, tasks: &[(String, bool)]) -> Op
 /// [`calls_input`] with each task's flags word: 1 optimizes, 2 asks for a
 /// Beacon trace host (`EntryEffects::TraceHost`).
 pub fn calls_input_flags(w: &World, program: &Program, tasks: &[(String, u64)]) -> Option<Vec<u8>> {
-    if !ir_words::encodable(w, program) || !calls_encodable(w) {
+    calls_input_with(w, program, tasks, false)
+}
+
+/// [`calls_input_flags`] that also writes `i128` and `u128` types, which
+/// @vesper/codegen-calls declares as two-word values (native-lib's 128-bit
+/// export entries, #2642). The walk's own callers keep refusing them.
+pub fn calls_input_flags_wide(
+    w: &World,
+    program: &Program,
+    tasks: &[(String, u64)],
+) -> Option<Vec<u8>> {
+    calls_input_with(w, program, tasks, true)
+}
+
+fn calls_input_with(
+    w: &World,
+    program: &Program,
+    tasks: &[(String, u64)],
+    wide: bool,
+) -> Option<Vec<u8>> {
+    calls_input_pool(w, program, tasks, wide).map(|(input, _)| input)
+}
+
+/// [`calls_input_flags`] (or with `wide`, [`calls_input_flags_wide`]) and
+/// the payload pool of its program section, which `ir_words::decode_program`
+/// needs to read a program that a package writes back
+/// (crates/vesper-codegen-swap-test/tests/self_host_library_ir.rs).
+pub fn calls_input_pool(
+    w: &World,
+    program: &Program,
+    tasks: &[(String, u64)],
+    wide: bool,
+) -> Option<(Vec<u8>, ir_words::Pool)> {
+    if !ir_words::encodable(w, program) || !calls_encodable(w, wide) {
         return None;
     }
     let mut t = Tables::of(program);
@@ -255,5 +300,5 @@ pub fn calls_input_flags(w: &World, program: &Program, tasks: &[(String, u64)]) 
     let mut tail = t.section();
     let world = t.enc.world(w);
     tail.extend(calls_section(&mut t.enc, w, tasks));
-    Some(t.enc.finish(&world, &tail))
+    Some((t.enc.finish(&world, &tail), t.pool))
 }

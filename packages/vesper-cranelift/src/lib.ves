@@ -141,6 +141,13 @@
 // |     fn vcl_call_memmove(inout b: Builder, in m: Module, dst: u32, src: u32, count: u32) -> ForeignVal[Unit];
 // |     fn vcl_isa_triple_arch(in m: Module) -> ForeignVal[u32];
 // |     fn vcl_has_x86_pshufb_lowering(in m: Module) -> ForeignVal[u32];
+// |     fn vcl_builder_finalize(inout b: Builder) -> ForeignVal[u32];
+// |     fn vcl_function_words(inout b: Builder, flags: u32, ptr_ty: u32, offset: u64, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
+// |     fn vcl_apply_edits(inout b: Builder, nocapture in edits: CSlice[u64]) -> ForeignVal[u32];
+// |     fn vcl_outline_cold(inout b: Builder, inout m: Module, nocapture in edits: CSlice[u64]) -> ForeignVal[u32];
+// |     fn vcl_take_cold_helper(inout b: Builder) -> ForeignVal[Option[Builder]];
+// |     fn vcl_cold_helper_func(in b: Builder) -> ForeignVal[u32];
+// |     fn vcl_define_with_cold_helpers(inout m: Module, func: u32, sink b: Builder) -> ForeignVal[u32];
 // | }
 //
 // @vesper/cranelift: Cranelift 0.125 from Vesper (self-hosting wave SH0,
@@ -1501,6 +1508,68 @@ pub fn isa_triple_arch(in m: Module) -> u32 eff [Ffi[Cranelift]] {
 }
 pub fn has_x86_pshufb_lowering(in m: Module) -> bool eff [Ffi[Cranelift]] {
     Cranelift::vcl_has_x86_pshufb_lowering(in m) == 1
+}
+
+// The CLIF seam (#2606): a finished function read back in the words of
+// crates/vesper-cranelift-sys/src/clif_words.rs for the Vesper CLIF passes
+// (@vesper/clif), and their edit scripts replayed on it. A builder is
+// finalized first; `define_function` then takes it as it is.
+pub fn words_simd() -> u32 {
+    1
+}
+pub fn words_shapes() -> u32 {
+    2
+}
+pub fn builder_finalize(inout b: Builder) -> bool eff [Ffi[Cranelift]] {
+    Cranelift::vcl_builder_finalize(inout b) == 0
+}
+// The function words of a finalized builder (empty on an error, which
+// `builder_error` reads). `flags` holds `words_simd()` and
+// `words_shapes()`; `ptr_ty` is the pointer type, or 0 for none.
+pub fn function_words(
+    inout b: Builder,
+    flags: u32,
+    ptr_ty: u32
+) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let mut none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let n = Cranelift::vcl_function_words(inout b, flags, ptr_ty, 0, inout none.as_slice_mut());
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    for _ in 0..n {
+        out.push(0);
+    }
+    Cranelift::vcl_function_words(inout b, flags, ptr_ty, 0, inout out.as_slice_mut());
+    out
+}
+pub fn apply_edits(inout b: Builder, in edits: Slice[u64]) -> bool eff [Ffi[Cranelift]] {
+    Cranelift::vcl_apply_edits(inout b, in edits) == 0
+}
+// The cold outliner's extraction (#2634): replay its answer words on a
+// finalized builder, declaring each helper in `m`. The helper count, or
+// `invalid()` on an error (`builder_error` reads it); 0 leaves the
+// function unchanged. Take every helper before the builder is defined,
+// then define each as `cold_helper_func` names after the parent.
+pub fn outline_cold(
+    inout b: Builder,
+    inout m: Module,
+    in edits: Slice[u64]
+) -> u32 eff [Ffi[Cranelift]] {
+    Cranelift::vcl_outline_cold(inout b, inout m, in edits)
+}
+pub fn take_cold_helper(inout b: Builder) -> Option[Builder] eff [Ffi[Cranelift]] {
+    Cranelift::vcl_take_cold_helper(inout b)
+}
+pub fn cold_helper_func(in b: Builder) -> FuncId eff [Ffi[Cranelift]] {
+    FuncId { id: Cranelift::vcl_cold_helper_func(in b) }
+}
+// Define `func` from `b` and then each cold helper `outline_cold` left on
+// it, in outline order, as src/native.rs does (the object bytes depend on
+// that order); false if one failed (`module_error_len`).
+pub fn define_with_cold_helpers(
+    inout m: Module,
+    func: FuncId,
+    sink b: Builder
+) -> bool eff [Ffi[Cranelift]] {
+    Cranelift::vcl_define_with_cold_helpers(inout m, func.id, b) == 0
 }
 
 // Typed entity words: every entity a host lends as a `call_arg` word or

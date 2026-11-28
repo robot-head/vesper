@@ -28,7 +28,9 @@ mod session;
 use serde_json::json;
 pub use session::LensConfig;
 #[doc(hidden)]
-pub use session::PortCheck;
+pub use session::{PortCheck, PortState, SERVER_VERSION};
+#[doc(hidden)]
+pub use session::{diagnostic_payload_answer, diagnostic_payload_words, payload_tags};
 
 /// Every proof-lens model of a checked source, for the differential test of
 /// its Vesper port (`tests/self_host_lsp_features.rs`): per function, the
@@ -669,7 +671,7 @@ fn dispatch<W: Write>(
                 return if clean {
                     Ok(())
                 } else {
-                    Err("LSP exit before shutdown".into())
+                    Err(EXIT_BEFORE_SHUTDOWN.into())
                 };
             }
             Event::Proof {
@@ -756,7 +758,8 @@ fn dispatch<W: Write>(
                             ))
                             .is_err()
                         {
-                            return Err("Lens session thread stopped".into());
+                            finish();
+                            return session_stopped(inbox);
                         }
                     }
                     Err(error) => {
@@ -791,7 +794,8 @@ fn dispatch<W: Write>(
                     .send((Work::Notification { method, params }, true))
                     .is_err()
                 {
-                    return Err("Lens session thread stopped".into());
+                    finish();
+                    return session_stopped(inbox);
                 }
             }
             // This server's own requests (code lens refresh) need no answer,
@@ -800,6 +804,25 @@ fn dispatch<W: Write>(
         }
     }
     Ok(())
+}
+
+/// The error of a session that ended with `exit` before `shutdown`.
+const EXIT_BEFORE_SHUTDOWN: &str = "LSP exit before shutdown";
+
+/// The dispatcher's result once the session thread has stopped and
+/// queued work can no longer reach it. The thread sends its last event
+/// (an exit, the drain or a write failure) before its queue closes, so a
+/// frame read behind an `exit` waits for that event rather than racing it.
+fn session_stopped(inbox: &Receiver<Event>) -> Result<(), String> {
+    while let Ok(event) = inbox.recv() {
+        match event {
+            Event::Exit { clean: true } | Event::Drained(None) => return Ok(()),
+            Event::Exit { clean: false } => return Err(EXIT_BEFORE_SHUTDOWN.into()),
+            Event::Drained(Some(error)) | Event::WriteFailed(error) => return Err(error),
+            _ => {}
+        }
+    }
+    Err("Lens session thread stopped".into())
 }
 
 fn session_thread<W: Write>(
@@ -1076,6 +1099,183 @@ impl MacroPreviewForPort {
         let snapshot = crate::database::macro_preview::preview(&self.db, self.file);
         let digest = host_digest.then(|| *blake3::hash(text.as_bytes()).as_bytes());
         macro_preview::port_words(uri, version, text, snapshot, limits, digest, rounds)
+    }
+}
+
+/// The Rust half of the Vesper LSP server loop (@vesper/lsp-server, #1828
+/// part 15): the session behind the loop's checked-document engine seam.
+/// The loop owns the stream, the framing, the envelope refusals and the
+/// request and notification gates; it hands each frame that passes them to
+/// this engine, which runs it through the same `handle_work` as [`serve`]
+/// and returns the frames that answer it. A `vesper.proofAudit` job runs to
+/// completion before the call returns. Debounce timers and background
+/// proof runs fire on their own threads, as in [`serve`]; the loop polls
+/// [`Engine::tick`] for them every [`Engine::deadline`] milliseconds while
+/// it waits for client bytes (part 15b).
+#[doc(hidden)]
+pub struct Engine {
+    session: session::Session,
+    shared: Shared<Vec<u8>>,
+    events: Sender<Event>,
+    inbox: Receiver<Event>,
+    /// Timer and background events that arrived while a proof job was
+    /// awaited, handled by the next [`Engine::tick`].
+    deferred: std::collections::VecDeque<Event>,
+}
+
+/// How often the loop polls [`Engine::tick`] while the client has
+/// background proof runs on: the debounce delays are hundreds of
+/// milliseconds.
+const ENGINE_POLL_MS: i64 = 10;
+
+/// What a frame handed to [`Engine::frame`] ended in.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineExit {
+    /// The server goes on.
+    Continue,
+    /// `exit` after `shutdown`.
+    Clean,
+    /// `exit` before `shutdown`.
+    Unclean,
+    /// The frame could not be handled (a write or session failure).
+    Failed,
+}
+
+#[doc(hidden)]
+impl Engine {
+    pub fn new(config: LensConfig) -> Result<Self, String> {
+        let (events, inbox) = mpsc::channel::<Event>();
+        Ok(Self {
+            deferred: std::collections::VecDeque::new(),
+            session: session::Session::with_config(config)?,
+            shared: Shared {
+                pending: Mutex::new(PendingRequests::new(MAX_PENDING).map_err(|e| e.to_string())?),
+                writer: Mutex::new(Vec::new()),
+                limits: ProtocolLimits::default(),
+            },
+            events,
+            inbox,
+        })
+    }
+
+    /// Handle one framed body that the loop's gates passed, returning the
+    /// frames written for it and how it ended (with the failure's text).
+    pub fn frame(&mut self, body: &[u8]) -> (Vec<u8>, EngineExit, String) {
+        let (exit, error) = match self.handle(body) {
+            Ok(exit) => (exit, String::new()),
+            Err(error) => (EngineExit::Failed, error),
+        };
+        let frames = std::mem::take(&mut *lock(&self.shared.writer));
+        (frames, exit, error)
+    }
+
+    /// Milliseconds the loop may wait for client bytes before it calls
+    /// [`Engine::tick`], or -1 when no timer can fire.
+    pub fn deadline(&self) -> i64 {
+        if self.session.debouncing() || !self.deferred.is_empty() {
+            ENGINE_POLL_MS
+        } else {
+            -1
+        }
+    }
+
+    /// Handle the timers and background runs that finished, in arrival
+    /// order, returning the frames they wrote as [`Engine::frame`] does.
+    pub fn tick(&mut self) -> (Vec<u8>, EngineExit, String) {
+        let (exit, error) = match self.fired() {
+            Ok(()) => (EngineExit::Continue, String::new()),
+            Err(error) => (EngineExit::Failed, error),
+        };
+        let frames = std::mem::take(&mut *lock(&self.shared.writer));
+        (frames, exit, error)
+    }
+
+    fn fired(&mut self) -> Result<(), String> {
+        while let Some(event) = self
+            .deferred
+            .pop_front()
+            .or_else(|| self.inbox.try_recv().ok())
+        {
+            let work = match event {
+                Event::Timer { uri } => Work::Timer { uri },
+                Event::Background {
+                    uri,
+                    generation,
+                    job,
+                    outcome: Some(outcome),
+                } => Work::BackgroundDone {
+                    uri,
+                    generation,
+                    job,
+                    outcome,
+                },
+                _ => continue,
+            };
+            handle_work(&mut self.session, work, &self.events, &self.shared)?;
+        }
+        Ok(())
+    }
+
+    fn handle(&mut self, body: &[u8]) -> Result<EngineExit, String> {
+        let message = parse_envelope(body, self.shared.limits).map_err(|e| e.to_string())?;
+        let work = match message {
+            Envelope::Request { id, method, params } => {
+                let token = lock(&self.shared.pending)
+                    .begin(id.clone())
+                    .map_err(|e| e.to_string())?;
+                let request = Work::Request {
+                    id: id.clone(),
+                    method,
+                    params,
+                    token: token.clone(),
+                };
+                handle_work(&mut self.session, request, &self.events, &self.shared)?;
+                // A proof job answers from its own thread: wait for it.
+                if lock(&self.shared.pending).is_pending(&id, &token) {
+                    while let Ok(event) = self.inbox.recv() {
+                        match event {
+                            Event::Proof {
+                                id,
+                                token,
+                                job,
+                                outcome: Some(outcome),
+                            } => {
+                                let done = Work::ProofDone {
+                                    id,
+                                    token,
+                                    job,
+                                    outcome,
+                                };
+                                handle_work(&mut self.session, done, &self.events, &self.shared)?;
+                                break;
+                            }
+                            // Timers keep their turn for the next tick.
+                            event @ (Event::Timer { .. } | Event::Background { .. }) => {
+                                self.deferred.push_back(event)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                return Ok(EngineExit::Continue);
+            }
+            Envelope::Notification { method, params } => Work::Notification { method, params },
+            Envelope::Response { .. } => return Ok(EngineExit::Continue),
+        };
+        if handle_work(&mut self.session, work, &self.events, &self.shared)? {
+            while let Ok(event) = self.inbox.try_recv() {
+                if let Event::Exit { clean } = event {
+                    return Ok(if clean {
+                        EngineExit::Clean
+                    } else {
+                        EngineExit::Unclean
+                    });
+                }
+            }
+            return Ok(EngineExit::Failed);
+        }
+        Ok(EngineExit::Continue)
     }
 }
 

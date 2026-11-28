@@ -518,6 +518,607 @@ fn flip_gate_pem_pubkey() {
     println!("flip-gate pairs pem_pubkey {}", pairs.join(" "));
 }
 
+const CRL_PASSES: usize = 20_000;
+
+fn flip_gate_crl_this_update() {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let ca_params = rcgen::CertificateParams::new(vec!["ca.vesper.test".to_string()]).unwrap();
+    let issuer = rcgen::Issuer::new(ca_params, key);
+    let crl_params = rcgen::CertificateRevocationListParams {
+        this_update: rcgen::date_time_ymd(2026, 11, 27),
+        next_update: rcgen::date_time_ymd(2027, 11, 27),
+        crl_number: rcgen::SerialNumber::from(1u64),
+        issuing_distribution_point: None,
+        revoked_certs: Vec::new(),
+        key_identifier_method: rcgen::KeyIdMethod::Sha256,
+    };
+    let crl = crl_params.signed_by(&issuer).unwrap();
+    let der = crl.der().as_ref().to_vec();
+    let rust_parse = |b: &[u8]| -> u64 {
+        let (rest, parsed) = x509_parser::parse_x509_crl(b).unwrap();
+        assert!(rest.is_empty());
+        u64::try_from(parsed.last_update().timestamp()).unwrap()
+    };
+    assert_eq!(
+        rust_parse(&der),
+        port::chain::crl_this_update(&der).unwrap()
+    );
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..CRL_PASSES {
+            black_box(rust_parse(black_box(&der)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..CRL_PASSES {
+            black_box(port::chain::crl_this_update(black_box(&der)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs crl_this_update {}", pairs.join(" "));
+}
+
+const AMD_EXT_PASSES: usize = 5_000;
+
+fn flip_gate_amd_cert_ext() {
+    let der = std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/vendor/snp-virtee-sev/vcek_milan.der"),
+    )
+    .unwrap();
+    let rust_parse = |b: &[u8]| -> usize {
+        let (rest, cert) = x509_parser::parse_x509_certificate(b).unwrap();
+        assert!(rest.is_empty());
+        cert.extensions().len()
+    };
+    let parsed =
+        port::amd::parse_amd_cert_extensions(&der, port::roots::AmdProduct::Milan).unwrap();
+    assert_eq!(parsed.product_name.split('-').next(), Some("Milan"));
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..AMD_EXT_PASSES {
+            black_box(rust_parse(black_box(&der)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..AMD_EXT_PASSES {
+            black_box(
+                port::amd::parse_amd_cert_extensions(
+                    black_box(&der),
+                    port::roots::AmdProduct::Milan,
+                )
+                .unwrap(),
+            );
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs amd_cert_ext {}", pairs.join(" "));
+}
+
+const PCK_EXT_PASSES: usize = 5_000;
+
+fn flip_gate_pck_ext() {
+    let quote_bytes = std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/vendor/tdx-dcap-qvl/tdx_quote"),
+    )
+    .unwrap();
+    let quote = port::tdx::TdxQuote::parse_prefix(&quote_bytes).unwrap().0;
+    let certs = port::chain::pem_certificates(&quote.pck_chain_pem).unwrap();
+    let der = certs[0].clone();
+    let rust_parse = |b: &[u8]| -> usize {
+        let (rest, cert) = x509_parser::parse_x509_certificate(b).unwrap();
+        assert!(rest.is_empty());
+        cert.extensions().len()
+    };
+    let parsed = port::intel::parse_pck_extensions(&der).unwrap();
+    assert_eq!(parsed.pce_id.len(), 2);
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..PCK_EXT_PASSES {
+            black_box(rust_parse(black_box(&der)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..PCK_EXT_PASSES {
+            black_box(port::intel::parse_pck_extensions(black_box(&der)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs pck_ext {}", pairs.join(" "));
+}
+
+const SPKI_PASSES: usize = 500_000;
+
+fn flip_gate_spki() {
+    use spki::ObjectIdentifier;
+    const ID_EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+    const SECP256R1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
+    const SECP384R1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.34");
+
+    let cert_der = data("snp-oak/milan_vcek.der");
+    let (_, cert) = x509_parser::parse_x509_certificate(&cert_der).unwrap();
+    let spki_der = cert.public_key().raw.to_vec();
+
+    let rust_parse = |der: &[u8]| -> port::chain::EcPublicKey {
+        let info = spki::SubjectPublicKeyInfoRef::try_from(der).unwrap();
+        assert_eq!(info.algorithm.oid, ID_EC_PUBLIC_KEY);
+        let curve = match info.algorithm.parameters_oid().unwrap() {
+            o if o == SECP256R1 => port::chain::Curve::P256,
+            o if o == SECP384R1 => port::chain::Curve::P384,
+            _ => panic!("unexpected curve"),
+        };
+        let point = info.subject_public_key.as_bytes().unwrap();
+        port::chain::EcPublicKey::from_sec1(curve, point).unwrap()
+    };
+
+    // Differential check: Vesper port matches Rust `spki` crate.
+    let expected = rust_parse(&spki_der);
+    let actual = port::chain::parse_spki_ec_key(&spki_der).unwrap();
+    assert_eq!(actual, expected);
+
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..SPKI_PASSES {
+            black_box(rust_parse(black_box(&spki_der)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..SPKI_PASSES {
+            black_box(port::chain::parse_spki_ec_key(black_box(&spki_der)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs spki {}", pairs.join(" "));
+}
+
+const PCS_ENVELOPE_PASSES: usize = 5_000;
+
+fn flip_gate_pcs_envelope() {
+    #[derive(serde::Deserialize)]
+    struct Envelope<'a> {
+        #[serde(borrow, rename = "tcbInfo")]
+        tcb_info: Option<&'a serde_json::value::RawValue>,
+        #[serde(borrow, rename = "enclaveIdentity")]
+        enclave_identity: Option<&'a serde_json::value::RawValue>,
+        signature: String,
+    }
+    let response = data("tdx-go-tdx-guest/sample_tcbInfo_response");
+    let rust_parse = |resp: &[u8]| -> port::intel::SignedCollateral {
+        let env: Envelope<'_> = serde_json::from_slice(resp).unwrap();
+        assert!(env.enclave_identity.is_none());
+        let raw = env.tcb_info.unwrap();
+        port::intel::SignedCollateral::new(raw.get().as_bytes(), &env.signature).unwrap()
+    };
+
+    // Differential check: Vesper port matches serde_json::from_slice.
+    let expected = rust_parse(&response);
+    let actual = port::intel::SignedCollateral::from_pcs_response(&response, "tcbInfo").unwrap();
+    assert_eq!(actual, expected);
+
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..PCS_ENVELOPE_PASSES {
+            black_box(rust_parse(black_box(&response)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..PCS_ENVELOPE_PASSES {
+            black_box(
+                port::intel::SignedCollateral::from_pcs_response(black_box(&response), "tcbInfo")
+                    .unwrap(),
+            );
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs pcs_envelope {}", pairs.join(" "));
+}
+
+const QE_IDENTITY_PASSES: usize = 20_000;
+
+fn flip_gate_qe_identity() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct IsvLevelJson {
+        tcb: IsvSvnJson,
+        tcb_date: String,
+        tcb_status: String,
+        #[serde(rename = "advisoryIDs", default)]
+        advisory_ids: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct IsvSvnJson {
+        isvsvn: u16,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct QeIdentityJson {
+        id: String,
+        version: u32,
+        issue_date: String,
+        next_update: String,
+        tcb_evaluation_data_number: u32,
+        miscselect: String,
+        miscselect_mask: String,
+        attributes: String,
+        attributes_mask: String,
+        mrsigner: String,
+        isvprodid: u16,
+        tcb_levels: Vec<IsvLevelJson>,
+    }
+    let response = data("tdx-go-tdx-guest/sample_qeIdentity_response");
+    let signed =
+        port::intel::SignedCollateral::from_pcs_response(&response, "enclaveIdentity").unwrap();
+    let body = signed.body;
+
+    let rust_parse = |json: &[u8]| -> QeIdentityJson {
+        let j: QeIdentityJson = serde_json::from_slice(json).unwrap();
+        assert_eq!(j.id, "TD_QE");
+        assert_eq!(j.version, 2);
+        assert!(!j.tcb_levels.is_empty());
+        let _ = (&j.issue_date, &j.next_update, j.tcb_evaluation_data_number);
+        let _ = (
+            &j.miscselect,
+            &j.miscselect_mask,
+            &j.attributes,
+            &j.attributes_mask,
+            &j.mrsigner,
+            j.isvprodid,
+        );
+        for l in &j.tcb_levels {
+            let _ = (l.tcb.isvsvn, &l.tcb_date, &l.tcb_status, &l.advisory_ids);
+        }
+        j
+    };
+
+    // Differential check: Vesper port matches serde_json::from_slice.
+    let expected = rust_parse(&body);
+    let actual = port::intel::QeIdentity::parse(&body).unwrap();
+    assert_eq!(
+        actual.tcb_evaluation_data_number,
+        expected.tcb_evaluation_data_number
+    );
+    assert_eq!(actual.isv_prod_id, expected.isvprodid);
+    assert_eq!(actual.levels.len(), expected.tcb_levels.len());
+
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..QE_IDENTITY_PASSES {
+            black_box(rust_parse(black_box(&body)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..QE_IDENTITY_PASSES {
+            black_box(port::intel::QeIdentity::parse(black_box(&body)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs qe_identity {}", pairs.join(" "));
+}
+
+const SGX_TCB_INFO_PASSES: usize = 20_000;
+
+fn flip_gate_sgx_tcb_info() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct SgxTcbInfoJson {
+        id: String,
+        version: u32,
+        issue_date: String,
+        next_update: String,
+        fmspc: String,
+        pce_id: String,
+        tcb_type: u32,
+        tcb_evaluation_data_number: u32,
+        tcb_levels: Vec<SgxTcbLevelJson>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct SgxTcbLevelJson {
+        tcb: SgxTcbJson,
+        tcb_date: String,
+        tcb_status: String,
+        #[serde(rename = "advisoryIDs", default)]
+        advisory_ids: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SgxTcbJson {
+        sgxtcbcomponents: Vec<ComponentJson>,
+        pcesvn: u16,
+    }
+    #[derive(serde::Deserialize)]
+    struct ComponentJson {
+        svn: u8,
+    }
+
+    let body = br#"{"id":"SGX","version":3,"issueDate":"2024-03-13T16:12:41Z","nextUpdate":"2024-04-12T16:12:41Z","fmspc":"00806F050000","pceId":"0000","tcbType":0,"tcbEvaluationDataNumber":17,"tcbLevels":[{"tcb":{"sgxtcbcomponents":[{"svn":4},{"svn":4},{"svn":2},{"svn":4},{"svn":2},{"svn":255},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0}],"pcesvn":13},"tcbDate":"2024-03-13T00:00:00Z","tcbStatus":"UpToDate"},{"tcb":{"sgxtcbcomponents":[{"svn":2},{"svn":2},{"svn":2},{"svn":2},{"svn":2},{"svn":255},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0}],"pcesvn":11},"tcbDate":"2023-08-09T00:00:00Z","tcbStatus":"OutOfDate","advisoryIDs":["INTEL-SA-00837","INTEL-SA-00950"]}]}"#;
+
+    let rust_parse = |json: &[u8]| -> SgxTcbInfoJson {
+        let j: SgxTcbInfoJson = serde_json::from_slice(json).unwrap();
+        assert_eq!(j.id, "SGX");
+        assert_eq!(j.version, 3);
+        assert_eq!(j.tcb_type, 0);
+        let _ = (
+            &j.issue_date,
+            &j.next_update,
+            &j.fmspc,
+            &j.pce_id,
+            j.tcb_evaluation_data_number,
+        );
+        for l in &j.tcb_levels {
+            let _ = (
+                l.tcb.sgxtcbcomponents.iter().map(|c| c.svn).sum::<u8>(),
+                l.tcb.pcesvn,
+                &l.tcb_date,
+                &l.tcb_status,
+                &l.advisory_ids,
+            );
+        }
+        j
+    };
+
+    // Differential check: Vesper port matches serde_json::from_slice.
+    let expected = rust_parse(body);
+    let actual = port::sgx::SgxTcbInfo::parse(body).unwrap();
+    assert_eq!(
+        actual.tcb_evaluation_data_number,
+        expected.tcb_evaluation_data_number
+    );
+    assert_eq!(actual.levels.len(), expected.tcb_levels.len());
+
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..SGX_TCB_INFO_PASSES {
+            black_box(rust_parse(black_box(body)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..SGX_TCB_INFO_PASSES {
+            black_box(port::sgx::SgxTcbInfo::parse(black_box(body)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs sgx_tcb_info {}", pairs.join(" "));
+}
+
+const TDX_TCB_INFO_PASSES: usize = 2_000;
+
+fn flip_gate_tdx_tcb_info() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TcbInfoJson {
+        id: String,
+        version: u32,
+        issue_date: String,
+        next_update: String,
+        fmspc: String,
+        pce_id: String,
+        tcb_type: u32,
+        tcb_evaluation_data_number: u32,
+        tdx_module: Option<ModuleJson>,
+        #[serde(default)]
+        tdx_module_identities: Vec<ModuleIdentityJson>,
+        tcb_levels: Vec<TcbLevelJson>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ModuleJson {
+        mrsigner: String,
+        attributes: String,
+        attributes_mask: String,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ModuleIdentityJson {
+        id: String,
+        mrsigner: String,
+        attributes: String,
+        attributes_mask: String,
+        tcb_levels: Vec<IsvLevelJson>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TcbLevelJson {
+        tcb: TcbJson,
+        tcb_date: String,
+        tcb_status: String,
+        #[serde(rename = "advisoryIDs", default)]
+        advisory_ids: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct TcbJson {
+        sgxtcbcomponents: Vec<ComponentJson>,
+        pcesvn: u16,
+        tdxtcbcomponents: Vec<ComponentJson>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ComponentJson {
+        svn: u8,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct IsvLevelJson {
+        tcb: IsvSvnJson,
+        tcb_date: String,
+        tcb_status: String,
+        #[serde(rename = "advisoryIDs", default)]
+        advisory_ids: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct IsvSvnJson {
+        isvsvn: u16,
+    }
+
+    let response = data("tdx-go-tdx-guest/sample_tcbInfo_response");
+    let signed = port::intel::SignedCollateral::from_pcs_response(&response, "tcbInfo").unwrap();
+    let body = signed.body;
+
+    let rust_parse = |json: &[u8]| -> TcbInfoJson {
+        let j: TcbInfoJson = serde_json::from_slice(json).unwrap();
+        assert_eq!(j.id, "TDX");
+        assert_eq!(j.version, 3);
+        assert_eq!(j.tcb_type, 0);
+        let _ = (
+            &j.issue_date,
+            &j.next_update,
+            &j.fmspc,
+            &j.pce_id,
+            j.tcb_evaluation_data_number,
+        );
+        if let Some(m) = &j.tdx_module {
+            let _ = (&m.mrsigner, &m.attributes, &m.attributes_mask);
+        }
+        for m in &j.tdx_module_identities {
+            let _ = (&m.id, &m.mrsigner, &m.attributes, &m.attributes_mask);
+            for l in &m.tcb_levels {
+                let _ = (l.tcb.isvsvn, &l.tcb_date, &l.tcb_status, &l.advisory_ids);
+            }
+        }
+        for l in &j.tcb_levels {
+            let _ = (
+                l.tcb.sgxtcbcomponents.iter().map(|c| c.svn).sum::<u8>(),
+                l.tcb.pcesvn,
+                l.tcb.tdxtcbcomponents.iter().map(|c| c.svn).sum::<u8>(),
+                &l.tcb_date,
+                &l.tcb_status,
+                &l.advisory_ids,
+            );
+        }
+        j
+    };
+
+    // Differential check: Vesper port matches serde_json::from_slice.
+    let expected = rust_parse(&body);
+    let actual = port::intel::TdxTcbInfo::parse(&body).unwrap();
+    assert_eq!(
+        actual.tcb_evaluation_data_number,
+        expected.tcb_evaluation_data_number
+    );
+    assert_eq!(actual.levels.len(), expected.tcb_levels.len());
+    assert_eq!(
+        actual.tdx_module_identities.len(),
+        expected.tdx_module_identities.len()
+    );
+
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..TDX_TCB_INFO_PASSES {
+            black_box(rust_parse(black_box(&body)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..TDX_TCB_INFO_PASSES {
+            black_box(port::intel::TdxTcbInfo::parse(black_box(&body)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs tdx_tcb_info {}", pairs.join(" "));
+}
+
 fn main() {
     assert_eq!(port::IMPLEMENTATION, "vesper");
     let args: Vec<String> = std::env::args().collect();
@@ -532,6 +1133,38 @@ fn main() {
         }
         if args.get(2).map(String::as_str) == Some("pem_pubkey") {
             flip_gate_pem_pubkey();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("crl_this_update") {
+            flip_gate_crl_this_update();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("amd_cert_ext") {
+            flip_gate_amd_cert_ext();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("pck_ext") {
+            flip_gate_pck_ext();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("spki") {
+            flip_gate_spki();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("pcs_envelope") {
+            flip_gate_pcs_envelope();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("qe_identity") {
+            flip_gate_qe_identity();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("sgx_tcb_info") {
+            flip_gate_sgx_tcb_info();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("tdx_tcb_info") {
+            flip_gate_tdx_tcb_info();
             return;
         }
     }

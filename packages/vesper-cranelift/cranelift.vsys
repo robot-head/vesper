@@ -140,4 +140,11 @@ sys library Cranelift (
     fn vcl_call_memmove(inout b: Builder, in m: Module, dst: u32, src: u32, count: u32) -> ForeignVal[Unit];
     fn vcl_isa_triple_arch(in m: Module) -> ForeignVal[u32];
     fn vcl_has_x86_pshufb_lowering(in m: Module) -> ForeignVal[u32];
+    fn vcl_builder_finalize(inout b: Builder) -> ForeignVal[u32];
+    fn vcl_function_words(inout b: Builder, flags: u32, ptr_ty: u32, offset: u64, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
+    fn vcl_apply_edits(inout b: Builder, nocapture in edits: CSlice[u64]) -> ForeignVal[u32];
+    fn vcl_outline_cold(inout b: Builder, inout m: Module, nocapture in edits: CSlice[u64]) -> ForeignVal[u32];
+    fn vcl_take_cold_helper(inout b: Builder) -> ForeignVal[Option[Builder]];
+    fn vcl_cold_helper_func(in b: Builder) -> ForeignVal[u32];
+    fn vcl_define_with_cold_helpers(inout m: Module, func: u32, sink b: Builder) -> ForeignVal[u32];
 }

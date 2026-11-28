@@ -29,7 +29,7 @@ use @vesper/place-ir::{BlockRow, FnRow, InstRow, PoolRow, Program, program_new};
 use self::ast::{Ast, Ex, FnR, Gn, Pm, Pt, ast_empty};
 use self::ops::{
     SeqRes, TiledRes, VecRes, is_seq_type, is_slice_type, resolve_seq_call, resolve_tiled,
-    resolve_vector
+    resolve_vector, seq_arg_pass
 };
 
 const NONE32: u32 = 4294967295;
@@ -1250,22 +1250,6 @@ fn callee_params(inout l: L, name: u32) -> u64 {
     0
 }
 
-fn seq_arg_pass(mode: u8, i: u64) -> u8 {
-    if mode == 1 {
-        TyPass::In
-    } else if mode == 2 {
-        TyPass::Inout
-    } else if mode == 3 && i == 0 {
-        TyPass::Inout
-    } else if mode == 4 && i == 0 {
-        TyPass::In
-    } else if mode == 5 && i == 1 {
-        TyPass::In
-    } else {
-        TyPass::Sink
-    }
-}
-
 fn lower_seq_call(inout l: L, ex: Ex, recv_id: u64, seq_res: SeqRes) -> u32 {
     let mut args: ChunkSeq[Arg] = ChunkSeq::new[Arg]();
     if seq_res.has_receiver {
@@ -1632,10 +1616,46 @@ fn control(inout l: L, ex: Ex) -> u32 {
     unit(inout l, ex.s0, ex.s1)
 }
 
+// Binds `pat_value` (of type `elem_ty`) to the pattern of `for` loop `ex`
+// and lowers its body, which `break`s to `exit`. Leaves `cur_block` where
+// every `continue` and the body's end meet.
+fn for_body(inout l: L, ex: Ex, pat_value: u32, elem_ty: u32, exit: u64) {
+    let unit_ty = l.ctx.types.unit;
+    let mark = l.alias_trail.len();
+    let pat = l.ast.pt(ex.a);
+    let bind_start = l.operands.len();
+    put(inout l, w(pat_value), Tag::Value);
+    pattern(inout l, ex.a, elem_ty, true);
+    let bind = emit_at(inout l, Op::Bind, bind_start, pat.s0, pat.s1, unit_ty);
+    l.loops.push(Lp {
+        exit: exit,
+        has_value: false,
+        next: NONE64,
+        cont_start: l.continue_blocks.len()
+    });
+    let body = expr(inout l, ex.c);
+    let popped = pop_loop(inout l);
+    let mut continues: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for j in popped.cont_start..l.continue_blocks.len() {
+        continues.push(u64_at(in l.continue_blocks, j));
+    }
+    l.continue_blocks.truncate(popped.cont_start);
+    restore(inout l, mark);
+    if continues.len() > 0 {
+        // Every `continue` and the body's end meet in one step block.
+        let step = new_block(inout l);
+        for j in 0..continues.len() {
+            jump(inout l, u64_at(in continues, j), step, NONE32);
+        }
+        jump(inout l, l.cur_block, step, NONE32);
+        l.cur_block = step;
+    }
+}
+
 fn lower_for(inout l: L, ex: Ex) -> u32 {
     let iter = l.ast.ex(ex.b);
     if iter.kind != X_RANGE {
-        return unit(inout l, ex.s0, ex.s1);
+        return lower_for_elements(inout l, ex, iter);
     }
     let unit_ty = l.ctx.types.unit;
     let start_ex = l.ast.ex(iter.a);
@@ -1669,36 +1689,8 @@ fn lower_for(inout l: L, ex: Ex) -> u32 {
     let condition = binary_at(inout l, op, index_value, bound_value, end_pos, bool_ty);
     branch(inout l, l.cur_block, condition, body_block, exit);
     l.cur_block = body_block;
-    let mark = l.alias_trail.len();
     let pat_value = read_slot(inout l, index, start_pos, elem_ty);
-    let pat = l.ast.pt(ex.a);
-    let bind_start = l.operands.len();
-    put(inout l, w(pat_value), Tag::Value);
-    pattern(inout l, ex.a, elem_ty, true);
-    let bind = emit_at(inout l, Op::Bind, bind_start, pat.s0, pat.s1, unit_ty);
-    l.loops.push(Lp {
-        exit: exit,
-        has_value: false,
-        next: NONE64,
-        cont_start: l.continue_blocks.len()
-    });
-    let body = expr(inout l, ex.c);
-    let popped = pop_loop(inout l);
-    let mut continues: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for j in popped.cont_start..l.continue_blocks.len() {
-        continues.push(u64_at(in l.continue_blocks, j));
-    }
-    l.continue_blocks.truncate(popped.cont_start);
-    restore(inout l, mark);
-    if continues.len() > 0 {
-        // Every `continue` and the body's end meet in one step block.
-        let step = new_block(inout l);
-        for j in 0..continues.len() {
-            jump(inout l, u64_at(in continues, j), step, NONE32);
-        }
-        jump(inout l, l.cur_block, step, NONE32);
-        l.cur_block = step;
-    }
+    for_body(inout l, ex, pat_value, elem_ty, exit);
     let latch = new_block(inout l);
     if inclusive {
         // Leave at the bound instead of incrementing past it.
@@ -1723,6 +1715,147 @@ fn lower_for(inout l: L, ex: Ex) -> u32 {
     jump(inout l, l.cur_block, header, NONE32);
     l.cur_block = exit;
     unit(inout l, ex.s0, ex.s1)
+}
+
+// The sequence the `for` loop of `lower_for_elements` reads: a fixed array
+// (a tuple type), a `ChunkSeq` or a `Slice`.
+enum ForSource: _ {
+    Array = 0,
+    Seq = 1,
+    Slice = 2,
+}
+
+// `for pat in xs { body }` over a fixed array, a `ChunkSeq` or a `Slice`:
+// the index loop the Rust checker rewrites it to (src/loops/for_sequences.rs),
+// lowered directly. The length is read once before the first iteration and
+// each element is read by index in order. A sequence place is read where it
+// is; anything else (an array, a literal, a call result) is evaluated once
+// into a `$loop{n}_seq` slot the loop owns. Any other iterable leaves the
+// function unlowered rather than lowering a loop that never runs (#2703).
+fn lower_for_elements(inout l: L, ex: Ex, iter: Ex) -> u32 {
+    let unit_ty = l.ctx.types.unit;
+    let iter_ty = type_at(inout l, iter.s0, iter.s1);
+    let source = if l.ctx.types.kind(iter_ty) == TyKind::Tuple && l.ctx.types.arity(iter_ty) > 0 {
+        ForSource::Array
+    } else if is_seq_type(in l.ctx, iter_ty) {
+        ForSource::Seq
+    } else if is_slice_type(in l.ctx, iter_ty) {
+        ForSource::Slice
+    } else {
+        l.skip = true;
+        return unit(inout l, ex.s0, ex.s1);
+    };
+    let elem_ty = default_type(inout l.ctx.types, l.ctx.types.arg(iter_ty, 0));
+    let index_ty = l.ctx.types.named0(l.ctx.world.k.u64_);
+    let bool_ty = bool_type(inout l);
+    let pos = iter.s0;
+    let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let in_place = source != ForSource::Array && place(in l, ex.b, inout path) != NONE32;
+    let seq_slot = if in_place {
+        NONE32
+    } else {
+        let value = expr(inout l, ex.b);
+        let seq_id = fresh(inout l);
+        let slot = slot_name(inout l, "$loop", seq_id, NONE32, "_seq");
+        set_local(inout l, slot, iter_ty);
+        bind_slot(inout l, slot, value, pos, unit_ty);
+        slot
+    };
+    let bound_value = if source == ForSource::Array {
+        let ops_start = l.operands.len();
+        put_literal(inout l, Lit::Int, l.ctx.types.arity(iter_ty), 0);
+        emit_at(inout l, Op::Const, ops_start, pos, pos, index_ty)
+    } else {
+        let label = if source == ForSource::Seq {
+            intern(inout l.ctx, "Len")
+        } else {
+            intern(inout l.ctx, "SliceLen")
+        };
+        let mut args: ChunkSeq[Arg] = ChunkSeq::new[Arg]();
+        args.push(for_receiver(inout l, ex.b, seq_slot, iter_ty, pos));
+        seq_at(inout l, label, in args, pos, index_ty)
+    };
+    let index_id = fresh(inout l);
+    let index = slot_name(inout l, "$loop", index_id, NONE32, "_index");
+    let bound_id = fresh(inout l);
+    let bound = slot_name(inout l, "$loop", bound_id, NONE32, "_bound");
+    let zero_start = l.operands.len();
+    put_literal(inout l, Lit::Int, 0, 0);
+    let zero = emit_at(inout l, Op::Const, zero_start, pos, pos, index_ty);
+    set_local(inout l, index, index_ty);
+    bind_slot(inout l, index, zero, pos, unit_ty);
+    set_local(inout l, bound, index_ty);
+    bind_slot(inout l, bound, bound_value, pos, unit_ty);
+    let header = new_block(inout l);
+    let body_block = new_block(inout l);
+    let exit = new_block(inout l);
+    jump(inout l, l.cur_block, header, NONE32);
+    l.cur_block = header;
+    let loop_start = l.operands.len();
+    let loop_inst = emit_at(inout l, Op::Loop, loop_start, ex.s0, ex.s1, unit_ty);
+    let index_value = read_slot(inout l, index, pos, index_ty);
+    let bound_now = read_slot(inout l, bound, pos, index_ty);
+    let condition = binary_at(inout l, l.lt_sym, index_value, bound_now, pos, bool_ty);
+    branch(inout l, l.cur_block, condition, body_block, exit);
+    l.cur_block = body_block;
+    let at = read_slot(inout l, index, pos, index_ty);
+    let element = if source == ForSource::Array {
+        let base = read_slot(inout l, seq_slot, pos, iter_ty);
+        let ops_start = l.operands.len();
+        put(inout l, w(base), Tag::Value);
+        put(inout l, w(at), Tag::Value);
+        emit_at(inout l, Op::Index, ops_start, pos, pos, elem_ty)
+    } else {
+        // In bounds: the index is under the length read before the loop,
+        // and the body cannot change the sequence (E0301).
+        let label = if source == ForSource::Seq {
+            l.seq_get_sym
+        } else {
+            l.seq_slice_get_sym
+        };
+        let mut args: ChunkSeq[Arg] = ChunkSeq::new[Arg]();
+        args.push(for_receiver(inout l, ex.b, seq_slot, iter_ty, pos));
+        args.push(Arg { pass: TyPass::Sink, value: at, root: 0, path: 0 });
+        seq_at(inout l, label, in args, pos, elem_ty)
+    };
+    for_body(inout l, ex, element, elem_ty, exit);
+    let step_index = read_slot(inout l, index, pos, index_ty);
+    let one_start = l.operands.len();
+    put_literal(inout l, Lit::Int, 1, 0);
+    let one = emit_at(inout l, Op::Const, one_start, pos, pos, index_ty);
+    let next_index = binary_at(inout l, l.plus_sym, step_index, one, pos, index_ty);
+    let write_start = l.operands.len();
+    put(inout l, w(index), Tag::Name);
+    put(inout l, w(l.assign_sym), Tag::Name);
+    put(inout l, w(next_index), Tag::Value);
+    let write_inst = emit_at(inout l, Op::Write, write_start, pos, pos, unit_ty);
+    jump(inout l, l.cur_block, header, NONE32);
+    l.cur_block = exit;
+    unit(inout l, ex.s0, ex.s1)
+}
+
+// The `in` receiver of a `for` loop's sequence operations: the iterated
+// place `iter_id`, or the loop's `seq_slot` when it is not NONE32.
+fn for_receiver(inout l: L, iter_id: u64, seq_slot: u32, iter_ty: u32, pos: u64) -> Arg {
+    if seq_slot == NONE32 {
+        return argument(inout l, iter_id, TyPass::In, 0, 0);
+    }
+    let ops_start = l.operands.len();
+    put(inout l, w(seq_slot), Tag::Name);
+    put(inout l, 0, Tag::Path);
+    put(inout l, widen_u64(TyPass::In), Tag::Raw);
+    put(inout l, 0, Tag::Raw);
+    let value = emit_at(inout l, Op::Read, ops_start, pos, pos, iter_ty);
+    Arg { pass: TyPass::In, value: value, root: wrapping_add(seq_slot, 1), path: 0 }
+}
+
+// A total sequence operation `label` over `args`, of type `ty`.
+fn seq_at(inout l: L, label: u32, in args: ChunkSeq[Arg], pos: u64, ty: u32) -> u32 {
+    let pool_id = pool_entry(inout l, PoolKind::MakeSeq, label);
+    let ops_start = l.operands.len();
+    put(inout l, pool_id, Tag::Pool);
+    put_args(inout l, in args);
+    emit_at(inout l, Op::Seq, ops_start, pos, pos, ty)
 }
 
 fn bind_slot(inout l: L, slot: u32, value: u32, pos: u64, unit_ty: u32) {

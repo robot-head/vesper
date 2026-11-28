@@ -27,3 +27,5 @@ capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdEnv]", "Ffi[StdProc
 # #1996), and `vesper verify SOURCE --format`, of src/verify_commands.rs.
 "@vesper/proof-audit" = { version = "^0.1", path = "../vesper-proof-audit" }
 "@vesper/verify" = { version = "^0.1", path = "../vesper-verify" }
+# `vesper lsp`'s loop (#1828 part 15c).
+"@vesper/lsp-server" = { version = "^0.1", path = "../vesper-lsp-server" }

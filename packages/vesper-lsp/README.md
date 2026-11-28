@@ -17,12 +17,20 @@ wave SH5 lane 16, #1339). Rust stays the default: the language server runs
   `Output` does) and ryu's float text.
 - `src/commands.ves`: the session's parameter checks over the tape:
   `validate_input`, `cancel_params` and the `vesper.proofAudit` arguments
-  (#1828 part 10b; see docs/parallel-results/self-host-lsp-features.md).
+  (#1828 part 10b), and the request gate of `Session::request`: the
+  lifecycle checks, `initialize` capability negotiation and its result,
+  and `shutdown` (part 14a), and the notification gate of
+  `Session::notification`: `exit` and the `didOpen`, `didChange` and
+  `didClose` parameters (part 14b; see
+  docs/parallel-results/self-host-lsp-features.md).
 - `src/lib.ves`: the JIT entries the differential calls (`lsp_frames`,
   `lsp_envelope`, `lsp_encode`, `lsp_serve`, `lsp_commands`).
 
 The document store is the sibling package [`documents/`](documents/): a
 world that contains `@vesper/serde` cannot name the builtin `String`
 (serde's `Kind::String` takes the name), and the store needs it.
+
+The session loop that uses these pieces is
+[`@vesper/lsp-server`](../vesper-lsp-server/) (part 15a).
 
 See docs/parallel-results/self-host-lsp-core.md for the numbers and gaps.

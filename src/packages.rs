@@ -825,6 +825,19 @@ impl Loading<'_> {
     /// root package is package 0, and modules follow `Loader::assemble`'s
     /// order.
     pub fn assembly_input(&self) -> Option<Vec<u8>> {
+        self.encode_input(false)
+    }
+
+    /// [`Loading::assembly_input`] for a graph whose sugar the Rust loader
+    /// expanded: it also carries every module's `sugar` declarations and
+    /// the regions suffix (each expanded region with the module defining
+    /// its rule, for the definition-site renaming). A graph with a module
+    /// Forge audited is refused (`None`).
+    pub fn sugar_assembly_input(&self) -> Option<Vec<u8>> {
+        self.encode_input(true)
+    }
+
+    fn encode_input(&self, sugar: bool) -> Option<Vec<u8>> {
         let root = self.root?;
         let l = &self.loader;
         if root != 0
@@ -835,9 +848,13 @@ impl Loading<'_> {
                 f.text.len() > crate::parser::ParseLimits::default().max_source_bytes
             })
             || l.packages.iter().any(|p| {
-                p.modules
-                    .iter()
-                    .any(|m| !m.sugar.is_plain() || !m.parsed.sugar_origins.is_empty())
+                p.modules.iter().any(|m| {
+                    if sugar {
+                        m.sugar.audited.is_some()
+                    } else {
+                        !m.sugar.is_plain() || !m.parsed.sugar_origins.is_empty()
+                    }
+                })
             })
         {
             return None;
@@ -897,8 +914,56 @@ impl Loading<'_> {
                 put_str(&mut out, name);
             }
         }
-        // No sugar declarations (see above).
+        if !sugar {
+            // No sugar declarations (see above).
+            put(&mut out, 0);
+            return Some(out);
+        }
+        let modules: Vec<_> = l.packages.iter().flat_map(|p| &p.modules).collect();
+        put(
+            &mut out,
+            modules.iter().map(|m| m.sugar.declarations.len()).sum(),
+        );
+        for (i, m) in modules.iter().enumerate() {
+            for (name, d) in &m.sugar.declarations {
+                put(&mut out, i);
+                put_str(&mut out, name);
+                put(&mut out, usize::from(d.public));
+            }
+        }
+        // No source maps and an empty policy trailer.
         put(&mut out, 0);
+        put(&mut out, 0);
+        // The regions suffix (packages/vesper-check-names-packages/src/load.ves).
+        let index: BTreeMap<(usize, &[String]), usize> = l
+            .packages
+            .iter()
+            .enumerate()
+            .flat_map(|(p, package)| package.modules.iter().map(move |m| (p, m.path.as_slice())))
+            .enumerate()
+            .map(|(i, key)| (key, i))
+            .collect();
+        let expanded: Vec<_> = modules
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| !m.parsed.sugar_origins.is_empty())
+            .collect();
+        put(&mut out, expanded.len());
+        for (i, m) in expanded {
+            put(&mut out, i);
+            put_str(&mut out, &m.sugar.fresh_prefix);
+            put(&mut out, m.parsed.sugar_origins.len());
+            for (region, (definition, _)) in m.parsed.sugar_origins.iter().zip(&m.sugar.origins) {
+                put(&mut out, region.expanded.start);
+                put(&mut out, region.expanded.end);
+                put(&mut out, index[&(definition.0, definition.1.as_slice())]);
+                put(&mut out, region.holes.len());
+                for hole in &region.holes {
+                    put(&mut out, hole.start);
+                    put(&mut out, hole.end);
+                }
+            }
+        }
         Some(out)
     }
 

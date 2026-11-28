@@ -40,6 +40,9 @@ pub fn pairs(
         .iter()
         .map(|(r, v)| format!(" {}:{}", r.as_nanos().max(1), v.as_nanos().max(1)))
         .collect();
-    println!("flip-gate pairs {workload}{line}");
+    // On a line of its own: with one test thread libtest has already
+    // printed `test <name> ... ` without a newline, and the gate reads only
+    // lines that start with `flip-gate pairs`.
+    println!("\nflip-gate pairs {workload}{line}");
     rounds
 }

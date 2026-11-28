@@ -24,6 +24,10 @@ mod driver;
 #[path = "commands.rs"]
 mod commands;
 
+// The host of `vesper lsp`'s Vesper loop (#1828 part 15c).
+#[path = "lsp_engine.rs"]
+mod lsp_engine;
+
 /// The C entry point: the Vesper driver.
 #[unsafe(export_name = "main")]
 extern "C" fn hybrid_main(

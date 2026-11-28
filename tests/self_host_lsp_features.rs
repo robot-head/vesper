@@ -52,6 +52,19 @@ fn formatting_entry() -> &'static Entry {
     })
 }
 
+/// `@vesper/lsp-publish` (#1828 part 13b) and its one entry, the
+/// publishDiagnostics payload. It is its own package: @vesper/diagnostics
+/// and @vesper/span declare the same `Resource` variants.
+fn payload_entry() -> &'static Entry {
+    static PACKAGE: OnceLock<Package> = OnceLock::new();
+    static ENTRY: OnceLock<Entry> = OnceLock::new();
+    ENTRY.get_or_init(|| {
+        PACKAGE
+            .get_or_init(|| Package::load("packages/vesper-lsp-publish"))
+            .entry("lsp_diagnostic_payload", optimize())
+    })
+}
+
 fn optimize() -> bool {
     std::env::var_os("LSP_FEATURES_NO_OPT").is_none()
 }
@@ -5378,6 +5391,295 @@ fn lint_preflight_speed() {
     eprintln!(
         "lint preflight ({} sources x {rounds}): rust {:?}; vesper {:?} (ratio {:.2})",
         texts.len(),
+        totals[0] / per,
+        totals[1] / per,
+        totals[1].as_secs_f64() / totals[0].as_secs_f64()
+    );
+}
+
+// ------------------------------------------------- publishDiagnostics
+
+/// One payload case: a document and the failure its analysis published.
+struct PayloadCase {
+    uri: String,
+    text: String,
+    failure: AnalysisFailure,
+}
+
+fn payload_diagnostic(
+    code: &str,
+    message: &str,
+    span: std::ops::Range<usize>,
+    help: Option<&str>,
+    related: &[(std::ops::Range<usize>, &str)],
+) -> vesper::ast::Diagnostic {
+    let mut d = vesper::ast::Diagnostic::new(code, message, span);
+    d.help = help.map(str::to_owned);
+    for (span, message) in related {
+        d = d.with_related(span.clone(), *message);
+    }
+    d
+}
+
+/// The failures of the corpus as the analysis publishes them (parse and
+/// semantic diagnostics, resource and unsupported refusals), and failures
+/// built over small documents to reach every rendering refusal: spans out
+/// of bounds, reversed, inside a character or a CRLF, empty codes and
+/// messages, the label, diagnostic and text budgets, help, control
+/// characters and bad URIs.
+fn payload_cases() -> Vec<PayloadCase> {
+    let mut cases = vec![];
+    let mut sources: Vec<String> = RECOVERY_PROGRAMS.map(str::to_owned).to_vec();
+    sources.extend(SIGNATURE_PROGRAMS.map(str::to_owned));
+    sources.extend([
+        "fn main() -> u64 { true }".to_owned(),
+        "fn main() -> u64 { missing(1) }".to_owned(),
+        "linear struct T {} fn leak(sink t: T) {}".to_owned(),
+        "fn f(x: u64) -> bool { x }\r\nfn g() -> u64 { f(1) }".to_owned(),
+        "fn 🙂() {}".to_owned(),
+        format!("fn main() -> u64 {{ {} }}", "(".repeat(70)),
+    ]);
+    for t in formatting_corpus().into_iter().step_by(9) {
+        let mut at = t.len() / 3;
+        while !t.is_char_boundary(at) {
+            at -= 1;
+        }
+        sources.push(t[..at].to_owned());
+        sources.push(t);
+    }
+    for text in sources {
+        if let Err(failure) = check_source(&text, AnalysisLimits::default()) {
+            cases.push(PayloadCase {
+                uri: "file:///w/a.ves".into(),
+                text,
+                failure,
+            });
+        }
+    }
+    let text = "fn é() {}\r\nfn b() { 1 }\n";
+    let n = text.len();
+    let bad: Vec<Vec<vesper::ast::Diagnostic>> = vec![
+        vec![payload_diagnostic("E1", "m", 0..2, None, &[])],
+        vec![payload_diagnostic("E1", "m", 0..n + 1, None, &[])],
+        vec![payload_diagnostic("E1", "m", 3..4, None, &[])],
+        vec![payload_diagnostic(
+            "E1",
+            "m",
+            std::ops::Range { start: 5, end: 3 },
+            None,
+            &[],
+        )],
+        vec![payload_diagnostic("E1", "m", 11..12, None, &[])],
+        vec![payload_diagnostic("", "m", 0..1, None, &[])],
+        vec![payload_diagnostic("E1", "", 0..1, None, &[])],
+        vec![payload_diagnostic(
+            "E1",
+            "m",
+            0..1,
+            Some("try \"this\"\n\u{1}"),
+            &[],
+        )],
+        vec![payload_diagnostic(
+            "E1",
+            "m",
+            0..1,
+            Some("h"),
+            &[(12..14, "here"), (0..2, "and\there")],
+        )],
+        vec![payload_diagnostic(
+            "E1",
+            "m",
+            0..1,
+            None,
+            &[(0..n + 4, "x")],
+        )],
+        vec![payload_diagnostic("E1", "m", n..n, None, &[(3..4, "x")])],
+        (0..300)
+            .map(|i| payload_diagnostic("E2", "many", i % 8..i % 8, None, &[]))
+            .collect(),
+        vec![payload_diagnostic(
+            "E3",
+            "labels",
+            0..1,
+            None,
+            &(0..300).map(|_| (0..1, "l")).collect::<Vec<_>>(),
+        )],
+        vec![payload_diagnostic(
+            "E4",
+            &"x".repeat(300_000),
+            0..1,
+            None,
+            &[],
+        )],
+    ];
+    for diagnostics in bad {
+        for semantic in [false, true] {
+            let failure = if semantic {
+                AnalysisFailure::Semantic {
+                    diagnostics: diagnostics.clone(),
+                }
+            } else {
+                AnalysisFailure::Parse {
+                    diagnostics: diagnostics.clone(),
+                }
+            };
+            cases.push(PayloadCase {
+                uri: "untitled:a".into(),
+                text: text.into(),
+                failure,
+            });
+        }
+    }
+    let related = payload_diagnostic("E1", "m", 0..1, Some("h"), &[(12..14, "here")]);
+    for uri in [
+        "",
+        "file:///a\u{7}b",
+        &"u".repeat(5000),
+        "file:///ünï \"q\"",
+    ] {
+        cases.push(PayloadCase {
+            uri: uri.into(),
+            text: text.into(),
+            failure: AnalysisFailure::Semantic {
+                diagnostics: vec![related.clone()],
+            },
+        });
+    }
+    cases.push(PayloadCase {
+        uri: "untitled:big".into(),
+        text: "x".repeat(120_000),
+        failure: AnalysisFailure::Parse {
+            diagnostics: vec![related.clone()],
+        },
+    });
+    cases.push(PayloadCase {
+        uri: "untitled:sep".into(),
+        text: "fn a() {}\u{2028}fn b() {}".into(),
+        failure: AnalysisFailure::Parse {
+            diagnostics: vec![related],
+        },
+    });
+    for reason in ["analysis source byte budget exceeded", "trait \"T\"\n\u{0}"] {
+        cases.push(PayloadCase {
+            uri: "untitled:r".into(),
+            text: text.into(),
+            failure: AnalysisFailure::Resource {
+                reason: reason.into(),
+            },
+        });
+        cases.push(PayloadCase {
+            uri: "untitled:u".into(),
+            text: text.into(),
+            failure: AnalysisFailure::Unsupported {
+                reason: reason.into(),
+            },
+        });
+    }
+    cases
+}
+
+/// `session::diagnostic_payload_answer` against `lsp_diagnostic_payload`
+/// under each pair of publication capabilities, as parsed JSON (the Rust
+/// answer's keys are sorted, the port's are in LSP order).
+#[test]
+fn diagnostic_payload_matches_rust() {
+    use vesper::lsp::{diagnostic_payload_answer, diagnostic_payload_words};
+    let entry = payload_entry();
+    let mut differ = vec![];
+    let mut kinds = BTreeMap::<String, usize>::new();
+    let cases = payload_cases();
+    for case in &cases {
+        // The document store refuses a text its line index refuses.
+        let Ok(index) = LineIndex::new(Arc::from(case.text.as_str()), index_limits()) else {
+            continue;
+        };
+        for (related, help) in [(true, true), (false, true), (true, false), (false, false)] {
+            let rust =
+                diagnostic_payload_answer(&case.uri, &index, &case.failure, related, help, 1);
+            let parsed: Value = serde_json::from_str(&rust).unwrap();
+            if related && help {
+                let kind = format!(
+                    "{} {}",
+                    parsed["status"].as_str().unwrap_or(""),
+                    parsed["diagnostics"][0]["data"]["kind"]
+                        .as_str()
+                        .unwrap_or("")
+                );
+                *kinds.entry(kind).or_default() += 1;
+            }
+            let words =
+                diagnostic_payload_words(&case.uri, &case.text, &case.failure, related, help, 1);
+            let vesper = entry.text(&words);
+            match serde_json::from_str::<Value>(&vesper) {
+                Ok(v) if v == parsed => {}
+                _ => differ.push(format!(
+                    "{:?} {related} {help}: {}",
+                    &case.text[..case.text.len().min(60)],
+                    first_difference(&rust, &vesper).unwrap_or_default()
+                )),
+            }
+        }
+    }
+    eprintln!(
+        "diagnostic payload: {} cases x 4 capabilities ({kinds:?}), {} differ",
+        cases.len(),
+        differ.len()
+    );
+    assert!(differ.is_empty(), "{:#?}", &differ[..differ.len().min(8)]);
+}
+
+/// Rust against Vesper with both capabilities off (the filter runs),
+/// `rounds` payloads per call, best of five ABBA pairs per case. The words
+/// are written outside the timing; the port's JSON is parsed inside it, as
+/// the session would.
+#[test]
+#[ignore]
+fn diagnostic_payload_speed() {
+    use vesper::lsp::{diagnostic_payload_answer, diagnostic_payload_words};
+    let entry = payload_entry();
+    let rounds = 8;
+    let mut totals = [Duration::ZERO; 2];
+    let cases = payload_cases();
+    for case in &cases {
+        // The document store refuses a text its line index refuses.
+        let Ok(index) = LineIndex::new(Arc::from(case.text.as_str()), index_limits()) else {
+            continue;
+        };
+        let words =
+            diagnostic_payload_words(&case.uri, &case.text, &case.failure, false, false, rounds);
+        let time = |f: &dyn Fn()| {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed()
+        };
+        let rust = || {
+            std::hint::black_box(diagnostic_payload_answer(
+                &case.uri,
+                &index,
+                &case.failure,
+                false,
+                false,
+                rounds,
+            ));
+        };
+        let port = || {
+            let text = entry.text(&words);
+            std::hint::black_box(serde_json::from_str::<Value>(&text).ok());
+        };
+        let mut best = [Duration::MAX; 2];
+        for _ in 0..5 {
+            best[0] = best[0].min(time(&rust));
+            best[1] = best[1].min(time(&port));
+            best[1] = best[1].min(time(&port));
+            best[0] = best[0].min(time(&rust));
+        }
+        totals[0] += best[0];
+        totals[1] += best[1];
+    }
+    let per = cases.len() as u32 * rounds as u32;
+    eprintln!(
+        "diagnostic payload ({} cases x {rounds}): rust {:?}; vesper {:?} (ratio {:.2})",
+        cases.len(),
         totals[0] / per,
         totals[1] / per,
         totals[1].as_secs_f64() / totals[0].as_secs_f64()

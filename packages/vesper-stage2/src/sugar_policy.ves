@@ -1,0 +1,1461 @@
+// File-local policy records carried by the Stage 2 package graph.
+// Validate every length before consuming a record; malformed metadata is
+// not equivalent to an expansion without restrictions.
+use @vesper/ast::{ArgNode, Ast, ExprNode, FnNode, ItemNode, expr_at, list_at, list_len, none};
+use @vesper/ast::lower::{lower_source};
+use @vesper/check-data::input::{Ctx};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{EffNode, TyKind, TyMode, TyPass, Types, default_type};
+use @vesper/check-core-typing::ints::{Lit as IntLit, fits, int_bits, int_unsigned};
+use @vesper/place-ir::codes::{Lit};
+use @vesper/check-data::world::{bounds_new, mode_of};
+use @vesper/place-ir-lower::ast::{Ast as IrAst, Ex};
+use @vesper/place-ir-lower::ops::{resolve_seq_call, seq_arg_pass, seq_may_fail};
+use @vesper/check-names-packages::{
+    AssembledModule, Assembly, AssemblyMetadata, assembly_source_size, assembly_sugar_policy,
+    resolve_sugar_effect_row
+};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use self::collect::{lower_effects};
+
+const EXPR_NAME: u8 = 2;
+const EXPR_CALL: u8 = 6;
+const EXPR_FIELD: u8 = 7;
+const EXPR_INDEX: u8 = 8;
+const EXPR_ASSIGN: u8 = 12;
+// Expression codes in the typed PlaceIR lowering input, not the syntax AST.
+const IR_LITERAL: u8 = 1;
+const IR_NAME: u8 = 2;
+const IR_TUPLE: u8 = 3;
+const IR_FIELD: u8 = 5;
+const IR_INDEX: u8 = 6;
+const IR_UNARY: u8 = 7;
+const IR_BINARY: u8 = 8;
+const IR_ASSIGN: u8 = 9;
+const IR_RANGE: u8 = 17;
+const IR_CLOSURE: u8 = 21;
+const ALL_HIGH_BITS: u64 = 18446744073709551615;
+const IR_CALL: u8 = 11;
+const CALL_ARG_WORDS: u64 = 2;
+const ARG_INOUT: u8 = 1;
+const ARG_SINK: u8 = 2;
+
+pub copy struct PolicySpan {
+    file: u64,
+    start: u64,
+    end: u64,
+}
+
+pub copy struct PolicyRegion {
+    span: PolicySpan,
+    first_hole: u64,
+    hole_count: u64,
+    first_place: u64,
+    place_count: u64,
+    emits_start: u64,
+    emits_end: u64,
+    call: PolicySpan,
+    rule_start: u64,
+    rule_end: u64,
+    author_module: u64,
+    caller_module: u64,
+}
+
+pub enum PolicyFailureKind: _ {
+    Metadata = 1,
+    Access = 2,
+    Effect = 3
+}
+
+pub copy struct PolicyFailure {
+    kind: u8,
+    origin: Option[PolicyRegion],
+}
+
+// Keep the success path allocation-free: zero is success, the low
+// bits are the kind, and the rest are the region index plus one.
+const POLICY_FAILURE_KIND_BITS: u32 = 2;
+const POLICY_FAILURE_KIND_MASK: u64 = 3;
+pub const POLICY_OK: u64 = 0;
+pub const POLICY_BAD_METADATA: u64 = 1;
+
+fn policy_fault(kind: u8, region: u64) -> u64 {
+    wrapping_shl_u64(wrapping_add(region, 1), POLICY_FAILURE_KIND_BITS) | widen_u64(kind)
+}
+
+fn materialize_policy_fault(in policies: SugarPolicies, failure: u64) -> Option[PolicyFailure] {
+    if failure == POLICY_OK {
+        return Option::None;
+    }
+    let indexed_region = wrapping_shr_u64(failure, POLICY_FAILURE_KIND_BITS);
+    let origin = if indexed_region == 0 {
+        Option::None
+    } else {
+        policies.regions.try_get(wrapping_sub(indexed_region, 1))
+    };
+    Option::Some(PolicyFailure {
+        kind: wrapping_u8(failure & POLICY_FAILURE_KIND_MASK),
+        origin: origin
+    })
+}
+
+pub fn diagnose_policy_fault(in src: PolicyInputs, failure: u64) -> Option[PolicyFailure] {
+    materialize_policy_fault(in src.policies, failure)
+}
+
+pub copy struct PolicyPlace {
+    span: PolicySpan,
+    floor: u64,
+}
+
+pub struct SugarPolicies {
+    regions: ChunkSeq[PolicyRegion],
+    holes: ChunkSeq[PolicySpan],
+    places: ChunkSeq[PolicyPlace],
+    emitted_text: ChunkSeq[u8],
+}
+
+const HOLE_WIDTH: u64 = 2;
+const PLACE_WIDTH: u64 = 3;
+const RULE_SPAN_OFFSET: u64 = 2;
+const RULE_IMPORT_OFFSET: u64 = 4;
+const LOCAL_RULE: u64 = 18446744073709551615;
+const PROVENANCE_WIDTH: u64 = 5;
+const PASS_IN: u64 = 1;
+const PASS_INOUT: u64 = 2;
+const PASS_OUT: u64 = 3;
+const PASS_SINK: u64 = 4;
+
+pub struct PolicyInputs {
+    policies: SugarPolicies,
+    module_files: ChunkSeq[u64],
+    file_bases: ChunkSeq[u64],
+    rows: ChunkSeq[u32],
+}
+
+pub fn empty_inputs() -> PolicyInputs {
+    PolicyInputs {
+        policies: SugarPolicies {
+            regions: ChunkSeq::new[PolicyRegion](),
+            holes: ChunkSeq::new[PolicySpan](),
+            places: ChunkSeq::new[PolicyPlace](),
+            emitted_text: ChunkSeq::new[u8]()
+        },
+        module_files: ChunkSeq::new[u64](),
+        file_bases: ChunkSeq::new[u64](),
+        rows: ChunkSeq::new[u32]()
+    }
+}
+
+pub fn policy_inputs(
+    in assembly: Assembly,
+    in mods: ChunkSeq[AssembledModule],
+    inout failure: Option[PolicyFailure]
+) -> Option[PolicyInputs] {
+    failure = Option::None;
+    let (words, bases) = match assembly_sugar_policy(in assembly) {
+        Option::Some(data) => data,
+        Option::None => return Option::None,
+    };
+    if words.len() == 0 {
+        return Option::Some(empty_inputs());
+    }
+    let policies = match decode(in words.as_slice(), bases.len(), mods.len()) {
+        Option::Some(policies) => policies,
+        Option::None => return Option::None,
+    };
+    let mut modules = ChunkSeq::new[u64]();
+    for i in 0..mods.len() {
+        match mods.try_get(i) {
+            Option::Some(m) => modules.push(widen_u64(m.file)),
+            Option::None => return Option::None,
+        }
+    }
+    for i in 0..policies.regions.len() {
+        let region = match policies.regions.try_get(i) {
+            Option::Some(region) => region,
+            Option::None => return Option::None,
+        };
+        if region.span.file != modules.try_get(region.caller_module).unwrap_or(LOCAL_RULE) {
+            return Option::None;
+        }
+        match assembly_source_size(in assembly, region.caller_module) {
+            Option::Some(size) => {
+                if region.span.end > size {
+                    return Option::None;
+                }
+            },
+            Option::None => return Option::None,
+        }
+    }
+    let fault = module_access_fault(in policies, in bases, in mods);
+    if fault != POLICY_OK {
+        failure = materialize_policy_fault(in policies, fault);
+        return Option::None;
+    }
+    Option::Some(PolicyInputs {
+        policies: policies,
+        module_files: modules,
+        file_bases: bases,
+        rows: ChunkSeq::new[u32]()
+    })
+}
+
+pub fn resolve_rows(
+    inout inputs: PolicyInputs,
+    inout assembly: Assembly,
+    inout names: Names,
+    inout types: Types
+) -> bool {
+    for i in 0..inputs.policies.regions.len() {
+        let region = match inputs.policies.regions.try_get(i) {
+            Option::Some(region) => region,
+            Option::None => return false,
+        };
+        match emitted_row(in inputs.policies, region, inout assembly, inout names, inout types) {
+            Option::Some(row) => inputs.rows.push(row),
+            Option::None => return false,
+        }
+    }
+    true
+}
+
+pub fn copy_inputs(in src: PolicyInputs) -> PolicyInputs {
+    let mut out = empty_inputs();
+    out.policies.regions.extend(in src.policies.regions.as_slice());
+    out.policies.holes.extend(in src.policies.holes.as_slice());
+    out.policies.places.extend(in src.policies.places.as_slice());
+    out.rows.extend(in src.rows.as_slice());
+    out.module_files.extend(in src.module_files.as_slice());
+    out.file_bases.extend(in src.file_bases.as_slice());
+    out
+}
+
+pub fn has_policy_at(in src: PolicyInputs, start: u64) -> bool {
+    match src.module_files.try_get(start >> 32) {
+        Option::Some(file) => file_has_policy(in src.policies, file),
+        Option::None => false,
+    }
+}
+
+// Stage 2 expression spans use the module index in the high word and the
+// assembler's virtual source offset in the low word.
+pub fn resolved_span(in src: PolicyInputs, start: u64, end: u64) -> Option[PolicySpan] {
+    let module = start >> 32;
+    if module != end >> 32 {
+        return Option::None;
+    }
+    let file = match src.module_files.try_get(module) {
+        Option::Some(file) => file,
+        Option::None => return Option::None,
+    };
+    let base = match src.file_bases.try_get(file) {
+        Option::Some(base) => base,
+        Option::None => return Option::None,
+    };
+    let lo = widen_u64(wrapping_u32(start));
+    let hi = widen_u64(wrapping_u32(end));
+    if lo < base || lo > hi {
+        return Option::None;
+    }
+    Option::Some(PolicySpan {
+        file: file,
+        start: wrapping_sub(lo, base),
+        end: wrapping_sub(hi, base)
+    })
+}
+
+fn word(in src: Slice[u64], n: u64) -> u64 {
+    src.try_get(n).unwrap_or(0)
+}
+
+fn room(from: u64, to: u64, count: u64, width: u64) -> bool {
+    if from > to {
+        return false;
+    }
+    let remaining = wrapping_sub(to, from);
+    let available = match width {
+        1 => remaining,
+        HOLE_WIDTH => remaining / HOLE_WIDTH,
+        PLACE_WIDTH => remaining / PLACE_WIDTH,
+        PROVENANCE_WIDTH => remaining / PROVENANCE_WIDTH,
+        _ => return false,
+    };
+    count <= available
+}
+
+fn span(in src: Slice[u64], file: u64, start: u64) -> PolicySpan {
+    PolicySpan { file: file, start: word(in src, start), end: word(in src, wrapping_add(start, 1)) }
+}
+
+pub fn contains(outer: PolicySpan, inner: PolicySpan) -> bool {
+    outer.file == inner.file
+        && inner.start <= inner.end
+        && outer.start <= inner.start
+        && inner.end <= outer.end
+}
+
+fn decode_module(
+    file: u64,
+    caller: u64,
+    in authors: Slice[u64],
+    in src: Slice[u64],
+    inout dst: SugarPolicies
+) -> bool {
+    if src.len() == 0 {
+        return false;
+    }
+    let mut pos: u64 = 1;
+    let region_count = word(in src, 0);
+    for _ in 0..region_count {
+        if !room(pos, src.len(), 1, 3) {
+            return false;
+        }
+        let region = span(in src, file, pos);
+        if region.start > region.end {
+            return false;
+        }
+        let holes = word(in src, wrapping_add(pos, 2));
+        pos = wrapping_add(pos, 3);
+        if !room(pos, src.len(), holes, HOLE_WIDTH) {
+            return false;
+        }
+        let first_hole = dst.holes.len();
+        for _ in 0..holes {
+            let hole = span(in src, file, pos);
+            if !contains(region, hole) {
+                return false;
+            }
+            dst.holes.push(hole);
+            pos = wrapping_add(pos, HOLE_WIDTH);
+        }
+        if !room(pos, src.len(), 1, 1) {
+            return false;
+        }
+        let places = word(in src, pos);
+        pos = wrapping_add(pos, 1);
+        if !room(pos, src.len(), places, PLACE_WIDTH) {
+            return false;
+        }
+        let first_place = dst.places.len();
+        for _ in 0..places {
+            let place = span(in src, file, pos);
+            let floor = word(in src, wrapping_add(pos, 2));
+            if !contains(region, place) || floor < PASS_IN || floor > PASS_SINK {
+                return false;
+            }
+            dst.places.push(PolicyPlace { span: place, floor: floor });
+            pos = wrapping_add(pos, PLACE_WIDTH);
+        }
+        if !room(pos, src.len(), 1, 1) {
+            return false;
+        }
+        let effect_len = word(in src, pos);
+        pos = wrapping_add(pos, 1);
+        if !room(pos, src.len(), effect_len, 1) {
+            return false;
+        }
+        let emits_start = dst.emitted_text.len();
+        for _ in 0..effect_len {
+            let byte = word(in src, pos);
+            if byte > 255 {
+                return false;
+            }
+            dst.emitted_text.push(wrapping_u8(byte));
+            pos = wrapping_add(pos, 1);
+        }
+        if !room(pos, src.len(), 1, PROVENANCE_WIDTH) {
+            return false;
+        }
+        let call = span(in src, file, pos);
+        let rule = span(in src, file, wrapping_add(pos, RULE_SPAN_OFFSET));
+        if call.start > call.end || rule.start > rule.end {
+            return false;
+        }
+        // The import is in the expander registry's numbering; translate
+        // it through the loader's author map, never through caller imports.
+        let defining_import = word(in src, wrapping_add(pos, RULE_IMPORT_OFFSET));
+        let author = if defining_import == LOCAL_RULE {
+            caller
+        } else {
+            match authors.try_get(defining_import) {
+                Option::Some(module) => module,
+                Option::None => return false,
+            }
+        };
+        pos = wrapping_add(pos, PROVENANCE_WIDTH);
+        dst.regions.push(PolicyRegion {
+            span: region,
+            first_hole: first_hole,
+            hole_count: holes,
+            first_place: first_place,
+            place_count: places,
+            emits_start: emits_start,
+            emits_end: dst.emitted_text.len(),
+            call: call,
+            rule_start: rule.start,
+            rule_end: rule.end,
+            author_module: author,
+            caller_module: caller
+        });
+    }
+    pos == src.len()
+}
+
+pub fn decode(in src: Slice[u64], files: u64, modules: u64) -> Option[SugarPolicies] {
+    let mut out = SugarPolicies {
+        regions: ChunkSeq::new[PolicyRegion](),
+        holes: ChunkSeq::new[PolicySpan](),
+        places: ChunkSeq::new[PolicyPlace](),
+        emitted_text: ChunkSeq::new[u8]()
+    };
+    let mut pos: u64 = 0;
+    loop {
+        if pos >= src.len() {
+            break;
+        }
+        if !room(pos, src.len(), 1, 2) {
+            return Option::None;
+        }
+        let file = word(in src, pos);
+        let words = word(in src, wrapping_add(pos, 1));
+        pos = wrapping_add(pos, 2);
+        if file >= files || words < 2 || !room(pos, src.len(), words, 1) {
+            return Option::None;
+        }
+        let end = wrapping_add(pos, words);
+        let caller = word(in src, pos);
+        let count = word(in src, wrapping_add(pos, 1));
+        let authors_start = wrapping_add(pos, 2);
+        if caller >= modules || !room(authors_start, end, count, 1) {
+            return Option::None;
+        }
+        let records_start = wrapping_add(authors_start, count);
+        let authors = src[authors_start..records_start];
+        for i in 0..authors.len() {
+            if word(in authors, i) >= modules {
+                return Option::None;
+            }
+        }
+        let records = src[records_start..end];
+        if !decode_module(file, caller, in authors, in records, inout out) {
+            return Option::None;
+        }
+        pos = end;
+    }
+    Option::Some(out)
+}
+
+pub fn caller_supplied(
+    in policies: SugarPolicies,
+    region: PolicyRegion,
+    operation: PolicySpan
+) -> bool {
+    let end = wrapping_add(region.first_hole, region.hole_count);
+    for i in region.first_hole..end {
+        match policies.holes.try_get(i) {
+            Option::Some(hole) => {
+                if contains(hole, operation) {
+                    return true;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    false
+}
+
+fn permit(floor: u64, pass: u64) -> bool {
+    // An assignment to an initialized capture replaces the old value.
+    let requested = if pass == PASS_OUT && floor != PASS_OUT {
+        PASS_INOUT
+    } else {
+        pass
+    };
+    floor == requested
+        || floor == PASS_INOUT && requested == PASS_IN
+        || floor == PASS_SINK && (requested == PASS_IN || requested == PASS_INOUT)
+}
+
+// Use the resolved operation span and the place or one of its projection
+// prefixes. An operation wholly in a caller expression belongs to the caller.
+fn access_failure(
+    in policies: SugarPolicies,
+    operation: PolicySpan,
+    place: PolicySpan,
+    requested: u64
+) -> u64 {
+    if requested < PASS_IN || requested > PASS_SINK {
+        return POLICY_BAD_METADATA;
+    }
+    for i in 0..policies.regions.len() {
+        let region = match policies.regions.try_get(i) {
+            Option::Some(region) => region,
+            Option::None => return POLICY_BAD_METADATA,
+        };
+        if !contains(region.span, operation) || caller_supplied(in policies, region, operation) {
+            continue;
+        }
+        let end = wrapping_add(region.first_place, region.place_count);
+        for j in region.first_place..end {
+            match policies.places.try_get(j) {
+                Option::Some(capture) => {
+                    if contains(capture.span, place) && !permit(capture.floor, requested) {
+                        return policy_fault(PolicyFailureKind::Access, i);
+                    }
+                },
+                Option::None => return policy_fault(PolicyFailureKind::Metadata, i),
+            }
+        }
+    }
+    POLICY_OK
+}
+
+// A direct value use has no enclosing call signature. Its spelling
+// still starts at the captured place, even after a template adds a
+// field projection. Check the capture at this exact source occurrence.
+pub fn captured_value_fault(in policies: SugarPolicies, site: PolicySpan, pass: u8) -> u64 {
+    let requested = policy_pass(pass);
+    for i in 0..policies.regions.len() {
+        let region = match policies.regions.try_get(i) {
+            Option::Some(region) => region,
+            Option::None => return POLICY_BAD_METADATA,
+        };
+        if !contains(region.span, site) {
+            continue;
+        }
+        let end = wrapping_add(region.first_place, region.place_count);
+        for j in region.first_place..end {
+            match policies.places.try_get(j) {
+                Option::Some(capture) => {
+                    if capture.span.file == site.file
+                        && capture.span.start == site.start
+                        && capture.span.end <= site.end
+                        && !permit(capture.floor, requested)
+                    {
+                        return policy_fault(PolicyFailureKind::Access, i);
+                    }
+                },
+                Option::None => return policy_fault(PolicyFailureKind::Metadata, i),
+            }
+        }
+    }
+    POLICY_OK
+}
+
+pub fn has_failure(failure: Option[PolicyFailure]) -> bool {
+    match failure {
+        Option::Some(_) => true,
+        Option::None => false,
+    }
+}
+
+fn local_span(file: u64, base: u64, node: ExprNode) -> PolicySpan {
+    PolicySpan {
+        file: file,
+        start: wrapping_sub(widen_u64(node.start), base),
+        end: wrapping_sub(widen_u64(node.end), base)
+    }
+}
+
+fn explicit_place_fault(
+    in policies: SugarPolicies,
+    in ast: Ast,
+    base: u64,
+    op: PolicySpan,
+    place: u32,
+    pass: u64
+) -> u64 {
+    let mut current = place;
+    loop {
+        if current == none() {
+            return POLICY_OK;
+        }
+        let expr = expr_at(in ast, current);
+        if expr.kind != EXPR_NAME && expr.kind != EXPR_FIELD && expr.kind != EXPR_INDEX {
+            return POLICY_OK;
+        }
+        let fault = access_failure(in policies, op, local_span(op.file, base, expr), pass);
+        if fault != POLICY_OK {
+            return fault;
+        }
+        if expr.kind == EXPR_NAME {
+            return POLICY_OK;
+        }
+        current = expr.a;
+    }
+}
+
+pub fn resolved_place_failure(
+    in src: PolicyInputs,
+    in a: IrAst,
+    site: PolicySpan,
+    place: u64,
+    pass: u8
+) -> u64 {
+    let mut current = place;
+    loop {
+        let e = match a.exs.try_get(current) {
+            Option::Some(expression) => expression,
+            Option::None => return POLICY_BAD_METADATA,
+        };
+        if e.kind != IR_NAME && e.kind != IR_FIELD && e.kind != IR_INDEX {
+            return POLICY_OK;
+        }
+        match resolved_span(in src, e.s0, e.s1) {
+            Option::Some(span) => {
+                let fault = access_failure(in src.policies, site, span, policy_pass(pass));
+                if fault != POLICY_OK {
+                    return fault;
+                }
+            },
+            Option::None => {
+                if has_policy_at(in src, e.s0) || has_policy_at(in src, e.s1) {
+                    return POLICY_BAD_METADATA;
+                }
+                return POLICY_OK;
+            },
+        }
+        if e.kind == IR_NAME {
+            return POLICY_OK;
+        }
+        current = e.a;
+    }
+}
+
+fn authored_operation(in policies: SugarPolicies, site: PolicySpan) -> bool {
+    for i in 0..policies.regions.len() {
+        match policies.regions.try_get(i) {
+            Option::Some(r) => {
+                if contains(r.span, site) && !caller_supplied(in policies, r, site) {
+                    return true;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    false
+}
+
+fn primitive_operand_pass(inout ctx: Ctx, in a: IrAst, arg: u64, mode: u8) -> u8 {
+    if mode != TyPass::Sink {
+        return mode;
+    }
+    // A primitive by-value read of a Copy operand is not a move of the
+    // caller's place. Unresolved types do not justify that downgrade.
+    let e = a.ex(arg);
+    let ty = ctx.world.expr_type(e.s0, e.s1);
+    if widen_u64(ty) >= ctx.types.nodes.len() || ctx.types.kind(ty) == TyKind::Infer {
+        return mode;
+    }
+    let bounds = bounds_new();
+    if mode_of(inout ctx.types, in ctx.names, in ctx.world, ty, in bounds) == TyMode::Copy {
+        TyPass::In
+    } else {
+        mode
+    }
+}
+
+pub fn failure_row(inout names: Names, inout types: Types, error_ty: u32) -> u32 {
+    let fail = names.intern(in "Fail".as_bytes());
+    let mut args = ChunkSeq::new[u32]();
+    args.push(error_ty);
+    let mut effects = ChunkSeq::new[EffNode]();
+    effects.push(EffNode { label: 0, name: fail, a: 0, n: 1 });
+    types.mk_row(in effects, in args, 0)
+}
+
+fn runtime_failure_row(inout ctx: Ctx) -> u32 {
+    let error = ctx.names.intern(in "RuntimeError".as_bytes());
+    let error_ty = ctx.types.named0(error);
+    failure_row(inout ctx.names, inout ctx.types, error_ty)
+}
+
+pub fn effect_failure(
+    in names: Names,
+    in types: Types,
+    in src: PolicyInputs,
+    site: PolicySpan,
+    actual: u32
+) -> u64 {
+    for i in 0..src.policies.regions.len() {
+        match src.policies.regions.try_get(i) {
+            Option::Some(region) => {
+                if contains(region.span, site) && !caller_supplied(in src.policies, region, site) {
+                    match src.rows.try_get(i) {
+                        Option::Some(declared) => {
+                            if !permits_effects(in names, in types, declared, actual) {
+                                return policy_fault(PolicyFailureKind::Effect, i);
+                            }
+                        },
+                        Option::None => return POLICY_BAD_METADATA,
+                    }
+                }
+            },
+            Option::None => return POLICY_BAD_METADATA,
+        }
+    }
+    POLICY_OK
+}
+
+fn known_ty(in ctx: Ctx, expr: Ex) -> u32 {
+    ctx.world.expr_type(expr.s0, expr.s1)
+}
+
+// A narrow, allocation-light fact: a literal representable by one
+// unsigned magnitude. Wider values are not treated as proven.
+fn integer_literal(in ctx: Ctx, in a: IrAst, e: Ex) -> Option[IntLit] {
+    if e.kind == IR_UNARY && ctx.names.spells(wrapping_u32(e.a), in "-".as_bytes()) {
+        return match integer_literal(in ctx, in a, a.ex(e.b)) {
+            Option::Some(value) => Option::Some(IntLit {
+                neg: !value.neg && value.mag != 0,
+                mag: value.mag,
+                hi: 0
+            }),
+            Option::None => Option::None,
+        };
+    }
+    if e.kind != IR_LITERAL || e.a != Lit::Int {
+        return Option::None;
+    }
+    if e.c == 0 {
+        Option::Some(IntLit { neg: false, mag: e.b, hi: 0 })
+    } else if e.c == ALL_HIGH_BITS && e.b != 0 {
+        Option::Some(IntLit { neg: true, mag: wrapping_sub(0, e.b), hi: 0 })
+    } else {
+        Option::None
+    }
+}
+
+fn is_op(in ctx: Ctx, name: u32, in spelling: Str, in assignment: Str, in indexed: Str) -> bool {
+    ctx.names.spells(name, in spelling.as_bytes())
+        || ctx.names.spells(name, in assignment.as_bytes())
+        || ctx.names.spells(name, in indexed.as_bytes())
+}
+
+fn literal_sum(a: IntLit, b: IntLit) -> Option[IntLit] {
+    if a.neg != b.neg {
+        if a.mag >= b.mag {
+            let mag = wrapping_sub(a.mag, b.mag);
+            return Option::Some(IntLit { neg: a.neg && mag != 0, mag: mag, hi: 0 });
+        }
+        return Option::Some(IntLit { neg: b.neg, mag: wrapping_sub(b.mag, a.mag), hi: 0 });
+    }
+    let mag = wrapping_add(a.mag, b.mag);
+    if mag < a.mag {
+        Option::None
+    } else {
+        Option::Some(IntLit { neg: a.neg, mag: mag, hi: 0 })
+    }
+}
+
+fn literal_product(a: IntLit, b: IntLit) -> Option[IntLit] {
+    // The product of two u64 magnitudes is exactly representable in u128.
+    let product = wrapping_mul(widen_u128(a.mag), widen_u128(b.mag));
+    if product > widen_u128(ALL_HIGH_BITS) {
+        Option::None
+    } else {
+        let mag = wrapping_u64(product);
+        Option::Some(IntLit { neg: mag != 0 && a.neg != b.neg, mag: mag, hi: 0 })
+    }
+}
+
+fn arithmetic_fault(
+    inout ctx: Ctx,
+    in src: PolicyInputs,
+    site: PolicySpan,
+    in error_name: Str
+) -> u64 {
+    let error = ctx.names.intern(in error_name.as_bytes());
+    let err_ty = ctx.types.named0(error);
+    let actual = failure_row(inout ctx.names, inout ctx.types, err_ty);
+    effect_failure(in ctx.names, in ctx.types, in src, site, actual)
+}
+
+fn arithmetic_policy(
+    inout ctx: Ctx,
+    in a: IrAst,
+    in src: PolicyInputs,
+    site: PolicySpan,
+    e: Ex
+) -> u64 {
+    let op = wrapping_u32(e.a);
+    let unary = e.kind == IR_UNARY;
+    let add = !unary && is_op(in ctx, op, in "+", in "+=", in "[]+=");
+    let sub = is_op(in ctx, op, in "-", in "-=", in "[]-=");
+    let mul = !unary && is_op(in ctx, op, in "*", in "*=", in "[]*=");
+    let div = !unary && is_op(in ctx, op, in "/", in "/=", in "[]/=");
+    let rem = !unary && is_op(in ctx, op, in "%", in "%=", in "[]%=");
+    let shift = !unary
+        && (is_op(in ctx, op, in "<<", in "<<=", in "[]<<=")
+            || is_op(in ctx, op, in ">>", in ">>=", in "[]>>="));
+    if !(add || sub || mul || div || rem || shift) {
+        return POLICY_OK;
+    }
+    let lhs = a.ex(e.b);
+    let rhs = if unary { lhs } else { a.ex(e.c) };
+    let lty = known_ty(in ctx, lhs);
+    let indexed = e.kind == IR_ASSIGN && ctx.names.has_prefix(op, in "[]".as_bytes());
+    let raw = if indexed { ctx.types.arg(lty, 0) } else { lty };
+    let ty = default_type(inout ctx.types, raw);
+    let name = ctx.types.name(ty);
+    let bits = int_bits(ctx.world.k, name);
+    if name == ctx.world.k.f32_ || name == ctx.world.k.f64_ {
+        return POLICY_OK;
+    }
+    let right_expr = if indexed && rhs.kind == IR_TUPLE {
+        a.ex(a.x(wrapping_add(rhs.a, 1)))
+    } else {
+        rhs
+    };
+    let right: Option[IntLit] = integer_literal(in ctx, in a, right_expr);
+    // The compound-assignment arm has no literal left operand. Keep
+    // the payload type explicit even when the first arm is empty.
+    let left: Option[IntLit] = if e.kind == IR_ASSIGN {
+        Option::None
+    } else {
+        integer_literal(in ctx, in a, lhs)
+    };
+    if div || rem {
+        let nonzero = match right {
+            Option::Some(r) => r.mag != 0,
+            Option::None => false
+        };
+        if !nonzero {
+            let fault = arithmetic_fault(inout ctx, in src, site, in "RuntimeError");
+            if fault != POLICY_OK {
+                return fault;
+            }
+        }
+    }
+    let safe = if shift {
+        match right {
+            Option::Some(r) => !r.neg && r.mag < widen_u64(bits),
+            Option::None => false,
+        }
+    } else if rem {
+        true
+    } else if div {
+        if bits != 0 && int_unsigned(ctx.world.k, name) {
+            true
+        } else {
+            match right {
+                Option::Some(r) => {
+                    if !r.neg || r.mag != 1 {
+                        true
+                    } else {
+                        match left {
+                            Option::Some(l) => fits(
+                                ctx.world.k,
+                                name,
+                                IntLit { neg: !l.neg && l.mag != 0, mag: l.mag, hi: 0 }
+                            ),
+                            Option::None => false,
+                        }
+                    }
+                },
+                Option::None => false,
+            }
+        }
+    } else {
+        let fact: Option[IntLit] = if unary {
+            match left {
+                Option::Some(l) => Option::Some(IntLit {
+                    neg: !l.neg && l.mag != 0,
+                    mag: l.mag,
+                    hi: 0
+                }),
+                Option::None => Option::None,
+            }
+        } else {
+            match (left, right) {
+                (Option::Some(l), Option::Some(r)) => {
+                    if mul {
+                        literal_product(l, r)
+                    } else if sub {
+                        literal_sum(l, IntLit { neg: !r.neg && r.mag != 0, mag: r.mag, hi: 0 })
+                    } else {
+                        literal_sum(l, r)
+                    }
+                },
+                _ => Option::None,
+            }
+        };
+        match fact {
+            Option::Some(value) => fits(ctx.world.k, name, value),
+            Option::None => false,
+        }
+    };
+    if safe {
+        POLICY_OK
+    } else {
+        arithmetic_fault(inout ctx, in src, site, in "ArithOverflow")
+    }
+}
+
+fn index_policy(inout ctx: Ctx, in a: IrAst, in src: PolicyInputs, site: PolicySpan, e: Ex) -> u64 {
+    let index = a.ex(e.b);
+    if index.kind == IR_RANGE
+        || (index.kind == IR_BINARY && ctx.names.spells(wrapping_u32(index.a), in "..".as_bytes()))
+    {
+        // Slice formation is a borrow, not an effect, as in the native
+        // checker. Its loan is checked at the owning call or assignment.
+        return resolved_place_failure(in src, in a, site, e.a, TyPass::In);
+    }
+    let access = resolved_place_failure(in src, in a, site, e.a, TyPass::In);
+    if access != POLICY_OK {
+        return access;
+    }
+    let base_ty = known_ty(in ctx, a.ex(e.a));
+    if ctx.types.kind(base_ty) == TyKind::Tuple {
+        match integer_literal(in ctx, in a, index) {
+            Option::Some(value) => {
+                if !value.neg && value.mag < ctx.types.arity(base_ty) {
+                    return POLICY_OK;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    arithmetic_fault(inout ctx, in src, site, in "RuntimeError")
+}
+
+fn unresolved_operation(in src: PolicyInputs, site: PolicySpan) -> u64 {
+    for i in 0..src.policies.regions.len() {
+        match src.policies.regions.try_get(i) {
+            Option::Some(region) => {
+                if contains(region.span, site) && !caller_supplied(in src.policies, region, site) {
+                    return policy_fault(PolicyFailureKind::Metadata, i);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    POLICY_BAD_METADATA
+}
+
+// Check after the checker has installed typed spans in the world. The
+// canonical sequence resolver determines passes for the actual receiver
+// type, not just a method-name spelling that may name a different function.
+// Decline authored calls neither the typed checker nor this audit resolved.
+pub fn primitive_failure(
+    inout ctx: Ctx,
+    in a: IrAst,
+    in src: PolicyInputs,
+    in checked_calls: ChunkSeq[bool]
+) -> u64 {
+    if src.policies.regions.len() == 0 {
+        return POLICY_OK;
+    }
+    for eid in 0..a.exs.len() {
+        let call = a.ex(eid);
+        if call.kind != IR_CALL
+            && call.kind != IR_INDEX
+            && call.kind != IR_UNARY
+            && call.kind != IR_BINARY
+            && call.kind != IR_ASSIGN
+            && call.kind != IR_CLOSURE
+        {
+            continue;
+        }
+        let site = match resolved_span(in src, call.s0, call.s1) {
+            Option::Some(span) => span,
+            Option::None => {
+                if has_policy_at(in src, call.s0) || has_policy_at(in src, call.s1) {
+                    return POLICY_BAD_METADATA;
+                }
+                continue;
+            },
+        };
+        if !authored_operation(in src.policies, site) {
+            continue;
+        }
+        if call.kind == IR_CLOSURE {
+            // The Stage 2 expression checker does not establish ownership
+            // facts for an authored closure body. Caller holes are exempt.
+            return unresolved_operation(in src, site);
+        }
+        if call.kind != IR_CALL {
+            let fault = if call.kind == IR_INDEX {
+                index_policy(inout ctx, in a, in src, site, call)
+            } else {
+                arithmetic_policy(inout ctx, in a, in src, site, call)
+            };
+            if fault != POLICY_OK {
+                return fault;
+            }
+            continue;
+        }
+        let callee = a.ex(call.a);
+        // A bare name may be shadowed by a local callable; the field
+        // receiver path does not need the lowerer's name-alias stack.
+        let certified = checked_calls.try_get(eid).unwrap_or(false);
+        if callee.kind != IR_FIELD {
+            if !certified {
+                return unresolved_operation(in src, site);
+            }
+            continue;
+        }
+        let primitive = resolve_seq_call(inout ctx, in a, call, callee, false);
+        if !primitive.matched || !primitive.has_receiver {
+            if !certified {
+                return unresolved_operation(in src, site);
+            }
+            continue;
+        }
+        if seq_may_fail(in ctx, primitive.label) {
+            let actual = runtime_failure_row(inout ctx);
+            let fault = effect_failure(in ctx.names, in ctx.types, in src, site, actual);
+            if fault != POLICY_OK {
+                return fault;
+            }
+        }
+        let method = wrapping_u32(callee.b);
+        // Mutable views borrow the original place exclusively even when the
+        // low-level sequence op shares its shape with the read-only view.
+        let recv_pass = if ctx.names.spells(method, in "try_get_mut".as_bytes())
+            || ctx.names.spells(method, in "as_slice_mut".as_bytes())
+        {
+            TyPass::Inout
+        } else {
+            primitive.receiver_pass
+        };
+        let fault = resolved_place_failure(in src, in a, site, callee.a, recv_pass);
+        if fault != POLICY_OK {
+            return fault;
+        }
+        for i in 0..call.n {
+            let arg = a.x(wrapping_add(call.b, wrapping_add(wrapping_mul(i, CALL_ARG_WORDS), 1)));
+            let pass = primitive_operand_pass(
+                inout ctx,
+                in a,
+                arg,
+                seq_arg_pass(primitive.arg_mode, i)
+            );
+            let fault = resolved_place_failure(in src, in a, site, arg, pass);
+            if fault != POLICY_OK {
+                return fault;
+            }
+        }
+    }
+    POLICY_OK
+}
+
+fn file_has_policy(in policies: SugarPolicies, file: u64) -> bool {
+    for i in 0..policies.regions.len() {
+        match policies.regions.try_get(i) {
+            Option::Some(r) => {
+                if r.span.file == file {
+                    return true;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    false
+}
+
+pub fn policy_pass(mode: u8) -> u64 {
+    if mode == ARG_INOUT {
+        PASS_INOUT
+    } else if mode == ARG_SINK {
+        PASS_SINK
+    } else {
+        PASS_IN
+    }
+}
+
+fn plain_assignment(in operator: Str) -> bool {
+    operator == "="
+}
+
+// Verify explicit accesses on the assembled syntax. Resolved callee and
+// method passes are separate from explicit call syntax.
+pub fn explicit_access_valid(
+    in meta: AssemblyMetadata,
+    in modules: ChunkSeq[AssembledModule]
+) -> bool {
+    if meta.sugar_policy_truncated {
+        return false;
+    }
+    if meta.sugar_policy_words.len() == 0 {
+        return true;
+    }
+    let policies = match decode(
+        in meta.sugar_policy_words.as_slice(),
+        meta.file_base.len(),
+        modules.len()
+    ) {
+        Option::Some(policies) => policies,
+        Option::None => return false,
+    };
+    module_access_fault(in policies, in meta.file_base, in modules) == POLICY_OK
+}
+
+fn module_access_fault(
+    in policies: SugarPolicies,
+    in bases: ChunkSeq[u64],
+    in modules: ChunkSeq[AssembledModule]
+) -> u64 {
+    let mut name = String::new();
+    for i in 0..modules.len() {
+        match modules.try_get(i) {
+            Option::Some(m) => {
+                let file = widen_u64(m.file);
+                if !file_has_policy(in policies, file) {
+                    continue;
+                }
+                let base = match bases.try_get(file) {
+                    Option::Some(base) => base,
+                    Option::None => return POLICY_BAD_METADATA,
+                };
+                for j in 0..m.ast.exprs.len() {
+                    let e = expr_at(in m.ast, wrapping_u32(j));
+                    if e.kind == EXPR_ASSIGN {
+                        if !m.ast.names.resolve_into(symbol_from_id(e.a), inout name) {
+                            return POLICY_BAD_METADATA;
+                        }
+                        let pass = if plain_assignment(in name.as_str()) {
+                            PASS_OUT
+                        } else {
+                            PASS_INOUT
+                        };
+                        let fault = explicit_place_fault(
+                            in policies,
+                            in m.ast,
+                            base,
+                            local_span(file, base, e),
+                            e.b,
+                            pass
+                        );
+                        if fault != POLICY_OK {
+                            return fault;
+                        }
+                    } else if e.kind == EXPR_CALL {
+                        for k in 0..list_len(in m.ast, e.c) {
+                            let id = list_at(in m.ast, e.c, k);
+                            match m.ast.args.get(idx_from_raw[ArgNode](id)) {
+                                Option::Some(arg) => {
+                                    if !arg.explicit {
+                                        continue;
+                                    }
+                                    let pass = policy_pass(arg.pass);
+                                    let fault = explicit_place_fault(
+                                        in policies,
+                                        in m.ast,
+                                        base,
+                                        local_span(file, base, e),
+                                        arg.expr,
+                                        pass
+                                    );
+                                    if fault != POLICY_OK {
+                                        return fault;
+                                    }
+                                },
+                                Option::None => return POLICY_BAD_METADATA,
+                            }
+                        }
+                    }
+                }
+            },
+            Option::None => return POLICY_BAD_METADATA,
+        }
+    }
+    POLICY_OK
+}
+
+// Intern an emits header in the same name/type tables as the resolved
+// operation. An absent header denotes the empty closed row.
+fn emitted_row(
+    in policies: SugarPolicies,
+    region: PolicyRegion,
+    inout assembly: Assembly,
+    inout names: Names,
+    inout types: Types
+) -> Option[u32] {
+    if region.emits_start == region.emits_end {
+        return Option::Some(types.empty_row);
+    }
+    if region.emits_start > region.emits_end || region.emits_end > policies.emitted_text.len() {
+        return Option::None;
+    }
+    let (ast, effects) = match parse_emitted_signature(
+        in policies.emitted_text[region.emits_start..region.emits_end]
+    ) {
+        Option::Some(parsed) => parsed,
+        Option::None => return Option::None,
+    };
+    let mut resolved = ast;
+    if !resolve_sugar_effect_row(inout assembly, region.author_module, inout resolved, effects) {
+        return Option::None;
+    }
+    closed_row(in resolved, effects, inout names, inout types)
+}
+
+fn parse_emitted_signature(in header: Slice[u8]) -> Option[(Ast, u32)] {
+    let mut source = ChunkSeq::new[u8]();
+    source.extend(in "fn __sugar_policy() ".as_bytes());
+    source.extend(in header);
+    source.extend(in " {}".as_bytes());
+    let text = match String::from_utf8(in source.as_slice()) {
+        Option::Some(text) => text,
+        Option::None => return Option::None,
+    };
+    let lowered = lower_source(in text.as_str());
+    if lowered.p.d.code.len() != 0 || lowered.ast.m_items.len() != 1 {
+        return Option::None;
+    }
+    let item_id = lowered.ast.m_items.try_get(0).unwrap_or(none());
+    let item = match lowered.ast.items.get(idx_from_raw[ItemNode](item_id)) {
+        Option::Some(item) => item,
+        Option::None => return Option::None,
+    };
+    let function = match lowered.ast.fns.get(idx_from_raw[FnNode](item.node)) {
+        Option::Some(function) => function,
+        Option::None => return Option::None,
+    };
+    if function.effects == none() {
+        Option::None
+    } else {
+        Option::Some((lowered.ast, function.effects))
+    }
+}
+
+fn closed_row(in ast: Ast, effects: u32, inout names: Names, inout types: Types) -> Option[u32] {
+    let mut cache = ChunkSeq::new[u32]();
+    let mut tmp = String::new();
+    let row = lower_effects(in ast, effects, inout names, inout types, inout cache, inout tmp);
+    if types.row(row).tail != 0 {
+        Option::None
+    } else {
+        Option::Some(row)
+    }
+}
+
+fn same_effect(in names: Names, in types: Types, allowed: EffNode, actual: EffNode) -> bool {
+    // Stage 2's typed rows encode Ffi[Library] as the nominal Ffi$Library
+    // symbol. A declaration with bare Ffi permits any library instance.
+    if allowed.name != actual.name
+        && !(names.spells(allowed.name, in "Ffi".as_bytes())
+            && names.has_prefix(actual.name, in "Ffi$".as_bytes()))
+    {
+        return false;
+    }
+    if allowed.label != 0 && allowed.label != actual.label {
+        return false;
+    }
+    let n = widen_u64(allowed.n);
+    if n == 0 {
+        return true;
+    }
+    if allowed.n != actual.n {
+        return false;
+    }
+    for j in 0..n {
+        let a = types.items.try_get(wrapping_add(widen_u64(allowed.a), j));
+        let b = types.items.try_get(wrapping_add(widen_u64(actual.a), j));
+        if a == Option::None || a != b {
+            return false;
+        }
+    }
+    true
+}
+
+// Compare the instantiated call row with the sugar's closed policy, not
+// with the enclosing function's permissions. Caller holes are handled by
+// the region lookup before any call to this predicate.
+pub fn permits_effects(in names: Names, in types: Types, allowed: u32, actual: u32) -> bool {
+    if widen_u64(allowed) >= types.rows.len() || widen_u64(actual) >= types.rows.len() {
+        return false;
+    }
+    let a = types.row(allowed);
+    let b = types.row(actual);
+    if a.tail != 0 || b.tail != 0 {
+        return false;
+    }
+    for i in 0..widen_u64(b.n) {
+        let got = types.effect_at(wrapping_add(widen_u64(b.a), i));
+        let mut found = false;
+        for k in 0..widen_u64(a.n) {
+            let cap = types.effect_at(wrapping_add(widen_u64(a.a), k));
+            if same_effect(in names, in types, cap, got) {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+    true
+}
+
+test {
+    use @vesper/check-data::input::{Ctx};
+    use @vesper/check-data::names::{names_new};
+    use @vesper/check-data::types::{types_new};
+
+    fn fixture_row(in header: Str, inout names: Names, inout types: Types) -> Option[u32] {
+        match parse_emitted_signature(in header.as_bytes()) {
+            Option::Some((ast, effects)) => closed_row(in ast, effects, inout names, inout types),
+            Option::None => Option::None,
+        }
+    }
+
+    fn test_policy_literal_proofs_do_not_wrap() -> bool {
+        let max = IntLit { neg: false, mag: ALL_HIGH_BITS, hi: 0 };
+        let one = IntLit { neg: false, mag: 1, hi: 0 };
+        let minus_one = IntLit { neg: true, mag: 1, hi: 0 };
+        let two = IntLit { neg: false, mag: 2, hi: 0 };
+        match (
+            literal_sum(max, one),
+            literal_sum(one, minus_one),
+            literal_product(max, one),
+            literal_product(max, two)
+        ) {
+            (Option::None, Option::Some(sum), Option::Some(product), Option::None) => {
+                !sum.neg && sum.mag == 0 && !product.neg && product.mag == ALL_HIGH_BITS
+            },
+            _ => false,
+        }
+    }
+
+    fn test_effect_policy_matches_resolved_type_arguments() -> bool {
+        let mut names = names_new();
+        let mut types = types_new(inout names);
+        let permitted = fixture_row(in "eff [Fail[u64]]", inout names, inout types);
+        let different = fixture_row(in "eff [Fail[bool]]", inout names, inout types);
+        let bare = fixture_row(in "eff [Fail]", inout names, inout types);
+        match (permitted, different, bare) {
+            (Option::Some(permitted), Option::Some(different), Option::Some(bare)) => {
+                permits_effects(in names, in types, permitted, permitted)
+                    && !permits_effects(in names, in types, permitted, different)
+                    && permits_effects(in names, in types, bare, different)
+            },
+            _ => false,
+        }
+    }
+
+    fn test_effect_policy_preserves_labels_and_ffi_instances() -> bool {
+        let mut names = names_new();
+        let mut types = types_new(inout names);
+        let author = fixture_row(in "eff [audit: Trace, Ffi[StdFs]]", inout names, inout types);
+        let same = fixture_row(in "eff [audit: Trace, Ffi[StdFs]]", inout names, inout types);
+        let other_label = fixture_row(in "eff [other: Trace]", inout names, inout types);
+        let other_library = fixture_row(in "eff [Ffi[StdEnv]]", inout names, inout types);
+        let bare = fixture_row(in "eff [Trace, Ffi]", inout names, inout types);
+        match (author, same, other_label, other_library, bare) {
+            (
+                Option::Some(a),
+                Option::Some(s),
+                Option::Some(l),
+                Option::Some(f),
+                Option::Some(b)
+            ) => {
+                permits_effects(in names, in types, a, s)
+                    && !permits_effects(in names, in types, a, l)
+                    && !permits_effects(in names, in types, a, f)
+                    && permits_effects(in names, in types, b, l)
+                    && permits_effects(in names, in types, b, f)
+            },
+            _ => false,
+        }
+    }
+
+    fn test_policy_wire_checks_bounds_before_loading() -> bool {
+        let data: [u64; 23] = [
+            0,
+            21,
+            0,
+            1,
+            1,
+            1,
+            10,
+            30,
+            1,
+            20,
+            21,
+            1,
+            20,
+            21,
+            1,
+            2,
+            91,
+            93,
+            3,
+            4,
+            1,
+            2,
+            0
+        ];
+        let mut frame = ChunkSeq::new[u64]();
+        for value in data {
+            frame.push(value);
+        }
+        let rows = match decode(in frame.as_slice(), 1, 2) {
+            Option::Some(table) => table,
+            Option::None => return false,
+        };
+        let r = match rows.regions.try_get(0) {
+            Option::Some(r) => r,
+            Option::None => return false,
+        };
+        let caller = PolicySpan { file: 0, start: 20, end: 21 };
+        let introduced = PolicySpan { file: 0, start: 19, end: 22 };
+        if access_failure(in rows, introduced, caller, PASS_IN) != POLICY_OK
+            || captured_value_fault(in rows, caller, TyPass::In) != POLICY_OK
+            || captured_value_fault(in rows, caller, TyPass::Sink) == POLICY_OK
+        {
+            return false;
+        }
+        // Use an ordinary parsed expression with synthetic policy spans
+        // to exercise the explicit access path without a full graph load.
+        let source = lower_source(in "fn value() -> u64 { x }");
+        let mut place = none();
+        for i in 0..source.ast.exprs.len() {
+            let expr = expr_at(in source.ast, wrapping_u32(i));
+            if expr.kind == EXPR_NAME
+                && widen_u64(expr.start) == caller.start
+                && widen_u64(expr.end) == caller.end
+            {
+                place = wrapping_u32(i);
+                break;
+            }
+        }
+        if place == none() {
+            return false;
+        }
+        let fault = explicit_place_fault(in rows, in source.ast, 0, introduced, place, PASS_INOUT);
+        let fail = match materialize_policy_fault(in rows, fault) {
+            Option::Some(fail) => fail,
+            Option::None => return false,
+        };
+        let reported = match fail.origin {
+            Option::Some(origin) => origin,
+            Option::None => return false,
+        };
+        fail.kind == PolicyFailureKind::Access
+            && reported.call.start == 3
+            && reported.call.end == 4
+            && reported.author_module == 1
+            && reported.rule_start == 1
+            && reported.rule_end == 2
+            && r.span.start == 10
+            && r.span.end == 30
+            && rows.places.len() == 1
+            && rows.emitted_text.len() == 2
+            && r.call.start == 3
+            && r.rule_start == 1
+            && r.rule_end == 2
+            && r.author_module == 1
+            && r.caller_module == 0
+            && caller_supplied(in rows, r, PolicySpan { file: 0, start: 20, end: 21 })
+            && !caller_supplied(in rows, r, PolicySpan { file: 0, start: 19, end: 22 })
+            && match decode(in frame[0..22], 1, 2)
+        {
+            Option::None => true,
+            Option::Some(_) => false,
+        }
+    }
+}

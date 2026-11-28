@@ -1,7 +1,7 @@
 //! `vesper resolve`: offline Loom resolution and locked validation (moved
 //! from the compiler's `package_commands`, self-hosting SH0 lane 2).
+use crate::atomic_file::atomic_write;
 use std::{fs, path::PathBuf};
-use vesper::atomic_file::atomic_write;
 
 pub fn resolve(args: Vec<String>) -> Result<(), String> {
     use std::collections::BTreeSet;

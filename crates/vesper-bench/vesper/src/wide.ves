@@ -117,7 +117,7 @@ pub fn w_mul_small(a: W, m: u64) -> W {
 
 // a << 1 with the bit shifted out of the top.
 fn w_shl1(a: W) -> W {
-    w((a.hi << 1) | (a.lo >> 63), a.lo << 1)
+    w(wrapping_shl_u64(a.hi, 1) | wrapping_shr_u64(a.lo, 63), wrapping_shl_u64(a.lo, 1))
 }
 
 // Unsigned (a / d, a % d) for d > 0, by shift and subtract. The remainder
@@ -126,7 +126,8 @@ fn w_shl1(a: W) -> W {
 pub fn w_udivrem(a: W, d: W) -> (W, W) {
     if a.hi == 0 && d.hi == 0 && d.lo != 0 {
         return handle Fail[RuntimeError] in {
-            (w_u64(a.lo / d.lo), w_u64(a.lo % d.lo))
+            let q = a.lo / d.lo;
+            (w_u64(q), w_u64(wrapping_sub(a.lo, wrapping_mul(q, d.lo))))
         } with {
             return v => v,
             raise(e, k) => (w_zero(), w_zero()),
@@ -148,7 +149,7 @@ pub fn w_udivrem(a: W, d: W) -> (W, W) {
             break;
         }
         i = wrapping_sub(i, 1);
-        let top = r.hi >> 63;
+        let top = wrapping_shr_u64(r.hi, 63);
         let bit = if i >= WORD_BITS {
             wrapping_shr_u64(a.hi, wrapping_u32(i)) & 1
         } else {
@@ -168,15 +169,19 @@ pub fn w_udivrem(a: W, d: W) -> (W, W) {
 // Schoolbook division by a divisor below 2^32, one 32-bit limb at a time:
 // each partial remainder is below the divisor, so every step fits a u64.
 fn w_udivrem_small(a: W, d: u64) -> (W, W) eff [Fail[RuntimeError]] {
-    let q3 = wrapping_shr_u64(a.hi, HALF_BITS) / d;
-    let r3 = wrapping_shr_u64(a.hi, HALF_BITS) % d;
+    let x3 = wrapping_shr_u64(a.hi, HALF_BITS);
+    let q3 = x3 / d;
+    let r3 = wrapping_sub(x3, wrapping_mul(q3, d));
     let x2 = wrapping_shl_u64(r3, HALF_BITS) | (a.hi & LOW_HALF);
     let q2 = x2 / d;
-    let x1 = wrapping_shl_u64(x2 % d, HALF_BITS) | wrapping_shr_u64(a.lo, HALF_BITS);
+    let r2 = wrapping_sub(x2, wrapping_mul(q2, d));
+    let x1 = wrapping_shl_u64(r2, HALF_BITS) | wrapping_shr_u64(a.lo, HALF_BITS);
     let q1 = x1 / d;
-    let x0 = wrapping_shl_u64(x1 % d, HALF_BITS) | (a.lo & LOW_HALF);
+    let r1 = wrapping_sub(x1, wrapping_mul(q1, d));
+    let x0 = wrapping_shl_u64(r1, HALF_BITS) | (a.lo & LOW_HALF);
     let q0 = x0 / d;
-    (w(wrapping_shl_u64(q3, HALF_BITS) | q2, wrapping_shl_u64(q1, HALF_BITS) | q0), w_u64(x0 % d))
+    let r0 = wrapping_sub(x0, wrapping_mul(q0, d));
+    (w(wrapping_shl_u64(q3, HALF_BITS) | q2, wrapping_shl_u64(q1, HALF_BITS) | q0), w_u64(r0))
 }
 
 // Floor division of a signed value by d > 0 (`i128::div_euclid` and

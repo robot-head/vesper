@@ -37,6 +37,23 @@ sys library HybridCommands (
     fn hc_lint_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
     fn hc_verify_run(nocapture in packed: CSlice[u8]) -> ForeignVal[u64];
     fn hc_verify_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
-    fn hc_lsp_serve() -> ForeignVal[u64];
-    fn hc_lsp_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    // The LSP loop's engine seam (@vesper/lsp-server, #1828 part 15):
+    // the Rust session behind the Vesper loop and the client's streams,
+    // crates/vesper-hybrid/src/lsp_engine.rs. `start` makes the session
+    // (0, or 1 with its error); `frame` and `tick` return the length of
+    // the frames they wrote, which `take` copies out; `exit` says how the
+    // last one ended (0 go on, 1 clean exit, 2 exit before shutdown, 3
+    // failed, with its error from `error`). `read` returns the bytes read,
+    // 0 at end of input, -1 once `wait_ms` passed (negative: no limit) or
+    // -2 on an error; `write` returns 0, or 1 on an error; `deadline` is
+    // how long the loop may wait before `tick` (-1: no timer is armed).
+    fn hc_lsp_engine_start() -> ForeignVal[u64];
+    fn hc_lsp_engine_frame(nocapture in body: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_lsp_engine_tick() -> ForeignVal[u64];
+    fn hc_lsp_engine_take(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_lsp_engine_exit() -> ForeignVal[u64];
+    fn hc_lsp_engine_error(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_lsp_engine_read(nocapture inout buf: CSlice[u8], wait_ms: i64) -> ForeignVal[i64];
+    fn hc_lsp_engine_write(nocapture in buf: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_lsp_engine_deadline() -> ForeignVal[i64];
 }

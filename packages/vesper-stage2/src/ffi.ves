@@ -1,0 +1,884 @@
+// The `.vsys` imports of a native library build (manuscript §16.3), as
+// src/ffi_lowering.rs `check_module` gives them to the checker: each
+// imported library's generated declarations (`types::Generated::append`:
+// wire structs, enums and handle types, then the `Ffi$Lib` effect) and the
+// rewriting of `Lib::f(..)` calls to that effect's operations.
+//
+// The type mapping is @vesper/ffi-lowering's port of src/ffi_lowering/types.rs
+// over each descriptor's canonical bytes (@vesper/vsys `parse_and_encode`).
+// Rust checks twice: pass 1 with slice parameters open (`$open`) to read
+// each slice argument's type, pass 2 with one operation per slice-length
+// vector used. Stage 2 checks once against the open operations
+// (`add_foreign_decls`, typecheck.ves `check_foreign_call`), then reads the
+// slice arguments' types from the checked spans and closes the effects to
+// the operations the calls use (`close_foreign_ops`).
+//
+// Not handled yet: `.vsys` constants, callback (function) parameters,
+// mapping handles, `Pinned[T]` and the generated release functions of
+// affine handles (ffi_lowering/drops.rs). A library that needs one keeps
+// the function or type out (Rust's shape refusal), and the calls input
+// shows the difference.
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, Types};
+use @vesper/check-data::util::{inc32, n32, u64_at, w};
+use @vesper/check-data::world::{Adt, EffectRow, Field, Variant, World, set_by_symbol};
+use @vesper/ffi-lowering::{
+    S, Sh, Sp, find_ge, find_gh, find_gs, generate, read_library, s_new, slice_count, sort_funs,
+    sorted_enum_names, sorted_handle_names, sorted_struct_rows
+};
+use @vesper/place-ir-lower::ast::{Ast, Ef, Eop, Pm};
+use @vesper/vsys::{parse_and_encode};
+use @vesper/vsys::lexer::{VsysError};
+use self::collect::{CollectedProgram, EffDeclInfo, EffOpInfo, ParamInfo};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+
+// The IR AST's expression kinds (@vesper/place-ir-lower ast.ves `X_*`).
+const X_NAME: u8 = 2;
+const X_CALL: u8 = 11;
+
+// @vesper/ffi-lowering's type node kinds (`TK_*`).
+const TK_NAMED: u8 = 0;
+const TK_TUPLE: u8 = 1;
+
+// ADT modes (@vesper/check-data `Adt.mode`).
+const MODE_COPY: u8 = 0;
+const MODE_AFFINE: u8 = 1;
+const MODE_LINEAR: u8 = 2;
+// A generated field takes its ADT's mode (`modality: None`).
+const FIELD_INHERITS_MODE: u8 = 0;
+
+// `ffi_lowering::EFFECT_PREFIX`: a library's effect is `Ffi$Lib`, which no
+// source identifier can spell.
+const EFFECT_PREFIX: Str = "Ffi$";
+// A slice parameter of a pass-1 operation (`types::OPEN`): nothing is
+// compatible with it, so the checker records each argument's own type.
+pub const OPEN_TYPE: Str = "$open";
+// A handle type's one field (`ffi_lowering::HANDLE_FIELD`) and its type.
+const HANDLE_FIELD: Str = "$handle";
+const HANDLE_WORD: Str = "u64";
+const SLICE_TYPE: Str = "Slice";
+const OPTION_TYPE: Str = "Option";
+const PATH_SEPARATOR: u8 = 58;
+// The separators of an operation's slice lengths (`types::op_name`):
+// `f$2_s` is `f` with a 2-element tuple and a lent source slice.
+const OP_LENGTHS: u8 = 36;
+const OP_LENGTH_SEPARATOR: u8 = 95;
+const OP_SOURCE_SLICE: u8 = 115;
+const DIGIT_ZERO: u8 = 48;
+const DECIMAL: u64 = 10;
+// `ffi_lowering::MAX_SLICE_ELEMENTS`.
+const MAX_SLICE_ELEMENTS: u64 = 4096;
+
+// The imported libraries of one build, after the type mapping.
+pub struct Foreign {
+    st: S,
+    // The library rows by name (Rust `Imports.libraries` is a BTreeMap).
+    order: ChunkSeq[u64],
+}
+
+// One imported descriptor: its text (placeholders replaced) and handler
+// tier (0 direct, 1 isolated(mpk)).
+pub struct ForeignSource {
+    handler: u64,
+    text: ChunkSeq[u8],
+}
+
+// A descriptor `text` imported with handler tier `handler`.
+pub fn foreign_source(handler: u64, in text: ChunkSeq[u8]) -> ForeignSource {
+    let mut t = ChunkSeq::new[u8]();
+    t.extend(in text.as_slice());
+    ForeignSource { handler: handler, text: t }
+}
+
+// No imports.
+pub fn foreign_none() -> Foreign {
+    Foreign { st: s_new(), order: ChunkSeq::new[u64]() }
+}
+
+pub fn foreign_is_empty(in f: Foreign) -> bool {
+    f.order.len() == 0
+}
+
+fn encode(in text: Slice[u8]) -> Option[ChunkSeq[u8]] {
+    handle Fail[VsysError] in {
+        Option::Some(parse_and_encode(in text))
+    } with {
+        return v => v,
+        raise(_e, _k) => Option::None,
+    }
+}
+
+// The imports `sources` declare, or None when one does not parse or the
+// generated declarations collide (`types::Generated::new`).
+pub fn foreign_read(in sources: ChunkSeq[ForeignSource]) -> Option[Foreign] {
+    let mut st = s_new();
+    for i in 0..sources.len() {
+        match sources.try_get(i) {
+            Option::Some(s) => {
+                let bytes = match encode(in s.text.as_slice()) {
+                    Option::Some(b) => b,
+                    Option::None => return Option::None,
+                };
+                read_library(in bytes.as_slice(), 0, bytes.len(), s.handler, inout st);
+            },
+            Option::None => {},
+        }
+    }
+    let e = generate(inout st);
+    if e.msg != NONE32 {
+        return Option::None;
+    }
+    let mut order = ChunkSeq::new[u64]();
+    for li in 0..st.libs.len() {
+        order.push(li);
+    }
+    for i in 1..order.len() {
+        let key = u64_at(in order, i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev = u64_at(in order, wrapping_sub(j, 1));
+            if st.name_cmp(st.lib(prev).name, st.lib(key).name) <= 0 {
+                break;
+            }
+            order.try_set(j, prev);
+            j = wrapping_sub(j, 1);
+        }
+        order.try_set(j, key);
+    }
+    Option::Some(Foreign { st: st, order: order })
+}
+
+fn sym_bytes(in st: S, sym: u32) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    for i in st.start(sym)..st.end(sym) {
+        out.push(st.text.try_get(i).unwrap_or(0));
+    }
+    out
+}
+
+fn intern_sym(in st: S, sym: u32, inout names: Names) -> u32 {
+    let b = sym_bytes(in st, sym);
+    names.intern(in b.as_slice())
+}
+
+// `Ffi$<library>`.
+fn effect_sym(in st: S, lib_name: u32, inout names: Names) -> u32 {
+    let mut b = ChunkSeq::new[u8]();
+    b.extend(in EFFECT_PREFIX.as_bytes());
+    let lib = sym_bytes(in st, lib_name);
+    b.extend(in lib.as_slice());
+    names.intern(in b.as_slice())
+}
+
+// A type of the mapping as a checker type, or NONE32 (a function type).
+fn ty_of(in st: S, ty: u32, inout names: Names, inout types: Types) -> u32 {
+    let node = st.tn(ty);
+    let mut args = ChunkSeq::new[u32]();
+    for i in 0..node.n {
+        let a = ty_of(in st, st.targ(wrapping_add(node.a, i)), inout names, inout types);
+        if a == NONE32 {
+            return NONE32;
+        }
+        args.push(a);
+    }
+    if node.kind == TK_TUPLE {
+        return types.tuple(in args);
+    }
+    if node.kind != TK_NAMED {
+        return NONE32;
+    }
+    let name = intern_sym(in st, node.name, inout names);
+    types.named(name, in args)
+}
+
+// The generated declaration of one ADT: its variants `vnames`, variant
+// `v` with fields `fnames`/`ftys` from `vstarts[v]` to `vstarts[v + 1]`.
+struct AdtDraft {
+    vnames: ChunkSeq[u32],
+    vstarts: ChunkSeq[u64],
+    fnames: ChunkSeq[u32],
+    ftys: ChunkSeq[u32],
+}
+
+fn draft() -> AdtDraft {
+    AdtDraft {
+        vnames: ChunkSeq::new[u32](),
+        vstarts: ChunkSeq::new[u64](),
+        fnames: ChunkSeq::new[u32](),
+        ftys: ChunkSeq::new[u32]()
+    }
+}
+
+fn draft_variant(inout d: AdtDraft, name: u32) {
+    d.vnames.push(name);
+    d.vstarts.push(d.fnames.len());
+}
+
+fn draft_field(inout d: AdtDraft, name: u32, ty: u32) {
+    d.fnames.push(name);
+    d.ftys.push(ty);
+}
+
+fn push_adt(inout world: World, name: u32, mode: u8, is_enum: bool, in d: AdtDraft) {
+    let va = n32(world.variants.len());
+    for vi in 0..d.vnames.len() {
+        let first = u64_at(in d.vstarts, vi);
+        let last = if wrapping_add(vi, 1) < d.vstarts.len() {
+            u64_at(in d.vstarts, wrapping_add(vi, 1))
+        } else {
+            d.fnames.len()
+        };
+        let fa = n32(world.fields.len());
+        for fi in first..last {
+            world.fields.push(Field {
+                name: d.fnames.try_get(fi).unwrap_or(0),
+                ty: d.ftys.try_get(fi).unwrap_or(0),
+                modality: FIELD_INHERITS_MODE
+            });
+        }
+        world.variants.push(Variant {
+            name: d.vnames.try_get(vi).unwrap_or(0),
+            fa: fa,
+            fc: n32(wrapping_sub(last, first)),
+            named: !is_enum
+        });
+    }
+    let idx = n32(world.adts.len());
+    world.adts.push(Adt {
+        name: name,
+        mode: mode,
+        ga: 0,
+        gn: 0,
+        va: va,
+        vn: n32(d.vnames.len()),
+        is_enum: is_enum,
+        tile: 0,
+        span_zero: true
+    });
+    set_by_symbol(inout world.by_name, name, inc32(idx));
+}
+
+// The pass-1 declarations `types::Generated::append` adds, in its order:
+// the wire structs, enums and handle types by name, then one linear
+// effect per library with an operation per function that has a source
+// shape (slice parameters `$open`).
+pub fn add_foreign_decls(inout cp: CollectedProgram, inout f: Foreign) {
+    if f.order.len() == 0 {
+        return;
+    }
+    let structs = sorted_struct_rows(in f.st);
+    for i in 0..structs.len() {
+        let g = f.st.gs(find_gs(in f.st, structs.try_get(i).unwrap_or(NONE32)));
+        let name = intern_sym(in f.st, g.name, inout cp.names);
+        let mut d = draft();
+        draft_variant(inout d, name);
+        for j in 0..g.field_count {
+            let field = f.st.gf(wrapping_add(g.field_start, j));
+            let fty = ty_of(in f.st, field.ty, inout cp.names, inout cp.types);
+            let fname = intern_sym(in f.st, field.name, inout cp.names);
+            draft_field(inout d, fname, fty);
+        }
+        push_adt(inout cp.world, name, MODE_COPY, false, in d);
+    }
+    let enums = sorted_enum_names(in f.st);
+    for i in 0..enums.len() {
+        let row = f.st.enum_row(f.st.ge(find_ge(in f.st, enums.try_get(i).unwrap_or(NONE32))).row);
+        let name = intern_sym(in f.st, row.name, inout cp.names);
+        let mut d = draft();
+        for j in 0..row.variant_count {
+            let v = f.st.variant_names
+                .try_get(wrapping_add(row.variant_start, j))
+                .unwrap_or(NONE32);
+            let vname = intern_sym(in f.st, v, inout cp.names);
+            draft_variant(inout d, vname);
+        }
+        push_adt(inout cp.world, name, MODE_COPY, true, in d);
+    }
+    let handles = sorted_handle_names(in f.st);
+    let handle_field = cp.names.intern(in HANDLE_FIELD.as_bytes());
+    let word = cp.types.named0(cp.names.intern(in HANDLE_WORD.as_bytes()));
+    for i in 0..handles.len() {
+        let h = f.st.gh(find_gh(in f.st, handles.try_get(i).unwrap_or(NONE32)));
+        if h.mapping != NONE32 {
+            continue;
+        }
+        let name = intern_sym(in f.st, h.name, inout cp.names);
+        let mode = if h.linear {
+            MODE_LINEAR
+        } else if h.copy {
+            MODE_COPY
+        } else {
+            MODE_AFFINE
+        };
+        let mut d = draft();
+        draft_variant(inout d, name);
+        draft_field(inout d, handle_field, word);
+        push_adt(inout cp.world, name, mode, false, in d);
+    }
+    let open = cp.types.named0(cp.names.intern(in OPEN_TYPE.as_bytes()));
+    for k in 0..f.order.len() {
+        let lib = f.st.lib(u64_at(in f.order, k));
+        let ename = effect_sym(in f.st, lib.name, inout cp.names);
+        let oa = n32(cp.eff_ops.len());
+        let mut syms = ChunkSeq::new[u32]();
+        for i in 0..lib.fun_count {
+            syms.push(n32(wrapping_add(lib.fun_start, i)));
+        }
+        sort_funs(in f.st, inout syms);
+        for i in 0..syms.len() {
+            let fi = w(syms.try_get(i).unwrap_or(0));
+            let sh = f.st.sh(fi);
+            if !sh.ok {
+                continue;
+            }
+            let result = ty_of(in f.st, sh.result, inout cp.names, inout cp.types);
+            if result == NONE32 {
+                continue;
+            }
+            let pa = n32(cp.params.len());
+            let mut ok = true;
+            for j in 0..sh.param_count {
+                let p = f.st.sp(wrapping_add(sh.param_start, j));
+                let ty = if p.slice {
+                    open
+                } else {
+                    ty_of(in f.st, p.ty, inout cp.names, inout cp.types)
+                };
+                if ty == NONE32 {
+                    ok = false;
+                }
+                cp.params.push(ParamInfo {
+                    name: intern_sym(in f.st, p.name, inout cp.names),
+                    pass: p.pass,
+                    ty: ty,
+                    start: 0,
+                    end: 0
+                });
+            }
+            if !ok {
+                cp.params.truncate(w(pa));
+                continue;
+            }
+            cp.eff_ops.push(EffOpInfo {
+                name: intern_sym(in f.st, f.st.fun(fi).sym, inout cp.names),
+                pa: pa,
+                pn: n32(sh.param_count),
+                result: result
+            });
+        }
+        let on = wrapping_sub(n32(cp.eff_ops.len()), oa);
+        cp.eff_decls.push(EffDeclInfo { name: ename, linear: true, ga: 0, gn: 0, oa: oa, on: on });
+        let eidx = n32(cp.world.effects.len());
+        cp.world.effects.push(EffectRow { name: ename, linear: true });
+        set_by_symbol(inout cp.world.effect_by_name, ename, inc32(eidx));
+    }
+}
+
+// The library row named `name`, or NONE64.
+fn lib_named(in f: Foreign, in names: Names, name: u32) -> u64 {
+    for k in 0..f.order.len() {
+        let li = u64_at(in f.order, k);
+        let b = sym_bytes(in f.st, f.st.lib(li).name);
+        if names_eq(in names, name, in b.as_slice()) {
+            return li;
+        }
+    }
+    NONE64
+}
+
+fn names_eq(in names: Names, sym: u32, in b: Slice[u8]) -> bool {
+    if names.size(sym) != b.len() {
+        return false;
+    }
+    for i in 0..b.len() {
+        if names.byte(sym, i) != b.try_get(i).unwrap_or(0) {
+            return false;
+        }
+    }
+    true
+}
+
+// The function row of library `li` named `name`, or NONE64.
+fn fun_named(in f: Foreign, in names: Names, li: u64, name: u32) -> u64 {
+    let lib = f.st.lib(li);
+    for i in 0..lib.fun_count {
+        let fi = wrapping_add(lib.fun_start, i);
+        let b = sym_bytes(in f.st, f.st.fun(fi).sym);
+        if names_eq(in names, name, in b.as_slice()) {
+            return fi;
+        }
+    }
+    NONE64
+}
+
+// `name` split at its last `::` into (library, function), or None.
+fn split_path(inout names: Names, name: u32) -> Option[(u32, u32)] {
+    let n = names.size(name);
+    let mut i = n;
+    loop {
+        if i < 2 {
+            return Option::None;
+        }
+        i = wrapping_sub(i, 1);
+        if names.byte(name, i) == PATH_SEPARATOR
+            && names.byte(name, wrapping_sub(i, 1)) == PATH_SEPARATOR
+        {
+            let mut left = ChunkSeq::new[u8]();
+            for j in 0..wrapping_sub(i, 1) {
+                left.push(names.byte(name, j));
+            }
+            let mut right = ChunkSeq::new[u8]();
+            for j in wrapping_add(i, 1)..n {
+                right.push(names.byte(name, j));
+            }
+            let l = names.intern(in left.as_slice());
+            let r = names.intern(in right.as_slice());
+            return Option::Some((l, r));
+        }
+    }
+    Option::None
+}
+
+fn starts_with_prefix(in names: Names, sym: u32) -> bool {
+    let p = EFFECT_PREFIX.as_bytes();
+    if names.size(sym) < p.len() {
+        return false;
+    }
+    for i in 0..p.len() {
+        if names.byte(sym, i) != p.try_get(i).unwrap_or(0) {
+            return false;
+        }
+    }
+    true
+}
+
+// The rewriter's renaming (src/ffi_lowering.rs `Rewriter::expr`): a call
+// of `Lib::f` names the operation `Ffi$Lib::f`, before checking.
+pub fn rename_foreign_calls(inout a: Ast, inout names: Names, in f: Foreign) {
+    if f.order.len() == 0 {
+        return;
+    }
+    for i in 0..a.exs.len() {
+        let e = a.ex(i);
+        if e.kind != X_CALL {
+            continue;
+        }
+        let ce = a.ex(e.a);
+        if ce.kind != X_NAME {
+            continue;
+        }
+        let (lib_sym, fn_sym) = match split_path(inout names, n32(ce.a)) {
+            Option::Some(p) => p,
+            Option::None => continue,
+        };
+        let li = lib_named(in f, in names, lib_sym);
+        if li == NONE64 || fun_named(in f, in names, li, fn_sym) == NONE64 {
+            continue;
+        }
+        let ename = effect_sym(in f.st, f.st.lib(li).name, inout names);
+        let renamed = join_path(inout names, ename, fn_sym);
+        let mut ce2 = ce;
+        ce2.a = w(renamed);
+        a.exs.try_set(e.a, ce2);
+    }
+}
+
+fn join_path(inout names: Names, left: u32, right: u32) -> u32 {
+    let mut b = ChunkSeq::new[u8]();
+    for i in 0..names.size(left) {
+        b.push(names.byte(left, i));
+    }
+    b.push(PATH_SEPARATOR);
+    b.push(PATH_SEPARATOR);
+    for i in 0..names.size(right) {
+        b.push(names.byte(right, i));
+    }
+    names.intern(in b.as_slice())
+}
+
+// One operation a call uses: (function row, slice lengths).
+struct Use {
+    fi: u64,
+    lens: ChunkSeq[u64],
+}
+
+fn copy_lens(in x: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut o = ChunkSeq::new[u64]();
+    for i in 0..x.len() {
+        o.push(u64_at(in x, i));
+    }
+    o
+}
+
+fn lens_before(in x: ChunkSeq[u64], in y: ChunkSeq[u64]) -> bool {
+    for i in 0..x.len() {
+        if i >= y.len() {
+            return false;
+        }
+        let a = u64_at(in x, i);
+        let b = u64_at(in y, i);
+        if a != b {
+            return a < b;
+        }
+    }
+    x.len() < y.len()
+}
+
+fn lens_eq(in x: ChunkSeq[u64], in y: ChunkSeq[u64]) -> bool {
+    !lens_before(in x, in y) && !lens_before(in y, in x)
+}
+
+// `slice_length`: a slice argument's length from its checked type: a lent
+// `Slice[T]` (in place only), a tuple's arity, `Unit` 0; inside `Option`
+// when nullable. None when it has no length.
+fn slice_length(
+    in types: Types,
+    in names: Names,
+    ty: u32,
+    nullable: bool,
+    in_place: bool
+) -> Option[u64] {
+    if ty == NONE32 {
+        return Option::None;
+    }
+    let mut t = ty;
+    if types.kind(t) == TyKind::Named
+        && names_eq(in names, types.name(t), in SLICE_TYPE.as_bytes())
+        && types.arity(t) == 1
+    {
+        return if in_place && !nullable {
+            Option::Some(NONE64)
+        } else {
+            Option::None
+        };
+    }
+    if nullable {
+        if types.kind(t) == TyKind::Named
+            && names_eq(in names, types.name(t), in OPTION_TYPE.as_bytes())
+            && types.arity(t) == 1
+        {
+            t = types.arg(t, 0);
+        } else {
+            return Option::None;
+        }
+    }
+    if types.kind(t) == TyKind::Tuple {
+        let n = types.arity(t);
+        return if n > MAX_SLICE_ELEMENTS {
+            Option::None
+        } else {
+            Option::Some(n)
+        };
+    }
+    Option::None
+}
+
+// `types::op_name`.
+fn op_name(inout names: Names, base: u32, in lens: ChunkSeq[u64]) -> u32 {
+    if lens.len() == 0 {
+        return base;
+    }
+    let mut b = ChunkSeq::new[u8]();
+    for i in 0..names.size(base) {
+        b.push(names.byte(base, i));
+    }
+    b.push(OP_LENGTHS);
+    for i in 0..lens.len() {
+        if i > 0 {
+            b.push(OP_LENGTH_SEPARATOR);
+        }
+        let n = u64_at(in lens, i);
+        if n == NONE64 {
+            b.push(OP_SOURCE_SLICE);
+        } else {
+            push_decimal(inout b, n);
+        }
+    }
+    names.intern(in b.as_slice())
+}
+
+fn push_decimal(inout b: ChunkSeq[u8], n: u64) {
+    if n >= DECIMAL {
+        push_decimal(inout b, n / DECIMAL);
+    }
+    b.push(wrapping_add(DIGIT_ZERO, wrapping_u8(n % DECIMAL)));
+}
+
+// Pass 2 (src/ffi_lowering.rs `check_module`): each call's slice lengths
+// from its slice arguments' checked types, the call renamed to its
+// operation `Ffi$Lib::f$<lengths>`, and each library's effect closed to
+// the operations its calls use, by function name then lengths.
+pub fn close_foreign_ops(
+    inout a: Ast,
+    inout names: Names,
+    inout types: Types,
+    in world: World,
+    in f: Foreign
+) {
+    if f.order.len() == 0 {
+        return;
+    }
+    let mut uses = ChunkSeq::new[Use]();
+    for i in 0..a.exs.len() {
+        let e = a.ex(i);
+        if e.kind != X_CALL {
+            continue;
+        }
+        let ce = a.ex(e.a);
+        if ce.kind != X_NAME || !starts_with_prefix(in names, n32(ce.a)) {
+            continue;
+        }
+        let (eff, fn_sym) = match split_path(inout names, n32(ce.a)) {
+            Option::Some(p) => p,
+            Option::None => continue,
+        };
+        let li = lib_of_effect(in f, inout names, eff);
+        if li == NONE64 {
+            continue;
+        }
+        let fi = fun_named(in f, in names, li, fn_sym);
+        if fi == NONE64 {
+            continue;
+        }
+        let sh = f.st.sh(fi);
+        if !sh.ok {
+            continue;
+        }
+        let mut lens = ChunkSeq::new[u64]();
+        let mut complete = e.n == sh.param_count;
+        if complete {
+            for j in 0..sh.param_count {
+                let p = f.st.sp(wrapping_add(sh.param_start, j));
+                if !p.slice {
+                    continue;
+                }
+                let av = a.ex(u64_at(
+                    in a.xs,
+                    wrapping_add(e.b, wrapping_add(wrapping_mul(j, 2), 1))
+                ));
+                let ty = world.expr_type(av.s0, av.s1);
+                match slice_length(in types, in names, ty, p.nullable, p.in_place) {
+                    Option::Some(n) => lens.push(n),
+                    Option::None => complete = false,
+                }
+            }
+        }
+        if !complete {
+            // An arity mismatch is reported against the base operation.
+            lens = ChunkSeq::new[u64]();
+        }
+        if lens.len() == slice_count(in f.st, sh) && lens.len() > 0 {
+            let op = op_name(inout names, fn_sym, in lens);
+            let mut ce2 = ce;
+            ce2.a = w(join_path(inout names, eff, op));
+            a.exs.try_set(e.a, ce2);
+        }
+        let mut seen = false;
+        for u in 0..uses.len() {
+            match uses.try_get(u) {
+                Option::Some(x) => {
+                    if x.fi == fi && lens_eq(in x.lens, in lens) {
+                        seen = true;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        if !seen {
+            uses.push(Use { fi: fi, lens: lens });
+        }
+    }
+    let open = names.intern(in OPEN_TYPE.as_bytes());
+    for k in 0..f.order.len() {
+        let li = u64_at(in f.order, k);
+        let lib = f.st.lib(li);
+        let ename = effect_sym(in f.st, lib.name, inout names);
+        let ei = effect_index(in a, ename);
+        if ei == NONE64 {
+            continue;
+        }
+        let mut syms = ChunkSeq::new[u32]();
+        for i in 0..lib.fun_count {
+            syms.push(n32(wrapping_add(lib.fun_start, i)));
+        }
+        sort_funs(in f.st, inout syms);
+        let old = a.effs
+            .try_get(ei)
+            .unwrap_or(Ef {
+                name: ename,
+                linear: true,
+                generic_start: 0,
+                generic_count: 0,
+                op_start: 0,
+                op_count: 0
+            });
+        let oa = a.eops.len();
+        for i in 0..syms.len() {
+            let fi = w(syms.try_get(i).unwrap_or(0));
+            let sym = intern_sym(in f.st, f.st.fun(fi).sym, inout names);
+            // The pass-1 operation: its parameter types, `$open` per slice.
+            let mut base = NONE64;
+            for oi in 0..old.op_count {
+                match a.eops.try_get(wrapping_add(old.op_start, oi)) {
+                    Option::Some(o) => {
+                        if o.name == sym {
+                            base = wrapping_add(old.op_start, oi);
+                        }
+                    },
+                    Option::None => {},
+                }
+            }
+            if base == NONE64 {
+                continue;
+            }
+            let base_op = a.eops
+                .try_get(base)
+                .unwrap_or(Eop { name: sym, param_start: 0, param_count: 0, result: 0 });
+            let sh = f.st.sh(fi);
+            let mut mine = ChunkSeq::new[u64]();
+            for u in 0..uses.len() {
+                match uses.try_get(u) {
+                    Option::Some(x) => {
+                        if x.fi == fi {
+                            mine.push(u);
+                        }
+                    },
+                    Option::None => {},
+                }
+            }
+            sort_uses(in uses, inout mine);
+            for m in 0..mine.len() {
+                let lens = match uses.try_get(u64_at(in mine, m)) {
+                    Option::Some(x) => copy_lens(in x.lens),
+                    Option::None => continue,
+                };
+                let fixed = lens.len() == slice_count(in f.st, sh) && lens.len() > 0;
+                let pa = a.pms.len();
+                let mut slice_at: u64 = 0;
+                for j in 0..base_op.param_count {
+                    let mut pm = a.pms
+                        .try_get(wrapping_add(base_op.param_start, j))
+                        .unwrap_or(Pm {
+                            name: 0,
+                            pass: 0,
+                            proj_start: 0,
+                            proj_count: 0,
+                            ty: 0,
+                            s0: 0,
+                            s1: 0
+                        });
+                    let is_open = types.kind(pm.ty) == TyKind::Named && types.name(pm.ty) == open;
+                    if is_open && fixed {
+                        let p = slice_param(in f.st, sh, slice_at);
+                        let n = u64_at(in lens, slice_at);
+                        slice_at = wrapping_add(slice_at, 1);
+                        let elem = ty_of(in f.st, p.ty, inout names, inout types);
+                        let mut t = if n == NONE64 {
+                            let mut args = ChunkSeq::new[u32]();
+                            args.push(elem);
+                            types.named(names.intern(in SLICE_TYPE.as_bytes()), in args)
+                        } else {
+                            let mut args = ChunkSeq::new[u32]();
+                            for _r in 0..n {
+                                args.push(elem);
+                            }
+                            types.tuple(in args)
+                        };
+                        if p.nullable {
+                            let mut args = ChunkSeq::new[u32]();
+                            args.push(t);
+                            t = types.named(names.intern(in OPTION_TYPE.as_bytes()), in args);
+                        }
+                        pm.ty = t;
+                    }
+                    a.pms.push(pm);
+                }
+                let name = if fixed {
+                    op_name(inout names, sym, in lens)
+                } else {
+                    sym
+                };
+                a.eops.push(Eop {
+                    name: name,
+                    param_start: pa,
+                    param_count: base_op.param_count,
+                    result: base_op.result
+                });
+            }
+        }
+        let mut ef = old;
+        ef.op_start = oa;
+        ef.op_count = wrapping_sub(a.eops.len(), oa);
+        a.effs.try_set(ei, ef);
+    }
+}
+
+// The `k`-th slice parameter of a shape.
+fn slice_param(in st: S, sh: Sh, k: u64) -> Sp {
+    let mut seen: u64 = 0;
+    for j in 0..sh.param_count {
+        let p = st.sp(wrapping_add(sh.param_start, j));
+        if p.slice {
+            if seen == k {
+                return p;
+            }
+            seen = wrapping_add(seen, 1);
+        }
+    }
+    st.sp(sh.param_start)
+}
+
+fn sort_uses(in uses: ChunkSeq[Use], inout xs: ChunkSeq[u64]) {
+    for i in 1..xs.len() {
+        let key = u64_at(in xs, i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev = u64_at(in xs, wrapping_sub(j, 1));
+            let before = match uses.try_get(key) {
+                Option::Some(k) => match uses.try_get(prev) {
+                    Option::Some(p) => lens_before(in k.lens, in p.lens),
+                    Option::None => false,
+                },
+                Option::None => false,
+            };
+            if !before {
+                break;
+            }
+            xs.try_set(j, prev);
+            j = wrapping_sub(j, 1);
+        }
+        xs.try_set(j, key);
+    }
+}
+
+fn effect_index(in a: Ast, name: u32) -> u64 {
+    for i in 0..a.effs.len() {
+        match a.effs.try_get(i) {
+            Option::Some(ef) => {
+                if ef.name == name {
+                    return i;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    NONE64
+}
+
+fn lib_of_effect(in f: Foreign, inout names: Names, eff: u32) -> u64 {
+    for k in 0..f.order.len() {
+        let li = u64_at(in f.order, k);
+        if effect_sym(in f.st, f.st.lib(li).name, inout names) == eff {
+            return li;
+        }
+    }
+    NONE64
+}

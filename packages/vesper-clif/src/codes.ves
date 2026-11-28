@@ -1,4 +1,5 @@
-// The codes of tests/common/clif_words.rs (`OPCODES`, `TYPES`, the
+// The codes of
+// crates/vesper-cranelift-sys/src/clif_words.rs (`OPCODES`, `TYPES`, the
 // condition codes, value kinds, memory and effect bits, edit ops). 0 is
 // "another one" for opcodes and types. Append only, in step with the
 // Rust tables.
@@ -84,6 +85,18 @@ pub const OP_ULOAD32: u64 = 75;
 pub const OP_SLOAD32: u64 = 76;
 pub const OP_ISTORE8: u64 = 77;
 pub const OP_ISTORE16: u64 = 78;
+// hoist_loop_invariants (#2362 part 5).
+pub const OP_FSUB: u64 = 79;
+pub const OP_FNEG: u64 = 80;
+pub const OP_FABS: u64 = 81;
+pub const OP_FCVT_FROM_UINT: u64 = 82;
+pub const OP_FCMP: u64 = 83;
+// 90 up (`OPCODES_FROM_90` of clif_words.rs): if_convert_pure_diamonds
+// (#2605).
+pub const OP_CLZ: u64 = 90;
+pub const OP_CTZ: u64 = 91;
+pub const OP_POPCNT: u64 = 92;
+pub const OP_BITREV: u64 = 93;
 
 // Types.
 pub const TY_OTHER: u64 = 0;
@@ -128,6 +141,10 @@ pub const M_ENDIAN: u64 = 4;
 pub const M_LITTLE: u64 = 8;
 pub const M_NOTRAP: u64 = 16;
 pub const M_ALIGNED: u64 = 32;
+// The alias region (0: none, then heap, table, vmctx) sits at this shift,
+// under this mask.
+pub const M_REGION_SHIFT: u64 = 6;
+pub const M_REGION_MASK: u64 = 192;
 
 // Effect bits.
 pub const F_TERMINATOR: u64 = 1;
@@ -171,6 +188,18 @@ pub const E_ALIAS: u64 = 16;
 pub const E_MOVE_INST: u64 = 17;
 pub const E_REMOVE_DEST_ARG: u64 = 18;
 pub const E_INS_BEFORE: u64 = 19;
+// The extend and trivial-arithmetic folds (#2362 part 3).
+pub const E_SET_UNARY: u64 = 20;
+pub const E_SET_BINARY: u64 = 21;
+// The slot steps (#2362 part 3).
+pub const E_NEW_SLOT: u64 = 22;
+pub const E_ZERO_BEFORE: u64 = 23;
+// vector_registers and sink_slot_inits (#2362 part 4).
+pub const E_REPLACE_BITCAST: u64 = 24;
+pub const E_REPLACE_STORE: u64 = 25;
+pub const E_MOVE_BEFORE: u64 = 26;
+// share_invariant_loads (#2362 part 5).
+pub const E_TRUST_LOAD: u64 = 27;
 // 64 up: the branch and fold steps of #2423 (20 to 63 are #2362's).
 pub const E_APPEND_DEST_ARG: u64 = 64;
 pub const E_SET_DEST: u64 = 65;
@@ -180,6 +209,8 @@ pub const E_ICONST: u64 = 68;
 pub const E_REPLACE_IMM: u64 = 69;
 pub const E_REPLACE_ICMP_IMM: u64 = 70;
 pub const E_MEM_ADDR: u64 = 71;
+// 80 up: if_convert_pure_diamonds and dense_icmp_chains_to_br_table (#2605).
+pub const E_PLACE_AFTER: u64 = 80;
 
 // A sized stack slot's kind.
 pub const S_EXPLICIT: u64 = 0;

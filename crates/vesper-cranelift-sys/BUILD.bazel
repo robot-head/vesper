@@ -1,15 +1,51 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
 
-# The tests load the @vesper/cranelift package beside the fixtures.
+# The tests that run fixtures (tests/support/stage2.rs): the committed
+# Stage 2 seed builds each one and the Cranelift component serves its
+# imports under Wasmtime.
+STAGE2_FIXTURE_TESTS = [
+    "test/checked_family",
+    "test/checker",
+    "test/composed",
+    "test/pilot",
+    "test/seam",
+    "test/sh5_extras",
+]
+
 vesper_crate(
-    extra_test_data = ["//packages/vesper-cranelift:files"],
+    # tests/support/mod.rs includes the Stage 2 gate's harness by path.
+    extra_integration_compile_data = ["//crates/vesper-stage2-gate:test_support"],
+    # The tests load the @vesper/cranelift package beside the fixtures.
+    extra_test_data = [
+        "//bootstrap/stage2-seed:seed",
+        "//crates/vesper-cranelift-component:component",
+        "//crates/vesper-cranelift-component:wit/vcl.wit",
+        "//packages/vesper-cranelift:files",
+    ],
+    # Stage 2 preopens the repository under WASI, which refuses runfiles
+    # symlinks that leave it: run in a copy made of regular files.
+    copy_test_cwd = STAGE2_FIXTURE_TESTS,
+    # A missing seed or component fails these tests instead of skipping
+    # them; the component's path is relative to this package.
+    test_env = {
+        "VESPER_CRANELIFT_COMPONENT": "../vesper-cranelift-component/vesper_cranelift_component.wasm",
+        "VESPER_STAGE2_FIXTURES": "1",
+    },
+    test_tags = {t: [
+        "resources:memory:2048",
+        "resources:cpu:2",
+    ] for t in STAGE2_FIXTURE_TESTS},
 )
 
-# crates/vesper-cranelift-component's object comparison runs these
-# fixtures through the same support module.
+# The root crate's CLIF pass differentials include the seam's function
+# words, edit replay (#2606) and cold extraction (#2634) by path: the root
+# cannot depend on the shim.
 exports_files(
-    ["tests/support/mod.rs"],
-    visibility = ["//crates/vesper-cranelift-component:__pkg__"],
+    [
+        "src/clif_outline.rs",
+        "src/clif_words.rs",
+    ],
+    visibility = ["//:__pkg__"],
 )
 
 filegroup(

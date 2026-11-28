@@ -367,6 +367,62 @@ fn capability_only(f: &Function) -> bool {
 pub fn cyclic_blocks(f: &crate::ir::FunctionIr) -> BTreeSet<usize> {
     aggregates::cyclic_blocks(f)
 }
+/// The calls of the nested graphs of graph `f`'s handlers (#2657), as the
+/// body hook's request lists them after the body's own: at each
+/// `Op::Handle` in block and instruction order, the calls of its nested
+/// graphs (`handle_calls`).
+fn nested_calls<'a>(
+    program: &'a crate::ir::Program,
+    f: &'a crate::ir::FunctionIr,
+    out: &mut Vec<&'a crate::ir::Op>,
+) {
+    for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+        handle_calls(program, &inst.op, out);
+    }
+}
+/// The calls of the nested graphs of `op` when it is an `Op::Handle`: its
+/// handled body, its `return` clause and its operation clauses, in that
+/// order (the nested graphs the walk emits there, `ir::nested_name`), each
+/// graph's calls as `graph_calls` lists them.
+fn handle_calls<'a>(
+    program: &'a crate::ir::Program,
+    op: &'a crate::ir::Op,
+    out: &mut Vec<&'a crate::ir::Op>,
+) {
+    if let crate::ir::Op::Handle { expr, .. } = op
+        && let ExprKind::Handle { body, ret, ops, .. } = &expr.kind
+    {
+        let nested = std::iter::once(crate::ir::nested_name("handler_body", &body.span))
+            .chain(std::iter::once(crate::ir::nested_name(
+                "handler_clause",
+                &ret.body.span,
+            )))
+            .chain(
+                ops.iter()
+                    .map(|c| crate::ir::nested_name("handler_clause", &c.body.span)),
+            );
+        for name in nested {
+            if let Some(g) = program.functions.get(&name) {
+                graph_calls(program, g, out);
+            }
+        }
+    }
+}
+/// The calls of nested graph `f`: each `Op::Call` in block and instruction
+/// order, and at each `Op::Handle` its nested graphs' calls
+/// (`handle_calls`).
+fn graph_calls<'a>(
+    program: &'a crate::ir::Program,
+    f: &'a crate::ir::FunctionIr,
+    out: &mut Vec<&'a crate::ir::Op>,
+) {
+    for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+        match &inst.op {
+            op @ crate::ir::Op::Call { .. } => out.push(op),
+            op => handle_calls(program, op, out),
+        }
+    }
+}
 /// The locals and `in` parameters of `f` kept in Cranelift SSA variables
 /// instead of stack home slots (`#1023`, `#1330`, `#1509`).
 pub fn register_locals(
@@ -808,6 +864,62 @@ fn trace_host_direct(world: &World, f: &Function) -> bool {
                 || (e.name == crate::trace_effects::TRACE && e.label.is_none() && e.args.is_empty())
         })
 }
+/// Turns an entry compile's first lowering into the program the walk
+/// defines its instances from: bit builtins and wide tuples lowered, then
+/// optimized and inlined (`optimize`) or fip reuse slots assigned, `Box`
+/// drops elaborated and, optimized, loop invariants hoisted. Answers which
+/// functions the inliner copied into each graph.
+fn prepare_walk_program(
+    world: &World,
+    entry: &str,
+    instances: &InstanceMap,
+    optimize: bool,
+    program: &mut crate::ir::Program,
+) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
+    crate::integer_widths::lower_bit_builtin_calls(world, program);
+    wide_native::refine_wide_tuples(program);
+    let mut inlined_into = BTreeMap::new();
+    if optimize {
+        // Only the graphs this entry reaches are optimized and inlined
+        // into, and only they size the budget: the inliner's program and
+        // per-callee budgets are shared, and a dependency's unreached
+        // functions spent them first (an unused `@vesper/fmt` halved
+        // `@vesper/verify` discovery's speed, #2167).
+        let unreached = set_aside_unreached(world, program, entry, instances);
+        let optimized = crate::ir_swap::optimize(world, program);
+        if optimized.is_ok() {
+            // Executable objects inline too (#959). The decision depends
+            // only on the world, never on the observer or instrument hooks,
+            // so a verified build stays byte-identical to the plain one and
+            // the verifiers check the code that ships.
+            let budget = crate::ir_inline::Budget::for_program(world, program);
+            inlined_into = crate::ir_swap::inline(world, program, &budget).inlined_into;
+        }
+        program.functions.extend(unreached);
+        optimized?;
+    } else {
+        crate::ir_opt::fip_reuse_pass(world, program)?;
+    }
+    crate::fip::elaborate_non_fip_drops(world, program);
+    if optimize {
+        // Native only, never the verified backend (Stage 1 perf lane 3).
+        crate::ir_swap::hoist(program);
+    }
+    Ok(inlined_into)
+}
+/// The program the walk defines a (non-trace) entry compile's instances
+/// from ([`prepare_walk_program`] of the first lowering): the graphs whose
+/// fip side tables [`BodyGate::graph`] reads (#2661).
+pub fn entry_walk_program(
+    world: &World,
+    entry: &str,
+    optimize: bool,
+) -> Result<crate::ir::Program, String> {
+    let instances = instances_for_entry(world, entry, false)?;
+    let mut program = crate::ir_swap::lower(world);
+    prepare_walk_program(world, entry, &instances, optimize, &mut program)?;
+    Ok(program)
+}
 /// Moves out of `program` the graphs that `entry` and its `instances`
 /// never reach, so that optimizing and inlining see only the code this
 /// entry emits. A graph is reached through a call, a function value, a
@@ -1154,35 +1266,7 @@ fn compile_entry<M: Module>(
             (instances, crate::ir_swap::lower(world), None)
         }
     };
-    crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
-    wide_native::refine_wide_tuples(&mut program);
-    let mut inlined_into = BTreeMap::new();
-    if optimize {
-        // Only the graphs this entry reaches are optimized and inlined
-        // into, and only they size the budget: the inliner's program and
-        // per-callee budgets are shared, and a dependency's unreached
-        // functions spent them first (an unused `@vesper/fmt` halved
-        // `@vesper/verify` discovery's speed, #2167).
-        let unreached = set_aside_unreached(world, &mut program, entry, &instances);
-        let optimized = crate::ir_swap::optimize(world, &mut program);
-        if optimized.is_ok() {
-            // Executable objects inline too (#959). The decision depends
-            // only on the world, never on the observer or instrument hooks,
-            // so a verified build stays byte-identical to the plain one and
-            // the verifiers check the code that ships.
-            let budget = crate::ir_inline::Budget::for_program(world, &program);
-            inlined_into = crate::ir_swap::inline(world, &mut program, &budget).inlined_into;
-        }
-        program.functions.extend(unreached);
-        optimized?;
-    } else {
-        crate::ir_opt::fip_reuse_pass(world, &mut program)?;
-    }
-    crate::fip::elaborate_non_fip_drops(world, &mut program);
-    if optimize {
-        // Native only, never the verified backend (Stage 1 perf lane 3).
-        crate::ir_swap::hoist(&mut program);
-    }
+    let inlined_into = prepare_walk_program(world, entry, &instances, optimize, &mut program)?;
     // The hook's conventions stand in for `NativeAbi::plan` when it planned
     // exactly the instances Rust discovered.
     let abi = match &plans {
@@ -1521,6 +1605,32 @@ pub struct EmittedFunction {
     /// The entry-block plan the walk followed ([`frame_plan`]); `None` for
     /// a function the walk did not lower (an outlined cold helper).
     pub frame: Option<FramePlan>,
+    /// Whether the walk's plain gate let it ask the `body` hook for this
+    /// function ([`BodyGate`]); `None` for an outlined cold helper.
+    pub body_gate: Option<BodyGate>,
+}
+/// The plain gate of the native walk's `body` hook (#2094, ported to
+/// @vesper/native-walk by #2661): the walk asks the hook for a function's
+/// body only when both halves hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyGate {
+    /// The instance leaves the function plain: its frame's result matches
+    /// the result pointer, the world has no `ConstDenorm` span, the
+    /// instance binds no generic or function-value variable, the function
+    /// is not `@fip`, the entry block has no trace flag or caller slot, and
+    /// every capability identity is a failure exit of the `fail_only`
+    /// record. (`inout` scalar parameters pass, #2563.)
+    pub instance: bool,
+    /// The graph the walk defines from has no fip reuse slots and no `Box`
+    /// drops. (The hook's own refusals come after the gate: sequence
+    /// drops and fused reads, #2653, and result homes or split locals.)
+    pub graph: bool,
+}
+impl BodyGate {
+    /// Whether the walk asks the `body` hook.
+    pub fn plain(self) -> bool {
+        self.instance && self.graph
+    }
 }
 impl EmittedFunction {
     /// The source function with this instance's generic arguments
@@ -1711,7 +1821,7 @@ fn define_instances_observed_with_trace<M: Module>(
             )?,
         };
         let mut fbctx = FunctionBuilderContext::new();
-        let wide_divisions = {
+        let (wide_divisions, body_gate) = {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
             let entry = b.create_block();
             b.append_block_params_for_function_params(entry);
@@ -1843,13 +1953,14 @@ fn define_instances_observed_with_trace<M: Module>(
                 .get(name)
                 .ok_or("missing lowered native function")?;
             // Part 6 of the native walk (#2094): the `body` hook may emit
-            // the whole body; else the Rust walk does.
-            if !c.body_hook(name, &f, &frame, body, sret)? {
+            // the whole body of a plain function; else the Rust walk does.
+            let body_gate = c.body_gate(&frame, body, sret);
+            if !(body_gate.plain() && c.body_hook(name, &f, &frame, body, sret)?) {
                 c.ir_function(body, sret)?;
             }
             c.b.seal_all_blocks();
             c.b.finalize();
-            c.wide_divisions
+            (c.wide_divisions, body_gate)
         };
         wide_native::fuse_wide_divisions(&mut ctx.func, &wide_divisions);
         // A hook error at an infallible layout helper (#1275).
@@ -1877,6 +1988,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 is_const_time,
                 ctx,
                 frame,
+                body_gate,
             ));
             continue;
         }
@@ -1922,13 +2034,16 @@ fn define_instances_observed_with_trace<M: Module>(
                 optimized: operands_only,
                 inlined: Default::default(),
                 frame: Some(frame.clone()),
+                body_gate: Some(body_gate),
             });
         }
         machine::define(m, define_id, &mut ctx, try_machine)
             .map_err(|e| format!("native codegen '{name}': {e}"))?;
         m.clear_context(&mut ctx);
     }
-    for (define_id, key, name, generic_vars, is_const_time, mut ctx, frame) in deferred_defs {
+    for (define_id, key, name, generic_vars, is_const_time, mut ctx, frame, body_gate) in
+        deferred_defs
+    {
         let cold_helpers = if !is_const_time {
             crate::native_cold_outline::outline(m, &key, &mut ctx.func)?
         } else {
@@ -1977,6 +2092,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 optimized: operands_only,
                 inlined: Default::default(),
                 frame: Some(frame.clone()),
+                body_gate: Some(body_gate),
             });
             for (cold_id, cold_key, cold_func) in &cold_helpers {
                 let callees = user_callees(cold_func);
@@ -1995,6 +2111,7 @@ fn define_instances_observed_with_trace<M: Module>(
                     optimized: operands_only,
                     inlined: Default::default(),
                     frame: None,
+                    body_gate: None,
                 });
             }
         }
@@ -4058,7 +4175,8 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// The callee of an `Op::Call` that `call_function_into` lowers to one
     /// `call` of an imported function and nothing else (part 6b of the
     /// body hook, #2094): a compiled-once, pure, non-generic function of
-    /// scalar `in` parameters and a scalar result, with no status word,
+    /// scalar `in` parameters (or `inout` scalars borrowed from whole
+    /// locals, #2563) and a scalar result, with no status word,
     /// register result, caller slot or trace flag, not a reserved builtin,
     /// constant table or `dyn` stub. A `fail_only` callee (#2425) takes a
     /// failure record after its arguments: its word carries
@@ -4071,6 +4189,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         args: &[crate::ir::Argument],
         capability: Option<&str>,
         types: &[Type],
+        locals: &BTreeMap<String, Type>,
     ) -> Option<u64> {
         let source = self.world.functions.get(callee)?;
         let fails = fail_only(self.world, source);
@@ -4087,9 +4206,26 @@ impl<M: Module> Codegen<'_, '_, M> {
             || crate::arrays::table_function(callee).is_some()
             || self.world.dyn_objects.stubs.contains_key(callee)
             || args.len() != source.params.len()
-            || args.iter().any(|a| a.pass != Pass::In)
         {
             return None;
+        }
+        // The callee may borrow scalar locals `inout` (#2563): each such
+        // argument is a whole local, passed by its address (a scratch word
+        // for a register; a `fail_only` callee's loans keep home slots,
+        // #2614) and loaded back after the call.
+        for (a, p) in args.iter().zip(&source.params) {
+            let whole_local = a.place.as_ref().is_some_and(|place| {
+                place.path.is_empty()
+                    && locals.get(&place.root).is_some_and(|t| {
+                        Layout::of(self.world, &crate::numeric::default_type(t))
+                            .is_ok_and(|l| !l.aggregate())
+                    })
+            });
+            match (a.pass, p.pass) {
+                (Pass::In, Pass::In) => {}
+                (Pass::Inout, Pass::Inout) if whole_local => {}
+                _ => return None,
+            }
         }
         let scalar_type = |t: &Type| {
             !crate::seq::is_seq_type(t)
@@ -4100,16 +4236,33 @@ impl<M: Module> Codegen<'_, '_, M> {
                 && scalar(t, &[]).is_ok()
         };
         let f = concrete(self.world, callee, &BTreeMap::new()).ok()?;
+        // A small enum result the callee returns as words in registers
+        // (#2581): `aggregates::enum_shape`'s words, as many as its ABI
+        // returns.
+        let key = instance_key(callee, &BTreeMap::new());
+        let words_result =
+            aggregates::enum_shape(self.world, &crate::numeric::default_type(&f.result))
+                .is_some_and(|shape| {
+                    self.abi.of(&key).result_words == Some(shape.words.len() as u32)
+                });
+        // A struct or enum result written through the result pointer
+        // (#2654): the caller passes storage that needs no zeroing on the
+        // optimize path (`aggregates::plain_data`).
+        let result_type = crate::numeric::default_type(&f.result);
+        let sret_result = !fails
+            && self.abi.of(&key).result_words.is_none()
+            && !contains_function(self.world, &result_type)
+            && Layout::of(self.world, &result_type).is_ok_and(|l| l.aggregate())
+            && aggregates::plain_data(self.world, &result_type);
         if specialized_function(self.world, &f)
             || fail_only(self.world, &f) != fails
             || crate::fip::uses_caller_slot(self.world, &f)
             || function_value_instance(self.world, source)
-            || !scalar_type(&f.result)
+            || !(scalar_type(&f.result) || words_result || sret_result)
             || !f.params.iter().all(|p| scalar_type(&p.ty))
         {
             return None;
         }
-        let key = instance_key(callee, &BTreeMap::new());
         let trace_entry = self.trace_entry.as_ref().map(|(e, _)| e.as_str());
         if trace_entry == Some(key.as_str())
             || uses_trace_fail(
@@ -4123,11 +4276,15 @@ impl<M: Module> Codegen<'_, '_, M> {
             return None;
         }
         let abi = self.abi.of(&key);
-        if abi.result_words.is_some() || (abi.status && !fails) {
+        if (abi.result_words.is_some() && !words_result) || (abi.status && !fails) {
             return None;
         }
         let id = u64::from(self.ids.get(&key)?.as_u32());
-        Some(if !fails {
+        Some(if words_result {
+            id | crate::codegen_swap::body::WORDS_CALL
+        } else if sret_result {
+            id | crate::codegen_swap::body::SRET_CALL
+        } else if !fails {
             id
         } else if abi.status {
             id | crate::codegen_swap::body::FAIL_CALL | crate::codegen_swap::body::STATUS_CALL
@@ -4135,8 +4292,47 @@ impl<M: Module> Codegen<'_, '_, M> {
             id | crate::codegen_swap::body::FAIL_CALL
         })
     }
-    /// Asks the `body` hook to emit `body` (`codegen_swap::body`), when
-    /// the frame leaves the function plain; `true` when it did.
+    /// The plain gate of [`Self::body_hook`] ([`BodyGate`]), read before
+    /// the walk lowers anything: the entry block's state and the graph's
+    /// fip side tables.
+    fn body_gate(
+        &self,
+        frame: &FramePlan,
+        body: &crate::ir::FunctionIr,
+        sret: Option<ir::Value>,
+    ) -> BodyGate {
+        // A struct result is built in, or copied to, the result pointer
+        // (`sret`, #2411); a register result (#2581) the same way in the
+        // local buffer the entry made, whose words the function returns.
+        // A small enum result (#2581) returns its words in registers.
+        let result_ok = match frame.result {
+            FrameResult::Value | FrameResult::Words(_) => sret.is_none(),
+            FrameResult::Sret | FrameResult::Buffer(_) => sret.is_some(),
+        };
+        let instance = result_ok
+            && self.denorm.is_empty()
+            && self.session.is_none()
+            && self.generic_vars.is_empty()
+            && !self.in_fip_fn
+            && self.trace_fail.is_none()
+            && self.caller_slot.is_none()
+            && frame.function_args.is_empty()
+            // A `fail_only` frame's capabilities are its failure exits
+            // (#2425): the record pointer goes in the request after the
+            // parameters.
+            && self
+                .capabilities
+                .values()
+                .all(|identity| self.fail_record.is_some() && identity.starts_with(FAIL_EXIT));
+        let graph = body.fip_call_slots.is_empty()
+            && body.fip_join_slots.is_empty()
+            && body.box_drops_before_inst.is_empty()
+            && body.box_drops_after_inst.is_empty()
+            && body.box_drops_before_term.is_empty();
+        BodyGate { instance, graph }
+    }
+    /// Asks the `body` hook to emit `body` (`codegen_swap::body`) of a
+    /// function [`Self::body_gate`] leaves plain; `true` when it did.
     fn body_hook(
         &mut self,
         name: &str,
@@ -4145,42 +4341,16 @@ impl<M: Module> Codegen<'_, '_, M> {
         body: &crate::ir::FunctionIr,
         sret: Option<ir::Value>,
     ) -> Result<bool, String> {
-        // A struct result is built in, or copied to, the result pointer
-        // (`sret`, #2411).
-        let result_ok = match frame.result {
-            FrameResult::Value => sret.is_none(),
-            FrameResult::Sret => sret.is_some(),
-            FrameResult::Buffer(_) | FrameResult::Words(_) => false,
-        };
-        // A failure exit returns a scalar zero beside its tag, so a
-        // `fail_only` function with a struct result stays with the walk.
-        let plain = result_ok
-            && !(sret.is_some() && self.fail_record.is_some())
-            && self.denorm.is_empty()
-            && self.session.is_none()
-            && self.generic_vars.is_empty()
-            && !self.in_fip_fn
-            && self.trace_fail.is_none()
-            && self.caller_slot.is_none()
-            && self.result_buffer.is_none()
-            && self.own_abi.result_words.is_none()
-            && frame.function_args.is_empty()
-            && self.pointers.is_empty()
-            // A `fail_only` frame's capabilities are its failure exits
-            // (#2425): the record pointer goes in the request after the
-            // parameters.
-            && self
-                .capabilities
-                .values()
-                .all(|identity| self.fail_record.is_some() && identity.starts_with(FAIL_EXIT))
-            && body.fip_call_slots.is_empty()
-            && body.fip_join_slots.is_empty()
-            && body.box_drops_before_inst.is_empty()
-            && body.box_drops_after_inst.is_empty()
-            && body.box_drops_before_term.is_empty();
         // Without a `body` hook the request is never read, so the default
         // compiler skips building it (and the callee scan below).
-        if !plain || crate::codegen_swap::installed().body.is_none() {
+        if crate::codegen_swap::installed().body.is_none() {
+            return Ok(false);
+        }
+        // Sequence and string operations (#2653): the body hook emits the
+        // plain ones only, so a graph whose sequences the walk drops,
+        // fuses into a match or reads through hoisted headers stays on
+        // the walk.
+        if !self.seq_body_plain(body) {
             return Ok(false);
         }
         let mut args = vec![
@@ -4203,27 +4373,38 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.b.def_var(var, record);
             args.push(u64::from(var.as_u32()));
         }
-        // Each `Op::Call` of the body, in instruction order: the callee's
-        // function id when the walk would emit it as a plain direct call
-        // (part 6b), else `codegen_swap::body::NO_CALLEE`.
-        let calls = body
+        // Each `Op::Call` of the body, in instruction order, then the calls
+        // of its handlers' nested graphs (`nested_calls`, #2657): the
+        // callee's function id when the walk would emit it as a plain
+        // direct call (part 6b), else `codegen_swap::body::NO_CALLEE`. The
+        // count word holds the body's own count and, above
+        // `NESTED_CALLS_SHIFT`, the nested count.
+        let mut graph_ops = body
             .blocks
             .iter()
             .flat_map(|b| &b.instructions)
-            .filter_map(|i| match &i.op {
+            .map(|inst| &inst.op)
+            .filter(|op| matches!(op, crate::ir::Op::Call { .. }))
+            .collect::<Vec<_>>();
+        let own = graph_ops.len();
+        nested_calls(self.program, body, &mut graph_ops);
+        let nested = graph_ops.len() - own;
+        let calls = graph_ops
+            .into_iter()
+            .filter_map(|op| match op {
                 crate::ir::Op::Call {
                     callee,
                     args,
                     capability,
                     types,
                 } => Some(
-                    self.plain_call(callee, args, capability.as_deref(), types)
+                    self.plain_call(callee, args, capability.as_deref(), types, &body.locals)
                         .unwrap_or(crate::codegen_swap::body::NO_CALLEE),
                 ),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        args.push(calls.len() as u64);
+        args.push(own as u64 | (nested as u64) << crate::codegen_swap::body::NESTED_CALLS_SHIFT);
         args.extend(calls);
         // The result pointer, and the values `aggregates::plan` builds in it
         // (by their index in the graph's values). Any other home (a field of
@@ -4231,12 +4412,17 @@ impl<M: Module> Codegen<'_, '_, M> {
         // walk.
         let mut result_homes = vec![];
         if self.operands_only {
-            if !aggregates::split_locals(self.world, body, &self.generic_vars).is_empty() {
+            // The graph `ir_graph_at` lowers: small enums kept as words
+            // (#2581).
+            let join = self.own_scalar_join(body);
+            let scalar_graph = self.scalar_graph(body, join.as_ref());
+            let graph = scalar_graph.as_ref().map_or(body, |s| &s.f);
+            if !aggregates::split_locals(self.world, graph, &self.generic_vars).is_empty() {
                 return Ok(false);
             }
             let homes = aggregates::plan(
                 self.world,
-                body,
+                graph,
                 &self.generic_vars,
                 false,
                 &BTreeMap::new(),
@@ -4245,18 +4431,56 @@ impl<M: Module> Codegen<'_, '_, M> {
                 if *home != aggregates::Home::Result || sret.is_none() {
                     return Ok(false);
                 }
-                let Some(index) = body.values.keys().position(|v| v == id) else {
+                let Some(index) = graph.values.keys().position(|v| v == id) else {
                     return Ok(false);
                 };
                 result_homes.push(index as u64);
             }
         }
-        args.push(sret.map_or(
-            crate::codegen_swap::body::NO_VALUE,
-            crate::codegen_swap::word,
-        ));
+        // A register result's word count rides above the buffer's value
+        // (`codegen_swap::body::RESULT_WORDS_SHIFT`), or above NO_POINTER
+        // for a small enum returned as words.
+        let result_words = match frame.result {
+            FrameResult::Buffer(words) | FrameResult::Words(words) => u64::from(words),
+            _ => 0,
+        };
+        args.push(match sret {
+            None if result_words == 0 => crate::codegen_swap::body::NO_VALUE,
+            None => {
+                crate::codegen_swap::body::NO_POINTER
+                    | result_words << crate::codegen_swap::body::RESULT_WORDS_SHIFT
+            }
+            Some(v) => {
+                crate::codegen_swap::word(v)
+                    | result_words << crate::codegen_swap::body::RESULT_WORDS_SHIFT
+            }
+        });
         args.push(result_homes.len() as u64);
         args.extend(result_homes);
+        // Each parameter's address variable: an `inout` scalar is loaded
+        // at entry and stored through its address at every definition
+        // (`Codegen::use_var`, `def_homes`); any other parameter has none.
+        args.push(f.params.len() as u64);
+        for p in &f.params {
+            let address = self
+                .vars
+                .get(&p.name)
+                .and_then(|var| self.pointers.get(&var.as_u32()));
+            args.push(address.map_or(crate::codegen_swap::body::NO_VALUE, |a| {
+                u64::from(a.as_u32())
+            }));
+        }
+        // The slice parameters read once at entry (#2653): each one's
+        // parameter index and the reads that take its receiver.
+        let views = self
+            .entry_views(body)
+            .ok_or("a header hoist the body hook refused")?;
+        args.push(views.len() as u64);
+        for (param, reads) in views {
+            args.push(param as u64);
+            args.push(reads.len() as u64);
+            args.extend(reads);
+        }
         crate::codegen_swap::body_request(
             &mut self.b,
             &mut *self.m,
@@ -4264,6 +4488,122 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.program,
             name,
             &args,
+        )
+    }
+    /// Whether the walk lowers graph `body`'s sequence and string
+    /// operations with no drops, fused `try_get` matches or hoisted
+    /// header reads (#2653): true for a graph with none.
+    fn seq_body_plain(&self, body: &crate::ir::FunctionIr) -> bool {
+        use crate::ir::Op;
+        let has_seq = body
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .any(|i| matches!(i.op, Op::Seq { .. }));
+        if !has_seq {
+            return true;
+        }
+        // The graph `ir_graph_at` lowers: small enums kept as words.
+        let join = self.own_scalar_join(body);
+        let scalar_graph = self.scalar_graph(body, join.as_ref());
+        let graph = scalar_graph.as_ref().map_or(body, |s| &s.f);
+        let drops = self.drops_enabled()
+            && (!crate::fip::replace_drops(self.world, graph, None).is_empty()
+                || !crate::fip::temporary_drops(self.world, graph).is_empty()
+                || !crate::fip::fail_exit_drops(self.world, graph).is_empty());
+        !drops
+            && crate::fip::seq_drop_plan(self.world, graph).is_empty()
+            && seq_native::fused_reads(graph).is_empty()
+            && self.entry_views(body).is_some()
+    }
+    /// The header hoists of graph `body` the body hook emits (#2653): on
+    /// the optimize path, the slice parameters `ir_graph_at` reads once
+    /// at entry (`seq_entry_view`), as (parameter index, the indexes of
+    /// the reads given that receiver among the graph's values). `None`
+    /// when a hoist is any other (a loop preheader's, a sequence's, a
+    /// field's).
+    fn entry_views(&self, body: &crate::ir::FunctionIr) -> Option<Vec<(usize, Vec<u64>)>> {
+        if !self.operands_only {
+            return Some(vec![]);
+        }
+        let join = self.own_scalar_join(body);
+        let scalar_graph = self.scalar_graph(body, join.as_ref());
+        let graph = scalar_graph.as_ref().map_or(body, |s| &s.f);
+        let mut views = vec![];
+        for hoist in crate::bounds_hoist::header_hoists(graph) {
+            if !hoist.entry || !hoist.place.path.is_empty() || !crate::seq::is_slice_type(&hoist.ty)
+            {
+                return None;
+            }
+            let param = graph
+                .params
+                .iter()
+                .position(|p| p.name == hoist.place.root)?;
+            let mut reads = vec![];
+            for read in &hoist.reads {
+                reads.push(graph.values.keys().position(|v| v == read)? as u64);
+            }
+            views.push((param, reads));
+        }
+        Some(views)
+    }
+    /// The enum shape a top-level graph `f` returns as words: the
+    /// function's own register-result ABI when its result is a small enum
+    /// of that many words (#1330).
+    fn own_scalar_join(&self, f: &crate::ir::FunctionIr) -> Option<aggregates::EnumShape> {
+        if !self.operands_only || self.in_fip_fn {
+            return None;
+        }
+        self.own_abi.result_words.and_then(|words| {
+            let ty = crate::numeric::default_type(&substitute(&f.result, &self.generic_vars));
+            let shape = aggregates::enum_shape(self.world, &ty)?;
+            (shape.words.len() as u32 == words).then_some(shape)
+        })
+    }
+    /// Graph `f` with its small enum values kept as words
+    /// (`aggregates::scalar_enums`, #1330) on the optimize path, `join`
+    /// the shape it returns as words; `None` when it keeps them in memory.
+    fn scalar_graph(
+        &self,
+        f: &crate::ir::FunctionIr,
+        join: Option<&aggregates::EnumShape>,
+    ) -> Option<aggregates::ScalarEnums> {
+        if !self.operands_only || self.in_fip_fn {
+            return None;
+        }
+        let world = self.world;
+        let shared: BTreeSet<String> = f
+            .locals
+            .keys()
+            .filter(|n| self.vars.contains_key(*n))
+            .cloned()
+            .collect();
+        aggregates::scalar_enums(
+            world,
+            f,
+            &self.generic_vars,
+            join,
+            &|callee, types, shape| {
+                let Some(g) = world.functions.get(callee) else {
+                    return false;
+                };
+                if specialized_function(world, g) {
+                    return true;
+                }
+                if world.dyn_objects.stubs.contains_key(callee) {
+                    return false;
+                }
+                let mut vars = BTreeMap::new();
+                for (p, t) in g.generics.iter().zip(types) {
+                    vars.insert(
+                        p.name.clone(),
+                        crate::numeric::default_type(&substitute(t, &self.generic_vars)),
+                    );
+                }
+                let key = instance_key(callee, &vars);
+                self.abi.of(&key).result_words == Some(shape.words.len() as u32)
+            },
+            &shared,
         )
     }
     fn ir_function(
@@ -4304,55 +4644,13 @@ impl<M: Module> Codegen<'_, '_, M> {
         // Small enum values kept as words (#1330): the graph is rewritten
         // so that their tags and fields are scalar values and locals.
         let scalar_join = self.scalar_enums.join.take().or_else(|| {
-            if return_to.is_none() && self.operands_only && !self.in_fip_fn {
-                self.own_abi.result_words.and_then(|words| {
-                    let ty =
-                        crate::numeric::default_type(&substitute(&f.result, &self.generic_vars));
-                    let shape = aggregates::enum_shape(self.world, &ty)?;
-                    (shape.words.len() as u32 == words).then_some(shape)
-                })
+            if return_to.is_none() {
+                self.own_scalar_join(f)
             } else {
                 None
             }
         });
-        let scalar_graph = if self.operands_only && !self.in_fip_fn {
-            let world = self.world;
-            let shared: BTreeSet<String> = f
-                .locals
-                .keys()
-                .filter(|n| self.vars.contains_key(*n))
-                .cloned()
-                .collect();
-            aggregates::scalar_enums(
-                world,
-                f,
-                &self.generic_vars,
-                scalar_join.as_ref(),
-                &|callee, types, shape| {
-                    let Some(g) = world.functions.get(callee) else {
-                        return false;
-                    };
-                    if specialized_function(world, g) {
-                        return true;
-                    }
-                    if world.dyn_objects.stubs.contains_key(callee) {
-                        return false;
-                    }
-                    let mut vars = BTreeMap::new();
-                    for (p, t) in g.generics.iter().zip(types) {
-                        vars.insert(
-                            p.name.clone(),
-                            crate::numeric::default_type(&substitute(t, &self.generic_vars)),
-                        );
-                    }
-                    let key = instance_key(callee, &vars);
-                    self.abi.of(&key).result_words == Some(shape.words.len() as u32)
-                },
-                &shared,
-            )
-        } else {
-            None
-        };
+        let scalar_graph = self.scalar_graph(f, scalar_join.as_ref());
         let no_words = BTreeMap::new();
         let (f, scalar_calls, scalar_returns) = match &scalar_graph {
             Some(s) => (&s.f, &s.calls, &s.returns),

@@ -5,8 +5,9 @@
 //! the corpus `main`s and the programs of tests/native_cold_outline.rs, is
 //! captured before the pass (`native_cold_outline::capture`). Rust runs
 //! the pass on one copy in a fresh object module; the Vesper package reads
-//! another in the words of tests/common/clif_words.rs and answers with its
-//! decisions, which `clif_words::apply_outline` builds in a second fresh
+//! another in the words of
+//! crates/vesper-cranelift-sys/src/clif_words.rs and answers with its
+//! decisions, which `clif_outline::apply_outline` builds in a second fresh
 //! module. The parents, the helpers (keys, ids and functions) and any
 //! error must be equal.
 //!
@@ -14,7 +15,12 @@
 //! - `CHECK_HARNESS_SPEED=1` runs the ABBA timing (release build).
 #[path = "common/check_harness.rs"]
 mod check_harness;
-#[path = "common/clif_words.rs"]
+// The Cranelift shim's extraction (#2634), function words and edit replay
+// (#2606), included by path: the root crate cannot depend on
+// vesper-cranelift-sys (a Bazel dev-dependency cycle).
+#[path = "../crates/vesper-cranelift-sys/src/clif_outline.rs"]
+mod clif_outline;
+#[path = "../crates/vesper-cranelift-sys/src/clif_words.rs"]
 mod clif_words;
 
 use check_harness::*;
@@ -65,7 +71,7 @@ fn vesper(key: &str, f: &ir::Function) -> Outcome {
     let ptr = m.target_config().pointer_type();
     let words = entry().words(&clif_words::encode_with(f, false, Some(ptr)));
     let mut func = f.clone();
-    let helpers = clif_words::apply_outline(&mut m, key, &mut func, &words)?;
+    let helpers = clif_outline::apply_outline(&mut m, key, &mut func, &words)?;
     Ok(shown(&func, helpers))
 }
 

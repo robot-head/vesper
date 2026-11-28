@@ -117,17 +117,19 @@ pub const FS_UNIQUE: u64 = 20;
 pub const FS_READ_DIR: u64 = 21;
 pub const FS_DIR_NEXT: u64 = 22;
 pub const FS_DIR_CLOSE: u64 = 23;
-const N_OPS: u64 = 24;
+pub const FS_WRITE_STDOUT: u64 = 24;
+pub const FS_WRITE_STDERR: u64 = 25;
+const N_OPS: u64 = 26;
 
 // Helper functions, after the operations in `Host.fns`.
-const H_ERR: u64 = 24;
-const H_PREOPENS: u64 = 25;
-const H_RESOLVE: u64 = 26;
-const H_SLOT: u64 = 27;
-const H_COPYOUT: u64 = 28;
-const H_KIND: u64 = 29;
-const H_PATH_OP: u64 = 30;
-const N_FNS: u64 = 33;
+const H_ERR: u64 = 26;
+const H_PREOPENS: u64 = 27;
+const H_RESOLVE: u64 = 28;
+const H_SLOT: u64 = 29;
+const H_COPYOUT: u64 = 30;
+const H_KIND: u64 = 31;
+const H_PATH_OP: u64 = 32;
+const N_FNS: u64 = 35;
 
 // The operation's `.vsys` name, its parameter count and the passing mode
 // of each parameter (0 in, 1 inout, 2 sink: `P_*` of plan.ves), as the
@@ -179,8 +181,12 @@ fn op_name(op_code: u64) -> Str {
         "vstd_fs_read_dir"
     } else if op_code == FS_DIR_NEXT {
         "vstd_fs_dir_next"
-    } else {
+    } else if op_code == FS_DIR_CLOSE {
         "vstd_fs_dir_close"
+    } else if op_code == FS_WRITE_STDOUT {
+        "vstd_fs_write_stdout"
+    } else {
+        "vstd_fs_write_stderr"
     }
 }
 
@@ -210,7 +216,12 @@ fn op_passes(op_code: u64) -> Str {
         "s"
     } else if op_code == FS_RENAME {
         "iio"
-    } else if op_code == FS_REMOVE_FILE || op_code == FS_SYNC_DIR || op_code == FS_READ_DIR {
+    } else if op_code == FS_REMOVE_FILE
+        || op_code == FS_SYNC_DIR
+        || op_code == FS_READ_DIR
+        || op_code == FS_WRITE_STDOUT
+        || op_code == FS_WRITE_STDERR
+    {
         "io"
     } else {
         // FS_METADATA
@@ -341,6 +352,10 @@ pub struct Host {
     i_read_entry: u32,
     i_drop_desc: u32,
     i_drop_stream: u32,
+    i_stdout: u32,
+    i_stderr: u32,
+    i_write_stream: u32,
+    i_drop_out_stream: u32,
     // the canonical ABI's return area (112 bytes)
     ret_area: u64,
     // [0] preopens read, [8] the last resolved relative path (a view),
@@ -389,6 +404,10 @@ pub fn host_none() -> Host {
         i_read_entry: NONE32,
         i_drop_desc: NONE32,
         i_drop_stream: NONE32,
+        i_stdout: NONE32,
+        i_stderr: NONE32,
+        i_write_stream: NONE32,
+        i_drop_out_stream: NONE32,
         ret_area: 0,
         misc: 0,
         err_table: 0,
@@ -422,10 +441,25 @@ fn imp(
         "wasi:cli/environment@0.2.0"
     } else if module == 1 {
         "wasi:filesystem/types@0.2.0"
-    } else {
+    } else if module == 2 {
         "wasi:filesystem/preopens@0.2.0"
+    } else if module == 3 {
+        "wasi:cli/stdout@0.2.0"
+    } else if module == 4 {
+        "wasi:cli/stderr@0.2.0"
+    } else {
+        "wasi:io/streams@0.2.0"
     };
     builder.import(in module_name.as_bytes(), in name.as_bytes(), in params, in no_vals())
+}
+
+fn imp_i32(inout builder: Builder, module: u8, in name: Str) -> u32 eff [Fail[WErr]] {
+    let module_name = if module == 3 {
+        "wasi:cli/stdout@0.2.0"
+    } else {
+        "wasi:cli/stderr@0.2.0"
+    };
+    builder.import(in module_name.as_bytes(), in name.as_bytes(), in no_vals(), in i32s(1))
 }
 
 // (i32 x n) with an `i64` at each position in `wide`.
@@ -590,6 +624,15 @@ pub fn host_new(inout builder: Builder, in codes: ChunkSeq[u8]) -> Host eff [Fai
             "[resource-drop]directory-entry-stream",
             in i32s(1)
         );
+        host.i_stdout = imp_i32(inout builder, 3, "get-stdout");
+        host.i_stderr = imp_i32(inout builder, 4, "get-stderr");
+        host.i_write_stream = imp(
+            inout builder,
+            5,
+            "[method]output-stream.blocking-write-and-flush",
+            in i32s(4)
+        );
+        host.i_drop_out_stream = imp(inout builder, 5, "[resource-drop]output-stream", in i32s(1));
     }
     host.ret_area = builder.data(in zeros(112));
     if host.fs {
@@ -611,20 +654,20 @@ pub fn host_new(inout builder: Builder, in codes: ChunkSeq[u8]) -> Host eff [Fai
 pub fn wit_imports(in host: Host) -> Str {
     if host.vcl {
         if host.env && host.fs {
-            "  import wasi:cli/environment@0.2.0;\n  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n  import vesper:cranelift/vcl@0.1.0;\n"
+            "  import wasi:cli/environment@0.2.0;\n  import wasi:cli/stdout@0.2.0;\n  import wasi:cli/stderr@0.2.0;\n  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n  import vesper:cranelift/vcl@0.1.0;\n"
         } else if host.env {
             "  import wasi:cli/environment@0.2.0;\n  import vesper:cranelift/vcl@0.1.0;\n"
         } else if host.fs {
-            "  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n  import vesper:cranelift/vcl@0.1.0;\n"
+            "  import wasi:cli/stdout@0.2.0;\n  import wasi:cli/stderr@0.2.0;\n  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n  import vesper:cranelift/vcl@0.1.0;\n"
         } else {
             "  import vesper:cranelift/vcl@0.1.0;\n"
         }
     } else if host.env && host.fs {
-        "  import wasi:cli/environment@0.2.0;\n  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n"
+        "  import wasi:cli/environment@0.2.0;\n  import wasi:cli/stdout@0.2.0;\n  import wasi:cli/stderr@0.2.0;\n  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n"
     } else if host.env {
         "  import wasi:cli/environment@0.2.0;\n"
     } else if host.fs {
-        "  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n"
+        "  import wasi:cli/stdout@0.2.0;\n  import wasi:cli/stderr@0.2.0;\n  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n"
     } else {
         ""
     }
@@ -1514,9 +1557,9 @@ fn resolve(
 
 // path ops `create-directory-at`, `remove-directory-at`, `unlink-file-at`
 // as (path, err) -> status.
-const P_MKDIR: u64 = 30;
-const P_RMDIR: u64 = 31;
-const P_UNLINK: u64 = 32;
+const P_MKDIR: u64 = 32;
+const P_RMDIR: u64 = 33;
+const P_UNLINK: u64 = 34;
 
 fn emit_path_op(inout builder: Builder, inout host: Host, inout asm: A, op_code: u64) eff [
     Fail[WErr]
@@ -1961,6 +2004,69 @@ fn emit_fs(inout builder: Builder, inout host: Host, inout asm: A, op_code: u64)
         asm.retk(0);
         asm.end();
         asm.lda(add(host.ret_area, 24), OP_I64_LOAD);
+        return;
+    }
+    if op_code == FS_WRITE_STDOUT || op_code == FS_WRITE_STDERR {
+        let addr = asm.loc();
+        let len = asm.loc();
+        let off = asm.loc();
+        let chunk = asm.loc();
+        let stream = asm.loc();
+        asm.view_addr(0, addr);
+        asm.view_len(0, len);
+        asm.call(
+            if op_code == FS_WRITE_STDOUT {
+                host.i_stdout
+            } else {
+                host.i_stderr
+            }
+        );
+        asm.op(OP_I64_EXTEND_I32_U);
+        asm.set(stream);
+        asm.setk(off, 0);
+        asm.open(OP_BLOCK);
+        asm.open(OP_LOOP);
+        asm.get(off);
+        asm.get(len);
+        asm.op(OP_I64_GE_U);
+        asm.br_if(1);
+        asm.get(len);
+        asm.get(off);
+        asm.op(OP_I64_SUB);
+        asm.set(chunk);
+        asm.get(chunk);
+        asm.k(4096);
+        asm.op(OP_I64_GT_U);
+        asm.open(OP_IF);
+        asm.setk(chunk, 4096);
+        asm.end();
+        asm.w32(stream);
+        asm.get(addr);
+        asm.get(off);
+        asm.op(OP_I64_ADD);
+        asm.op(OP_I32_WRAP_I64);
+        asm.w32(chunk);
+        asm.i32k(host.ret_area);
+        asm.call(host.i_write_stream);
+        failed(inout asm, in host);
+        asm.open(OP_IF);
+        asm.w32(stream);
+        asm.call(host.i_drop_out_stream);
+        // IoKind::Other (12)
+        put_errk(inout asm, 1, 12);
+        asm.retk(0);
+        asm.end();
+        asm.get(off);
+        asm.get(chunk);
+        asm.op(OP_I64_ADD);
+        asm.set(off);
+        asm.br(0);
+        asm.end();
+        asm.end();
+        asm.w32(stream);
+        asm.call(host.i_drop_out_stream);
+        put_errk(inout asm, 1, 0);
+        asm.k(1);
         return;
     }
     if op_code == FS_CLOSE || op_code == FS_DIR_CLOSE {

@@ -1,0 +1,481 @@
+// The publishDiagnostics payload of `vesper lsp` (src/lsp/session.rs
+// `diagnostic_payload` and the publication filter of `diagnostics`) in
+// Vesper, over the words `session::diagnostic_payload_words` writes.
+//
+// A parse or semantic failure is rendered by the Vesper port of
+// vesper-diagnostics: `prepare`'s checks (`prepare_check`), then
+// `Prepared::to_lsp` (`lsp`). The Rust build also runs
+// `Diagnostics::new`'s checks on the checked copies between the two; with
+// no fixes every one of them is implied by a passing `prepare_check` (the
+// same spans, a stronger work bound and twice the metadata), so the port
+// does not repeat them. A rendering error, or a resource or unsupported
+// failure, publishes one analysis-unavailable warning at the document
+// origin instead. The fields the client did not negotiate (related
+// information, `data` with help) are then removed.
+//
+// The answer is the text `session::diagnostic_payload_answer` writes: the
+// JSON object `{"diagnostics":[..],"status":..,"kind":..}`.
+use @vesper/diagnostics::{prepare_check, lsp, Caps, Failure, Res, Totals};
+use @vesper/diagnostics::Sizes as DiagnosticSizes;
+use self::json::{byte, put, put_bytes, put_string};
+
+const WORD_BYTES: u64 = 8;
+
+// `payload_tags` of src/lsp/session.rs.
+enum Tag: _ {
+    Parse = 0,
+    Semantic = 1,
+    Resource = 2,
+    Unsupported = 3
+}
+
+enum Ascii: _ {
+    Quote = 0x22,
+    Comma = 0x2c,
+    Backslash = 0x5c,
+    LBracket = 0x5b,
+    RBracket = 0x5d,
+    LBrace = 0x7b,
+    RBrace = 0x7d
+}
+
+// The depth of a published diagnostic's members: inside the array and
+// the diagnostic's object.
+const MEMBER_DEPTH: u64 = 2;
+// A string escape's backslash and the byte it escapes.
+const ESCAPE_BYTES: u64 = 2;
+
+copy struct Reader {
+    pos: u64
+}
+
+fn next(in b: Slice[u8], inout r: Reader) -> u64 {
+    let value = b.try_read_u64_le(r.pos).unwrap_or(0);
+    r.pos = wrapping_add(r.pos, WORD_BYTES);
+    value
+}
+
+// A length-prefixed text: its offset in `b`, after which `r` moves.
+fn text(in b: Slice[u8], inout r: Reader) -> u64 {
+    let len = next(in b, inout r);
+    let at = r.pos;
+    r.pos = wrapping_add(at, len);
+    at
+}
+
+// `vesper_span::Limits`, in field order.
+copy struct SpanLimits {
+    max_source_bytes: usize,
+    max_lines: usize,
+    max_metadata_bytes: usize,
+    max_work: usize,
+    max_edits: usize,
+    max_output_bytes: usize,
+    max_diagnostics: usize,
+    max_labels: usize,
+    max_fixes: usize,
+    max_text_bytes: usize
+}
+
+fn span_limits(in b: Slice[u8], inout r: Reader) -> SpanLimits {
+    SpanLimits {
+        max_source_bytes: narrow_usize(next(in b, inout r)),
+        max_lines: narrow_usize(next(in b, inout r)),
+        max_metadata_bytes: narrow_usize(next(in b, inout r)),
+        max_work: narrow_usize(next(in b, inout r)),
+        max_edits: narrow_usize(next(in b, inout r)),
+        max_output_bytes: narrow_usize(next(in b, inout r)),
+        max_diagnostics: narrow_usize(next(in b, inout r)),
+        max_labels: narrow_usize(next(in b, inout r)),
+        max_fixes: narrow_usize(next(in b, inout r)),
+        max_text_bytes: narrow_usize(next(in b, inout r))
+    }
+}
+
+fn caps_of(in l: SpanLimits, max_name_bytes: usize) -> Caps {
+    Caps {
+        max_source_bytes: l.max_source_bytes,
+        max_lines: l.max_lines,
+        max_metadata_bytes: l.max_metadata_bytes,
+        max_work: l.max_work,
+        max_edits: l.max_edits,
+        max_output_bytes: l.max_output_bytes,
+        max_diagnostics: l.max_diagnostics,
+        max_labels: l.max_labels,
+        max_fixes: l.max_fixes,
+        max_text_bytes: l.max_text_bytes,
+        max_name_bytes: max_name_bytes
+    }
+}
+
+fn len_at(in b: Slice[u8], at: u64) -> u64 {
+    b.try_read_u64_le(wrapping_sub(at, WORD_BYTES)).unwrap_or(0)
+}
+
+// The encodings the ports read, built from the failure's diagnostics at
+// `start`: `prepare_check`'s input (seven words per diagnostic, three per
+// related label), and `lsp`'s model (five words per diagnostic, three per
+// label, the primary label first with no message) and its text pool.
+copy struct Encoded {
+    count: u64
+}
+
+fn encode(
+    in b: Slice[u8],
+    start: u64,
+    inout input: ChunkSeq[u64],
+    inout model: ChunkSeq[u64],
+    inout pool: ChunkSeq[u8]
+) -> Encoded {
+    let mut r = Reader { pos: start };
+    let count = next(in b, inout r);
+    for d in 0..count {
+        let code = text(in b, inout r);
+        let code_len = len_at(in b, code);
+        let message = text(in b, inout r);
+        let message_len = len_at(in b, message);
+        let has_help = next(in b, inout r);
+        let help = text(in b, inout r);
+        let help_len = len_at(in b, help);
+        let span_start = next(in b, inout r);
+        let span_end = next(in b, inout r);
+        let related = next(in b, inout r);
+        input.push(code_len);
+        input.push(message_len);
+        input.push(has_help);
+        input.push(help_len);
+        input.push(related);
+        input.push(span_start);
+        input.push(span_end);
+        model.push(code_len);
+        model.push(message_len);
+        model.push(has_help);
+        model.push(help_len);
+        model.push(wrapping_add(related, 1));
+        model.push(span_start);
+        model.push(span_end);
+        model.push(0);
+        put_bytes(inout pool, in b[code..wrapping_add(code, code_len)]);
+        put_bytes(inout pool, in b[message..wrapping_add(message, message_len)]);
+        if has_help != 0 {
+            put_bytes(inout pool, in b[help..wrapping_add(help, help_len)]);
+        }
+        for l in 0..related {
+            let label_start = next(in b, inout r);
+            let label_end = next(in b, inout r);
+            let label = text(in b, inout r);
+            let label_len = len_at(in b, label);
+            input.push(label_start);
+            input.push(label_end);
+            input.push(label_len);
+            model.push(label_start);
+            model.push(label_end);
+            model.push(label_len);
+            put_bytes(inout pool, in b[label..wrapping_add(label, label_len)]);
+        }
+    }
+    Encoded { count: count }
+}
+
+// The rendering's outcome: the LSP JSON array, or the error's `Display`
+// text and its unavailable kind.
+enum Rendered {
+    Json(ChunkSeq[u8]),
+    Refused(ChunkSeq[u8], bool)
+}
+
+fn resource_name(inout o: ChunkSeq[u8], r: Res) {
+    match r {
+        Res::Source => put(inout o, in "Source"),
+        Res::Lines => put(inout o, in "Lines"),
+        Res::Metadata => put(inout o, in "Metadata"),
+        Res::Work => put(inout o, in "Work"),
+        Res::Edits => put(inout o, in "Edits"),
+        Res::Output => put(inout o, in "Output"),
+        Res::Diagnostics => put(inout o, in "Diagnostics"),
+        Res::Labels => put(inout o, in "Labels"),
+        Res::Fixes => put(inout o, in "Fixes"),
+        Res::Text => put(inout o, in "Text"),
+    }
+}
+
+// `vesper_diagnostics::Error`'s `Display` for a port failure, and whether
+// it is an invalid compiler span.
+fn failure_text(f: Failure) -> Rendered {
+    let mut o = ChunkSeq::new[u8]();
+    let mut span = false;
+    match f {
+        Failure::UnsupportedLineEnding => {
+            put(
+                inout o,
+                in "terminal source contains a line separator unsupported by the shared line profile"
+            );
+            return Rendered::Refused(o, false);
+        },
+        _ => (),
+    }
+    put(inout o, in "diagnostic rendering ");
+    match f {
+        Failure::SpanLimits => put(inout o, in "Span(InvalidLimits)"),
+        Failure::Budget(r) => {
+            put(inout o, in "Span(Budget(");
+            resource_name(inout o, r);
+            put(inout o, in "))");
+        },
+        Failure::ReversedRange => {
+            put(inout o, in "Span(ReversedRange)");
+            span = true;
+        },
+        Failure::ByteOutOfBounds => {
+            put(inout o, in "Span(ByteOutOfBounds)");
+            span = true;
+        },
+        Failure::Utf8Boundary => {
+            put(inout o, in "Span(Utf8Boundary)");
+            span = true;
+        },
+        Failure::LineEndingInterior => {
+            put(inout o, in "Span(LineEndingInterior)");
+            span = true;
+        },
+        Failure::InvalidDiagnostic => put(inout o, in "Span(InvalidDiagnostic)"),
+        Failure::InvalidLimits => put(inout o, in "InvalidLimits"),
+        Failure::Name => put(inout o, in "Name"),
+        Failure::Output => put(inout o, in "Output"),
+        Failure::UnsupportedLineEnding => (),
+    }
+    Rendered::Refused(o, span)
+}
+
+fn totals_ok(t: Totals) -> Result[Totals, Failure] {
+    Result::Ok(t)
+}
+
+fn totals_err(f: Failure) -> Result[Totals, Failure] {
+    Result::Err(f)
+}
+
+fn json_ok(sink json: ChunkSeq[u8]) -> Result[ChunkSeq[u8], Failure] {
+    Result::Ok(json)
+}
+
+fn json_err(f: Failure) -> Result[ChunkSeq[u8], Failure] {
+    Result::Err(f)
+}
+
+// `prepare` and `to_lsp` over the failure's diagnostics.
+fn render(
+    in src: Str,
+    in uri: Str,
+    in caps: Caps,
+    in sizes: DiagnosticSizes,
+    in b: Slice[u8],
+    start: u64
+) -> Rendered {
+    let mut input = ChunkSeq::new[u64]();
+    let mut model = ChunkSeq::new[u64]();
+    let mut pool = ChunkSeq::new[u8]();
+    let e = encode(in b, start, inout input, inout model, inout pool);
+    let totals = handle Fail[Failure] in {
+        totals_ok(prepare_check(in src, in input.as_slice(), e.count, in caps, in sizes))
+    } with {
+        return v => v,
+        raise(f, resume) => totals_err(f),
+    };
+    let t = match totals {
+        Result::Ok(t) => t,
+        Result::Err(f) => return failure_text(f),
+    };
+    let json = handle Fail[Failure] in {
+        json_ok(lsp(
+            in src,
+            in model.as_slice(),
+            e.count,
+            in pool.as_slice(),
+            in uri,
+            in caps,
+            in sizes,
+            t.labels,
+            t.text
+        ))
+    } with {
+        return v => v,
+        raise(f, resume) => json_err(f),
+    };
+    match json {
+        Result::Ok(j) => Rendered::Json(j),
+        Result::Err(f) => failure_text(f),
+    }
+}
+
+// The analysis-unavailable warning at the origin, as `unavailable_warning`
+// writes it. It has no related information and its `data` has no help, so
+// the publication filter keeps it whole.
+fn warning(inout o: ChunkSeq[u8], in kind: Str, in reason: Slice[u8]) {
+    put(
+        inout o,
+        in "[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"severity\":2,\"source\":\"vesper\",\"code\":\"VESPER_ANALYSIS_UNAVAILABLE\",\"message\":"
+    );
+    put_string(inout o, in reason);
+    put(inout o, in ",\"data\":{\"status\":\"analysis_unavailable\",\"kind\":\"");
+    put(inout o, in kind);
+    put(inout o, in "\"}}]");
+}
+
+// Whether the member key at `at` (an opening quote) is `key`.
+fn key_is(in a: Slice[u8], at: u64, in key: Str) -> bool {
+    let k = key.as_bytes();
+    let end = wrapping_add(wrapping_add(at, 1), k.len());
+    if wrapping_add(end, 1) > a.len() || byte(in a, end) != Ascii::Quote {
+        return false;
+    }
+    for i in 0..k.len() {
+        if byte(in a, wrapping_add(wrapping_add(at, 1), i)) != byte(in k, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// The publication filter over the compact LSP array `a`: each diagnostic's
+// `relatedInformation` member unless `related`, and its `data` member
+// (which `lsp` only writes with help) unless `help_data`. Neither is a
+// diagnostic's first member, so each is removed with its leading comma.
+fn filtered(inout o: ChunkSeq[u8], in a: Slice[u8], related: bool, help_data: bool) {
+    if related && help_data {
+        put_bytes(inout o, in a);
+        return;
+    }
+    let n = a.len();
+    let mut depth = 0;
+    let mut skipping = false;
+    // The start of the bytes not yet copied.
+    let mut run = 0;
+    let mut i = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let c = byte(in a, i);
+        if c == Ascii::Quote {
+            // A string: jump to its closing quote, past each escape.
+            i = wrapping_add(i, 1);
+            loop {
+                let at = match a[i..n].find_either(Ascii::Quote, Ascii::Backslash) {
+                    Option::Some(k) => wrapping_add(i, k),
+                    Option::None => n,
+                };
+                if at >= n || byte(in a, at) == Ascii::Quote {
+                    i = wrapping_add(at, 1);
+                    break;
+                }
+                i = wrapping_add(at, ESCAPE_BYTES);
+            }
+            continue;
+        }
+        if c == Ascii::LBracket || c == Ascii::LBrace {
+            depth = wrapping_add(depth, 1);
+        } else if c == Ascii::RBracket || c == Ascii::RBrace {
+            depth = wrapping_sub(depth, 1);
+            if skipping && depth < MEMBER_DEPTH {
+                skipping = false;
+                run = i;
+            }
+        } else if c == Ascii::Comma && depth == MEMBER_DEPTH {
+            let at = wrapping_add(i, 1);
+            let drop = (!related && key_is(in a, at, in "relatedInformation"))
+                || (!help_data && key_is(in a, at, in "data"));
+            if skipping && !drop {
+                run = i;
+            }
+            if drop && !skipping {
+                o.extend(in a[run..i]);
+            }
+            skipping = drop;
+        }
+        i = wrapping_add(i, 1);
+    }
+    if !skipping {
+        o.extend(in a[run..n]);
+    }
+}
+
+// `diagnostic_payload` and the publication filter over the words at
+// `start`, the answer into `o`.
+pub fn diagnostic_payload(inout o: ChunkSeq[u8], in input: Str, start: u64) {
+    o.truncate(0);
+    let b = input.as_bytes();
+    let mut r = Reader { pos: start };
+    let limits = span_limits(in b, inout r);
+    let max_name_bytes = next(in b, inout r);
+    let diagnostic_size = next(in b, inout r);
+    let label_size = next(in b, inout r);
+    let value_size = next(in b, inout r);
+    let related = next(in b, inout r) != 0;
+    let help_data = next(in b, inout r) != 0;
+    let uri_at = text(in b, inout r);
+    let src_at = text(in b, inout r);
+    let tag = next(in b, inout r);
+    let uri = match String::from_utf8(in b[uri_at..wrapping_add(uri_at, len_at(in b, uri_at))]) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
+    };
+    let src_end = wrapping_add(src_at, len_at(in b, src_at));
+    put(inout o, in "{\"diagnostics\":");
+    if tag == Tag::Resource || tag == Tag::Unsupported {
+        let reason = text(in b, inout r);
+        let kind = if tag == Tag::Resource {
+            "resource"
+        } else {
+            "unsupported"
+        };
+        let mut w = ChunkSeq::new[u8]();
+        warning(inout w, in kind, in b[reason..wrapping_add(reason, len_at(in b, reason))]);
+        put_bytes(inout o, in w.as_slice());
+        put(inout o, in ",\"status\":\"analysis_unavailable\",\"kind\":\"");
+        put(inout o, in kind);
+        put(inout o, in "\"}");
+        return;
+    }
+    let rendered = render(
+        in input[src_at..src_end],
+        in uri,
+        in caps_of(in limits, narrow_usize(max_name_bytes)),
+        in DiagnosticSizes {
+            diagnostic: narrow_usize(diagnostic_size),
+            label: narrow_usize(label_size),
+            value: narrow_usize(value_size),
+            line: 0,
+            report_label: 0
+        },
+        in b,
+        r.pos
+    );
+    match rendered {
+        Rendered::Json(json) => {
+            filtered(inout o, in json.as_slice(), related, help_data);
+            put(inout o, in ",\"status\":\"");
+            if tag == Tag::Parse {
+                put(inout o, in "parse_error\",\"kind\":\"parse\"}");
+            } else {
+                put(inout o, in "semantic_error\",\"kind\":\"semantic\"}");
+            }
+        },
+        Rendered::Refused(message, span) => {
+            let kind = if span {
+                "invalid_compiler_span"
+            } else {
+                "diagnostic_metadata"
+            };
+            let mut reason = ChunkSeq::new[u8]();
+            put(inout reason, in "Analysis unavailable: compiler diagnostic metadata: ");
+            put_bytes(inout reason, in message.as_slice());
+            let mut w = ChunkSeq::new[u8]();
+            warning(inout w, in kind, in reason.as_slice());
+            put_bytes(inout o, in w.as_slice());
+            put(inout o, in ",\"status\":\"analysis_unavailable\",\"kind\":\"");
+            put(inout o, in kind);
+            put(inout o, in "\"}");
+        },
+    }
+}

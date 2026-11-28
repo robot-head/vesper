@@ -1,0 +1,622 @@
+// @vesper/aegis::pck_ext: Intel SGX/TDX PCK certificate DER extension parser (`src/intel.rs`).
+
+const DER_BOOLEAN: u64 = 0x01;
+const DER_INTEGER: u64 = 0x02;
+const DER_OCTET_STRING: u64 = 0x04;
+const DER_OID: u64 = 0x06;
+const DER_ENUMERATED: u64 = 0x0a;
+const DER_UTF8_STRING: u64 = 0x0c;
+const DER_PRINTABLE_STRING: u64 = 0x13;
+const DER_IA5_STRING: u64 = 0x16;
+const DER_SEQUENCE: u64 = 0x30;
+const DER_SET: u64 = 0x31;
+const DER_CONTEXT_0: u64 = 0xa0;
+const DER_CONTEXT_3: u64 = 0xa3;
+const DER_LONG_FORM: u64 = 0x80;
+const DER_LENGTH_OCTETS_MASK: u64 = 0x7f;
+const DER_MAX_LENGTH_OCTETS: u64 = 4;
+const DER_SHORT_HEADER: u64 = 2;
+const BYTE_SHIFT: u64 = 8;
+
+const TBS_ISSUER_IDX: u64 = 2;
+
+// Common Name OID: 2.5.4.3 -> [0x55, 0x04, 0x03].
+const CN_OID_LEN: u64 = 3;
+const CN_OID_B0: u64 = 0x55;
+const CN_OID_B1: u64 = 0x04;
+const CN_OID_B2: u64 = 0x03;
+
+// SGX Extension OID: 1.2.840.113741.1.13.1 (9 DER bytes).
+const SGX_OID_LEN: u64 = 9;
+const SGX_OID_B0: u64 = 0x2a;
+const SGX_OID_B1: u64 = 0x86;
+const SGX_OID_B2: u64 = 0x48;
+const SGX_OID_B3: u64 = 0x86;
+const SGX_OID_B4: u64 = 0xf8;
+const SGX_OID_B5: u64 = 0x4d;
+const SGX_OID_B6: u64 = 0x01;
+const SGX_OID_B7: u64 = 0x0d;
+const SGX_OID_B8: u64 = 0x01;
+
+const SGX_ARC_PPID: u64 = 1;
+const SGX_ARC_TCB: u64 = 2;
+const SGX_ARC_PCE_ID: u64 = 3;
+const SGX_ARC_FMSPC: u64 = 4;
+const SGX_ARC_TYPE: u64 = 5;
+const SGX_ARC_INSTANCE_ID: u64 = 6;
+const SGX_ARC_CONFIG: u64 = 7;
+
+const TCB_COMP_COUNT: u64 = 16;
+const TCB_ARC_PCESVN: u64 = 17;
+const TCB_ARC_CPUSVN: u64 = 18;
+const TCB_ALL_COMPS_MASK: u64 = 0xFFFF;
+
+const CFG_ARC_DYN_PLAT: u64 = 1;
+const CFG_ARC_CACHED_KEYS: u64 = 2;
+const CFG_ARC_SMT: u64 = 3;
+
+const LEN_PPID: u64 = 16;
+const LEN_PCE_ID: u64 = 2;
+const LEN_FMSPC: u64 = 6;
+const LEN_CPUSVN: u64 = 16;
+const LEN_INSTANCE_ID: u64 = 16;
+
+const MAX_SGX_TYPE: u64 = 2;
+const MAX_U8: u64 = 255;
+const MAX_U16: u64 = 65535;
+const DER_INT_SIGN_BIT: u64 = 0x80;
+
+// Output slots (15 u64 words).
+const PCK_OUT_FLAGS: u64 = 0;
+const PCK_OUT_PCE_SVN: u64 = 1;
+const PCK_OUT_SGX_TYPE: u64 = 2;
+const PCK_OUT_CN_START: u64 = 3;
+const PCK_OUT_CN_END: u64 = 4;
+const PCK_OUT_PPID_START: u64 = 5;
+const PCK_OUT_PPID_END: u64 = 6;
+const PCK_OUT_PCEID_START: u64 = 7;
+const PCK_OUT_PCEID_END: u64 = 8;
+const PCK_OUT_FMSPC_START: u64 = 9;
+const PCK_OUT_FMSPC_END: u64 = 10;
+const PCK_OUT_CPUSVN_START: u64 = 11;
+const PCK_OUT_CPUSVN_END: u64 = 12;
+const PCK_OUT_INST_START: u64 = 13;
+const PCK_OUT_INST_END: u64 = 14;
+const PCK_OUT_LEN: u64 = 15;
+
+const PCK_FLAG_PPID: u64 = 1;
+const PCK_FLAG_TCB: u64 = 2;
+const PCK_FLAG_PCE_ID: u64 = 4;
+const PCK_FLAG_FMSPC: u64 = 8;
+const PCK_FLAG_SGX_TYPE: u64 = 16;
+const PCK_FLAG_INSTANCE_ID: u64 = 32;
+const PCK_FLAG_CONFIG: u64 = 64;
+const PCK_FLAG_DYN_SET: u64 = 128;
+const PCK_FLAG_DYN_VAL: u64 = 256;
+const PCK_FLAG_CACHED_SET: u64 = 512;
+const PCK_FLAG_CACHED_VAL: u64 = 1024;
+const PCK_FLAG_SMT_SET: u64 = 2048;
+const PCK_FLAG_SMT_VAL: u64 = 4096;
+const PCK_FLAG_CN: u64 = 8192;
+
+const PCK_ERR_OK: u64 = 0;
+const PCK_ERR_CERT: u64 = 1;
+const PCK_ERR_TRAILING: u64 = 2;
+const PCK_ERR_MISSING_EXT: u64 = 3;
+const PCK_ERR_DUP_EXT: u64 = 4;
+const PCK_ERR_BAD_EXT: u64 = 5;
+const PCK_ERR_NO_CN: u64 = 6;
+
+fn byte_at(in b: Slice[u8], i: u64) -> u64 {
+    match b.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn tlv_at(in b: Slice[u8], pos: u64, limit: u64) -> (bool, u64, u64) {
+    if wrapping_add(pos, DER_SHORT_HEADER) > limit {
+        return (false, 0, 0);
+    }
+    let first_len = byte_at(in b, wrapping_add(pos, 1));
+    let mut len: u64 = 0;
+    let mut header: u64 = DER_SHORT_HEADER;
+    if first_len < DER_LONG_FORM {
+        len = first_len;
+    } else {
+        let n = first_len & DER_LENGTH_OCTETS_MASK;
+        if n == 0 || n > DER_MAX_LENGTH_OCTETS {
+            return (false, 0, 0);
+        }
+        header = wrapping_add(DER_SHORT_HEADER, n);
+        if wrapping_add(pos, header) > limit {
+            return (false, 0, 0);
+        }
+        let mut k: u64 = 0;
+        loop {
+            if k >= n {
+                break;
+            }
+            let x = byte_at(in b, wrapping_add(wrapping_add(pos, DER_SHORT_HEADER), k));
+            len = (len << BYTE_SHIFT) | x;
+            k = wrapping_add(k, 1);
+        }
+    }
+    let body_start = wrapping_add(pos, header);
+    if len > wrapping_sub(limit, body_start) {
+        return (false, 0, 0);
+    }
+    (true, body_start, wrapping_add(body_start, len))
+}
+
+fn match_sgx_oid_exact(in b: Slice[u8], start: u64, end: u64) -> bool {
+    wrapping_sub(end, start) == SGX_OID_LEN
+        && byte_at(in b, start) == SGX_OID_B0
+        && byte_at(in b, wrapping_add(start, 1)) == SGX_OID_B1
+        && byte_at(in b, wrapping_add(start, 2)) == SGX_OID_B2
+        && byte_at(in b, wrapping_add(start, 3)) == SGX_OID_B3
+        && byte_at(in b, wrapping_add(start, 4)) == SGX_OID_B4
+        && byte_at(in b, wrapping_add(start, 5)) == SGX_OID_B5
+        && byte_at(in b, wrapping_add(start, 6)) == SGX_OID_B6
+        && byte_at(in b, wrapping_add(start, 7)) == SGX_OID_B7
+        && byte_at(in b, wrapping_add(start, 8)) == SGX_OID_B8
+}
+
+fn match_sgx_oid_prefix(in b: Slice[u8], start: u64, end: u64) -> bool {
+    wrapping_sub(end, start) > SGX_OID_LEN
+        && byte_at(in b, start) == SGX_OID_B0
+        && byte_at(in b, wrapping_add(start, 1)) == SGX_OID_B1
+        && byte_at(in b, wrapping_add(start, 2)) == SGX_OID_B2
+        && byte_at(in b, wrapping_add(start, 3)) == SGX_OID_B3
+        && byte_at(in b, wrapping_add(start, 4)) == SGX_OID_B4
+        && byte_at(in b, wrapping_add(start, 5)) == SGX_OID_B5
+        && byte_at(in b, wrapping_add(start, 6)) == SGX_OID_B6
+        && byte_at(in b, wrapping_add(start, 7)) == SGX_OID_B7
+        && byte_at(in b, wrapping_add(start, 8)) == SGX_OID_B8
+}
+
+fn parse_small_int(in b: Slice[u8], pos: u64, end: u64, max_val: u64) -> (bool, u64) {
+    let tag = byte_at(in b, pos);
+    if tag != DER_INTEGER && tag != DER_ENUMERATED {
+        return (false, 0);
+    }
+    let (ok, v_start, v_end) = tlv_at(in b, pos, end);
+    if !ok || v_end != end {
+        return (false, 0);
+    }
+    let v_len = wrapping_sub(v_end, v_start);
+    if v_len == 0 || v_len > 3 {
+        return (false, 0);
+    }
+    if (byte_at(in b, v_start) & DER_INT_SIGN_BIT) != 0 {
+        return (false, 0);
+    }
+    let mut val: u64 = 0;
+    let mut k: u64 = 0;
+    loop {
+        if k >= v_len {
+            break;
+        }
+        val = (val << BYTE_SHIFT) | byte_at(in b, wrapping_add(v_start, k));
+        k = wrapping_add(k, 1);
+    }
+    if val > max_val {
+        return (false, 0);
+    }
+    (true, val)
+}
+
+fn find_issuer_cn(in b: Slice[u8], start: u64, end: u64) -> (bool, u64, u64) {
+    let mut cur = start;
+    loop {
+        if cur >= end {
+            break;
+        }
+        let (ok_set, set_body, set_end) = tlv_at(in b, cur, end);
+        if !ok_set || byte_at(in b, cur) != DER_SET {
+            return (false, 0, 0);
+        }
+        cur = set_end;
+        let mut rcur = set_body;
+        loop {
+            if rcur >= set_end {
+                break;
+            }
+            let (ok_seq, seq_body, seq_end) = tlv_at(in b, rcur, set_end);
+            if !ok_seq || byte_at(in b, rcur) != DER_SEQUENCE {
+                return (false, 0, 0);
+            }
+            rcur = seq_end;
+            let (ok_oid, oid_body, oid_end) = tlv_at(in b, seq_body, seq_end);
+            if !ok_oid || byte_at(in b, seq_body) != DER_OID {
+                return (false, 0, 0);
+            }
+            if wrapping_sub(oid_end, oid_body) == CN_OID_LEN
+                && byte_at(in b, oid_body) == CN_OID_B0
+                && byte_at(in b, wrapping_add(oid_body, 1)) == CN_OID_B1
+                && byte_at(in b, wrapping_add(oid_body, 2)) == CN_OID_B2
+            {
+                let (ok_v, v_body, v_end) = tlv_at(in b, oid_end, seq_end);
+                if !ok_v || v_end != seq_end {
+                    return (false, 0, 0);
+                }
+                let tag = byte_at(in b, oid_end);
+                if tag == DER_UTF8_STRING || tag == DER_PRINTABLE_STRING || tag == DER_IA5_STRING {
+                    return (true, v_body, v_end);
+                }
+                return (false, 0, 0);
+            }
+        }
+    }
+    (false, 0, 0)
+}
+
+pub fn parse_pck_ext(in der: Slice[u8], inout out: Slice[u64], inout sgx_comps: Slice[u8]) -> u64 {
+    if out.len() < PCK_OUT_LEN || sgx_comps.len() < TCB_COMP_COUNT {
+        return PCK_ERR_CERT;
+    }
+    let total = der.len();
+    let (ok0, body_start, outer_end) = tlv_at(in der, 0, total);
+    if !ok0 || byte_at(in der, 0) != DER_SEQUENCE {
+        return PCK_ERR_CERT;
+    }
+    if outer_end != total {
+        return PCK_ERR_TRAILING;
+    }
+    let (ok_tbs, tbs_body, tbs_end) = tlv_at(in der, body_start, outer_end);
+    if !ok_tbs || byte_at(in der, body_start) != DER_SEQUENCE {
+        return PCK_ERR_CERT;
+    }
+
+    let mut cur = tbs_body;
+    let mut idx: u64 = 0;
+    let mut shift: u64 = 0;
+    let mut issuer_body: u64 = 0;
+    let mut issuer_end: u64 = 0;
+    let mut has_issuer = false;
+    let mut ext_seq_start: u64 = 0;
+    let mut ext_seq_end: u64 = 0;
+    let mut found_exts = false;
+
+    loop {
+        if cur >= tbs_end {
+            break;
+        }
+        let (ok_f, f_body, f_end) = tlv_at(in der, cur, tbs_end);
+        if !ok_f {
+            return PCK_ERR_CERT;
+        }
+        let tag = byte_at(in der, cur);
+        if idx == 0 && tag == DER_CONTEXT_0 {
+            shift = 1;
+        }
+        if idx == wrapping_add(shift, TBS_ISSUER_IDX) && tag == DER_SEQUENCE {
+            issuer_body = f_body;
+            issuer_end = f_end;
+            has_issuer = true;
+        }
+        if tag == DER_CONTEXT_3 {
+            let (ok_s, s_body, s_end) = tlv_at(in der, f_body, f_end);
+            if !ok_s || s_end != f_end || byte_at(in der, f_body) != DER_SEQUENCE {
+                return PCK_ERR_CERT;
+            }
+            ext_seq_start = s_body;
+            ext_seq_end = s_end;
+            found_exts = true;
+        }
+        cur = f_end;
+        idx = wrapping_add(idx, 1);
+    }
+
+    if !found_exts {
+        return PCK_ERR_MISSING_EXT;
+    }
+
+    // Find the single SGX extension.
+    let mut ecur = ext_seq_start;
+    let mut sgx_val_s: u64 = 0;
+    let mut sgx_val_e: u64 = 0;
+    let mut sgx_count: u64 = 0;
+    loop {
+        if ecur >= ext_seq_end {
+            break;
+        }
+        let (ok_e, e_body, e_end) = tlv_at(in der, ecur, ext_seq_end);
+        if !ok_e || byte_at(in der, ecur) != DER_SEQUENCE {
+            return PCK_ERR_CERT;
+        }
+        ecur = e_end;
+        let (ok_oid, oid_body, oid_end) = tlv_at(in der, e_body, e_end);
+        if !ok_oid || byte_at(in der, e_body) != DER_OID {
+            return PCK_ERR_CERT;
+        }
+        if !match_sgx_oid_exact(in der, oid_body, oid_end) {
+            continue;
+        }
+        sgx_count = wrapping_add(sgx_count, 1);
+        if sgx_count > 1 {
+            return PCK_ERR_DUP_EXT;
+        }
+        let mut vcur = oid_end;
+        if vcur < e_end && byte_at(in der, vcur) == DER_BOOLEAN {
+            let (ok_b, _b_body, b_end) = tlv_at(in der, vcur, e_end);
+            if !ok_b {
+                return PCK_ERR_CERT;
+            }
+            vcur = b_end;
+        }
+        let (ok_val, vs, ve) = tlv_at(in der, vcur, e_end);
+        if !ok_val || ve != e_end || byte_at(in der, vcur) != DER_OCTET_STRING {
+            return PCK_ERR_CERT;
+        }
+        sgx_val_s = vs;
+        sgx_val_e = ve;
+    }
+    if sgx_count == 0 {
+        return PCK_ERR_MISSING_EXT;
+    }
+
+    if !has_issuer {
+        return PCK_ERR_NO_CN;
+    }
+    let (ok_cn, cn_s, cn_e) = find_issuer_cn(in der, issuer_body, issuer_end);
+    if !ok_cn {
+        return PCK_ERR_NO_CN;
+    }
+
+    // Outer SEQUENCE inside SGX extension OCTET STRING.
+    let (ok_top, top_body, top_end) = tlv_at(in der, sgx_val_s, sgx_val_e);
+    if !ok_top || top_end != sgx_val_e || byte_at(in der, sgx_val_s) != DER_SEQUENCE {
+        return PCK_ERR_BAD_EXT;
+    }
+
+    let mut flags: u64 = PCK_FLAG_CN;
+    let mut pce_svn: u64 = 0;
+    let mut sgx_type: u64 = 0;
+    let mut ppid_s: u64 = 0;
+    let mut ppid_e: u64 = 0;
+    let mut pceid_s: u64 = 0;
+    let mut pceid_e: u64 = 0;
+    let mut fmspc_s: u64 = 0;
+    let mut fmspc_e: u64 = 0;
+    let mut cpusvn_s: u64 = 0;
+    let mut cpusvn_e: u64 = 0;
+    let mut inst_s: u64 = 0;
+    let mut inst_e: u64 = 0;
+
+    let mut icur = top_body;
+    loop {
+        if icur >= top_end {
+            break;
+        }
+        let (ok_it, it_body, it_end) = tlv_at(in der, icur, top_end);
+        if !ok_it || byte_at(in der, icur) != DER_SEQUENCE {
+            return PCK_ERR_BAD_EXT;
+        }
+        icur = it_end;
+        let (ok_oid, oid_body, oid_end) = tlv_at(in der, it_body, it_end);
+        if !ok_oid || byte_at(in der, it_body) != DER_OID {
+            return PCK_ERR_BAD_EXT;
+        }
+        if !match_sgx_oid_prefix(in der, oid_body, oid_end) {
+            return PCK_ERR_BAD_EXT;
+        }
+        let suf_s = wrapping_add(oid_body, SGX_OID_LEN);
+        if wrapping_sub(oid_end, suf_s) != 1 {
+            return PCK_ERR_BAD_EXT;
+        }
+        let arc = byte_at(in der, suf_s);
+        let (ok_v, v_body, v_end) = tlv_at(in der, oid_end, it_end);
+        if !ok_v || v_end != it_end {
+            return PCK_ERR_BAD_EXT;
+        }
+
+        if arc == SGX_ARC_PPID {
+            if (flags & PCK_FLAG_PPID) != 0
+                || byte_at(in der, oid_end) != DER_OCTET_STRING
+                || wrapping_sub(v_end, v_body) != LEN_PPID
+            {
+                return PCK_ERR_BAD_EXT;
+            }
+            ppid_s = v_body;
+            ppid_e = v_end;
+            flags = flags | PCK_FLAG_PPID;
+        } else if arc == SGX_ARC_PCE_ID {
+            if (flags & PCK_FLAG_PCE_ID) != 0
+                || byte_at(in der, oid_end) != DER_OCTET_STRING
+                || wrapping_sub(v_end, v_body) != LEN_PCE_ID
+            {
+                return PCK_ERR_BAD_EXT;
+            }
+            pceid_s = v_body;
+            pceid_e = v_end;
+            flags = flags | PCK_FLAG_PCE_ID;
+        } else if arc == SGX_ARC_FMSPC {
+            if (flags & PCK_FLAG_FMSPC) != 0
+                || byte_at(in der, oid_end) != DER_OCTET_STRING
+                || wrapping_sub(v_end, v_body) != LEN_FMSPC
+            {
+                return PCK_ERR_BAD_EXT;
+            }
+            fmspc_s = v_body;
+            fmspc_e = v_end;
+            flags = flags | PCK_FLAG_FMSPC;
+        } else if arc == SGX_ARC_TYPE {
+            if (flags & PCK_FLAG_SGX_TYPE) != 0 {
+                return PCK_ERR_BAD_EXT;
+            }
+            let (ok_t, tv) = parse_small_int(in der, oid_end, v_end, MAX_SGX_TYPE);
+            if !ok_t {
+                return PCK_ERR_BAD_EXT;
+            }
+            sgx_type = tv;
+            flags = flags | PCK_FLAG_SGX_TYPE;
+        } else if arc == SGX_ARC_INSTANCE_ID {
+            if (flags & PCK_FLAG_INSTANCE_ID) != 0
+                || byte_at(in der, oid_end) != DER_OCTET_STRING
+                || wrapping_sub(v_end, v_body) != LEN_INSTANCE_ID
+            {
+                return PCK_ERR_BAD_EXT;
+            }
+            inst_s = v_body;
+            inst_e = v_end;
+            flags = flags | PCK_FLAG_INSTANCE_ID;
+        } else if arc == SGX_ARC_TCB {
+            if (flags & PCK_FLAG_TCB) != 0 || byte_at(in der, oid_end) != DER_SEQUENCE {
+                return PCK_ERR_BAD_EXT;
+            }
+            let mut comp_mask: u64 = 0;
+            let mut has_pcesvn = false;
+            let mut has_cpusvn = false;
+            let mut tcur = v_body;
+            loop {
+                if tcur >= v_end {
+                    break;
+                }
+                let (ok_te, te_body, te_end) = tlv_at(in der, tcur, v_end);
+                if !ok_te || byte_at(in der, tcur) != DER_SEQUENCE {
+                    return PCK_ERR_BAD_EXT;
+                }
+                tcur = te_end;
+                let (ok_toid, toid_body, toid_end) = tlv_at(in der, te_body, te_end);
+                if !ok_toid || byte_at(in der, te_body) != DER_OID {
+                    return PCK_ERR_BAD_EXT;
+                }
+                if !match_sgx_oid_prefix(in der, toid_body, toid_end) {
+                    return PCK_ERR_BAD_EXT;
+                }
+                let tsuf = wrapping_add(toid_body, SGX_OID_LEN);
+                if wrapping_sub(toid_end, tsuf) != 2 || byte_at(in der, tsuf) != SGX_ARC_TCB {
+                    return PCK_ERR_BAD_EXT;
+                }
+                let tarc = byte_at(in der, wrapping_add(tsuf, 1));
+                let (ok_tv, tv_body, tv_end) = tlv_at(in der, toid_end, te_end);
+                if !ok_tv || tv_end != te_end {
+                    return PCK_ERR_BAD_EXT;
+                }
+                if tarc >= 1 && tarc <= TCB_COMP_COUNT {
+                    let ci = wrapping_sub(tarc, 1);
+                    let bit = wrapping_shl_u64(1, wrapping_u32(ci));
+                    if (comp_mask & bit) != 0 {
+                        return PCK_ERR_BAD_EXT;
+                    }
+                    let (ok_c, cv) = parse_small_int(in der, toid_end, tv_end, MAX_U8);
+                    if !ok_c {
+                        return PCK_ERR_BAD_EXT;
+                    }
+                    sgx_comps.try_set(ci, wrapping_u8(cv));
+                    comp_mask = comp_mask | bit;
+                } else if tarc == TCB_ARC_PCESVN {
+                    if has_pcesvn {
+                        return PCK_ERR_BAD_EXT;
+                    }
+                    let (ok_p, pv) = parse_small_int(in der, toid_end, tv_end, MAX_U16);
+                    if !ok_p {
+                        return PCK_ERR_BAD_EXT;
+                    }
+                    pce_svn = pv;
+                    has_pcesvn = true;
+                } else if tarc == TCB_ARC_CPUSVN {
+                    if has_cpusvn
+                        || byte_at(in der, toid_end) != DER_OCTET_STRING
+                        || wrapping_sub(tv_end, tv_body) != LEN_CPUSVN
+                    {
+                        return PCK_ERR_BAD_EXT;
+                    }
+                    cpusvn_s = tv_body;
+                    cpusvn_e = tv_end;
+                    has_cpusvn = true;
+                } else {
+                    return PCK_ERR_BAD_EXT;
+                }
+            }
+            if comp_mask != TCB_ALL_COMPS_MASK || !has_pcesvn || !has_cpusvn {
+                return PCK_ERR_BAD_EXT;
+            }
+            flags = flags | PCK_FLAG_TCB;
+        } else if arc == SGX_ARC_CONFIG {
+            if (flags & PCK_FLAG_CONFIG) != 0 || byte_at(in der, oid_end) != DER_SEQUENCE {
+                return PCK_ERR_BAD_EXT;
+            }
+            let mut ccur = v_body;
+            loop {
+                if ccur >= v_end {
+                    break;
+                }
+                let (ok_ce, ce_body, ce_end) = tlv_at(in der, ccur, v_end);
+                if !ok_ce || byte_at(in der, ccur) != DER_SEQUENCE {
+                    return PCK_ERR_BAD_EXT;
+                }
+                ccur = ce_end;
+                let (ok_coid, coid_body, coid_end) = tlv_at(in der, ce_body, ce_end);
+                if !ok_coid || byte_at(in der, ce_body) != DER_OID {
+                    return PCK_ERR_BAD_EXT;
+                }
+                if !match_sgx_oid_prefix(in der, coid_body, coid_end) {
+                    return PCK_ERR_BAD_EXT;
+                }
+                let csuf = wrapping_add(coid_body, SGX_OID_LEN);
+                if wrapping_sub(coid_end, csuf) != 2 || byte_at(in der, csuf) != SGX_ARC_CONFIG {
+                    return PCK_ERR_BAD_EXT;
+                }
+                let carc = byte_at(in der, wrapping_add(csuf, 1));
+                let (ok_cv, cv_body, cv_end) = tlv_at(in der, coid_end, ce_end);
+                if !ok_cv
+                    || cv_end != ce_end
+                    || byte_at(in der, coid_end) != DER_BOOLEAN
+                    || wrapping_sub(cv_end, cv_body) != 1
+                {
+                    return PCK_ERR_BAD_EXT;
+                }
+                let bval = byte_at(in der, cv_body) != 0;
+                if carc == CFG_ARC_DYN_PLAT {
+                    if (flags & PCK_FLAG_DYN_SET) != 0 {
+                        return PCK_ERR_BAD_EXT;
+                    }
+                    flags = flags | PCK_FLAG_DYN_SET;
+                    if bval {
+                        flags = flags | PCK_FLAG_DYN_VAL;
+                    }
+                } else if carc == CFG_ARC_CACHED_KEYS {
+                    if (flags & PCK_FLAG_CACHED_SET) != 0 {
+                        return PCK_ERR_BAD_EXT;
+                    }
+                    flags = flags | PCK_FLAG_CACHED_SET;
+                    if bval {
+                        flags = flags | PCK_FLAG_CACHED_VAL;
+                    }
+                } else if carc == CFG_ARC_SMT {
+                    if (flags & PCK_FLAG_SMT_SET) != 0 {
+                        return PCK_ERR_BAD_EXT;
+                    }
+                    flags = flags | PCK_FLAG_SMT_SET;
+                    if bval {
+                        flags = flags | PCK_FLAG_SMT_VAL;
+                    }
+                } else {
+                    return PCK_ERR_BAD_EXT;
+                }
+            }
+            flags = flags | PCK_FLAG_CONFIG;
+        } else {
+            return PCK_ERR_BAD_EXT;
+        }
+    }
+
+    out.try_set(PCK_OUT_FLAGS, flags);
+    out.try_set(PCK_OUT_PCE_SVN, pce_svn);
+    out.try_set(PCK_OUT_SGX_TYPE, sgx_type);
+    out.try_set(PCK_OUT_CN_START, cn_s);
+    out.try_set(PCK_OUT_CN_END, cn_e);
+    out.try_set(PCK_OUT_PPID_START, ppid_s);
+    out.try_set(PCK_OUT_PPID_END, ppid_e);
+    out.try_set(PCK_OUT_PCEID_START, pceid_s);
+    out.try_set(PCK_OUT_PCEID_END, pceid_e);
+    out.try_set(PCK_OUT_FMSPC_START, fmspc_s);
+    out.try_set(PCK_OUT_FMSPC_END, fmspc_e);
+    out.try_set(PCK_OUT_CPUSVN_START, cpusvn_s);
+    out.try_set(PCK_OUT_CPUSVN_END, cpusvn_e);
+    out.try_set(PCK_OUT_INST_START, inst_s);
+    out.try_set(PCK_OUT_INST_END, inst_e);
+    PCK_ERR_OK
+}

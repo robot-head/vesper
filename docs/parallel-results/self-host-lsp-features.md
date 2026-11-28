@@ -1260,3 +1260,294 @@ build, source words written outside the timing.
 | 35.8 µs | 39.7 µs | **1.11x** |
 
 Rust lines deleted: 0; the lint driver still lexes in Rust.
+
+# Part 13b: the publishDiagnostics payload (#1828)
+
+`Session::diagnostics` in `src/lsp/session.rs` publishes a failed analysis
+through `diagnostic_payload`. A parse or semantic failure is rendered with
+vesper-diagnostics (`prepare`, then `to_lsp`). A rendering error, or a
+resource or unsupported failure, becomes one analysis-unavailable warning
+at the origin. The fields the client did not negotiate are then removed.
+Part 13b ports all of this as `lsp_diagnostic_payload` in a new package,
+`@vesper/lsp-publish` (`packages/vesper-lsp-publish`), over the Vesper
+port of vesper-diagnostics. It is its own package because
+`@vesper/diagnostics` and `@vesper/span` both declare the `Resource`
+variants, and enum variants share one namespace across packages.
+
+## What changed
+
+- `src/lsp/session.rs`: the publication filter is the free function
+  `publication_filter`. The hidden `diagnostic_payload_answer`
+  (Rust's payload as JSON), `diagnostic_payload_words` (the failure as the
+  port reads it) and `payload_tags` are added and re-exported from
+  `src/lsp.rs`.
+- `packages/vesper-lsp-publish` (new): `payload.ves` (encodings, error
+  texts, warning, filter) and `json.ves` (string escapes, packing).
+- `tests/self_host_lsp_features.rs`: `diagnostic_payload_matches_rust` and
+  the ignored `diagnostic_payload_speed`.
+- `tests/wasm_seed_package_io.rs`: the package is in `COMPILER_PACKAGES`.
+- `BUILD.bazel`: the test's data includes the package and the
+  vesper-diagnostics crate files.
+
+## Differential
+
+161 failures, each under all four combinations of the two publication
+capabilities (644 answers), compared as parsed JSON. The failures come
+from the corpus analyses (51 parse and 19 semantic payloads, 61 resource
+and 7 unsupported refusals) and from hand-built failures that reach every
+rendering refusal: spans out of bounds, reversed, inside a character or a
+CRLF, empty codes and messages, the diagnostic, label and text budgets,
+help with escapes, related labels, empty, control-character and long URIs
+(11 `diagnostic_metadata` and 12 `invalid_compiler_span` warnings).
+0 diffs.
+
+## Numbers
+
+8 payloads per call with both capabilities off, so the filter runs. Best
+of five ABBA rounds per failure, release build. The words are written
+outside the timing. The port's JSON is parsed into a serde `Value` inside
+the timing, as the session would.
+
+| Rust | Vesper | Ratio |
+|--:|--:|--:|
+| 16.0 µs | 5.1 µs | **0.32x** |
+
+The first version ran at 4.79x. It copied the source into a `String` each
+round and filtered byte by byte. Lending the source as a `Str` slice of the
+input, and skipping strings with `find_either` while copying runs as
+slices, brought it to 0.32x. Rust lines deleted: 0; the session does not
+call the port yet.
+
+# Part 14a: the session request gate and initialize handshake (#1828)
+
+`Session::request` in `src/lsp/session.rs` checks every request before a
+handler runs. After `validate_input` it refuses a second `initialize`, a
+request before `initialize` or after `shutdown`, `shutdown` with
+parameters, unknown methods and parameters that are not an object.
+`initialize` negotiates the client's capabilities (related information,
+diagnostic data, hierarchical symbols, code actions, code-lens refresh)
+and the background proof debounce, then answers with the server's
+capabilities. Part 14a moves this gate into the pure function `route`
+(with `initialize_result` and `background_choice`), so the session only
+stores what `route` returns. The Vesper port is a new check kind of
+`lsp_commands` in `@vesper/lsp`.
+
+## What changed
+
+- `src/lsp/session.rs`: `route`, `initialize_result`, `running` and
+  `SERVER_VERSION`; `Session::request` calls `route`. The hidden
+  `PortCheck::Request` (state, auditor, configured debounce) and
+  `PortState` rows go through `command_checks_for_port`.
+- `src/lsp/session/lens_requests.rs`: `background_choice` replaces
+  `configure_background`, with the named bounds `BACKGROUND_ENTRIES` and
+  `MAX_CLIENT_DEBOUNCE_MS`.
+- `packages/vesper-lsp/src/commands.ves`: the request check, the
+  negotiation over the tape and the `initialize` result as serde_json
+  writes it (sorted keys). The input header gains the server version.
+- `tests/self_host_lsp_core.rs`: `request_cases` joins `command_cases`,
+  so `commands_match_rust` and `commands_speed` cover it.
+
+## Differential
+
+1,583 request checks among the 2,218 command checks. Every state against
+22 methods and 9 parameter shapes, then 100 `initialize` parameter sets
+under 7 auditor and debounce settings. The sets cover each capability as
+true, false, a number, a string and null, wrong container shapes,
+escaped keys, code-action literal support shapes, and `debounceMs` as 0,
+the bounds, negative, `-0`, fractions, exponents, `u64::MAX` and past it.
+0 diffs.
+
+## Numbers
+
+64 rounds per check, best of five ABBA pairs, release build. Rust takes
+parsed `serde_json::Value` parameters; Vesper parses the tape once per
+check. Rust builds the `initialize` result as a `Value` and writes it.
+
+| Checks | Rust | Vesper | Ratio |
+|--|--:|--:|--:|
+| Request (1,583) | 4.33 µs | 0.33 µs | **0.08x** |
+| All commands (2,187) | 3.00 µs | 0.25 µs | **0.08x** |
+
+Rust lines deleted: 0; the session does not call the port yet.
+
+# Part 14b: the notification gate (#1828)
+
+`Session::notification` checks every notification before the document
+store sees it. After `validate_input` it answers `exit` (clean only after
+`shutdown`), refuses notifications outside a running session, reads the
+`didOpen`, `didChange` and `didClose` parameters (the document URI and
+version, the text, and each content change's range, `rangeLength` and
+text, at most 64 changes) and ignores other notifications. Part 14b
+moves this into the pure function `note_route`, and ports it as another
+check kind of `lsp_commands` in `@vesper/lsp`. The row also reports
+whether the URI names a `Loom.toml` manifest, which picks the store.
+
+## What changed
+
+- `src/lsp/session.rs`: `note_route` and its result `Note`;
+  `Session::notification` acts on it. The hidden `PortCheck::Note` and
+  `PortState::Exited` rows render a `Note` with `note_row`.
+- `packages/vesper-lsp/src/commands.ves`: the notification check, the
+  parameter readings and their refusals, in Rust's order.
+- `tests/self_host_lsp_core.rs`: `note_cases` joins `command_cases`.
+
+## Differential
+
+430 notification checks among 2,648 command checks. Every state
+(uninitialized, running, shut down, exited) against 9 notifications and
+6 parameter shapes, then `didOpen` and `didClose` documents with
+missing, mistyped and escaped members, every version edge, manifest and
+near-manifest URIs and a 200,000-byte text, and `didChange` with 0 to 100
+changes and every range, position and `rangeLength` edge (`-0`,
+fractions, exponents, `u32::MAX` and past it) alone and between valid
+changes. 0 diffs.
+
+## Numbers
+
+64 rounds per check, best of five ABBA pairs, release build, without the
+cases over 4 KiB.
+
+| Checks | Rust | Vesper | Ratio |
+|--|--:|--:|--:|
+| Notification (428) | 271 ns | 277 ns | **1.02x** |
+| All commands (2,615) | 2.65 µs | 0.28 µs | **0.11x** |
+
+Rust lines deleted: 0; the session does not call the port yet.
+
+
+# Part 15a: the server loop in Vesper
+
+`@vesper/lsp-server` is the first package that runs a whole LSP session
+in Vesper. It reads each frame with `read_frame`, parses the envelope,
+and answers what Vesper already owns: refused bodies, the request gate
+(lifecycle, `initialize`, `shutdown`), the notification gate and
+`$/cancelRequest`. Everything else crosses an engine seam,
+`sys library LspEngine`: `lsp_engine_frame` hands the body to the
+engine, `lsp_engine_take` copies its answer frames out, `lsp_engine_exit`
+reports whether the session continues or exits cleanly, and
+`lsp_engine_error` carries a failure. The seam is the "checked document"
+interface Stage 2 agreed on; it starts as Rust and gets a Vesper engine
+before `src/lsp` can go.
+
+## What changed
+
+- `packages/vesper-lsp-server`: the loop (`serve`), refusal frames
+  (error responses and `window/logMessage` warnings) and the
+  `lsp_server_run` JIT entry; `engine-*.vsys` declare the seam.
+- `packages/vesper-lsp`: exports the gate (`Gate`, `gate_request`,
+  `gate_note`, `refusal_code`, `refusal_message`), the frame reader,
+  envelope parser, encoder and limits for the server package.
+- `src/lsp.rs`: the hidden `Engine`, which drives a Rust `Session` one
+  body at a time and waits for a proof job to finish before it returns.
+- `tests/self_host_lsp_core.rs`: `server_loop_matches_rust` binds the
+  seam to the hidden `Engine` and compares the bytes `serve_with` writes.
+
+## Differential
+
+16 scripted sessions: empty input, the full lifecycle, requests before
+`initialize`, refused bodies, gate refusals, documents and their
+handlers, a manifest, cancels and responses, edits and proof commands,
+`exit` before `shutdown` and uninitialized, frames after `exit`, end of
+input without `exit`, requests after `shutdown`, a framing error and a
+truncated frame. Every byte of output and the exit outcome match. 0
+diffs.
+
+The scripts leave out sequences where Rust's own answer order is a race
+between its reader and worker threads (a refused envelope body after a
+queued request, cancelling a queued request, `vesper.proofAudit`).
+
+## Numbers
+
+Release build, best of five ABBA pairs over the 16 sessions.
+
+| | Rust | Vesper | Ratio |
+|--|--:|--:|--:|
+| 16 sessions | 7.2 ms | 2.4 ms | **0.33x** |
+
+Rust lines deleted: 0. Gaps: no debounce timers or background proofs
+yet (part 15b), `vesper.proofAudit` runs synchronously, in-flight work
+is not cancelled, and `vesper lsp` still runs Rust (part 15c).
+
+# Part 15b: reading live and running timers
+
+`serve_live` in `@vesper/lsp-server` serves a client whose bytes arrive
+over time. It asks the host for bytes (`lsp_engine_read`, at most
+64 KiB at a time), reads a frame only once all of its bytes are in
+(`read_frame` reports a partial frame as truncated, so the loop reads
+more and tries again), writes each frame's answers as soon as they exist
+(`lsp_engine_write`), and drops handled bytes once 1 MiB has piled up.
+While it waits for the client, it waits no longer than
+`lsp_engine_deadline` and then calls `lsp_engine_tick`, which handles the
+debounce timers and background proof runs that finished. The host owns
+the descriptors and the clock, so the loop has no platform code.
+
+## What changed
+
+- `packages/vesper-lsp-server`: `serve_live` and the `lsp_server_live`
+  JIT entry; the engine seam gains `lsp_engine_read`, `lsp_engine_write`,
+  `lsp_engine_deadline` and `lsp_engine_tick`.
+- `src/lsp.rs`: `Engine::deadline` (a 10 ms poll while the client has
+  background proofs on) and `Engine::tick`. Timers still fire on their
+  own threads, as in `serve`. A timer that fires while a
+  `vesper.proofAudit` job is awaited waits for the next tick instead of
+  being dropped.
+- `tests/self_host_lsp_core.rs`: `live_loop_matches_rust` and
+  `live_loop_runs_timers`.
+
+## Differential
+
+- `live_loop_matches_rust`: all 16 sessions from part 15a, read in 1-,
+  5-, 64- and 4,096-byte pieces and whole, each with and without a wait
+  that runs out (and so a tick) before every read: 160 runs, 0 diffs.
+- `live_loop_runs_timers`: a client turns background proofs on, opens a
+  document, then pauses for 1.5 s, so the debounce timer fires and the
+  background run finishes before `shutdown`. `/bin/false` stands in for
+  Lean and the auditor. Both sides send the same 4 messages, including
+  one `vesper/proofStatus`, once its `elapsed_ms` is set aside. 0 diffs
+  over repeated runs.
+
+## Numbers
+
+| | Rust | Vesper | Ratio |
+|--|--:|--:|--:|
+| 16 sessions, 64 KiB reads | 8.0 ms | 2.7 ms | **0.34x** |
+
+Rust lines deleted: 0. Gaps: a `vesper.proofAudit` request still
+blocks the loop until its job finishes, work that is already running is
+not cancelled, and `vesper lsp` does not run this loop yet (part 15c,
+which also supplies the stdin, stdout and clock host functions).
+
+# Part 15c: `vesper lsp` runs the Vesper loop
+
+The hybrid compiler's `vesper lsp` now runs `@vesper/lsp-server`'s
+`serve_stdio`: `run_lsp` in `@vesper/driver-commands` calls it instead of
+handing the whole session to Rust `serve`. The engine seam moved into the
+`HybridCommands` import of `@vesper/driver-engines` as
+`hc_lsp_engine_*`, as the Stage 2 plan asked (Rust hooks first), so the
+loop's effect is the one the driver already carries and the wasm32-wasip2
+build refuses it like every other Rust engine.
+`crates/vesper-hybrid/src/lsp_engine.rs` is the host: it starts the Rust
+session with `serve`'s default configuration, reads standard input on its
+own thread (so a read can wait with a timeout on every target) and writes
+and flushes standard output.
+
+## What changed
+
+- `packages/vesper-driver-engines`: `hc_lsp_engine_start`, `frame`,
+  `tick`, `take`, `exit`, `error`, `read`, `write`, `deadline` replace
+  `hc_lsp_serve` and `hc_lsp_err`; src-wasip2 refuses `vesper lsp`.
+- `packages/vesper-lsp-server`: uses that seam (its own `.vsys` files are
+  gone) and adds `serve_stdio` with `ProtocolLimits::default()`
+  (`default_limits` in `@vesper/lsp`).
+- `crates/vesper-hybrid`: the new `lsp_engine.rs`, re-exported from
+  `commands::host`; `hc_lsp_serve` and `hc_lsp_err` are deleted.
+- Bazel: `lsp_package` and `lsp_server_package`, in the driver's deps.
+
+## Differential
+
+The part 15a and 15b differentials bind the same seam by its new names:
+16 sessions, 160 chunked runs and the timed session, 0 diffs.
+
+Rust lines deleted: 39 (`hc_lsp_serve`, `hc_lsp_err` and their error
+cell). `src/lsp.rs` `serve` stays for the root `vesper` binary until the
+hybrid is the default.
