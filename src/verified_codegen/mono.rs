@@ -69,7 +69,7 @@ fn subst(t: &Type, vars: &Vars) -> Type {
 }
 
 /// `f` with every type substituted by `vars`.
-fn instantiate(f: &FunctionIr, name: String, vars: &Vars) -> FunctionIr {
+pub(crate) fn instantiate(f: &FunctionIr, name: String, vars: &Vars) -> FunctionIr {
     let mut g = f.clone();
     g.name = name;
     if vars.is_empty() {
