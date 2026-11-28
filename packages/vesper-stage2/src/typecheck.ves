@@ -1424,6 +1424,42 @@ fn constrain_literals(inout tc: Tc, in a: Ast, eid: u64, target: u32) {
     }
 }
 
+// An annotated `let` whose initializer joins branches (`if`, `match` or a
+// block tail) records the annotation as the join's type once every branch
+// settled to it (`refine_annotation`), so lowering sees one type at the
+// join (#2209). Returns whether `eid` now has `target`.
+fn settle_join(inout tc: Tc, in a: Ast, eid: u64, target: u32) -> bool {
+    let e = match a.exs.try_get(eid) {
+        Option::Some(v) => v,
+        Option::None => return false,
+    };
+    let found = span_ty(in tc, e.s0, e.s1);
+    if found == target {
+        return true;
+    }
+    let settled = if e.kind == X_BLOCK && e.b != NONE64 {
+        settle_join(inout tc, in a, e.b, target)
+    } else if e.kind == X_IF && e.c != NONE64 {
+        let then_settled = settle_join(inout tc, in a, e.b, target);
+        settle_join(inout tc, in a, e.c, target) && then_settled
+    } else if e.kind == X_MATCH && e.n > 0 {
+        let mut all = true;
+        for i in 0..e.n {
+            let body = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
+            if !settle_join(inout tc, in a, body, target) {
+                all = false;
+            }
+        }
+        all
+    } else {
+        found == tc.never_ty
+    };
+    if settled && found != tc.never_ty {
+        retype_span(inout tc, e.s0, e.s1, target);
+    }
+    settled
+}
+
 // The type recorded last at `s0..s1`, or NONE32.
 fn span_ty(in tc: Tc, s0: u64, s1: u64) -> u32 {
     let mut i = tc.spans.len();
@@ -1826,7 +1862,13 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                 let float = tc.types.kind(et) == TyKind::Named
                     && (tc.types.name(et) == tc.world.k.f64_
                         || tc.types.name(et) == tc.world.k.f32_);
-                if float || tc.types.kind(et) == TyKind::Tuple {
+                // A payload-free constructor (`Option::None`) takes the
+                // element's generic enum type; it holds no literal to settle,
+                // and the native backend needs its payload cells (#2209).
+                let bare_ctor = a.ex(sub).kind == X_NAME
+                    && tc.types.kind(et) == TyKind::Named
+                    && tc.types.arity(et) > 0;
+                if float || tc.types.kind(et) == TyKind::Tuple || bare_ctor {
                     et
                 } else {
                     tc.infer_ty
@@ -2044,6 +2086,10 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             }
             let vt = check_owned_expr(inout tc, in a, val, exp);
             if is_let != 0 {
+                if tc.types.kind(exp) != TyKind::Infer && vt != exp {
+                    constrain_literals(inout tc, in a, val, exp);
+                    let _ = settle_join(inout tc, in a, val, exp);
+                }
                 // An annotated binding has its annotation's type
                 // (`refine_annotation`), whatever its literals settled to.
                 let bound = if tc.types.kind(exp) == TyKind::Infer {

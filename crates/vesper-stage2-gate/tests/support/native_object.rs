@@ -738,8 +738,8 @@ pub fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
-    let nested_object = dir.join("native-nested-call.o");
-    std::fs::rename(&object, &nested_object).unwrap();
+    let nested_call_object = dir.join("native-nested-call.o");
+    std::fs::rename(&object, &nested_call_object).unwrap();
     assert_eq!(
         compile("product_inputs"),
         0,
@@ -1072,7 +1072,7 @@ pub fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &math_object,
             &conversions_object,
             &bits_object,
-            &nested_object,
+            &nested_call_object,
             &product_inputs_object,
             &product_caller_object,
             &compound_object,

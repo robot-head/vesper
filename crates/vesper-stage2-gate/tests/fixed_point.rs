@@ -4,10 +4,10 @@
 //! CLI, and precompiled under the CLI), and every compiler package must come
 //! out the same from each Stage 2 of the chain
 //! ([`support::packages::check_compiler_packages_fixed_point`]).
-mod support;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[path = "support/native_object.rs"]
 mod native_object;
+mod support;
 
 use support::packages::*;
 use support::*;
