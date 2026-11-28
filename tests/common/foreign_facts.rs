@@ -53,6 +53,17 @@ pub fn facts(world: &World, program: &Program, target: &str) -> Vec<u8> {
             Some((c, symbol, words))
         })
         .collect();
+    // A symbol two operations import with different forms (or one the
+    // walk calls another way) is declared with another signature first,
+    // which the walk calls through its address: those calls stay on the
+    // walk.
+    let rows: Vec<_> = rows
+        .iter()
+        .filter(|(_, symbol, words)| {
+            words.first() == Some(&plan_probe::BODY_CALL_DIRECT)
+                && rows.iter().all(|(_, s, w)| s != symbol || w == words)
+        })
+        .collect();
     let mut out = vec![];
     if rows.is_empty() {
         return out;
@@ -61,9 +72,9 @@ pub fn facts(world: &World, program: &Program, target: &str) -> Vec<u8> {
     put(&mut out, rows.len() as u64);
     for (callee, symbol, words) in rows {
         put_text(&mut out, callee);
-        put_text(&mut out, &symbol);
+        put_text(&mut out, symbol);
         put(&mut out, words.len() as u64);
-        for w in words {
+        for &w in words {
             put(&mut out, w);
         }
     }

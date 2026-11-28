@@ -98,14 +98,25 @@ const WORD_BYTES: u64 = 8;
 // @vesper/native-lib. The status word, then the input's bytes when it is
 // `Status::Ok`.
 pub fn library_walk_calls_input(in input: Slice[u8], optimize: bool) -> (u64, ChunkSeq[u8]) {
+    let (status, out, rest) = library_walk_calls_input_rest(in input, optimize);
+    (status, out)
+}
+
+// `library_walk_calls_input`, with where what follows the input's calls
+// section starts (the foreign-call facts, #2751).
+pub fn library_walk_calls_input_rest(
+    in input: Slice[u8],
+    optimize: bool
+) -> (u64, ChunkSeq[u8], u64) {
     let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in input);
     let mut p = read_program(inout r, in input, in c);
     let calls = read_calls(inout r, in input, in c);
+    let rest = r.pos;
     let status = run(inout c, inout p, in calls, Stage::Hoist, optimize);
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     if status != Status::Ok {
-        return (status, out);
+        return (status, out, rest);
     }
     let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
     put_names(inout o, in c.names);
@@ -117,7 +128,7 @@ pub fn library_walk_calls_input(in input: Slice[u8], optimize: bool) -> (u64, Ch
     for i in 0..o.len() {
         let ok = out.try_write_u64_le(wrapping_mul(i, WORD_BYTES), o.try_get(i).unwrap_or(0));
     }
-    (status, out)
+    (status, out, rest)
 }
 
 // The pipeline through `stage` over the first lowering `p`: the status.

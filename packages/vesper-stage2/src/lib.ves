@@ -32,7 +32,7 @@ use self::traits::{
 };
 use self::facts::{record_failure_ops};
 use self::tables::{lower_table_reads};
-pub use self::ffi::{ForeignSource, foreign_source};
+pub use self::ffi::{ForeignSource, foreign_source, put_foreign_facts};
 use self::ffi::{
     Foreign, add_foreign_decls, close_foreign_ops, foreign_none, foreign_read, rename_foreign_calls
 };
@@ -370,6 +370,8 @@ pub struct Lowered {
     low: L,
     call_rows: ChunkSeq[CallRow],
     call_pairs: ChunkSeq[Pair],
+    // The `.vsys` imports, for the foreign-call facts (#2751).
+    foreign: Foreign,
     // The vtable stubs and vtables of boxed trait objects (traits.ves).
     dyn_out: DynOut,
 }
@@ -496,6 +498,7 @@ pub fn stage2_lower_dir_with(
         low: low,
         call_rows: call_rows,
         call_pairs: call_pairs,
+        foreign: foreign,
         dyn_out: dyn_out
     })
 }

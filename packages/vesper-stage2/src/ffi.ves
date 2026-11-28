@@ -23,9 +23,12 @@ use @vesper/check-data::types::{TyKind, Types};
 use @vesper/check-data::util::{inc32, n32, u64_at, w};
 use @vesper/check-data::world::{Adt, EffectRow, Field, Variant, World, set_by_symbol};
 use @vesper/ffi-lowering::{
-    S, Sh, Sp, find_ge, find_gh, find_gs, generate, read_library, s_new, slice_count, sort_funs,
-    sorted_enum_names, sorted_handle_names, sorted_struct_rows
+    BODY_CALL_DIRECT, BODY_CALL_OTHER, S, Sh, Sp, body_call, find_ge, find_gh, find_gs, generate,
+    read_library, s_new, slice_count, sort_funs, sorted_enum_names, sorted_handle_names,
+    sorted_struct_rows
 };
+use @vesper/place-ir::{Program};
+use @vesper/place-ir::codes::{Op};
 use @vesper/place-ir-lower::ast::{Ast, Ef, Eop, Pm};
 use @vesper/vsys::{parse_and_encode};
 use @vesper/vsys::lexer::{VsysError};
@@ -881,4 +884,212 @@ fn lib_of_effect(in f: Foreign, inout names: Names, eff: u32) -> u64 {
         }
     }
     NONE64
+}
+
+// The foreign-call facts of a native library build (#2751): what
+// tests/common/foreign_facts.rs writes from the Rust plan, for
+// @vesper/codegen-scalar's body plans (foreign.ves `read_foreign_facts`).
+// For each foreign operation program `p` calls, in name order, the C
+// symbol and the call's form (@vesper/ffi-lowering `body_call`), as
+// `[FOREIGN_FACTS, n, (callee, symbol, m, m words)...]`, texts as their
+// length and then eight bytes to a word. Nothing when it calls none the
+// plans make.
+pub const FOREIGN_FACTS: u64 = 6002813733352656710;
+const BYTE_BITS: u32 = 8;
+const WORD_BITS: u32 = 64;
+const PATH_SEP: Str = "::";
+
+// Name `a` sorts before name `b` (byte order, as a Rust `BTreeSet`).
+fn name_before(in names: Names, a: u32, b: u32) -> bool {
+    let na = names.size(a);
+    let nb = names.size(b);
+    let n = if na < nb { na } else { nb };
+    for k in 0..n {
+        let x = names.byte(a, k);
+        let y = names.byte(b, k);
+        if x != y {
+            return x < y;
+        }
+    }
+    na < nb
+}
+
+// A text of `bytes[a..e]`: its length, then eight bytes to a word,
+// little-endian, the last word zero-padded.
+fn put_text_words(inout o: ChunkSeq[u64], in bytes: ChunkSeq[u8], a: u64, e: u64) {
+    o.push(wrapping_sub(e, a));
+    let mut word: u64 = 0;
+    let mut shift: u32 = 0;
+    for k in a..e {
+        word = word | wrapping_shl_u64(widen_u64(bytes.try_get(k).unwrap_or(0)), shift);
+        shift = wrapping_add(shift, BYTE_BITS);
+        if shift == WORD_BITS {
+            o.push(word);
+            word = 0;
+            shift = 0;
+        }
+    }
+    if shift != 0 {
+        o.push(word);
+    }
+}
+
+// Whether rows `x` and `y` (`words[at[r]..at[r]+n[r]]`) have the same
+// words.
+fn same_row_words(
+    in words: ChunkSeq[u64],
+    in at: ChunkSeq[u64],
+    in n: ChunkSeq[u64],
+    x: u64,
+    y: u64
+) -> bool {
+    let nx = n.try_get(x).unwrap_or(0);
+    if nx != n.try_get(y).unwrap_or(1) {
+        return false;
+    }
+    let ax = at.try_get(x).unwrap_or(0);
+    let ay = at.try_get(y).unwrap_or(0);
+    for k in 0..nx {
+        if words.try_get(wrapping_add(ax, k)).unwrap_or(0)
+            != words.try_get(wrapping_add(ay, k)).unwrap_or(1)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+// Where `::` first starts in name `sym`, or NONE64.
+fn path_sep_at(in names: Names, sym: u32) -> u64 {
+    let n = names.size(sym);
+    let sep = PATH_SEP.as_bytes();
+    if n < sep.len() {
+        return NONE64;
+    }
+    for k in 0..wrapping_add(wrapping_sub(n, sep.len()), 1) {
+        let mut hit = true;
+        for j in 0..sep.len() {
+            if names.byte(sym, wrapping_add(k, j)) != sep.try_get(j).unwrap_or(0) {
+                hit = false;
+            }
+        }
+        if hit {
+            return k;
+        }
+    }
+    NONE64
+}
+
+pub fn put_foreign_facts(in p: Program, in names: Names, inout f: Foreign, inout o: ChunkSeq[u64]) {
+    if f.order.len() == 0 {
+        return;
+    }
+    // The foreign callees, once each, in name order.
+    let mut callees: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..p.insts.len() {
+        let inst = p.inst(i);
+        if inst.op != Op::Call {
+            continue;
+        }
+        let callee = n32(p.op(inst.a));
+        if !names.has_prefix(callee, in EFFECT_PREFIX.as_bytes()) {
+            continue;
+        }
+        let mut seen = false;
+        for k in 0..callees.len() {
+            if callees.try_get(k).unwrap_or(NONE32) == callee {
+                seen = true;
+            }
+        }
+        if seen {
+            continue;
+        }
+        // Inserted in order: moved down past each later name.
+        callees.push(callee);
+        let mut j = wrapping_sub(callees.len(), 1);
+        loop {
+            if j == 0 {
+                break;
+            }
+            let before = callees.try_get(wrapping_sub(j, 1)).unwrap_or(NONE32);
+            if !name_before(in names, callee, before) {
+                break;
+            }
+            let ok = callees.try_set(j, before);
+            let ok2 = callees.try_set(wrapping_sub(j, 1), callee);
+            j = wrapping_sub(j, 1);
+        }
+    }
+    // Per row: its callee (a name), its C symbol (of `f.st`) and its
+    // words `words[at..at+n]`.
+    let mut row_callee: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut row_symbol: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut row_at: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut row_n: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for k in 0..callees.len() {
+        let callee = callees.try_get(k).unwrap_or(NONE32);
+        let sep = path_sep_at(in names, callee);
+        if sep == NONE64 {
+            continue;
+        }
+        bytes.clear();
+        names.write(callee, inout bytes);
+        let eff = f.st.intern(in bytes[0..sep]);
+        let op = f.st.intern(in bytes[wrapping_add(sep, PATH_SEP.len())..bytes.len()]);
+        let mut row: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let symbol = body_call(inout f.st, eff, op, inout row);
+        if symbol == NONE32 {
+            continue;
+        }
+        row_callee.push(callee);
+        row_symbol.push(symbol);
+        row_at.push(words.len());
+        row_n.push(row.len());
+        for j in 0..row.len() {
+            words.push(row.try_get(j).unwrap_or(0));
+        }
+    }
+    // A symbol two operations import with different forms (or one the
+    // walk calls another way) stays on the walk (foreign_facts.rs).
+    let mut kept: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..row_callee.len() {
+        if words.try_get(row_at.try_get(k).unwrap_or(0)).unwrap_or(BODY_CALL_OTHER)
+            != BODY_CALL_DIRECT
+        {
+            continue;
+        }
+        let symbol = row_symbol.try_get(k).unwrap_or(NONE32);
+        let mut alone = true;
+        for j in 0..row_callee.len() {
+            if row_symbol.try_get(j).unwrap_or(NONE32) == symbol
+                && !same_row_words(in words, in row_at, in row_n, j, k)
+            {
+                alone = false;
+            }
+        }
+        if alone {
+            kept.push(k);
+        }
+    }
+    if kept.len() == 0 {
+        return;
+    }
+    o.push(FOREIGN_FACTS);
+    o.push(kept.len());
+    for k in 0..kept.len() {
+        let r = kept.try_get(k).unwrap_or(0);
+        bytes.clear();
+        names.write(row_callee.try_get(r).unwrap_or(NONE32), inout bytes);
+        put_text_words(inout o, in bytes, 0, bytes.len());
+        let symbol = row_symbol.try_get(r).unwrap_or(NONE32);
+        put_text_words(inout o, in f.st.text, f.st.start(symbol), f.st.end(symbol));
+        let n = row_n.try_get(r).unwrap_or(0);
+        o.push(n);
+        let a = row_at.try_get(r).unwrap_or(0);
+        for j in 0..n {
+            o.push(words.try_get(wrapping_add(a, j)).unwrap_or(0));
+        }
+    }
 }

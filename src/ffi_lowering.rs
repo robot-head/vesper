@@ -2051,17 +2051,7 @@ pub mod plan_probe {
         effect: &str,
         op: &str,
     ) -> Result<(String, Handler, String), String> {
-        let mut plan = Plan::default();
-        for (name, import) in &imports.libraries {
-            plan.libraries.insert(
-                effect_name(name),
-                LibraryPlan {
-                    name: name.clone(),
-                    handler: import.handler,
-                    descriptor: import.descriptor.clone(),
-                },
-            );
-        }
+        let mut plan = probe_plan(imports);
         if let Some(target) = target {
             let triple: target_lexicon::Triple =
                 target.parse().map_err(|e| format!("invalid target: {e}"))?;
@@ -2075,6 +2065,34 @@ pub mod plan_probe {
         let _guard = PlanGuard;
         super::op_plan(effect, op).map(|p| (p.library, p.handler, p.function.symbol().to_owned()))
     }
+
+    /// The library plan of `imports`, as `ForeignChecked::with_lowering`
+    /// installs it, with no library blocked.
+    fn probe_plan(imports: &Imports) -> Plan {
+        let mut plan = Plan::default();
+        for (name, import) in &imports.libraries {
+            plan.libraries.insert(
+                effect_name(name),
+                LibraryPlan {
+                    name: name.clone(),
+                    handler: import.handler,
+                    descriptor: import.descriptor.clone(),
+                },
+            );
+        }
+        plan
+    }
+
+    /// [`body_call`] of operation `op` of `effect` over the plan of
+    /// `imports` (tests/self_host_ffi_lowering.rs). No form depends on the
+    /// target, so this asks for [`PROBE_TARGET`].
+    pub fn body_probe(imports: &Imports, effect: &str, op: &str) -> Option<(String, Vec<u64>)> {
+        PLAN.with(|p| *p.borrow_mut() = Some(Rc::new(probe_plan(imports))));
+        let _guard = PlanGuard;
+        body_call(effect, op, PROBE_TARGET)
+    }
+    /// The target [`body_probe`] names.
+    const PROBE_TARGET: &str = "x86_64-unknown-linux-gnu";
 
     /// Slice lengths by call span, as pass 2 reads them.
     pub type Arities = BTreeMap<(usize, usize), Vec<usize>>;

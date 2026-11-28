@@ -45,6 +45,11 @@ pub(crate) mod ir_words;
 #[path = "../../../tests/common/handler_facts.rs"]
 pub(crate) mod handler_facts;
 
+// The foreign-call facts after the handler facts (#2751), shared with
+// crates/vesper-codegen-swap-test/tests/self_host_native_walk_body.rs.
+#[path = "../../../tests/common/foreign_facts.rs"]
+pub(crate) mod foreign_facts;
+
 // The `World` facts the native walk's body plans read on the optimize path
 // (#2581, #2654), shared with the codegen swap tests.
 #[path = "../../../tests/common/aggregate_facts.rs"]

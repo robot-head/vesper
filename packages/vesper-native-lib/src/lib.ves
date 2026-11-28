@@ -59,13 +59,13 @@ use @vesper/codegen-scalar-emit::body::{emit_body_words};
 use @vesper/native-clif-opt::{STEP_MERGE_TAILS, is_ported, pass_steps, run_steps};
 use @vesper/native-vectorize::{vectorize_script};
 use @vesper/native-cold-outline::{outline_script};
-use @vesper/codegen-scalar::{codegen_scalar_body_plan_prefix};
+use @vesper/codegen-scalar::{codegen_scalar_body_plan_prefix_with};
 use @vesper/codegen-calls::data::{calls_input_round_trip};
 use @vesper/check-data::input::{Reader as IrReader, read_ctx};
 use @vesper/place-ir::{Op, Program, Term, read_program};
 use @vesper/native-walk::{native_walk_call_words_bytes};
 use @vesper/native-walk::frame::{graph_plain};
-use @vesper/library-ir::{Status as IrStatus, library_walk_calls_input};
+use @vesper/library-ir::{Status as IrStatus, library_walk_calls_input_rest};
 use self::declare::{
     Declared, RESULT_BUFFER, RESULT_SRET, RESULT_WORDS, declare_library, declared_new, exports_new
 };
@@ -548,8 +548,10 @@ fn call_words_of(in walk: Slice[u8], count: u64) -> CallWords {
     CallWords { words: words, at: at }
 }
 
-fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
-    let words = codegen_scalar_body_plan_prefix(in program);
+// The body plans of the walk's `program`, with the foreign-call facts
+// `foreign` (#2751; empty for none).
+fn plans_of(in program: Slice[u8], in foreign: Slice[u8], in d: Declared) -> Plans {
+    let words = codegen_scalar_body_plan_prefix_with(in program, in foreign);
     // per program function: the start of its plan words
     let mut by_row: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut k: u64 = 0;
@@ -649,7 +651,7 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
         module_free(m);
         return failure(in declare_err.as_slice());
     }
-    let (status, walk) = library_walk_calls_input(in calls.as_slice(), d.optimize);
+    let (status, walk, rest) = library_walk_calls_input_rest(in calls.as_slice(), d.optimize);
     if status != IrStatus::Ok {
         module_free(m);
         let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -657,7 +659,12 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
         push_dec(inout message, status);
         return failure(in message.as_slice());
     }
-    let plans = plans_of(in walk.as_slice(), in d);
+    let from = if rest > calls.len() {
+        calls.len()
+    } else {
+        rest
+    };
+    let plans = plans_of(in walk.as_slice(), in calls[from..calls.len()], in d);
     let count = d.ids.len();
     let callees = call_words_of(in walk.as_slice(), count);
     for index in 0..count {

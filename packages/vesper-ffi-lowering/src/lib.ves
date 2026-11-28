@@ -23,7 +23,7 @@
 // - cpu.ves: the machine code of `@vesper-std/cpu`'s functions
 //   (src/ffi_lowering/cpu.rs), with its entry `ffi_cpu_code`.
 
-use self::cpu::code_for;
+use self::cpu::{code_for, has_prefix};
 
 const NONE: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
@@ -219,6 +219,10 @@ pub copy struct Fun {
     lib: u64,
     // the call of a callback type: params[param_start] is the pointer itself
     indirect: bool,
+    // `#[link_name]`: the C symbol a direct call imports, or NONE for `sym`
+    link: u32,
+    // `-> ForeignVal[Option[M[len]]]`: the result is a mapping
+    mapped: bool,
 }
 
 // A `ParameterType`. Pointees and slice elements are a scalar (`elem_scalar`) or
@@ -604,7 +608,9 @@ impl S {
                 has_variadic: false,
                 variadic_first: 0,
                 lib: 0,
-                indirect: false
+                indirect: false,
+                link: NONE,
+                mapped: false
             },
         }
     }
@@ -1136,7 +1142,8 @@ fn read_function(
         state.params.push(param);
     }
     let result = read_value(inout reader, in bytes, inout state);
-    if peek_is(in reader, in bytes, in "mapping/length-from") {
+    let mapped = peek_is(in reader, in bytes, in "mapping/length-from");
+    if mapped {
         let marker = reader.field(in bytes);
         let length = reader.count(in bytes);
     }
@@ -1153,9 +1160,10 @@ fn read_function(
     }
     // The C symbol several declarations may share (`#[link_name]`): the
     // plans and shapes name the declaration's own symbol.
+    let mut link = NONE;
     if peek_is(in reader, in bytes, in "link-name") {
         let marker = reader.field(in bytes);
-        let link = reader.field(in bytes);
+        link = field_sym(inout reader, in bytes, inout state);
     }
     state.funs.push(Fun {
         sym: sym,
@@ -1166,7 +1174,9 @@ fn read_function(
         has_variadic: has_variadic,
         variadic_first: variadic_first,
         lib: lib,
-        indirect: indirect
+        indirect: indirect,
+        link: link,
+        mapped: mapped
     });
 }
 
@@ -2939,6 +2949,149 @@ pub fn op_plan(inout state: S, target: u32, eff_name: u32, op: u32) {
     state.put_q(message);
 }
 
+// `plan_probe::body_call`'s forms: what the native walk's body plans read
+// of a foreign call (@vesper/codegen-scalar foreign.ves).
+pub const BODY_CALL_OTHER: u64 = 0;
+pub const BODY_CALL_DIRECT: u64 = 1;
+pub const BODY_PARAM_SCALAR: u64 = 0;
+pub const BODY_PARAM_BOOL: u64 = 1;
+pub const BODY_PARAM_HANDLE: u64 = 2;
+pub const BODY_RESULT_UNIT: u64 = 0;
+pub const BODY_RESULT_SCALAR: u64 = 1;
+// The bit of a scalar word above its width: whether it is signed.
+const BODY_SIGNED: u64 = 256;
+const BITS_8: u64 = 8;
+const BITS_16: u64 = 16;
+const BITS_32: u64 = 32;
+const BITS_64: u64 = 64;
+
+// Whether a direct call of C symbol `symbol` is one the body plans make:
+// not a `@vesper-std/cpu` function (`cpu::code_for`), nor one the native
+// runtime shares with foreign imports (src/ffi_lowering/native.rs
+// `runtime_import`), which the walk calls through its shared declaration.
+fn body_symbol_plain(in symbol: Slice[u8]) -> bool {
+    !has_prefix(in symbol)
+        && !symbol.eq(in "write".as_bytes())
+        && !symbol.eq(in "memcpy".as_bytes())
+        && !symbol.eq(in "memmove".as_bytes())
+        && !symbol.eq(in "memset".as_bytes())
+        && !symbol.eq(in "malloc".as_bytes())
+        && !symbol.eq(in "calloc".as_bytes())
+        && !symbol.eq(in "realloc".as_bytes())
+        && !symbol.eq(in "free".as_bytes())
+        && !symbol.eq(in "exit".as_bytes())
+}
+
+// A scalar code's body word: its bits, and BODY_SIGNED when signed.
+fn body_scalar(code: u8) -> u64 {
+    let bits = if code == SC_U8 || code == SC_I8 {
+        BITS_8
+    } else if code == SC_U16 || code == SC_I16 {
+        BITS_16
+    } else if code == SC_U32 || code == SC_I32 {
+        BITS_32
+    } else {
+        BITS_64
+    };
+    let signed = code == SC_I8 || code == SC_I16 || code == SC_I32 || code == SC_I64;
+    if signed { bits | BODY_SIGNED } else { bits }
+}
+
+// The library row of effect `eff_name` (`Ffi$Lib`), or NONE64.
+fn effect_lib(in state: S, eff_name: u32) -> u64 {
+    let mut lib = NONE64;
+    for li in 0.. state.libs.len() {
+        let name = state.lib(li).name;
+        let eff_start = state.start(eff_name);
+        if state.size(eff_name) == add(state.size(name), 4)
+            && state.text[eff_start..add(eff_start, 4)].eq(in "Ffi$".as_bytes())
+            && state.spells(name, in state.text[add(eff_start, 4).. state.end(eff_name)])
+        {
+            lib = li;
+        }
+    }
+    lib
+}
+
+// `plan_probe::body_call` of operation `op` of `eff_name`: the C symbol a
+// direct call imports (NONE when the plan has no such operation), with
+// its words in `words`: BODY_CALL_DIRECT, the parameter count, a form and
+// a scalar word per parameter and for the result; or BODY_CALL_OTHER for
+// a call the body plans leave to the walk.
+pub fn body_call(inout state: S, eff_name: u32, op: u32, inout words: ChunkSeq[u64]) -> u32 {
+    let lib = effect_lib(in state, eff_name);
+    if lib == NONE64 {
+        return NONE;
+    }
+    let op_start = state.start(op);
+    let mut cut = state.end(op);
+    for i in op_start.. state.end(op) {
+        if u8_at(in state.text, i) == Ascii::Dollar && cut == state.end(op) {
+            cut = i;
+        }
+    }
+    let mut sym_bytes = ChunkSeq::new[u8]();
+    for i in op_start..cut {
+        sym_bytes.push(u8_at(in state.text, i));
+    }
+    let symbol = state.intern(in sym_bytes[0..sym_bytes.len()]);
+    let lib_row = state.lib(lib);
+    let mut fi = NONE64;
+    for i in 0..lib_row.fun_count {
+        if state.fun(add(lib_row.fun_start, i)).sym == symbol {
+            fi = add(lib_row.fun_start, i);
+        }
+    }
+    if fi == NONE64 {
+        return NONE;
+    }
+    let func = state.fun(fi);
+    let link = if func.link == NONE {
+        func.sym
+    } else {
+        func.link
+    };
+    words.push(BODY_CALL_DIRECT);
+    words.push(func.param_count);
+    let mut plain = lib_row.handler == H_DIRECT
+        && !func.indirect
+        && !func.errno
+        && !func.has_variadic
+        && !func.mapped;
+    for k in 0..func.param_count {
+        let p = state.par(add(func.param_start, k));
+        if p.tag == P_VALUE && p.value_ty.tag == VT_SCALAR {
+            words.push(BODY_PARAM_SCALAR);
+            words.push(body_scalar(p.value_ty.scalar));
+        } else if p.tag == P_VALUE && p.value_ty.tag == VT_BOOL {
+            words.push(BODY_PARAM_BOOL);
+            words.push(0);
+        } else if p.tag == P_HANDLE && !is_mapping(in state, lib, p.type_name) {
+            words.push(BODY_PARAM_HANDLE);
+            words.push(0);
+        } else {
+            plain = false;
+        }
+    }
+    if func.result.tag == VT_UNIT {
+        words.push(BODY_RESULT_UNIT);
+        words.push(0);
+    } else if func.result.tag == VT_SCALAR {
+        words.push(BODY_RESULT_SCALAR);
+        words.push(body_scalar(func.result.scalar));
+    } else {
+        plain = false;
+    }
+    if !body_symbol_plain(in state.text[state.start(link).. state.end(link)]) {
+        plain = false;
+    }
+    if !plain {
+        words.clear();
+        words.push(BODY_CALL_OTHER);
+    }
+    link
+}
+
 // The scalar carrier of an enum of library `lib`.
 fn enum_scalar(in state: S, lib: u64, name: u32) -> u8 {
     let lib_row = state.lib(lib);
@@ -3204,6 +3357,21 @@ fn run(in bytes: Slice[u8], inout state: S) {
         state.put_q(op);
         state.put(in " ");
         op_plan(inout state, target, eff_name, op);
+        state.nl();
+        // The form the native walk's body plans read.
+        let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let symbol = body_call(inout state, eff_name, op, inout words);
+        state.put(in "body ");
+        if symbol == NONE {
+            state.put(in "-");
+        } else {
+            state.put(in "ok ");
+            state.put_q(symbol);
+            for k in 0..words.len() {
+                state.put(in " ");
+                state.put_u64(words.try_get(k).unwrap_or(0));
+            }
+        }
         state.nl();
     }
     // target support
