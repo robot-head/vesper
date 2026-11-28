@@ -1,16 +1,14 @@
 //! Checked finite source kernels measured through the owned native batch.
 //! Compilation/setup are outside windows; Rust dispatch/result overhead remains.
+use crate::{
+    compiler,
+    native_kernel::{KernelStats, NativeKernel, Scalar},
+};
 use serde_json::{Value as Json, json};
 use std::{
     fs::{self, OpenOptions},
     io::Read,
     path::{Path, PathBuf},
-};
-use vesper::{
-    ast::{ExprKind, Item, Literal, Module, PatternKind, Statement, Type},
-    lexer::{self, TokenKind as K},
-    native::batch::{BatchLimits, BatchStats, NativeBatch},
-    runtime::Value,
 };
 use vesper_bench::{
     Analysis, Arm, BenchCase, BodyStatus, ClockStatus, Decision, Invocation, ObservedRunError,
@@ -439,199 +437,79 @@ fn read_source(path: &Path) -> Result<String, String> {
     }
     String::from_utf8(bytes).map_err(|_| "bench source must be UTF-8".into())
 }
-fn source_guard(source: &str) -> Result<(), String> {
-    let (tokens, errors) = lexer::lex(source);
-    if !errors.is_empty() {
-        return Err("bench source has lexical diagnostics".into());
-    }
-    if tokens.len() > 16_384 {
-        return Err("bench source token limit".into());
-    }
-    let (mut depth, mut functions, mut conditionals, mut segment) =
-        (0usize, 0usize, 0usize, 0usize);
-    for token in tokens {
-        if token.kind.trivia() || token.kind == K::Eof {
-            continue;
-        }
-        match token.kind {
-            K::LBrace | K::LBracket | K::LParen => {
-                depth += 1;
-                if depth > 32 {
-                    return Err("bench source nesting limit".into());
-                }
-            }
-            K::RBrace | K::RBracket | K::RParen => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-        functions += usize::from(token.kind == K::Fn);
-        conditionals += usize::from(token.kind == K::If);
-        if functions > 128 || conditionals > 64 {
-            return Err("bench source function/conditional limit".into());
-        }
-        if matches!(token.kind, K::Semi | K::LBrace | K::RBrace) {
-            segment = 0;
-        } else {
-            segment += 1;
-            if segment > 256 {
-                return Err("bench source expression/signature limit".into());
-            }
-        }
-    }
-    Ok(())
+/// The compiler service bench asks for (`KIND` in the root package's
+/// `src/tool_facts_bench.rs`).
+const BENCH_FACTS: &str = "bench";
+
+/// What a compiled case also asks the compiler for, beside the kernel.
+#[derive(Clone, Copy)]
+struct Extra {
+    /// Evaluator step repetitions (`--deterministic`).
+    steps: Option<usize>,
+    /// The CLIF and machine listing (`--asm`, `--expect-vectorized`).
+    asm: bool,
 }
-fn primitive(ty: &Type) -> bool {
-    *ty == Type::unit()
-        || matches!(
-            ty,
-            Type::Named(name, args)
-                if args.is_empty()
-                    && matches!(name.as_str(), "i64" | "u8" | "u32" | "u64" | "f64" | "bool" | "Unit")
-        )
-}
-fn scalar_source(module: &Module) -> Result<(), String> {
-    if !module.model_uses.is_empty() || !module.trait_bounds.is_empty() {
-        return Err("bench source models/trait constraints are unsupported".into());
-    }
-    let mut bodies = Vec::new();
-    let mut names = std::collections::BTreeSet::new();
-    for item in &module.items {
-        let Item::Function(function) = item else {
-            return Err(
-                "bench currently supports ordinary scalar function declarations only".into(),
-            );
-        };
-        if !function.generics.is_empty()
-            || function.body.is_none()
-            || !function.effects.instances.is_empty()
-            || function.effects.tail.is_some()
-            || !primitive(&function.result)
-            || function.params.iter().any(|p| !primitive(&p.ty))
-        {
-            return Err("bench requires nongeneric pure primitive-scalar signatures".into());
-        }
-        names.insert(function.name.as_str());
-        bodies.push((function.body.as_ref().expect("body checked"), 1usize));
-    }
-    // The initial kernel profile excludes inferred composite growth before the
-    // unchanged checker. Byte/depth limits alone cannot bound repeated (x,x).
-    const MAX_NODES: usize = 4096;
-    let mut visited = 0usize;
-    while let Some((expr, depth)) = bodies.pop() {
-        visited += 1;
-        if visited > MAX_NODES || depth > 32 {
-            return Err("bench scalar AST volume/depth limit".into());
-        }
-        let mut add = |child| -> Result<(), String> {
-            if visited + bodies.len() >= MAX_NODES {
-                return Err("bench scalar AST volume limit".into());
-            }
-            bodies.push((child, depth + 1));
-            Ok(())
-        };
-        match &expr.kind {
-            ExprKind::Literal(Literal::String(_)) => {
-                return Err("bench string/aggregate expressions are unsupported".into());
-            }
-            ExprKind::Literal(_) | ExprKind::Name(_) => {}
-            ExprKind::Tuple(values) if values.is_empty() => {}
-            ExprKind::Unary(_, value) => add(value)?,
-            ExprKind::Binary(_, left, right) | ExprKind::Assign(_, left, right) => {
-                add(left)?;
-                add(right)?;
-            }
-            ExprKind::Call {
-                callee,
-                types,
-                args,
-            } => {
-                let ExprKind::Name(name) = &callee.kind else {
-                    return Err("bench indirect/method calls are unsupported".into());
-                };
-                if !types.is_empty()
-                    || (!names.contains(name.as_str())
-                        && vesper::numeric::wrapping_intrinsic(name).is_none())
-                {
-                    return Err("bench generic/constructor/unknown calls are unsupported".into());
-                }
-                add(callee)?;
-                for argument in args {
-                    add(&argument.expr)?;
-                }
-            }
-            ExprKind::Block { statements, tail } => {
-                for statement in statements {
-                    match statement {
-                        Statement::Let { pat, ty, value, .. } => {
-                            if !matches!(pat.kind, PatternKind::Bind(_) | PatternKind::Wild)
-                                || (*ty != Type::Infer && !primitive(ty))
-                            {
-                                return Err(
-                                    "bench composite patterns/annotations are unsupported".into()
-                                );
-                            }
-                            add(value)?;
-                        }
-                        Statement::Expr(value) => add(value)?,
-                    }
-                }
-                if let Some(tail) = tail {
-                    add(tail)?;
-                }
-            }
-            ExprKind::If {
-                condition,
-                then,
-                otherwise,
-            } => {
-                add(condition)?;
-                add(then)?;
-                if let Some(otherwise) = otherwise {
-                    add(otherwise)?;
-                }
-            }
-            _ => return Err("bench composite/closure/handler expressions are unsupported".into()),
-        }
-    }
-    Ok(())
-}
+
 struct SourceCase {
-    runner: NativeBatch,
-    entry: String,
+    runner: NativeKernel,
     source_id: String,
-    world: vesper::check::World,
+    /// The compiler's `steps` and `asm` answers, raised where they are used.
+    steps: Json,
+    asm: Json,
 }
 impl SourceCase {
-    fn compile(path: &Path, entry: &str) -> Result<Self, String> {
-        Self::compile_text(&read_source(path)?, entry)
+    fn compile(path: &Path, entry: &str, extra: Extra) -> Result<Compiled, String> {
+        Self::compile_text(&read_source(path)?, entry, extra)
     }
-    fn compile_text(source: &str, entry: &str) -> Result<Self, String> {
+    /// Ask the compiler for the kernel: the slow half, which needs nothing
+    /// of this process and so runs for both arms at once.
+    fn compile_text(source: &str, entry: &str, extra: Extra) -> Result<Compiled, String> {
         if source.len() as u64 > MAX_SOURCE_BYTES {
             return Err("bench source exceeds 256 KiB".into());
         }
-        source_guard(source)?;
-        let parsed = vesper::parser::parse(source);
-        if let Some(error) = parsed.diagnostics.first() {
-            return Err(format!(
-                "{} at {:?}: {}",
-                error.code, error.span, error.message
-            ));
+        let steps = extra.steps.map(|n| n.to_string());
+        let mut options = vec!["--entry", entry];
+        if let Some(steps) = &steps {
+            options.extend(["--steps", steps.as_str()]);
         }
-        scalar_source(&parsed.module)?;
-        let checked = vesper::check::check(&parsed.module);
-        if let Some(error) = checked.diagnostics.first() {
-            return Err(format!(
-                "{} at {:?}: {}",
-                error.code, error.span, error.message
-            ));
+        if extra.asm {
+            options.push("--asm");
         }
-        let runner = NativeBatch::compile(&checked.world, &[entry], BatchLimits::default())?;
-        Ok(Self {
-            runner,
+        Ok(Compiled {
+            facts: compiler::facts_about(BENCH_FACTS, source, &options)?,
             entry: entry.to_owned(),
             source_id: blake3::hash(source.as_bytes()).to_hex().to_string(),
-            world: checked.world,
         })
     }
+}
+
+/// The compiler's answer for one arm, not yet loaded.
+struct Compiled {
+    facts: Json,
+    entry: String,
+    source_id: String,
+}
+impl Compiled {
+    /// Load the kernel into this process.
+    fn load(mut self) -> Result<SourceCase, String> {
+        let runner = NativeKernel::load(&self.facts["batch"], &self.entry)?;
+        Ok(SourceCase {
+            runner,
+            source_id: self.source_id,
+            steps: self.facts["steps"].take(),
+            asm: self.facts["asm"].take(),
+        })
+    }
+}
+
+/// A nested compiler answer: its `ok` value, or its `error`.
+fn nested(answer: &Json) -> Result<&Json, String> {
+    if let Some(error) = answer.get("error") {
+        return Err(error.as_str().unwrap_or_default().to_owned());
+    }
+    answer
+        .get("ok")
+        .ok_or_else(|| "the compiler did not answer; use a matching vesper".to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -879,29 +757,22 @@ fn cas_json(c: &CasBaseline, rev: &str) -> Json {
 // `--deterministic`: exact evaluator step counts (simulated clock).
 // ---------------------------------------------------------------------------
 
-const STEP_FUEL: u64 = 50_000_000;
-
-/// Evaluator steps for one call of `entry`, with its result.
-fn evaluator_steps(world: &vesper::check::World, entry: &str) -> Result<(u64, String), String> {
-    let mut runtime = vesper::runtime::Runtime::new(world);
-    // The benchmark JIT compiles unoptimized IR; count the same program.
-    runtime.optimize = false;
-    runtime.fuel = STEP_FUEL;
-    let value = runtime.run(entry, Vec::new())?;
-    let steps = STEP_FUEL - runtime.fuel;
-    if steps == 0 {
-        return Err("evaluator reported zero steps".into());
-    }
-    Ok((steps, format!("{value:?}")))
+/// The evaluator repetitions `--deterministic` compares.
+fn step_repetitions(options: &Options) -> usize {
+    options.config.epochs.clamp(2, 64)
 }
-fn deterministic_arm(case: &mut SourceCase, repetitions: usize) -> Result<(u64, String), String> {
-    let (steps, value) = evaluator_steps(&case.world, &case.entry)?;
-    for _ in 1..repetitions {
-        if evaluator_steps(&case.world, &case.entry)? != (steps, value.clone()) {
-            return Err("evaluator step count is not deterministic".into());
-        }
-    }
-    let native = format!("{:?}", case.runner.run(&case.entry)?);
+/// The compiler's evaluator steps for one call (the same in every
+/// repetition), cross-checked against one native call.
+fn deterministic_arm(case: &mut SourceCase) -> Result<(u64, String), String> {
+    let answer = nested(&case.steps)?;
+    let steps = answer["steps"]
+        .as_u64()
+        .ok_or("the compiler reported no evaluator steps")?;
+    let value = answer["value"]
+        .as_str()
+        .ok_or("the compiler reported no evaluator result")?
+        .to_owned();
+    let native = case.runner.run()?.to_string();
     if native != value {
         return Err(format!(
             "native result {native} differs from the evaluator's {value}"
@@ -914,9 +785,9 @@ fn deterministic_outcome(
     baseline: &mut SourceCase,
     candidate: &mut SourceCase,
 ) -> Result<Outcome, String> {
-    let repetitions = options.config.epochs.clamp(2, 64);
-    let (base, base_value) = deterministic_arm(baseline, repetitions)?;
-    let (cand, cand_value) = deterministic_arm(candidate, repetitions)?;
+    let repetitions = step_repetitions(options);
+    let (base, base_value) = deterministic_arm(baseline)?;
+    let (cand, cand_value) = deterministic_arm(candidate)?;
     let pair = PairedSample::new(base, cand, 1).map_err(|e| e.to_string())?;
     let bounds = pair.regression_bp_bounds();
     let (status, gate_failure) = match options.threshold {
@@ -955,118 +826,25 @@ fn deterministic_outcome(
 // `--asm` and `--expect-vectorized`: CLIF and machine listings.
 // ---------------------------------------------------------------------------
 
-/// The benchmark JIT's ISA flags (`NativeBatch`): non-PIC, no colocated
-/// libcalls, NaN canonicalization for DetFloat programs, host target.
-fn batch_isa(
-    world: &vesper::check::World,
-) -> Result<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>, String> {
-    use cranelift_codegen::settings::{self, Configurable};
-    let mut flags = settings::builder();
-    flags
-        .set("use_colocated_libcalls", "false")
-        .map_err(|e| e.to_string())?;
-    flags.set("is_pic", "false").map_err(|e| e.to_string())?;
-    if vesper::native::needs_nan_canonicalization(world) {
-        flags
-            .set("enable_nan_canonicalization", "true")
-            .map_err(|e| e.to_string())?;
-    }
-    cranelift_native::builder()
-        .map_err(str::to_string)?
-        .finish(settings::Flags::new(flags))
-        .map_err(|e| e.to_string())
-}
-/// Machine-listing lines that name a vector register. On x86-64 scalar
-/// floats also live in xmm registers, so this is a listing aid, not the
-/// vectorization decision (which uses CLIF value types).
-fn vector_register_line(line: &str) -> bool {
-    const AARCH64: [&str; 8] = [".16b", ".8b", ".8h", ".4h", ".4s", ".2s", ".2d", ".1d"];
-    line.contains("%xmm")
-        || line.contains("%ymm")
-        || line.contains("%zmm")
-        || AARCH64.iter().any(|a| line.contains(a))
-        || line.contains(" z0") // SVE
-}
 struct Listing {
     data: Json,
     text: String,
     vector_instructions: usize,
 }
+/// The compiler's listing: every compiled function's CLIF and machine code,
+/// recompiled with the benchmark JIT's ISA flags.
 fn asm_listing(case: &SourceCase) -> Result<Listing, String> {
-    let mut functions = Vec::new();
-    vesper::native::object_with_observer(
-        &case.world,
-        &case.entry,
-        None,
-        false,
-        Some(&mut |f| functions.push(f)),
-    )?;
-    if functions.is_empty() {
-        return Err("no compiled functions to list".into());
-    }
-    let isa = batch_isa(&case.world)?;
-    let mut text = String::new();
-    let mut entries = Vec::new();
-    let mut total_vector = 0usize;
-    for f in functions {
-        let func = &f.function;
-        let mut vector = 0usize;
-        let mut instructions = 0usize;
-        for block in func.layout.blocks() {
-            for inst in func.layout.block_insts(block) {
-                instructions += 1;
-                let dfg = &func.dfg;
-                if dfg.ctrl_typevar(inst).is_vector()
-                    || dfg
-                        .inst_results(inst)
-                        .iter()
-                        .any(|v| dfg.value_type(*v).is_vector())
-                    || dfg
-                        .inst_args(inst)
-                        .iter()
-                        .any(|v| dfg.value_type(*v).is_vector())
-                {
-                    vector += 1;
-                }
-            }
-        }
-        total_vector += vector;
-        let clif = func.display().to_string();
-        let mut ctx = cranelift_codegen::Context::for_function(func.clone());
-        ctx.set_disasm(true);
-        let compiled = ctx
-            .compile(
-                &*isa,
-                &mut cranelift_codegen::control::ControlPlane::default(),
-            )
-            .map_err(|e| format!("{}: {:?}", f.symbol, e.inner))?;
-        let machine = compiled
-            .vcode
-            .clone()
-            .ok_or("Cranelift produced no machine listing")?;
-        let bytes = compiled.code_buffer();
-        let vector_lines = machine.lines().filter(|l| vector_register_line(l)).count();
-        text.push_str(&format!(
-            ";; {} ({}): {} CLIF instructions, {} vector-typed; {} code bytes\n{clif}\n;; machine code ({})\n{machine}\n",
-            f.symbol,
-            f.source,
-            instructions,
-            vector,
-            bytes.len(),
-            isa.triple(),
-        ));
-        entries.push(
-            json!({"symbol":f.symbol,"source":f.source,"clif":clif,"machine":machine,
-            "clif_instructions":instructions,"vector_clif_instructions":vector,
-            "machine_vector_register_lines":vector_lines,"code_bytes":bytes.len(),
-            "code_blake3":blake3::hash(bytes).to_hex().to_string()}),
-        );
-    }
+    let answer = nested(&case.asm)?;
     Ok(Listing {
-        data: json!({"target":isa.triple().to_string(),"functions":entries,
-            "scope":"the benchmark's unoptimized IR recompiled with the benchmark JIT's ISA flags; code bytes are this recompilation's, not read from JIT memory"}),
-        text,
-        vector_instructions: total_vector,
+        data: answer["data"].clone(),
+        text: answer["text"]
+            .as_str()
+            .ok_or("the compiler sent no listing text")?
+            .to_owned(),
+        vector_instructions: answer["vector_instructions"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or("the compiler sent no vector instruction count")?,
     })
 }
 fn vectorization_status(listing: &Listing) -> &'static str {
@@ -1090,13 +868,13 @@ fn baseline_label(options: &Options) -> String {
 }
 impl BenchCase for SourceCase {
     type Input = ();
-    type Output = Value;
+    type Output = Scalar;
     type Error = String;
     fn setup(&mut self, _: Invocation) -> Result<(), String> {
         Ok(())
     }
-    fn run(&mut self, _: ()) -> Result<Value, String> {
-        self.runner.run(&self.entry)
+    fn run(&mut self, _: ()) -> Result<Scalar, String> {
+        self.runner.run()
     }
 }
 fn pair_json(pair: PairedSample, metric: Metric) -> Json {
@@ -1124,7 +902,7 @@ fn pair_json(pair: PairedSample, metric: Metric) -> Json {
         "regression_basis_points": {"floor": bounds.floor.to_string(), "ceil": bounds.ceil.to_string()},
     })
 }
-fn stats_json(stats: BatchStats) -> Json {
+fn stats_json(stats: KernelStats) -> Json {
     json!({
         "modules": stats.module_count, "compilations": stats.compilation_count,
         "defined_functions": stats.defined_functions, "entries": stats.entry_count,
@@ -1936,13 +1714,30 @@ fn measure(options: Options) -> Result<Option<Outcome>, String> {
         }
         None => None,
     };
-    let mut baseline = match &cas {
-        Some((c, rev)) => SourceCase::compile_text(&c.source, &options.baseline_entry)
-            .map_err(|error| format!("baseline git:{rev}:{}: {error}", c.git.path))?,
-        None => SourceCase::compile(&options.baseline, &options.baseline_entry)
-            .map_err(|error| format!("baseline {}: {error}", options.baseline.display()))?,
+    let extra = Extra {
+        steps: options.deterministic.then(|| step_repetitions(&options)),
+        asm: options.asm || options.expect_vectorized,
     };
-    let mut candidate = SourceCase::compile(&options.path, &options.entry)
+    // Both arms ask the compiler at once; the baseline's error still wins.
+    let (baseline, candidate) = std::thread::scope(|scope| {
+        let baseline = scope.spawn(|| match &cas {
+            Some((c, _)) => SourceCase::compile_text(&c.source, &options.baseline_entry, extra),
+            None => SourceCase::compile(&options.baseline, &options.baseline_entry, extra),
+        });
+        let candidate = SourceCase::compile(&options.path, &options.entry, extra);
+        let baseline = baseline
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (baseline, candidate)
+    });
+    let mut baseline = baseline
+        .and_then(Compiled::load)
+        .map_err(|error| match &cas {
+            Some((c, rev)) => format!("baseline git:{rev}:{}: {error}", c.git.path),
+            None => format!("baseline {}: {error}", options.baseline.display()),
+        })?;
+    let mut candidate = candidate
+        .and_then(Compiled::load)
         .map_err(|error| format!("candidate {}: {error}", options.path.display()))?;
     if cas.is_none()
         && options.path == options.baseline
@@ -2175,26 +1970,6 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         print!("{}", outcome.text);
     }
     outcome.gate_failure.map_or(Ok(()), Err)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn inferred_growth_is_rejected_without_calling_the_checker() {
-        let mut source = String::from("fn main(){let x=0;");
-        for _ in 0..25 {
-            source.push_str("let x=(x,x);");
-        }
-        source.push('}');
-        let parsed = vesper::parser::parse(&source);
-        assert!(parsed.diagnostics.is_empty());
-        assert!(scalar_source(&parsed.module).is_err());
-        let generic =
-            vesper::parser::parse("fn dup[T:mod copy](in x:T)->(T,T){(x,x)} fn main(){dup(0);}");
-        assert!(generic.diagnostics.is_empty());
-        assert!(scalar_source(&generic.module).is_err());
-    }
 }
 
 #[cfg(test)]
@@ -2694,9 +2469,6 @@ mod metronome_rest_tests {
         assert_eq!(gated.data["vectorization"]["gate"], "Fail");
         assert!(gated.data.get("asm").is_none());
         assert!(gated.gate_failure.unwrap().contains("--expect-vectorized"));
-        assert!(vector_register_line("  addps %xmm1, %xmm0"));
-        assert!(vector_register_line("  add v0.4s, v1.4s, v2.4s"));
-        assert!(!vector_register_line("  addq %rsi, %rax"));
     }
 
     #[test]

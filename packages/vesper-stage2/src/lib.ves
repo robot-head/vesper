@@ -30,6 +30,10 @@ use self::collect::{collect_program, collect_program_traits};
 use self::traits::{DynOut, dyn_out, dyn_out_new, mono_plan, mono_plan_new};
 use self::facts::{record_failure_ops};
 use self::tables::{lower_table_reads};
+pub use self::ffi::{ForeignSource, foreign_source};
+use self::ffi::{
+    Foreign, add_foreign_decls, close_foreign_ops, foreign_none, foreign_read, rename_foreign_calls
+};
 use self::loader::{load_package_graph_bytes_traits};
 use self::sugar_policy::{
     PolicyFailure, PolicyFailureKind, PolicyInputs, copy_inputs, empty_inputs,
@@ -364,8 +368,21 @@ pub struct Lowered {
 pub fn stage2_lower_dir(
     in root_dir: Slice[u8],
     in os: Slice[u8],
+    in foreign_sources: ChunkSeq[ForeignSource],
     inout err: ChunkSeq[u8]
 ) -> Option[Lowered] eff [Ffi[StdFs]] {
+    // The `.vsys` imports (ffi.ves), as `ffi_lowering::check_module` reads them.
+    let mut foreign = if foreign_sources.len() == 0 {
+        foreign_none()
+    } else {
+        match foreign_read(in foreign_sources) {
+            Option::Some(f) => f,
+            Option::None => {
+                err.extend(in "foreign imports".as_bytes());
+                return Option::None;
+            },
+        }
+    };
     let encoded = match load_graph_compact(in root_dir, in os, true) {
         Option::Some(b) => b,
         Option::None => {
@@ -394,8 +411,13 @@ pub fn stage2_lower_dir(
             return Option::None;
         },
     };
-    let (ir_ast, names_seed, types_seed, world0, dyn_out) = front_with_traits(in mods);
+    let (ir_ast0, names_seed, types_seed, world0, dyn_out) = front_with_traits(
+        in mods,
+        inout foreign
+    );
     let mut names0 = names_seed;
+    let mut ir_ast = ir_ast0;
+    rename_foreign_calls(inout ir_ast, inout names0, in foreign);
     let mut types0 = types_seed;
     if !resolve_rows(inout sugar, inout a, inout names0, inout types0) {
         err.extend(in INVALID_SUGAR_POLICY.as_bytes());
@@ -422,9 +444,11 @@ pub fn stage2_lower_dir(
     }
     // Native lowering reads the operations that may fail.
     let (names, types, world) = record_failure_ops(in ir_ast, sink names, sink types, sink world);
-    // Native code reads constant aggregates as tables.
-    let mut ir_ast = ir_ast;
+    // Pass 2 of the foreign check: one operation per slice-length vector.
     let mut names = names;
+    let mut types = types;
+    close_foreign_ops(inout ir_ast, inout names, inout types, in world, in foreign);
+    // Native code reads constant aggregates as tables.
     lower_table_reads(inout ir_ast, inout names, in types, in world);
     let c = Ctx {
         names: names,
@@ -447,10 +471,14 @@ pub fn stage2_lower_dir(
 // package with traits or conformances is checked once to plan its
 // instances, then collected and lowered again with them, as Rust's
 // `check_lowered_package` checks pass 1 and then the elaborated module.
-fn front_with_traits(in mods: ChunkSeq[AssembledModule]) -> (IrAst, Names, Types, World, DynOut) {
+fn front_with_traits(
+    in mods: ChunkSeq[AssembledModule],
+    inout foreign: Foreign
+) -> (IrAst, Names, Types, World, DynOut) {
     let mut names0 = names_new();
     let types0 = types_new(inout names0);
-    let first = collect_program_traits(in mods, sink names0, sink types0, sink mono_plan_new());
+    let mut first = collect_program_traits(in mods, sink names0, sink types0, sink mono_plan_new());
+    add_foreign_decls(inout first, inout foreign);
     if first.tr.traits.len() == 0 && first.tr.confs.len() == 0 {
         let (ir, n, t, wd) = build_ir_ast_for_entry(sink first, in mods, in "");
         return (ir, n, t, wd, dyn_out_new());
@@ -468,7 +496,8 @@ fn front_with_traits(in mods: ChunkSeq[AssembledModule]) -> (IrAst, Names, Types
     let mut types = types2;
     let plan = mono_plan(in ir1, in tr2, in calls, inout names, inout types);
     let dyn_objects = dyn_out(in plan, in tr2, inout names);
-    let second = collect_program_traits(in mods, sink names, sink types, sink plan);
+    let mut second = collect_program_traits(in mods, sink names, sink types, sink plan);
+    add_foreign_decls(inout second, inout foreign);
     let (ir, n, t, wd) = build_ir_ast_for_entry(sink second, in mods, in "");
     (ir, n, t, wd, dyn_objects)
 }

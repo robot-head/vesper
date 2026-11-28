@@ -671,7 +671,7 @@ fn dispatch<W: Write>(
                 return if clean {
                     Ok(())
                 } else {
-                    Err("LSP exit before shutdown".into())
+                    Err(EXIT_BEFORE_SHUTDOWN.into())
                 };
             }
             Event::Proof {
@@ -758,7 +758,8 @@ fn dispatch<W: Write>(
                             ))
                             .is_err()
                         {
-                            return Err("Lens session thread stopped".into());
+                            finish();
+                            return session_stopped(inbox);
                         }
                     }
                     Err(error) => {
@@ -793,7 +794,8 @@ fn dispatch<W: Write>(
                     .send((Work::Notification { method, params }, true))
                     .is_err()
                 {
-                    return Err("Lens session thread stopped".into());
+                    finish();
+                    return session_stopped(inbox);
                 }
             }
             // This server's own requests (code lens refresh) need no answer,
@@ -802,6 +804,25 @@ fn dispatch<W: Write>(
         }
     }
     Ok(())
+}
+
+/// The error of a session that ended with `exit` before `shutdown`.
+const EXIT_BEFORE_SHUTDOWN: &str = "LSP exit before shutdown";
+
+/// The dispatcher's result once the session thread has stopped and
+/// queued work can no longer reach it. The thread sends its last event
+/// (an exit, the drain or a write failure) before its queue closes, so a
+/// frame read behind an `exit` waits for that event rather than racing it.
+fn session_stopped(inbox: &Receiver<Event>) -> Result<(), String> {
+    while let Ok(event) = inbox.recv() {
+        match event {
+            Event::Exit { clean: true } | Event::Drained(None) => return Ok(()),
+            Event::Exit { clean: false } => return Err(EXIT_BEFORE_SHUTDOWN.into()),
+            Event::Drained(Some(error)) | Event::WriteFailed(error) => return Err(error),
+            _ => {}
+        }
+    }
+    Err("Lens session thread stopped".into())
 }
 
 fn session_thread<W: Write>(
