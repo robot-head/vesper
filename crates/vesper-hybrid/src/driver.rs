@@ -455,6 +455,14 @@ impl Session {
             return count(assembled.diagnostics.len() + assembled.manifest_errors.len());
         }
         self.original = assembled.sources.combined();
+        // The assembled module is the session's parse: the Vesper driver
+        // runs no `Parse` for a package (#1893).
+        self.source = self.original.clone();
+        self.parsed = Some(parser::Parse {
+            module: assembled.module.clone(),
+            green: parser::parse("").green,
+            diagnostics: vec![],
+        });
         self.loaded = Some(assembled);
         0
     }
