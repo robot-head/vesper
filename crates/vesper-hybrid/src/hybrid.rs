@@ -243,6 +243,8 @@ pub(crate) use assemble::{
 };
 /// The Vesper driver's own parse (#1893) reads back through the parse swap.
 pub(crate) use parse::{driver_parse, driver_parse_begin};
+/// And its sugar expansion through the sugar swap's decoder.
+pub(crate) use sugar::driver_expansion;
 
 /// The Vesper driver's `run` (#2053) evaluates through the run swap.
 pub(crate) use run::driver_run;

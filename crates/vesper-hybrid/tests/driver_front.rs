@@ -109,7 +109,12 @@ const PROGRAMS: &[(&str, &str)] = &[
     // A line separator the diagnostic port refuses (the session renders
     // the raw fallback).
     ("syntax_vt.ves", "fn main( -> i64 {\x0b\n}\n"),
-    // A syntax error in a source with sugar (the session expands it).
+    // A sugar rule whose expansion does not parse.
+    (
+        "sugar_template_syntax.ves",
+        "sugar bad_tpl: infix(`.+`, additive, left) { rule ($a:expr .+ $b:expr) => { $b + } }\nfn main() -> i64 {\n    1 .+ 42\n}\n",
+    ),
+    // A syntax error in a source with sugar (the expansion's error).
     (
         "sugar_syntax.ves",
         "sugar take_right: infix(`.+`, additive, left) { rule ($a:expr .+ $b:expr) => { $b } }\nfn main( -> i64 {\n    1 .+ 42\n}\n",
@@ -137,6 +142,14 @@ fn ves_files(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// Whether a source declares sugar at the top level.
+fn declares_sugar(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|text| {
+        text.lines()
+            .any(|l| l.starts_with("sugar ") || l.starts_with("pub sugar "))
+    })
 }
 
 fn corpus(root: &Path) -> Vec<PathBuf> {
@@ -189,9 +202,12 @@ fn front_passes_match_the_default_compiler() {
     for (i, path) in corpus(&root).into_iter().enumerate() {
         if i % stride == 0 {
             // `check` over examples/ and tests/ only: the packages' files
-            // need their package to check.
-            let check =
-                path.starts_with(root.join("examples")) || path.starts_with(root.join("tests"));
+            // need their package to check. A package file that declares
+            // sugar checks on its own too, through the sugar expansion the
+            // driver parses (#1893).
+            let check = path.starts_with(root.join("examples"))
+                || path.starts_with(root.join("tests"))
+                || declares_sugar(&path);
             inputs.push((path, check));
         }
     }
@@ -318,6 +334,20 @@ fn emit_cst_runs_in_the_vesper_driver() {
     )
     .unwrap();
     assert_eq!(passes(&["check", sugared.to_str().unwrap()]), 1);
+    // A source whose sugar expands parses in the driver too (#1893): its
+    // check runs the passes of the same program written without sugar.
+    let expands = scratch.join("expands.ves");
+    std::fs::write(
+        &expands,
+        "sugar take_right: infix(`.+`, additive, left) { rule ($a:expr .+ $b:expr) => { $b } }\nfn main() -> i64 {\n    1 .+ 42\n}\n",
+    )
+    .unwrap();
+    let plain = scratch.join("plain.ves");
+    std::fs::write(&plain, "fn main() -> i64 {\n    42\n}\n").unwrap();
+    assert_eq!(
+        passes(&["check", expands.to_str().unwrap()]),
+        passes(&["check", plain.to_str().unwrap()])
+    );
     let _ = std::fs::remove_dir_all(&scratch);
     // The driver's parse is the parse swap's: with no swaps, the session
     // parses and dumps.

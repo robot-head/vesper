@@ -578,6 +578,18 @@ pub mod host {
         unsafe { std::slice::from_raw_parts(ptr, len) }
     }
 
+    /// A lent word slice (empty when `len` is 0).
+    ///
+    /// # Safety
+    /// `ptr` is valid for `len` words for the call when `len` is not 0.
+    unsafe fn lent_words<'a>(ptr: *const u64, len: usize) -> &'a [u64] {
+        if len == 0 || ptr.is_null() {
+            return &[];
+        }
+        // SAFETY: as documented.
+        unsafe { std::slice::from_raw_parts(ptr, len) }
+    }
+
     /// Write `text` to stdout (1) or stderr (2).
     ///
     /// # Safety
@@ -710,6 +722,65 @@ pub mod host {
             let n = count(parsed.diagnostics.len());
             s.source = s.original.clone();
             s.source_map = Vec::new();
+            s.parsed = Some(parsed);
+            n
+        })) {
+            Ok(n) => n,
+            Err(_) => PANIC,
+        }
+    }
+
+    /// The session's `Parse` from a source whose sugar the Vesper driver
+    /// expanded and parsed (`front.ves` `parse_front`): `expansion` is
+    /// `@vesper/sugar`'s `expand_words` and `words` the `parse_words` stream
+    /// of its expanded text, which has no diagnostics. As
+    /// `parse_compiler_input`'s `parse_resolved`: the module keeps the
+    /// expansion's effect regions and the session compiles the expanded text
+    /// under its source map. 0, or `FAIL` when `expansion` expands nothing.
+    ///
+    /// # Safety
+    /// `s` is a live session lent `inout`; `words` and `expansion` lent word
+    /// slices.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hd_parsed_sugar(
+        s: *mut Session,
+        words: *const u64,
+        len: usize,
+        expansion: *const u64,
+        expansion_len: usize,
+    ) -> i64 {
+        // SAFETY: lent for the call.
+        let (s, words, expansion) = unsafe {
+            (
+                &mut *s,
+                lent_words(words, len),
+                lent_words(expansion, expansion_len),
+            )
+        };
+        PASSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match panic::catch_unwind(AssertUnwindSafe(|| {
+            let Ok(Some(expanded)) = crate::vesper_hybrid::driver_expansion(expansion) else {
+                s.text = b"driver: the sugar expansion expands nothing".to_vec();
+                return FAIL;
+            };
+            let mut parsed = crate::vesper_hybrid::driver_parse(&expanded.source, words);
+            let n = count(parsed.diagnostics.len());
+            parsed.module.sugar_origins = expanded.regions;
+            s.source_map = expanded
+                .mappings
+                .iter()
+                .map(|m| vesper::forge_frontend::SourceMapSegment {
+                    expanded: (&m.expanded).into(),
+                    original: (&m.original).into(),
+                    kind: if m.copied {
+                        vesper::forge_frontend::MapKind::Source
+                    } else {
+                        vesper::forge_frontend::MapKind::Generated
+                    },
+                    r#macro: None,
+                })
+                .collect();
+            s.source = expanded.source;
             s.parsed = Some(parsed);
             n
         })) {
