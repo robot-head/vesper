@@ -541,6 +541,12 @@ impl Session {
         std::mem::take(&mut self.timers)
     }
 
+    /// Whether the client negotiated debounced background proof runs, so
+    /// timers can fire (the Vesper loop polls for them, #1828 part 15b).
+    pub(crate) fn debouncing(&self) -> bool {
+        self.background.is_some()
+    }
+
     /// A debounce timer fired: start a background run of every obligation
     /// that has no outcome for the current source yet.
     pub(crate) fn timer_fired(&mut self, uri: &str) -> TimerOutcome {

@@ -1414,3 +1414,105 @@ cases over 4 KiB.
 
 Rust lines deleted: 0; the session does not call the port yet.
 
+
+# Part 15a: the server loop in Vesper
+
+`@vesper/lsp-server` is the first package that runs a whole LSP session
+in Vesper. It reads each frame with `read_frame`, parses the envelope,
+and answers what Vesper already owns: refused bodies, the request gate
+(lifecycle, `initialize`, `shutdown`), the notification gate and
+`$/cancelRequest`. Everything else crosses an engine seam,
+`sys library LspEngine`: `lsp_engine_frame` hands the body to the
+engine, `lsp_engine_take` copies its answer frames out, `lsp_engine_exit`
+reports whether the session continues or exits cleanly, and
+`lsp_engine_error` carries a failure. The seam is the "checked document"
+interface Stage 2 agreed on; it starts as Rust and gets a Vesper engine
+before `src/lsp` can go.
+
+## What changed
+
+- `packages/vesper-lsp-server`: the loop (`serve`), refusal frames
+  (error responses and `window/logMessage` warnings) and the
+  `lsp_server_run` JIT entry; `engine-*.vsys` declare the seam.
+- `packages/vesper-lsp`: exports the gate (`Gate`, `gate_request`,
+  `gate_note`, `refusal_code`, `refusal_message`), the frame reader,
+  envelope parser, encoder and limits for the server package.
+- `src/lsp.rs`: the hidden `Engine`, which drives a Rust `Session` one
+  body at a time and waits for a proof job to finish before it returns.
+- `tests/self_host_lsp_core.rs`: `server_loop_matches_rust` binds the
+  seam to the hidden `Engine` and compares the bytes `serve_with` writes.
+
+## Differential
+
+16 scripted sessions: empty input, the full lifecycle, requests before
+`initialize`, refused bodies, gate refusals, documents and their
+handlers, a manifest, cancels and responses, edits and proof commands,
+`exit` before `shutdown` and uninitialized, frames after `exit`, end of
+input without `exit`, requests after `shutdown`, a framing error and a
+truncated frame. Every byte of output and the exit outcome match. 0
+diffs.
+
+The scripts leave out sequences where Rust's own answer order is a race
+between its reader and worker threads (a refused envelope body after a
+queued request, cancelling a queued request, `vesper.proofAudit`).
+
+## Numbers
+
+Release build, best of five ABBA pairs over the 16 sessions.
+
+| | Rust | Vesper | Ratio |
+|--|--:|--:|--:|
+| 16 sessions | 7.2 ms | 2.4 ms | **0.33x** |
+
+Rust lines deleted: 0. Gaps: no debounce timers or background proofs
+yet (part 15b), `vesper.proofAudit` runs synchronously, in-flight work
+is not cancelled, and `vesper lsp` still runs Rust (part 15c).
+
+# Part 15b: reading live and running timers
+
+`serve_live` in `@vesper/lsp-server` serves a client whose bytes arrive
+over time. It asks the host for bytes (`lsp_engine_read`, at most
+64 KiB at a time), reads a frame only once all of its bytes are in
+(`read_frame` reports a partial frame as truncated, so the loop reads
+more and tries again), writes each frame's answers as soon as they exist
+(`lsp_engine_write`), and drops handled bytes once 1 MiB has piled up.
+While it waits for the client, it waits no longer than
+`lsp_engine_deadline` and then calls `lsp_engine_tick`, which handles the
+debounce timers and background proof runs that finished. The host owns
+the descriptors and the clock, so the loop has no platform code.
+
+## What changed
+
+- `packages/vesper-lsp-server`: `serve_live` and the `lsp_server_live`
+  JIT entry; the engine seam gains `lsp_engine_read`, `lsp_engine_write`,
+  `lsp_engine_deadline` and `lsp_engine_tick`.
+- `src/lsp.rs`: `Engine::deadline` (a 10 ms poll while the client has
+  background proofs on) and `Engine::tick`. Timers still fire on their
+  own threads, as in `serve`. A timer that fires while a
+  `vesper.proofAudit` job is awaited waits for the next tick instead of
+  being dropped.
+- `tests/self_host_lsp_core.rs`: `live_loop_matches_rust` and
+  `live_loop_runs_timers`.
+
+## Differential
+
+- `live_loop_matches_rust`: all 16 sessions from part 15a, read in 1-,
+  5-, 64- and 4,096-byte pieces and whole, each with and without a wait
+  that runs out (and so a tick) before every read: 160 runs, 0 diffs.
+- `live_loop_runs_timers`: a client turns background proofs on, opens a
+  document, then pauses for 1.5 s, so the debounce timer fires and the
+  background run finishes before `shutdown`. `/bin/false` stands in for
+  Lean and the auditor. Both sides send the same 4 messages, including
+  one `vesper/proofStatus`, once its `elapsed_ms` is set aside. 0 diffs
+  over repeated runs.
+
+## Numbers
+
+| | Rust | Vesper | Ratio |
+|--|--:|--:|--:|
+| 16 sessions, 64 KiB reads | 8.0 ms | 2.7 ms | **0.34x** |
+
+Rust lines deleted: 0. Gaps: a `vesper.proofAudit` request still
+blocks the loop until its job finishes, work that is already running is
+not cancelled, and `vesper lsp` does not run this loop yet (part 15c,
+which also supplies the stdin, stdout and clock host functions).

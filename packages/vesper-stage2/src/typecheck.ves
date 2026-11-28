@@ -285,6 +285,8 @@ fn bind_pat(inout tc: Tc, in a: Ast, pid: u64, ty: u32) {
         Option::None => return,
     };
     if p.kind == Pat::Bind {
+        // The binding's type, for the linearity pass (linear.ves).
+        record_span(inout tc, p.s0, p.s1, ty);
         bind_var(inout tc, n32(p.a), ty);
         return;
     }
@@ -1450,8 +1452,24 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         expected
     } else if e.kind == X_FOR {
         let it = check_expr(inout tc, in a, e.b, tc.infer_ty);
+        let ranged = match a.exs.try_get(e.b) {
+            Option::Some(ix) => ix.kind == X_RANGE,
+            Option::None => false,
+        };
+        // Over a fixed array (a tuple), a `ChunkSeq` or a `Slice`, the
+        // pattern binds an element (#2703).
+        let sequence = tc.types.kind(it) == TyKind::Named
+            && tc.types.arity(it) == 1
+            && (tc.types.name(it) == tc.world.k.chunk_seq || tc.types.name(it) == tc.world.k.slice);
+        let elem = if ranged {
+            it
+        } else if (tc.types.kind(it) == TyKind::Tuple && tc.types.arity(it) > 0) || sequence {
+            default_type(inout tc.types, tc.types.arg(it, 0))
+        } else {
+            it
+        };
         push_scope(inout tc);
-        bind_pat(inout tc, in a, e.a, it);
+        bind_pat(inout tc, in a, e.a, elem);
         let _bt = check_expr(inout tc, in a, e.c, tc.unit_ty);
         pop_scope(inout tc);
         tc.unit_ty

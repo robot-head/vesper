@@ -13,10 +13,11 @@ use std::sync::OnceLock;
 /// transitions or source trace events.
 pub const SEMANTICS: &str = "vesper-reference-cek+simpulse-journal-v1+sim-session-v2";
 
-/// Every field must match for a replay to proceed. The executable digest is
-/// the SHA-256 of the running binary, which statically links the compiler,
-/// checker, reference evaluator and SimPulse kernel; a package version or a
-/// caller-provided label is never accepted in its place.
+/// Every field must match for a replay to proceed. The executable digest
+/// binds the running binary (the SimPulse kernel and the session adapter)
+/// and the `vesper` executable whose parser, checker and reference evaluator
+/// serve it ([`executable_sha256`]); a package version or a caller-provided
+/// label is never accepted in its place.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionIdentity {
@@ -131,16 +132,61 @@ impl ExecutionIdentity {
     }
 }
 
-/// SHA-256 of the current executable's bytes, computed once per process.
+/// Bytes per piece of [`file_digest`], hashed on its own thread.
+const DIGEST_CHUNK_BYTES: usize = 8 << 20;
+
+/// SHA-256 over the SHA-256 of each [`DIGEST_CHUNK_BYTES`] piece of the file,
+/// in order, so that a large compiler binary hashes on every core.
+fn file_digest(path: &std::path::Path) -> Result<String, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("cannot read {} for its digest: {e}", path.display()))?;
+    let pieces: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = bytes
+            .chunks(DIGEST_CHUNK_BYTES)
+            .map(|piece| scope.spawn(move || sha256_hex(piece)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("hashing a slice cannot panic"))
+            .collect()
+    });
+    Ok(sha256_hex(
+        format!("{}:{}\n", bytes.len(), pieces.join(",")).as_bytes(),
+    ))
+}
+
+/// SHA-256 of the current executable's digest and the digest of the
+/// compiler that evaluates its sessions ([`crate::compiler`]), one per
+/// line ([`file_digest`] each), computed once per process.
 pub fn executable_sha256() -> Result<String, String> {
     static DIGEST: OnceLock<Result<String, String>> = OnceLock::new();
     DIGEST
         .get_or_init(|| {
             let path = std::env::current_exe()
                 .map_err(|e| format!("cannot locate the embedding executable: {e}"))?;
-            let bytes = std::fs::read(&path)
-                .map_err(|e| format!("cannot read {} for its digest: {e}", path.display()))?;
-            Ok(sha256_hex(&bytes))
+            let compiler = crate::machine::compiler()?;
+            let (embedding, compiler) = std::thread::scope(|scope| {
+                let compiler = scope.spawn(|| file_digest(compiler));
+                let embedding = file_digest(&path);
+                let compiler = compiler
+                    .join()
+                    .unwrap_or_else(|_| Err("the compiler digest panicked".into()));
+                (embedding, compiler)
+            });
+            Ok(sha256_hex(
+                format!("{}\n{}\n", embedding?, compiler?).as_bytes(),
+            ))
         })
         .clone()
+}
+
+/// Start [`executable_sha256`] in the background, so that it overlaps
+/// starting the host and checking the source.
+pub(crate) fn prefetch_executable_sha256() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        std::thread::spawn(|| {
+            let _ = executable_sha256();
+        });
+    });
 }
