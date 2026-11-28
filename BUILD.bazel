@@ -2377,7 +2377,10 @@ filegroup(
     srcs = glob([
         "lean/**",
         "tools/proof-audit/**",
+        "tests/fixtures/doc_links/**",
+        "tests/fixtures/doc_navigation/**",
         "tests/fixtures/format_proof/**",
+        "tests/fixtures/macro_preview/**",
         "tests/fixtures/source_macro_parameters/**",
         "tests/fixtures/source_macro_tuples/**",
         "tests/fixtures/source_macros/**",

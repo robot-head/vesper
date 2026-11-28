@@ -12,9 +12,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const LOCAL: &str = include_str!("fixtures/doc_navigation/local.ves");
-const EXCLUSIONS: &str = include_str!("fixtures/doc_navigation/exclusions.ves");
-const COLLISIONS: &str = include_str!("fixtures/doc_navigation/collisions.ves");
+const LOCAL: &str = include_str!("../../../tests/fixtures/doc_navigation/local.ves");
+const EXCLUSIONS: &str = include_str!("../../../tests/fixtures/doc_navigation/exclusions.ves");
+const COLLISIONS: &str = include_str!("../../../tests/fixtures/doc_navigation/collisions.ves");
 const DISK: &[u8] = b"fn on_disk() -> i64 { 99 } fn main() -> i64 { on_disk() }\n";
 
 fn binary() -> PathBuf {
