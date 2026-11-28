@@ -67,6 +67,8 @@ use @vesper/driver::{
 use @vesper/place-ir::{place_ir_json_bytes};
 // `--package` validation for `vesper emit --emit interface` (#2339, #1893).
 use @vesper/loom-calculus::{lock_graph_focus_error};
+// A package directory's manifest name for `vesper emit --format interface`.
+use @vesper/loom-calculus::loader::{parse_manifest};
 // The package assembly of the package load (#1986).
 use self::assemble::{assembled_words};
 // The package graph read of the package load (#1986 slice 2).
@@ -129,10 +131,6 @@ fn step_check() -> u32 {
 
 fn step_lib_build() -> u32 {
     10
-}
-
-fn step_emit_interface() -> u32 {
-    11
 }
 
 fn step_optimize() -> u32 {
@@ -464,6 +462,45 @@ fn is_package(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
     is_file_path(in manifest.as_slice())
 }
 
+// The package an interface without `--package` exports under: the loaded
+// package directory's manifest name (`Step::EmitInterface` of
+// crates/vesper-hybrid/src/driver/front.rs did this over the Rust
+// session's load), validated as `PackageName::parse` validates it; or
+// false and the error.
+fn manifest_package(in input: Slice[u8], package: bool) -> (bool, ChunkSeq[u8]) eff [Ffi[StdFs]] {
+    let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if !package {
+        message.extend(in NO_INTERFACE_PACKAGE.as_bytes());
+        return (false, message);
+    }
+    let path = join(in input, in "Loom.toml".as_bytes(), os() == os_windows());
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let failed = handle Fail[IoError] in {
+        text = read_path(in path.as_slice());
+        0
+    } with {
+        return v => v,
+        raise(e, _) => error_word(e),
+    };
+    let m = parse_manifest(in text.as_slice());
+    if failed != 0 || !m.ok {
+        message.extend(in NO_INTERFACE_PACKAGE.as_bytes());
+        return (false, message);
+    }
+    let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let pool = m.pool.as_slice();
+    name.extend(in pool[m.name_start..m.name_end]);
+    let err = lock_graph_focus_error(in name.as_slice());
+    if err.pool.len() > 0 {
+        message.extend(in err.pool.as_slice());
+        return (false, message);
+    }
+    (true, name)
+}
+
+// Rust's message for an interface export with no package to name.
+const NO_INTERFACE_PACKAGE: Str = "interface export requires --package @org/name or std/name";
+
 // `cli()` of src/main.rs from loading the input on, pass by pass.
 fn drive(
     inout s: Session,
@@ -572,11 +609,12 @@ fn drive(
             }
             pkg
         } else {
-            let r = step(inout s, step_emit_interface());
-            if is_failure(r) {
-                return pass_failed(in s, r);
+            let input = value(in o, slot_input());
+            let (named, name) = manifest_package(in input.as_slice(), package);
+            if !named {
+                return error(in name.as_slice());
             }
-            text(in s)
+            name
         };
         let r = world_decls(inout s, in source.as_slice(), held);
         if is_failure(r) {
