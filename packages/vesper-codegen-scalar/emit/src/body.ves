@@ -52,8 +52,10 @@ use @vesper/cranelift::{
     ins_stack_addr, ins_store, module_pointer_type, ins_imul_imm, ins_uload8, ins_uload16,
     ins_uload32, mem_can_move, mem_readonly, mem_trusted, data_align, data_define, data_new,
     declare_anonymous_data, define_data, import_data, ins_symbol_value, Slot, ins_istore8,
-    ins_istore16, ins_istore32
+    ins_istore16, ins_istore32, module_get_function, module_jit, module_kind, set_cold_block,
+    module_get_data
 };
+use @vesper/codegen-seq-emit::common::{runtime_call};
 use super::{
     BODY_ERROR, DECLINED, HANDLED, coerce, emit_overflow_test, kind_max_imm, kind_min_imm,
     kind_unsigned, narrow_type, operand, planned, temp
@@ -150,6 +152,18 @@ const SEQ_TRY_SET: u64 = 34;
 const SEQ_SET: u64 = 35;
 // `try_set`'s private slot for a store past the end (`discard_slot`).
 const DISCARD_BYTES: u32 = 16;
+// A `ChunkSeq`'s `push` (#2750).
+const SEQ_PUSH: u64 = 36;
+const HEADER_CAP: i32 = 8;
+// `seq::aot_runtime::defined`: the runtime is in the module once its
+// fault function is.
+const SEQ_FAULT: Str = "vesper_seq_fault";
+const SEQ_GROW: Str = "vesper_seq_grow";
+// `ChunkSeq::new` (#2750), and the runtime's shared empty header.
+const SEQ_NEW: u64 = 37;
+const SEQ_EMPTY: Str = "vesper_seq_empty";
+// The plan's runtime word (@vesper/codegen-scalar's `body_runtime`).
+const RUNTIME_EMPTY_HEADER: u64 = 2;
 // The bits of a literal byte, and the bytes of a literal word.
 const BYTE_BITS: u64 = 8;
 const BYTE_MASK: u64 = 255;
@@ -1634,6 +1648,18 @@ impl Body {
         dest: u64
     ) -> Value eff [Ffi[Cranelift]] {
         let form = w.next();
+        if form == SEQ_NEW {
+            // `seq_empty_header` in an object: the runtime's header.
+            let id = match module_get_data(inout m, in SEQ_EMPTY.as_bytes()) {
+                Option::Some(d) => d,
+                Option::None => return Value { id: invalid() },
+            };
+            let gv = import_data(inout b, in m, id);
+            return ins_symbol_value(inout b, ty_i64(), gv);
+        }
+        if form == SEQ_PUSH {
+            return self.seq_push(inout b, inout m, inout w, x, y);
+        }
         if form == SEQ_TRY_SET {
             return self.seq_try_set(inout b, inout m, inout w, x, y, z);
         }
@@ -1994,6 +2020,75 @@ impl Body {
             switch_to_block(inout b, done);
         }
         ins_uextend(inout b, ty_i64(), valid)
+    }
+
+    // A sequence's `push` of `y` (`seq_op`, `seq_reserve_then`): the
+    // element stored at the end on the fast path; on the cold path the
+    // handle grown (`vesper_seq_grow`), written back to the receiver's
+    // local, and the same store through it.
+    fn seq_push(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words,
+        x: Value,
+        y: Value
+    ) -> Value eff [Ffi[Cranelift]] {
+        let stride = w.next();
+        let kind = w.next();
+        let local = w.next();
+        let len = self.seq_word(inout b, x, HEADER_LEN);
+        let next = ins_iadd_imm(inout b, len, 1);
+        let cap = self.seq_word(inout b, x, HEADER_CAP);
+        let fits = ins_icmp(inout b, cc_ule(), next, cap);
+        let fast = create_block(inout b);
+        let grow = create_block(inout b);
+        let done = create_block(inout b);
+        let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        ins_brif0(inout b, fits, fast, grow);
+        switch_to_block(inout b, fast);
+        self.push_tail(inout b, x, len, next, y, stride, kind);
+        ins_jump(inout b, done, in none.as_slice());
+        switch_to_block(inout b, grow);
+        set_cold_block(inout b, grow);
+        let sv = ins_iconst(inout b, ty_i64(), wrapping_i64(stride));
+        let mut rargs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        rargs.push(x.id);
+        rargs.push(sv.id);
+        rargs.push(next.id);
+        let grown = runtime_call(inout b, inout m, in SEQ_GROW, in rargs.as_slice());
+        self.write_back(inout b, local, grown);
+        self.push_tail(inout b, grown, len, next, y, stride, kind);
+        ins_jump(inout b, done, in none.as_slice());
+        switch_to_block(inout b, done);
+        ins_iconst(inout b, ty_i64(), 0)
+    }
+
+    // `push`'s store through handle `h`: the element at `len`, then the
+    // new length.
+    fn push_tail(
+        inout self,
+        inout b: Builder,
+        h: Value,
+        len: Value,
+        next: Value,
+        v: Value,
+        stride: u64,
+        kind: u64
+    ) eff [Ffi[Cranelift]] {
+        let zero = ins_iconst(inout b, ty_i64(), 0);
+        let addr = self.seq_elem_addr(inout b, h, zero, len, stride);
+        self.store_elem(inout b, addr, v, stride, kind);
+        ins_store(inout b, PLAIN, next, h, HEADER_LEN);
+    }
+
+    // `seq_write_back` of grown handle `v` to local `l`: the walk's
+    // assignment of the name (`def_local`, then the second store), whose
+    // value is a zero.
+    fn write_back(inout self, inout b: Builder, l: u64, v: Value) eff [Ffi[Cranelift]] {
+        self.def_local(inout b, l, v);
+        self.store_local(inout b, l, v);
+        let z = ins_iconst(inout b, ty_i64(), 0);
     }
 
     // `seq_view` of a sequence: its handle, a zero start and its length.
@@ -3575,6 +3670,14 @@ impl Body {
     }
 }
 
+// `seq::aot_runtime::defined`.
+fn has_runtime(inout m: Module) -> bool eff [Ffi[Cranelift]] {
+    match module_get_function(inout m, in SEQ_FAULT.as_bytes()) {
+        Option::Some(_) => true,
+        Option::None => false,
+    }
+}
+
 // The whole body of one planned function on the lent builder, whose
 // current block is the function's entry: HANDLED, DECLINED when a non-builtin
 // call is not one the walk makes directly, or BODY_ERROR when the words are
@@ -3691,6 +3794,18 @@ pub fn emit_body_words(
     let returned = w.next();
     let frame_words = if sret == invalid() { result_words } else { 0 };
     if returned != frame_words {
+        return DECLINED;
+    }
+    // A body that grows a sequence calls the sequence runtime (#2750): in
+    // an object the walk defines it first, so without it the body is the
+    // walk's.
+    // The shared empty header's JIT address is the walk's alone.
+    let runtime = w.next();
+    let jit = module_kind(in m) == module_jit();
+    if (runtime & RUNTIME_EMPTY_HEADER) != 0 && jit {
+        return DECLINED;
+    }
+    if runtime != 0 && !jit && !has_runtime(inout m) {
         return DECLINED;
     }
     for k in 0..nc {
