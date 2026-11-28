@@ -80,7 +80,9 @@ use crate::ir::{Op, Program};
 use cranelift_codegen::ir;
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -453,12 +455,20 @@ pub fn hook(family: Family) -> Option<Hook> {
 
 /// The [`body::FUNCTION`] request of `function`: whether the `body` hook
 /// emitted its body (`false` when no hook is in effect or it declined).
+///
+/// A generic function's instance (#2715) is lent under its instance key
+/// (`site.function`) with the program as it is. The graph to plan is the
+/// instance's own, with every type substituted: a hook that plans the
+/// body reads it with [`body_graph`].
+#[allow(clippy::too_many_arguments)]
 pub fn body_request(
     builder: &mut FunctionBuilder<'_>,
     module: &mut dyn Module,
     world: &World,
     program: &Program,
+    key: &str,
     function: &str,
+    generics: &BTreeMap<String, Type>,
     args: &[u64],
 ) -> Result<bool, String> {
     if !ACTIVE.load(Ordering::Acquire) {
@@ -467,14 +477,24 @@ pub fn body_request(
     let Some(hook) = installed().body else {
         return Ok(false);
     };
+    let instance = if generics.is_empty() {
+        None
+    } else {
+        match instance_program(program, function, generics) {
+            Some(instance) => Some(instance),
+            None => return Ok(false),
+        }
+    };
+    let site = if instance.is_some() { key } else { function };
+    let previous = LENT_INSTANCE.replace(instance);
     let mut results = Vec::new();
-    hook(&mut Lent {
+    let handled = hook(&mut Lent {
         builder,
         module,
         world,
         program,
         site: Site {
-            function,
+            function: site,
             ..Site::NONE
         },
         op: body::FUNCTION,
@@ -483,7 +503,53 @@ pub fn body_request(
         results: &mut results,
         jit: JIT.with(Cell::get),
         optimize: OPTIMIZE.with(Cell::get),
-    })
+    });
+    LENT_INSTANCE.set(previous);
+    handled
+}
+
+/// The generic instance (#2715) of the [`body::FUNCTION`] request being
+/// lent, if it is one: its own program (the substituted graph, named by
+/// `verified_codegen::mono::instance_name`, beside its direct callees'
+/// graphs) and that name. A hook that plans the body plans this program's
+/// function in place of the lent program's `site.function`.
+pub fn body_instance() -> Option<Instance> {
+    LENT_INSTANCE.with(|cell| cell.borrow().clone())
+}
+
+thread_local! {
+    /// The instance of the body request being lent (see [`body_instance`]).
+    static LENT_INSTANCE: RefCell<Option<Instance>> = const { RefCell::new(None) };
+}
+
+/// A generic instance lent as its own program, and its name. The program
+/// is made for the one request, so a hook must not cache its plan by the
+/// program's address (a later request's program may reuse it).
+pub type Instance = (Rc<Program>, String);
+
+/// Function `function` of `program` instantiated at `generics`, with its
+/// direct callees, and the instance's name (see [`body_request`]).
+fn instance_program(
+    program: &Program,
+    function: &str,
+    generics: &BTreeMap<String, Type>,
+) -> Option<Instance> {
+    let name = crate::verified_codegen::mono::instance_name(function, generics);
+    let source = program.functions.get(function)?;
+    let mut graph = crate::verified_codegen::mono::instantiate(source, name.clone(), generics);
+    // The bounds name the type parameters the instance substituted away
+    // (native lowering never reads them).
+    graph.bounds.clear();
+    let mut functions = BTreeMap::new();
+    for i in graph.blocks.iter().flat_map(|b| &b.instructions) {
+        if let Op::Call { callee, .. } = &i.op
+            && let Some(f) = program.functions.get(callee)
+        {
+            functions.insert(callee.clone(), f.clone());
+        }
+    }
+    functions.insert(name.clone(), graph);
+    Some((Rc::new(Program { functions }), name))
 }
 
 /// A family request: `None` when no hook is in effect or it declined (the

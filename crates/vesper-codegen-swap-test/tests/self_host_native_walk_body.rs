@@ -151,15 +151,23 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     if lent.op != codegen_swap::body::FUNCTION {
         return Ok(false);
     }
-    let words = PLAN.with(|cell| {
-        let mut cell = cell.borrow_mut();
-        let key = (program_key(lent.program), lent.optimize);
-        if cell.as_ref().is_none_or(|p| p.key != key) {
-            *cell = Some(plan_of(lent.world, lent.program, lent.optimize));
-        }
-        let plan = cell.as_ref().expect("just planned");
-        plan.bodies.get(lent.site.function).cloned()
-    });
+    // A generic instance (#2715) is planned from its own program, made
+    // for this request only (so its plan is not cached).
+    let instance = codegen_swap::body_instance();
+    let words = match &instance {
+        Some((program, name)) => plan_of(lent.world, program, lent.optimize)
+            .bodies
+            .remove(name),
+        None => PLAN.with(|cell| {
+            let mut cell = cell.borrow_mut();
+            let key = (program_key(lent.program), lent.optimize);
+            if cell.as_ref().is_none_or(|p| p.key != key) {
+                *cell = Some(plan_of(lent.world, lent.program, lent.optimize));
+            }
+            let plan = cell.as_ref().expect("just planned");
+            plan.bodies.get(lent.site.function).cloned()
+        }),
+    };
     let Some(words) = words else {
         UNPLANNED.fetch_add(1, Ordering::Relaxed);
         return Ok(false);
@@ -195,6 +203,9 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     match answer {
         HANDLED => {
             EMITTED.fetch_add(1, Ordering::Relaxed);
+            if instance.is_some() {
+                INSTANCES.fetch_add(1, Ordering::Relaxed);
+            }
             if sret != codegen_swap::body::NO_VALUE {
                 if sret >> codegen_swap::body::RESULT_WORDS_SHIFT == 0 {
                     SRET.fetch_add(1, Ordering::Relaxed);
@@ -3001,3 +3012,97 @@ fn vesper_fused_try_get_matches_match() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// Generic function instances (#2715), lent with their types substituted:
+/// type parameters at scalar arguments (`i64`, `u8`, `bool`, `f64`) and at
+/// a plain generic struct, a generic calling a non-generic function, and
+/// one calling itself at its own instance.
+const GENERIC_SOURCE: &str = "
+copy struct Pair[T: mod copy] {
+    a: T,
+    b: T,
+}
+fn id[T](sink x: T) -> T {
+    x
+}
+fn pick[T: mod copy](a: T, b: T, right: bool) -> T {
+    if right { b } else { a }
+}
+fn grow(k: i64) -> i64 {
+    if k > 100 { k } else { grow(wrapping_mul(k, 3)) }
+}
+fn tagged[T: mod copy](x: T, k: i64) -> i64 {
+    let y: T = x;
+    let z: T = id(y);
+    grow(k)
+}
+fn first[T: mod copy](p: Pair[T]) -> T {
+    p.a
+}
+fn swap[T: mod copy](p: Pair[T]) -> Pair[T] {
+    Pair { a: p.b, b: p.a }
+}
+fn nth[T: mod copy](p: Pair[T], n: i64) -> T {
+    if n == 0 {
+        first(p)
+    } else {
+        nth(swap(p), wrapping_sub(n, 1))
+    }
+}
+fn main() -> i64 {
+    let a: i64 = pick(3, 4, true);
+    let b: u8 = pick(7, 9, false);
+    let c: bool = pick(true, false, true);
+    let d: f64 = pick(1.5, 2.5, true);
+    let e: i64 = tagged(2.0, 5);
+    let f: i64 = tagged(c, 7);
+    let p: Pair[i64] = Pair { a: 11, b: 13 };
+    let g: i64 = nth(p, 3);
+    let q: Pair[u8] = swap(Pair { a: 1, b: 2 });
+    let h: i64 = id(a);
+    let dd: i64 = if d > 2.0 { 1 } else { 0 };
+    let cc: i64 = if c { 1 } else { 0 };
+    wrapping_add(
+        wrapping_add(wrapping_add(a, widen_i64(b)), wrapping_add(cc, dd)),
+        wrapping_add(wrapping_add(e, f), wrapping_add(wrapping_add(g, h), widen_i64(q.a))),
+    )
+}
+";
+
+/// Of the functions emitted from Vesper, the generic instances (#2715).
+static INSTANCES: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn vesper_generic_instances_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(GENERIC_SOURCE);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the generic program does not build: {e}");
+        }
+        let before = INSTANCES.load(Ordering::Relaxed);
+        let total = both("generic_instances", &checked.world, true);
+        let instances = INSTANCES.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "generic_instances: {}; {instances} generic instances emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let runs = if cross() { 1 } else { 2 };
+        let min_instances = MIN_GENERIC_INSTANCES * runs;
+        assert!(
+            instances >= min_instances,
+            "only {instances} generic instances came from Vesper (expected >= {min_instances})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// `GENERIC_SOURCE`'s scalar instances (`id` at three types, `pick` at
+/// four) at both optimizer settings, once per comparison (a JIT-running
+/// host compares each setting twice). The `Pair` instances wait on plain
+/// generic products in the planner (#2689).
+const MIN_GENERIC_INSTANCES: u64 = 14;

@@ -12,6 +12,7 @@ use self::exprs::{
     record
 };
 use self::methods::{is_qualified};
+use self::opfacts::{mark_overflow};
 use self::relations::{lit_of};
 use self::ints::{default_of, fits, int_bits, int_unsigned};
 
@@ -375,5 +376,7 @@ pub fn float_to_integer(inout ck: Ck, ex: Ex, narrow: bool, to: u32, arg_expr: u
     } else if !narrow {
         let arg_ex = ck.ex(arg_expr);
         error(inout ck, "E0200", arg_ex.start, arg_ex.end);
+    } else {
+        mark_overflow(inout ck.facts, ex.start, ex.end);
     }
 }

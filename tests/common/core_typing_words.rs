@@ -84,6 +84,14 @@ fn binary_code(op: &str) -> u64 {
     }
 }
 
+/// An assignment operator's word: 0 for `=`, else the code of the
+/// operator it combines with (`+=` is `+`'s).
+fn assign_code(op: &str) -> u64 {
+    op.strip_suffix('=')
+        .filter(|o| !o.is_empty())
+        .map_or(0, binary_code)
+}
+
 fn pass_code(p: Pass) -> u64 {
     pass_word(p)
 }
@@ -364,16 +372,16 @@ fn encode_expr(w: &Src, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
             }
         }
         ExprKind::Assign(op, place, value) if !op.starts_with(vesper::arrays::WRITE_PREFIX) => {
-            out.extend([E_ASSIGN, s, t, (op != "=") as u64]);
+            out.extend([E_ASSIGN, s, t, assign_code(op)]);
             encode_expr(w, e, place, out);
             encode_expr(w, e, value, out);
         }
         // An element write `a[i] op= v` or `a.set(i, v)`, lowered to
-        // `Assign("[]op", a, (i, v))`: whether it is compound, the array,
+        // `Assign("[]op", a, (i, v))`: the operator's `assign_code`, the array,
         // the operand pair.
         ExprKind::Assign(op, array, operands) => {
-            let simple = op.strip_prefix(vesper::arrays::WRITE_PREFIX) == Some("=");
-            out.extend([E_ARRAY_WRITE, s, t, !simple as u64]);
+            let op = op.strip_prefix(vesper::arrays::WRITE_PREFIX).unwrap_or(op);
+            out.extend([E_ARRAY_WRITE, s, t, assign_code(op)]);
             encode_expr(w, e, array, out);
             encode_expr(w, e, operands, out);
         }
@@ -730,6 +738,54 @@ pub fn rust_handler_effects(w: &World, spans: &[(usize, usize)]) -> Vec<((usize,
         .collect()
 }
 
+/// The row prefixes of a checked function's operations that may raise
+/// `Fail[RuntimeError]` (`world.partial_ops`) and `Fail[ArithOverflow]`
+/// (`world.overflow_ops`).
+pub const PARTIAL_ROW: &str = "P";
+pub const OVERFLOW_ROW: &str = "O";
+
+/// One failing operation: its row prefix and span.
+pub type FailureOp = (&'static str, (usize, usize));
+
+/// Each checked function's span and the `P start end` and `O start end`
+/// rows Vesper wrote for it.
+pub fn vesper_failure_ops(text: &str) -> Vec<((usize, usize), BTreeSet<FailureOp>)> {
+    let mut out: Vec<((usize, usize), BTreeSet<FailureOp>)> = vec![];
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split(' ').collect();
+        let num = |i: usize| parts[i].parse::<usize>().unwrap();
+        match parts[0] {
+            "F" => out.push(((num(1), num(2)), BTreeSet::new())),
+            PARTIAL_ROW | OVERFLOW_ROW => {
+                let tag = if parts[0] == PARTIAL_ROW {
+                    PARTIAL_ROW
+                } else {
+                    OVERFLOW_ROW
+                };
+                out.last_mut()
+                    .expect("a failing operation follows its function")
+                    .1
+                    .insert((tag, (num(1), num(2))));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The Rust checker's failing operations inside the function span `(a, b)`
+/// (`World::partial_ops` and `World::overflow_ops`), as
+/// `vesper_failure_ops` reads them.
+pub fn rust_failure_ops(w: &World, (a, b): (usize, usize)) -> BTreeSet<FailureOp> {
+    let inside = |&&(s, t): &&(usize, usize)| (a..=b).contains(&s) && t <= b;
+    let partial = w.partial_ops.iter().filter(inside);
+    let overflow = w.overflow_ops.iter().filter(inside);
+    partial
+        .map(|span| (PARTIAL_ROW, *span))
+        .chain(overflow.map(|span| (OVERFLOW_ROW, *span)))
+        .collect()
+}
+
 /// Vesper's text: `F start end` then `T start end type` rows in insertion
 /// order (a later row for a span replaces an earlier one, as
 /// `types.insert` does), `S start end` for a skipped function and `D code
@@ -767,9 +823,10 @@ pub fn vesper_types(text: &str) -> (String, Vec<(usize, usize)>, usize) {
             }
             "S" => skipped += 1,
             "D" => out.push_str(&format!("{line}\n")),
-            // A checked function's result (`vesper_results`) and a
-            // handler's effects (`vesper_handler_effects`).
-            "R" | "H" => {}
+            // A checked function's result (`vesper_results`), a handler's
+            // effects (`vesper_handler_effects`) and its failing operations
+            // (`vesper_failure_ops`).
+            "R" | "H" | PARTIAL_ROW | OVERFLOW_ROW => {}
             _ => panic!("unexpected line {line}"),
         }
     }

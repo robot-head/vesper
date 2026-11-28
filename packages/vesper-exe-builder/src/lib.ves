@@ -1,0 +1,255 @@
+// @vesper/exe-builder: the object of `vesper build`'s native executable, as
+// one program that Stage 2 builds (Stage 2 retirement slice 4e, #2752).
+//
+// Stage 2 compiles this package to a component, and `wac plug` composes it
+// with the Cranelift component (crates/vesper-cranelift-component), so the
+// pinned wasmtime CLI runs it with nothing else
+// (`//:vesper-exe-builder.wasm`).
+//
+//     exe-builder <package> <triple> <object> <status>
+//
+// `vesper build` (src/main.rs) compiles the package's `main` into an object
+// (`native::object_with_options`, an optimized `compile_entry` with an
+// object entry) and links it with `cc <object> -o <path> -lm`. This program
+// makes the same object without the Rust compiler: Stage 2's front end
+// makes the calls input of the entry task (@vesper/export-build
+// `stage2_entry_calls_input`), and @vesper/native-lib's executable mode
+// declares the entry as the exported `main`, every other instance local,
+// and defines them all. The object needs no runtime beyond the C library
+// and libm, so the host links it as `vesper build` does; a WASI program
+// cannot run the linker itself.
+//
+// The status file holds one line, `object <OBJECT_*>`, then, when
+// @vesper/native-lib refused the build, its error text.
+//
+// The exit status is 0 unless an argument is missing or a file could not
+// be read or written.
+use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset};
+use @vesper/export-build::target_os;
+use @vesper/export-build::calls_input::{CALLS_OK, stage2_entry_calls_input};
+use @vesper/native-lib::executable_object;
+use @vesper-std/env::{arg_bytes, arg_count};
+use @vesper-std/fs::{IoError, read_path, write_path};
+
+// The object was written.
+pub const OBJECT_BUILT: u64 = 0;
+// Stage 2's front end made no calls input for the entry.
+pub const OBJECT_NO_CALLS: u64 = 1;
+// @vesper/native-lib answered with an error.
+pub const OBJECT_FAILED: u64 = 2;
+// @vesper/native-lib trapped (Stage 2's memory ran out): the builder's run
+// fails with this status written.
+pub const OBJECT_TRAPPED: u64 = 4;
+
+// The positional arguments, after the program name.
+const ARG_PACKAGE: u64 = 1;
+const ARG_TRIPLE: u64 = 2;
+const ARG_OBJECT: u64 = 3;
+const ARG_STATUS: u64 = 4;
+const POSITIONAL_ARGS: u64 = 5;
+const TAG_OBJECT: Str = "object ";
+const NEWLINE: u8 = 10;
+
+// `request_step`'s answer when a file could not be read or written
+// (beyond every `OBJECT_*`).
+const STEP_IO: u64 = 255;
+// `stage2_heap_mark` outside Stage 2's self-built heap.
+const NO_HEAP_MARK: u64 = 0;
+
+// Exit statuses.
+const EXIT_OK: u64 = 0;
+const EXIT_USAGE: u64 = 2;
+const EXIT_IO: u64 = 1;
+
+// @vesper/native-lib's answer: a status word, then the object or the error.
+const ANSWER_OK: u64 = 0;
+const ANSWER_FAILED: u64 = 1;
+const WORD_BYTES: u64 = 8;
+
+// The executable's entry: `vesper build` requires `main`, and the C runtime
+// calls it under the same symbol.
+const ENTRY: Str = "main";
+
+// The request's header (`native::object_isa_optimized` for an optimized
+// build, `object_with_codegen_options`): the ISA flags, with NaN
+// canonicalization for a program with a `DetFloat` function, the object's
+// module name, no CLIF text kept, and instructions that carry their source
+// locations (`CodegenOptions::default()`).
+const FLAGS: Str = "enable_llvm_abi_extensions=true;is_pic=true;opt_level=speed";
+const NAN_FLAG: Str = ";enable_nan_canonicalization=true";
+const MODULE_NAME: Str = "vesper";
+const KEEP_CLIF: u64 = 0;
+const SOURCE_LOCATIONS: u64 = 1;
+// `vesper build` optimizes unless `--no-opt` is given.
+const OPTIMIZE: bool = true;
+// The request names one export: the entry.
+const ONE_EXPORT: u64 = 1;
+
+// Decimal digits, from ASCII `0`.
+const DECIMAL_BASE: u64 = 10;
+const DIGIT_ZERO: u64 = 48;
+
+fn arg(i: u64) -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
+    match arg_bytes(i) {
+        Option::Some(a) => a,
+        Option::None => ChunkSeq::new[u8](),
+    }
+}
+
+fn push_dec(inout out: ChunkSeq[u8], value: u64) {
+    if value >= DECIMAL_BASE {
+        push_dec(inout out, value / DECIMAL_BASE);
+    }
+    out.push(wrapping_u8(wrapping_add(value % DECIMAL_BASE, DIGIT_ZERO)));
+}
+
+fn status_line(inout out: ChunkSeq[u8], reason: u64) {
+    out.extend(in TAG_OBJECT.as_bytes());
+    push_dec(inout out, reason);
+    out.push(NEWLINE);
+}
+
+fn put_word(inout out: ChunkSeq[u8], v: u64) {
+    let at = out.len();
+    out.resize(wrapping_add(at, WORD_BYTES), 0);
+    let ok = out.try_write_u64_le(at, v);
+}
+
+fn put_bytes(inout out: ChunkSeq[u8], in b: Slice[u8]) {
+    put_word(inout out, b.len());
+    out.extend(in b);
+}
+
+// @vesper/native-lib's executable request (packages/vesper-native-lib
+// `executable_object`) over the calls input `calls`.
+fn request_of(in triple: Slice[u8], in calls: Slice[u8], det_float: bool) -> ChunkSeq[u8] {
+    let mut q: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_bytes(inout q, in triple);
+    let mut flags: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    flags.extend(in FLAGS.as_bytes());
+    if det_float {
+        flags.extend(in NAN_FLAG.as_bytes());
+    }
+    put_bytes(inout q, in flags.as_slice());
+    put_bytes(inout q, in MODULE_NAME.as_bytes());
+    put_word(inout q, KEEP_CLIF);
+    put_word(inout q, SOURCE_LOCATIONS);
+    put_word(inout q, ONE_EXPORT);
+    put_bytes(inout q, in ENTRY.as_bytes());
+    put_bytes(inout q, in ENTRY.as_bytes());
+    put_bytes(inout q, in calls);
+    q
+}
+
+// Parks the request for the package at `root` at `object`, as Stage 2's
+// front end makes it. `OBJECT_BUILT` when it was parked, else why not, or
+// `STEP_IO` when the file could not be written.
+fn request_step(
+    in root: Slice[u8],
+    in triple: Slice[u8],
+    in object: Slice[u8],
+    in status: Slice[u8]
+) -> u64 eff [Ffi[StdFs]] {
+    let os = target_os(in triple);
+    let calls = stage2_entry_calls_input(in root, in os.as_slice(), in ENTRY.as_bytes(), OPTIMIZE);
+    // An empty input (no front end ran) declines too.
+    if calls.declined != CALLS_OK || calls.bytes.len() == 0 {
+        // The front end's error goes to the status file now: the caller
+        // frees this step's heap.
+        let mut report: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        status_line(inout report, OBJECT_NO_CALLS);
+        report.extend(in calls.err.as_slice());
+        let written = handle Fail[IoError] in {
+            write_path(in status, in report.as_slice());
+            OBJECT_NO_CALLS
+        } with {
+            return v => v,
+            raise(_e, _k) => STEP_IO,
+        };
+        return written;
+    }
+    let req = request_of(in triple, in calls.bytes.as_slice(), calls.det_float);
+    handle Fail[IoError] in {
+        write_path(in object, in req.as_slice());
+        OBJECT_BUILT
+    } with {
+        return v => v,
+        raise(_e, _k) => STEP_IO,
+    }
+}
+
+// @vesper/native-lib's answer to `req`: whether it built the object, and
+// the object's bytes or the error text.
+fn object_of(in req: Slice[u8]) -> (bool, ChunkSeq[u8]) eff [Ffi[Cranelift]] {
+    let answer = executable_object(in req);
+    let status = answer.as_slice().try_read_u64_le(0).unwrap_or(ANSWER_FAILED);
+    let len = answer.as_slice().try_read_u64_le(WORD_BYTES).unwrap_or(0);
+    let start = wrapping_add(WORD_BYTES, WORD_BYTES);
+    let end = wrapping_add(start, len);
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if end < start || end > answer.len() {
+        return (false, bytes);
+    }
+    bytes.extend(in answer[start..end]);
+    (status == ANSWER_OK, bytes)
+}
+
+pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[Cranelift]] {
+    if arg_count() < POSITIONAL_ARGS {
+        return EXIT_USAGE;
+    }
+    let root = arg(ARG_PACKAGE);
+    let triple = arg(ARG_TRIPLE);
+    let object = arg(ARG_OBJECT);
+    let status = arg(ARG_STATUS);
+    // Stage 2's self-built heap frees nothing on its own: the front end's
+    // heap is freed before native-lib runs, which reads the request back
+    // from where the front end parked it (the object's path, which the
+    // object step overwrites).
+    let scratch = stage2_heap_mark();
+    let reason = request_step(
+        in root.as_slice(),
+        in triple.as_slice(),
+        in object.as_slice(),
+        in status.as_slice()
+    );
+    if scratch != NO_HEAP_MARK {
+        stage2_heap_reset(scratch);
+    }
+    if reason == STEP_IO {
+        return EXIT_IO;
+    }
+    handle Fail[IoError] in {
+        let mut report: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        if reason == OBJECT_BUILT {
+            // Stage 2's 4 GiB memory can run out in native-lib, which traps
+            // the builder: the status names that until the object is
+            // written, and the host reads it after a failed run.
+            let mut pending: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            status_line(inout pending, OBJECT_TRAPPED);
+            write_path(in status.as_slice(), in pending.as_slice());
+            let req = read_path(in object.as_slice());
+            let (built, bytes) = object_of(in req.as_slice());
+            if built {
+                write_path(in object.as_slice(), in bytes.as_slice());
+                status_line(inout report, OBJECT_BUILT);
+            } else {
+                let empty: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                write_path(in object.as_slice(), in empty.as_slice());
+                status_line(inout report, OBJECT_FAILED);
+                report.extend(in bytes.as_slice());
+            }
+        } else {
+            let empty: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            write_path(in object.as_slice(), in empty.as_slice());
+        }
+        // request_step wrote a declined build's status.
+        if reason == OBJECT_BUILT {
+            write_path(in status.as_slice(), in report.as_slice());
+        }
+        EXIT_OK
+    } with {
+        return v => v,
+        raise(_e, _k) => EXIT_IO,
+    }
+}
