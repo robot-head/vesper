@@ -2410,7 +2410,10 @@ filegroup(
     srcs = glob([
         "lean/**",
         "tools/proof-audit/**",
+        "tests/fixtures/doc_links/**",
+        "tests/fixtures/doc_navigation/**",
         "tests/fixtures/format_proof/**",
+        "tests/fixtures/macro_preview/**",
     ]),
     visibility = ["//crates/vesper-cli-tests:__pkg__"],
 )
