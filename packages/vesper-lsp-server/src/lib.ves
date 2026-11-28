@@ -20,7 +20,7 @@ use @vesper/lsp::{
 };
 use @vesper/serde::Doc;
 use @vesper/driver-engines::{
-    lsp_engine_deadline, lsp_engine_error, lsp_engine_exit, lsp_engine_frame, lsp_engine_read,
+    lsp_engine_deadline, lsp_engine_error_text, lsp_engine_exit, lsp_engine_frame, lsp_engine_read,
     lsp_engine_start, lsp_engine_take, lsp_engine_tick, lsp_engine_write
 };
 
@@ -281,10 +281,8 @@ fn answered(inout s: Server, n: u64) -> Next eff [Ffi[HybridCommands]] {
 
 // Append the host's error text to the loop's.
 fn host_error(inout s: Server) eff [Ffi[HybridCommands]] {
-    let at = s.error.len();
-    let len = lsp_engine_error(inout s.error[at..at]);
-    s.error.resize(wrapping_add(at, len), 0);
-    let _copied = lsp_engine_error(inout s.error[at..s.error.len()]);
+    let text = lsp_engine_error_text();
+    s.error.extend(in text[0..text.len()]);
 }
 
 fn method_is(in m: Slice[u8], in name: Str) -> bool {
@@ -612,10 +610,8 @@ pub fn lsp_server_run(in input: Str) -> ChunkSeq[u64] eff [Ffi[HybridCommands]] 
 // stdout. The error text when the server stops with an error.
 pub fn serve_stdio(inout error: ChunkSeq[u8]) -> bool eff [Ffi[HybridCommands]] {
     if lsp_engine_start() != ENGINE_STARTED {
-        let at = error.len();
-        let len = lsp_engine_error(inout error[at..at]);
-        error.resize(wrapping_add(at, len), 0);
-        let _copied = lsp_engine_error(inout error[at..error.len()]);
+        let text = lsp_engine_error_text();
+        error.extend(in text[0..text.len()]);
         return false;
     }
     serve_live(default_limits(), inout error)

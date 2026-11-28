@@ -112,8 +112,22 @@ pub fn lsp_engine_exit() -> u64 eff [Ffi[HybridCommands]] {
     HybridCommands::hc_lsp_engine_exit()
 }
 
-pub fn lsp_engine_error(inout buf: Slice[u8]) -> u64 eff [Ffi[HybridCommands]] {
-    HybridCommands::hc_lsp_engine_error(inout buf)
+// The last error's text, copied out (a second copy when it grew).
+pub fn lsp_engine_error_text() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let n = HybridCommands::hc_lsp_engine_error(inout err.as_slice_mut());
+    if n == 0 {
+        return err;
+    }
+    err.resize(n, 0);
+    let actual = HybridCommands::hc_lsp_engine_error(inout err.as_slice_mut());
+    if actual > err.len() {
+        err.resize(actual, 0);
+        let _got = HybridCommands::hc_lsp_engine_error(inout err.as_slice_mut());
+    } else {
+        err.truncate(actual);
+    }
+    err
 }
 
 pub fn lsp_engine_read(inout buf: Slice[u8], wait_ms: i64) -> i64 eff [Ffi[HybridCommands]] {

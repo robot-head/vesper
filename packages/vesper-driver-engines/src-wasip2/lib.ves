@@ -79,16 +79,9 @@ pub fn lsp_engine_exit() -> u64 eff [Ffi[HybridCommands]] {
     LSP_EXIT_FAILED
 }
 
-// The refusal, with the copy-out protocol.
-pub fn lsp_engine_error(inout buf: Slice[u8]) -> u64 eff [Ffi[HybridCommands]] {
-    let err = refused(in "lsp");
-    let n = err.len();
-    if n <= buf.len() {
-        for i in 0..n {
-            buf[i] = err[i];
-        }
-    }
-    n
+// The refusal.
+pub fn lsp_engine_error_text() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    refused(in "lsp")
 }
 
 pub fn lsp_engine_read(inout _buf: Slice[u8], _wait_ms: i64) -> i64 eff [Ffi[HybridCommands]] {
