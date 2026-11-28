@@ -1,0 +1,13 @@
+// A struct argument; exits 7.
+struct Point {
+    x: u64,
+    y: u64,
+}
+
+fn sum(p: Point) -> u64 {
+    wrapping_add(p.x, p.y)
+}
+
+pub fn main() -> u64 {
+    sum(Point { x: 3, y: 4 })
+}

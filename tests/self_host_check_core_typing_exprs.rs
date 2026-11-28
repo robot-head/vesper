@@ -144,6 +144,43 @@ fn handler_effects_match_rust() {
     assert!(total > 0);
 }
 
+/// Every checked function's operations that may raise `Fail[RuntimeError]`
+/// or `Fail[ArithOverflow]` (opfacts.ves) are the ones the Rust checker
+/// recorded in `World::partial_ops` and `World::overflow_ops`.
+#[test]
+fn failure_ops_match_rust() {
+    const SHOWN: usize = 12;
+    let f = package().entry("core_typing_exprs", true);
+    let (mut functions, mut ops, mut computed, mut bad) = (0, 0, 0, 0);
+    for c in corpus() {
+        let text = f.text(&exprs_input(&c.world, &c.module));
+        for (span, v) in vesper_failure_ops(&text) {
+            let r = rust_failure_ops(&c.world, span);
+            functions += 1;
+            ops += r.len();
+            computed += v.len();
+            for (side, op) in r
+                .symmetric_difference(&v)
+                .map(|op| (if r.contains(op) { "rust" } else { "vesper" }, op))
+            {
+                bad += 1;
+                if bad <= SHOWN {
+                    eprintln!(
+                        "failure ops: {} fn {span:?}: only {side} has {} {:?}",
+                        c.name, op.0, op.1
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "failure ops: {bad} differ over {functions} functions, \
+         {ops} Rust and {computed} Vesper operations"
+    );
+    assert_eq!(bad, 0);
+    assert!(ops > 0 && computed == ops);
+}
+
 #[test]
 fn function_results_match_rust() {
     let f = package().entry("core_typing_exprs", true);
