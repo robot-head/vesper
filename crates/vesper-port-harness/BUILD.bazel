@@ -58,13 +58,6 @@ vesper_crate(
             "//crates/vesper-warp-tcp:files",
             "//crates/vesper-warp-wheel:files",
         ],
-        # The Stage 2 executable differential (#2752) builds its fixtures
-        # (tests/stage2_executable) with both compilers and links them.
-        "test/stage2_executable": [
-            ":files",
-            "//:bin/vesper",
-            "//:vesper-exe-builder.wasm",
-        ],
     },
     # Runfiles paths from the package directory the test starts in.
     test_env_by_target = {
@@ -72,23 +65,14 @@ vesper_crate(
             "VESPER_PORT_BUILDER": "../../vesper-port-builder.wasm",
             "VESPER_PORT_COMPILER": "../../bin/vesper",
         },
-        "test/stage2_executable": {
-            "VESPER_EXE_BUILDER": "../../vesper-exe-builder.wasm",
-            "VESPER_PORT_COMPILER": "../../bin/vesper",
-        },
     },
     test_path_binaries = {
         "test/stage2_builder": ["@wasmtime//:wasmtime"],
-        "test/stage2_executable": ["@wasmtime//:wasmtime"],
     },
     # One port builder at a time under Wasmtime (up to 4 GiB of linear
     # memory each).
     test_tags = {
         "test/stage2_builder": [
-            "resources:memory:6144",
-            "resources:cpu:2",
-        ],
-        "test/stage2_executable": [
             "resources:memory:6144",
             "resources:cpu:2",
         ],
