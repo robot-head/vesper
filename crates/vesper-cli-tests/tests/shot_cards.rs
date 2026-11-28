@@ -6,8 +6,9 @@
 //! Set `VESPER_BLESS_SHOT=1` to rewrite the goldens after an intended change
 //! (and bump `SHOT_CACHE_SCHEMA`).
 
+mod support;
+
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use vesper_highlight::HighlightSpan;
 use vesper_highlight::shot::{
@@ -15,11 +16,12 @@ use vesper_highlight::shot::{
     SvgOptions,
 };
 
-const FONT: &[u8] = include_bytes!("../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf");
+const FONT: &[u8] =
+    include_bytes!("../../../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf");
 const CARDS: [&str; 3] = ["wal_txn", "transaction", "counter"];
 
 fn root() -> PathBuf {
-    std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap()
+    support::repo_root()
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -301,11 +303,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 fn vesper(args: &[&std::ffi::OsStr]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_vesper"))
-        .arg("shot")
-        .args(args)
-        .output()
-        .unwrap()
+    support::vesper().arg("shot").args(args).output().unwrap()
 }
 
 fn shot_json(input: &Path, output: &Path, extra: &[&str]) -> serde_json::Value {

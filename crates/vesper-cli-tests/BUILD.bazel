@@ -8,7 +8,11 @@ load("//tools/bazel:defs.bzl", "vesper_crate")
 vesper_crate(
     # Lean models, the proof auditor and shared fixtures embedded by
     # include_str! from the root package.
-    extra_integration_compile_data = ["//:cli_test_sources"],
+    extra_integration_compile_data = [
+        "//:cli_test_sources",
+        # codex_footprints_cli embeds the Codex examples and fixtures.
+        "//crates/vesper-doc:files",
+    ],
     extra_test_data = [
         "//:files",
         # attestation_cli and publish_cli sign with the Loom trust fixtures;
@@ -20,6 +24,24 @@ vesper_crate(
         "//:vesper_shipped",
         "//:vesper_tools",
     ],
+    test_data_by_target = {
+        "test/imported_source_tests": [
+            "//:cli_imported_source_data",
+            # @vesper/prism-h3 depends on @vesper/prism-bytes.
+            "//crates/vesper-prism:files",
+            "//crates/vesper-prism-h3:files",
+            "//crates/vesper-semver:files",
+        ],
+        # sort imports `guard` and `when` from @vesper-std/sugar and the
+        # Option methods from @vesper-std/core (#2026), so testing
+        # sort/src/unstable.ves resolves sort's manifest and its dependencies.
+        "test/test_runner_cli": [
+            "//:cli_test_runner_data",
+            "//crates/vesper-crucible:files",
+            "//crates/vesper-lean-syntax:files",
+            "//crates/vesper-simpulse:files",
+        ],
+    },
     # Reservations include subprocess overhead; they do not enforce RSS limits.
     test_tags = {
         # The CLI audit subprocess permits Lean -M8192 and runs serially.
@@ -28,6 +50,10 @@ vesper_crate(
             "resources:cpu:1",
         ],
         "test/format_proof_cli": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/forge_provenance_cli": [
             "resources:memory:9216",
             "resources:cpu:1",
         ],
@@ -56,6 +82,11 @@ vesper_crate(
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
         }),
+        # Macro provenance audits replay Std serially, like proof_audit_cli.
+        "test/forge_provenance_cli": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
         # Full logical-model replay exceeds 300 s on the Linux executor.
         # Linux and Windows retain every semantic/audit/control assertion;
         # proof_audit_private still exercises portability on macOS too.
@@ -68,6 +99,9 @@ vesper_crate(
         # Actual formatter witnesses replay Lean serially; keep every case
         # enabled while allowing the target 900 seconds on slower runners.
         "test/format_proof_cli": "long",
+        "test/forge_provenance_cli": "long",
+        # Front-end and AST tests check and lower their full package closures.
+        "test/imported_source_tests": "long",
         # Fresh model compilation, 285 theorem roots and actual negative controls.
         "test/resource_model42": "long",
     },

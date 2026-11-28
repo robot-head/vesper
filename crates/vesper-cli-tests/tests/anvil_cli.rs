@@ -1,8 +1,10 @@
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Output,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -35,7 +37,7 @@ impl Drop for TempDir {
 }
 
 fn vesper(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_vesper"))
+    support::vesper()
         .current_dir(cwd)
         .args(args)
         .output()

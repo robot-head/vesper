@@ -1,8 +1,10 @@
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Output,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -35,7 +37,7 @@ impl Drop for Temp {
 }
 
 fn vesper(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_vesper"))
+    support::vesper()
         .current_dir(cwd)
         .args(args)
         .output()
@@ -741,7 +743,7 @@ fn invalid_parameterized_rows_report_the_case_location() {
 }
 
 fn check_source_unit_tests(suites: &[(&str, usize)]) {
-    let cwd = std::env::current_dir().unwrap();
+    let cwd = support::repo_root();
     for &(file, count) in suites {
         let out = vesper(&cwd, &["test", file, "--json", "--no-cache"]);
         let report = parse_json(&out);

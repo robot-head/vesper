@@ -2,6 +2,8 @@
 //! mode-crossing tables, capability badges, the package-wide search index
 //! (impls, Pact models, generic instantiation), one-step `.olean` publishing
 //! and per-package doctest modules.
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
@@ -11,33 +13,33 @@ use std::{
 };
 use vesper_doc::hoogle;
 
-const ACCOUNT: &str = include_str!("../crates/vesper-doc/examples/footprints/account.ves");
+const ACCOUNT: &str = include_str!("../../../crates/vesper-doc/examples/footprints/account.ves");
 const PACKAGE_FILES: &[(&str, &str)] = &[
     (
         "Loom.toml",
-        include_str!("../crates/vesper-doc/examples/codex-package/Loom.toml"),
+        include_str!("../../../crates/vesper-doc/examples/codex-package/Loom.toml"),
     ),
     (
         "src/ledger.ves",
-        include_str!("../crates/vesper-doc/examples/codex-package/src/ledger.ves"),
+        include_str!("../../../crates/vesper-doc/examples/codex-package/src/ledger.ves"),
     ),
     (
         "src/audit.ves",
-        include_str!("../crates/vesper-doc/examples/codex-package/src/audit.ves"),
+        include_str!("../../../crates/vesper-doc/examples/codex-package/src/audit.ves"),
     ),
     (
         "src/models.ves",
-        include_str!("../crates/vesper-doc/examples/codex-package/src/models.ves"),
+        include_str!("../../../crates/vesper-doc/examples/codex-package/src/models.ves"),
     ),
 ];
 const FOOTPRINTS_GOLDEN: &str =
-    include_str!("../crates/vesper-doc/tests/fixtures/account-footprints.json");
+    include_str!("../../../crates/vesper-doc/tests/fixtures/account-footprints.json");
 const FOOTPRINTS_HTML_GOLDEN: &str =
-    include_str!("../crates/vesper-doc/tests/fixtures/account-footprints.html");
+    include_str!("../../../crates/vesper-doc/tests/fixtures/account-footprints.html");
 const PACKAGE_INDEX_GOLDEN: &str =
-    include_str!("../crates/vesper-doc/tests/fixtures/codex-package-search-index.json");
+    include_str!("../../../crates/vesper-doc/tests/fixtures/codex-package-search-index.json");
 const PACKAGE_CAPS_GOLDEN: &str =
-    include_str!("../crates/vesper-doc/tests/fixtures/codex-package-capabilities.json");
+    include_str!("../../../crates/vesper-doc/tests/fixtures/codex-package-capabilities.json");
 
 struct Scratch(PathBuf);
 impl Scratch {
@@ -76,7 +78,7 @@ impl Drop for Scratch {
 }
 
 fn vesper(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_vesper"))
+    support::vesper()
         .current_dir(cwd)
         .args(args)
         .output()
@@ -102,7 +104,7 @@ fn json(output: &Output) -> Value {
 fn golden(name: &str, actual: &str, expected: &str) {
     if std::env::var_os("VESPER_UPDATE_SNAPSHOTS").is_some() {
         fs::write(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
+            support::repo_root()
                 .join("crates/vesper-doc/tests/fixtures")
                 .join(name),
             actual,
@@ -490,7 +492,7 @@ fn audit_for(module: &str, olean: &[u8]) -> String {
 
 #[test]
 fn olean_certificates_publish_from_the_proof_audit_in_one_step() {
-    let broker = include_str!("../crates/vesper-doc/examples/broker.ves");
+    let broker = include_str!("../../../crates/vesper-doc/examples/broker.ves");
     let olean = b"\x00one-step olean bytes";
     let audit = audit_for("CodexBroker", olean);
     let dir = Scratch::new(&[

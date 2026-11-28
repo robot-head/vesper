@@ -1,5 +1,7 @@
 //! `vesper forge lean --provenance` and the macro provenance admission rule of
 //! `vesper proof-audit` on real Lean 4.35 artifacts (skipped without Lean).
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
@@ -14,10 +16,10 @@ use std::{
 /// Each audit may use Lean -M8192; run the real replays one at a time.
 static SERIAL: Mutex<()> = Mutex::new(());
 
-const MIXED: &str = include_str!("fixtures/source_macros/provenance_mixed.ves");
+const MIXED: &str = include_str!("../../../tests/fixtures/source_macros/provenance_mixed.ves");
 
 fn vesper() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_vesper"))
+    support::vesper()
 }
 
 struct Dir(PathBuf);
@@ -132,7 +134,7 @@ fn rejected_check_reports_macro_origins_for_diagnostics() {
 
 fn resolve_lean(lean: String) -> String {
     let Ok(output) = Command::new(&lean)
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(support::repo_root())
         .arg("--print-prefix")
         .output()
     else {

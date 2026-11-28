@@ -5812,11 +5812,13 @@ dependencies = [
  "serde_json",
  "vesper-bench-seed",
  "vesper-chrono",
+ "vesper-doc",
  "vesper-ffi",
  "vesper-highlight-seed",
  "vesper-lean-syntax-seed",
  "vesper-loom-calculus-seed",
  "vesper-loom-cas-seed",
+ "vesper-lsp",
  "vesper-semver-seed",
  "vesper-simd-seed",
 ]

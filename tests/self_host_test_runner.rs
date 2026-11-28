@@ -266,9 +266,9 @@ fn corpus() -> &'static [Source] {
             out.push(Source { label, text });
         }
         for suite in [
-            "tests/test_runner_cli.rs",
-            "tests/anvil_cli.rs",
-            "tests/imported_source_tests.rs",
+            "crates/vesper-cli-tests/tests/test_runner_cli.rs",
+            "crates/vesper-cli-tests/tests/anvil_cli.rs",
+            "crates/vesper-cli-tests/tests/imported_source_tests.rs",
             "crates/vesper-syntax/src/test_attrs.rs",
             "src/test_runner.rs",
         ] {

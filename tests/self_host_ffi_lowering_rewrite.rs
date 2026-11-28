@@ -880,7 +880,7 @@ const FFI_TESTS: [&str; 12] = [
     "tests/tree_abi.rs",
     "tests/vsys_packages.rs",
     "tests/dyn_effects.rs",
-    "tests/test_runner_cli.rs",
+    "crates/vesper-cli-tests/tests/test_runner_cli.rs",
 ];
 
 /// Every library the corpus knows, first descriptor per name (host

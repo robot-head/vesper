@@ -929,7 +929,7 @@ const VSYS_TESTS: [&str; 15] = [
     "tests/ffi_handles.rs",
     "tests/ffi_lowering.rs",
     "tests/package_submodule_exports.rs",
-    "tests/test_runner_cli.rs",
+    "crates/vesper-cli-tests/tests/test_runner_cli.rs",
     "tests/tree_abi.rs",
     "tests/vsys_packages.rs",
     "tests/dyn_effects.rs",
