@@ -42,7 +42,7 @@ use @vesper/codegen-export::directives::{directives_text};
 use @vesper/stage2::collect::{CollectedProgram, FnInfo, ParamInfo, collect_program};
 use @vesper/vsys::{parse_and_encode};
 use @vesper/vsys::lexer::{VsysError};
-use @vesper/stage2::{sugar_policy_exports_valid};
+use @vesper/stage2::{ForeignSource, foreign_source, sugar_policy_exports_valid};
 use @vesper/stage2::loader::{load_package_graph_bytes, package_graph_vsys_paths};
 use @vesper-std/fs::{IoError, read_path};
 use @vesper-std/intern::{symbol_from_id};
@@ -1463,6 +1463,102 @@ fn is_handle_adt(in world: World, in names: Names, n: u32) -> bool {
         }
     }
     false
+}
+
+// The target a native build for OS `os` lowers `.vsys` imports for: the
+// host triple of that OS that `vesper build --lib` runs on in CI.
+fn host_target_of(in os: Slice[u8]) -> Option[Target] {
+    let mut o = ChunkSeq::new[u8]();
+    o.extend(in os);
+    if same_bytes(in o, OS_LINUX) {
+        return target_of(in LINUX_X86_64.as_bytes());
+    }
+    if same_bytes(in o, OS_MACOS) {
+        return target_of(in MACOS_AARCH64.as_bytes());
+    }
+    if same_bytes(in o, OS_WINDOWS) {
+        return target_of(in WINDOWS_X86_64.as_bytes());
+    }
+    Option::None
+}
+
+// The ffi lowering's handler tier for a directive handler
+// (@vesper/ffi-lowering `H_DIRECT`, `H_MPK`).
+const TIER_DIRECT: u64 = 0;
+const TIER_ISOLATED: u64 = 1;
+
+fn tier_of(handler: u8) -> u64 {
+    if handler == HANDLER_ISOLATED {
+        TIER_ISOLATED
+    } else {
+        TIER_DIRECT
+    }
+}
+
+// The `.vsys` descriptors the package at `root_dir` imports for a native
+// build on OS `os`, with their handler tiers: its root module's inline
+// `// @export vsys` bodies, then its manifest `vsys` files (the order
+// `Directives::parse` and `add_packages` list them). An empty list when
+// the OS has no `.vsys` target; None when a directive or file does not
+// read.
+pub fn foreign_sources(
+    in root_dir: Slice[u8],
+    in os: Slice[u8]
+) -> Option[ChunkSeq[ForeignSource]] eff [Ffi[StdFs]] {
+    let mut out = ChunkSeq::new[ForeignSource]();
+    let target = match host_target_of(in os) {
+        Option::Some(t) => t,
+        Option::None => return Option::Some(out),
+    };
+    let mut root_path = ChunkSeq::new[u8]();
+    root_path.extend(in root_dir);
+    root_path.extend(in ROOT_MODULE.as_bytes());
+    let source = match read_file(in root_path.as_slice()) {
+        Option::Some(s) => s,
+        Option::None => return Option::None,
+    };
+    let none = ChunkSeq::new[u8]();
+    let dump = directives_text(in source, in target.triple, in target.abi, in none);
+    let plain = match plain_directives(in dump) {
+        Option::Some(d) => d,
+        Option::None => return Option::None,
+    };
+    for ii in 0..plain.inline.len() {
+        match plain.inline.try_get(ii) {
+            Option::Some(body) => out.push(foreign_source(tier_of(body.handler), in body.body)),
+            Option::None => {},
+        }
+    }
+    let vsys_paths = match package_graph_vsys_paths(in root_dir) {
+        Option::Some(v) => v,
+        Option::None => return Option::None,
+    };
+    for vi in 0..vsys_paths.len() {
+        let path = expand_path(in token(in vsys_paths, vi), in target);
+        let text = match read_file(in path.as_slice()) {
+            Option::Some(t) => t,
+            Option::None => return Option::None,
+        };
+        let filled = fill_descriptor(in text, in target);
+        let d = match scan_descriptor(in filled) {
+            Option::Some(d) => d,
+            Option::None => return Option::None,
+        };
+        // A link naming the library sets its handler (`put_import`).
+        let mut handler = HANDLER_DIRECT;
+        for li in 0..plain.links.len() {
+            match plain.links.try_get(li) {
+                Option::Some(l) => {
+                    if same_seq(in l.library, in d.name) && l.handler != HANDLER_NONE {
+                        handler = l.handler;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        out.push(foreign_source(tier_of(handler), in filled));
+    }
+    Option::Some(out)
 }
 
 // `plan_input(world, public, library, directives)` for the package at

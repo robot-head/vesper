@@ -17,6 +17,7 @@ use @vesper/check-data::world::{
 use @vesper/place-ir::codes::{Lit, Pat};
 use @vesper/wasm-backend::ir::{CallRow, Pair};
 use @vesper/place-ir-lower::ast::{Ast, Ef, Eop, Ex, FnR, Hd, Pm, Pt};
+use self::ffi::{OPEN_TYPE};
 use self::facts::{loop_breaks, loop_never_breaks, loop_plain_breaks};
 use self::sugar_policy::{
     POLICY_BAD_METADATA, POLICY_OK, PolicyFailure, PolicyInputs, PolicySpan, caller_supplied,
@@ -26,6 +27,8 @@ use self::sugar_policy::{
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
+// Name prefix of the effects Stage 2 declares for foreign imports.
+const FOREIGN_EFFECT_PREFIX: Str = "Ffi$";
 
 const X_LITERAL: u8 = 1;
 const X_NAME: u8 = 2;
@@ -1029,6 +1032,49 @@ fn check_sugar_value_call(inout tc: Tc, in a: Ast, callable: u32, e: Ex, ce: Ex)
 
 // Rust's `apply`: a generic callee's arguments are first inferred from the
 // type its context expects of the result, then from its arguments.
+// Whether `sym` names an operation of a `.vsys` library's effect
+// (`Ffi$Lib::f`, ffi.ves `rename_foreign_calls`).
+fn is_foreign_op(in tc: Tc, sym: u32) -> bool {
+    let p = FOREIGN_EFFECT_PREFIX.as_bytes();
+    if tc.names.size(sym) < p.len() {
+        return false;
+    }
+    for i in 0..p.len() {
+        if tc.names.byte(sym, i) != p.try_get(i).unwrap_or(0) {
+            return false;
+        }
+    }
+    true
+}
+
+// A call of a `.vsys` operation as `ffi_lowering::check_module`'s pass 1
+// checks it: each argument against its parameter, and a slice parameter
+// (`$open`) records the argument's own type, which ffi.ves
+// `close_foreign_ops` reads the slice lengths from.
+fn check_foreign_call(inout tc: Tc, in a: Ast, op: Eop, e: Ex, ce: Ex) -> u32 {
+    let open = tc.names.intern(in OPEN_TYPE.as_bytes());
+    for ai in 0..e.n {
+        let av = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1)));
+        let mut pt = tc.infer_ty;
+        if ai < op.param_count {
+            match a.pms.try_get(wrapping_add(op.param_start, ai)) {
+                Option::Some(pm) => {
+                    pt = pm.ty;
+                },
+                Option::None => {},
+            }
+        }
+        if tc.types.kind(pt) == TyKind::Named && tc.types.name(pt) == open {
+            pt = tc.infer_ty;
+        }
+        let _at = check_expr(inout tc, in a, av, pt);
+        constrain_literals(inout tc, in a, av, pt);
+    }
+    record_span(inout tc, ce.s0, ce.s1, op.result);
+    record_span(inout tc, e.s0, e.s1, op.result);
+    op.result
+}
+
 fn check_fn_call(
     inout tc: Tc,
     in a: Ast,
@@ -1899,6 +1945,15 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             Option::Some(ce) => {
                 if ce.kind == X_NAME {
                     let cname = n32(ce.a);
+                    // A `.vsys` operation (`Lib::f`, renamed by ffi.ves).
+                    if is_foreign_op(in tc, cname) && lookup_var(in tc, cname) == NONE32 {
+                        match find_eop(in a, inout tc.names, cname) {
+                            Option::Some((_ef, op)) => {
+                                return check_foreign_call(inout tc, in a, op, e, ce);
+                            },
+                            Option::None => {},
+                        }
+                    }
                     if tc.sugar.policies.regions.len() != 0 {
                         let callable = lookup_var(in tc, cname);
                         if callable != NONE32
