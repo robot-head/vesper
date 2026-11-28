@@ -44,6 +44,15 @@ pub fn pick(c: bool, x: u8) -> u8 { let mut y: u8 = x; if c { y = x & 15; } y }"
         "pub fn lerp(a: f64, b: f64, t: f64) -> f64 { a + (b - a) * t }
 pub fn half(x: f32) -> f32 { x * 0.5 }",
     ),
+    // String literals (#2653): static data, and a `String` result built
+    // in the frame's result.
+    (
+        "strings",
+        "pub fn empty() -> String { \"\" }
+pub fn greeting() -> String { \"hello, world\" }
+pub fn greeting_len() -> u64 { \"hello, world\".len() }
+pub fn byte_of(i: u64) -> u64 eff [Fail[RuntimeError]] { widen_u64(\"abcdefghijk\".byte_at(i)) }",
+    ),
     (
         "calls",
         "fn square(x: i64) -> i64 { wrapping_mul(x, x) }
