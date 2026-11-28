@@ -824,13 +824,6 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
-        # Rust-exit SH6 lane 19 (#1414): the Vesper suite, run with
-        # `vesper test --engines all`, and the Rust test files the families
-        # came from (converted.json names them). Anchored globs.
-        "test/vesper_suite": glob([
-            "tests/vesper/**",
-            "tests/*.rs",
-        ]),
         # Self-hosting SH5 lane 14 (#1337): @vesper/test-runner against
         # test_discovery on the repository's .ves files, the runner's test
         # suites and mutants. Anchored globs.
@@ -2445,6 +2438,18 @@ filegroup(
     name = "lean",
     srcs = glob(["lean/**"]),
     visibility = ["//visibility:public"],
+)
+
+# Root sources the CLI tests in //crates/vesper-cli-tests compile in with
+# `include_str!` (#2743): fixtures they share with root corpus tests.
+filegroup(
+    name = "cli_test_sources",
+    srcs = glob([
+        "tests/fixtures/doc_links/**",
+        "tests/fixtures/doc_navigation/**",
+        "tests/fixtures/macro_preview/**",
+    ]),
+    visibility = ["//crates/vesper-cli-tests:__pkg__"],
 )
 
 filegroup(

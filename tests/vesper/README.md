@@ -11,7 +11,7 @@ Run it from the repository root:
 vesper test tests/vesper --engines all --no-cache --fuel 200000000
 ```
 
-`tests/vesper_suite.rs` runs the same command under `cargo test` and
+`crates/vesper-cli-tests/tests/vesper_suite.rs` runs the same command under `cargo test` and
 `bazel test`, so every CI platform runs it.
 
 ## Layout
@@ -22,7 +22,7 @@ program with its own `main` and a `test { }` block, so cases never share
 names. A family converted by `aspect maintenance convert-rust-tests` has a
 `converted.json` that records the Rust file, the number of cases, the
 `#[test]` functions the cases cover completely, and the ones kept in Rust.
-`tests/vesper_suite.rs` checks the case count, so a lost file fails CI.
+`crates/vesper-cli-tests/tests/vesper_suite.rs` checks the case count, so a lost file fails CI.
 
 ## The two shapes
 

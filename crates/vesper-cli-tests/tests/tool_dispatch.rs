@@ -1,6 +1,8 @@
 //! `vesper <tool>` dispatch to `vesper-<tool>` binaries (self-hosting SH0
 //! lane 2, #1124): same arguments, streams and exit status; a clear error when
 //! the binary is missing; unknown commands keep the compiler's error.
+mod support;
+
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -22,8 +24,12 @@ fn executable(name: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("{name} not found on PATH"))
 }
 
+/// The compiler under test as a real file: Bazel's PATH entries are
+/// runfiles symlinks, and a hard link to the symlink would still find the
+/// tools beside its target.
 fn vesper() -> PathBuf {
-    executable(env!("CARGO_BIN_EXE_vesper"))
+    let path = support::vesper_path();
+    fs::canonicalize(&path).unwrap_or(path)
 }
 
 /// The tool binary `vesper` would run: beside it, else on PATH.
@@ -37,7 +43,7 @@ fn tool(name: &str) -> PathBuf {
 }
 
 fn run(program: &Path, args: &[&str]) -> Output {
-    Command::new(program)
+    support::command(program)
         .args(args)
         .stdin(Stdio::null())
         .output()
@@ -176,11 +182,7 @@ fn a_missing_tool_binary_is_named() {
 fn build_tee_names_the_missing_measurement_tool() {
     let (dir, exe) = lone_vesper("tee");
     let source = dir.join("main.ves");
-    fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/fibonacci.ves"),
-        &source,
-    )
-    .unwrap();
+    fs::copy(support::repo_root().join("examples/fibonacci.ves"), &source).unwrap();
     // Keep the linker on PATH, but no directory that holds vesper-tee.
     let tee = format!("vesper-tee{}", env::consts::EXE_SUFFIX);
     let path = env::split_paths(&env::var_os("PATH").unwrap_or_default())

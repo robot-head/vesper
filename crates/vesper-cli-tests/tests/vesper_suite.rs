@@ -7,15 +7,16 @@
 //! themselves are Vesper sources (tests/vesper/README.md); once the Rust
 //! compiler retires, CI runs the same command directly.
 
+mod support;
+
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    support::repo_root()
 }
 
 /// A copy of tests/vesper made of regular files: Bazel's runfiles are
@@ -54,7 +55,7 @@ fn copy_tree(from: &Path, to: &Path) {
 /// The command CI runs: the same as tests/vesper/README.md's, on a copy.
 fn run_suite() -> Value {
     let copy = Copy::new();
-    let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+    let out = support::vesper()
         .current_dir(&copy.0)
         .args([
             "test",

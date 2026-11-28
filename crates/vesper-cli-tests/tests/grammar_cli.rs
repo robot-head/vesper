@@ -1,9 +1,11 @@
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
@@ -103,7 +105,7 @@ fn path(path: &Path) -> &str {
     path.to_str().unwrap()
 }
 fn invoke(args: &[&str]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vesper"))
+    let mut child = support::vesper()
         .arg("grammar")
         .args(args)
         .stdout(Stdio::piped())
@@ -325,8 +327,7 @@ fn der_actual_values_and_typed_set_of_require_canonical_reencoding() {
 #[test]
 fn actual_arrow_reference_streams_keep_nulls_versions_alignment_and_overflow_honest() {
     let f = Fixture::new();
-    let fixtures =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/vesper-grammar/tests/fixtures/ipc");
+    let fixtures = support::repo_root().join("crates/vesper-grammar/tests/fixtures/ipc");
     for (name, version) in [("modern-v5.arrow", "V5"), ("legacy-v4.arrow", "V4")] {
         let bytes = fs::read(fixtures.join(name)).unwrap();
         let input = f.file(name, &bytes);

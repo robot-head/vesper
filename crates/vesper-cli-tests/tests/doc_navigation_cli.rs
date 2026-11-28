@@ -1,25 +1,26 @@
 //! Actual framed definition requests against current unsaved doc comments.
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     fs,
     io::{Read, Write},
     path::PathBuf,
-    process::{Command, Stdio},
+    process::Stdio,
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
 };
 
-const LOCAL: &str = include_str!("fixtures/doc_navigation/local.ves");
-const EXCLUSIONS: &str = include_str!("fixtures/doc_navigation/exclusions.ves");
-const COLLISIONS: &str = include_str!("fixtures/doc_navigation/collisions.ves");
+const LOCAL: &str = include_str!("../../../tests/fixtures/doc_navigation/local.ves");
+const EXCLUSIONS: &str = include_str!("../../../tests/fixtures/doc_navigation/exclusions.ves");
+const COLLISIONS: &str = include_str!("../../../tests/fixtures/doc_navigation/collisions.ves");
 const DISK: &[u8] = b"fn on_disk() -> i64 { 99 } fn main() -> i64 { on_disk() }\n";
 
 fn binary() -> PathBuf {
     let path = std::env::var_os("VESPER_DOC_NAVIGATION_BINARY")
         .map(PathBuf::from)
-        .or_else(|| option_env!("CARGO_BIN_EXE_vesper").map(PathBuf::from))
-        .expect("actual vesper or VESPER_DOC_NAVIGATION_BINARY required");
+        .unwrap_or_else(support::vesper_path);
     let exe = PathBuf::from(format!("{}.exe", path.display()));
     if exe.is_file() { exe } else { path }
 }
@@ -124,7 +125,7 @@ impl Fixture {
             write!(&mut input, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
             input.extend(body);
         }
-        let mut child = Command::new(binary())
+        let mut child = support::command(&binary())
             .arg("lsp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

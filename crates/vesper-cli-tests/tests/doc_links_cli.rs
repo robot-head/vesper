@@ -1,4 +1,6 @@
 //! Actual executable acceptance of checked local intra-doc references.
+mod support;
+
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -11,8 +13,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const LOCAL: &str = include_str!("fixtures/doc_links/local.ves");
-const EXCLUSIONS: &str = include_str!("fixtures/doc_links/exclusions.ves");
+const LOCAL: &str = include_str!("../../../tests/fixtures/doc_links/local.ves");
+const EXCLUSIONS: &str = include_str!("../../../tests/fixtures/doc_links/exclusions.ves");
 const EXPECTED: &[&str] = &[
     "Tx",
     "close",
@@ -28,8 +30,7 @@ const EXPECTED: &[&str] = &[
 fn binary() -> PathBuf {
     let path = std::env::var_os("VESPER_DOC_LINKS_BINARY")
         .map(PathBuf::from)
-        .or_else(|| option_env!("CARGO_BIN_EXE_vesper").map(PathBuf::from))
-        .expect("actual vesper or VESPER_DOC_LINKS_BINARY required");
+        .unwrap_or_else(support::vesper_path);
     let exe = PathBuf::from(format!("{}.exe", path.display()));
     if exe.is_file() { exe } else { path }
 }
@@ -106,7 +107,12 @@ impl Fixture {
         }
     }
     fn command(&self, args: &[&str]) -> Output {
-        let result = output(Command::new(binary()).arg("doc").arg(&self.path).args(args));
+        let result = output(
+            support::command(&binary())
+                .arg("doc")
+                .arg(&self.path)
+                .args(args),
+        );
         assert_eq!(fs::read(&self.path).unwrap(), self.source.as_bytes());
         result
     }
@@ -288,27 +294,27 @@ fn actual_lexical_exclusions_cannot_smuggle_references_or_html() {
 fn actual_unknown_ambiguous_and_unsupported_links_fail_before_output_creation() {
     for (source, code, raw) in [
         (
-            include_str!("fixtures/doc_links/unknown.ves"),
+            include_str!("../../../tests/fixtures/doc_links/unknown.ves"),
             "unknown",
             "[missing]",
         ),
         (
-            include_str!("fixtures/doc_links/ambiguous.ves"),
+            include_str!("../../../tests/fixtures/doc_links/ambiguous.ves"),
             "ambiguous",
             "[Channel]",
         ),
         (
-            include_str!("fixtures/doc_links/unsupported_self.ves"),
+            include_str!("../../../tests/fixtures/doc_links/unsupported_self.ves"),
             "unsupported",
             "[Self::commit]",
         ),
         (
-            include_str!("fixtures/doc_links/unsupported_package.ves"),
+            include_str!("../../../tests/fixtures/doc_links/unsupported_package.ves"),
             "unsupported",
             "[@local/tx::commit]",
         ),
         (
-            include_str!("fixtures/doc_links/unsupported_generic.ves"),
+            include_str!("../../../tests/fixtures/doc_links/unsupported_generic.ves"),
             "unsupported",
             "[Box[u64]]",
         ),
@@ -373,7 +379,7 @@ fn actual_cli_keeps_source_and_existing_output_bytes_unchanged() {
         let symlink = fixture.dir.join("source-link.ves");
         std::os::unix::fs::symlink(&fixture.path, &symlink).unwrap();
         let result = output(
-            Command::new(binary())
+            support::command(&binary())
                 .arg("doc")
                 .arg(&symlink)
                 .arg("--json"),

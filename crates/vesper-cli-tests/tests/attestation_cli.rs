@@ -1,8 +1,10 @@
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
-    path::{Path, PathBuf},
-    process::{Command, Output},
+    path::PathBuf,
+    process::Output,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -16,8 +18,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).unwrap();
-        let source =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/vesper-loom-trust/tests/fixtures");
+        let source = support::repo_root().join("crates/vesper-loom-trust/tests/fixtures");
         for name in [
             "identity.json",
             "policy.json",
@@ -35,7 +36,7 @@ impl Fixture {
         fs::write(self.0.join(name), serde_json::to_vec_pretty(value).unwrap()).unwrap();
     }
     fn run(&self, extra: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_vesper"))
+        support::vesper()
             .current_dir(&self.0)
             .args([
                 "attest",
@@ -220,10 +221,7 @@ fn malformed_inputs_missing_files_and_bad_options_never_claim_verification() {
         vec!["attest", "verify", "--at", "not-time"],
         vec!["attest", "verify", "--artifact", "a", "--artifact", "b"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_vesper"))
-            .args(&args)
-            .output()
-            .unwrap();
+        let output = support::vesper().args(&args).output().unwrap();
         assert!(!output.status.success(), "{args:?}");
         assert!(output.stdout.is_empty());
     }

@@ -1,18 +1,20 @@
 //! Actual opt-in stdio previews remain separate from original-source semantics.
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
     path::PathBuf,
-    process::{Command, Stdio},
+    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
 
-const REPEATED: &str = include_str!("fixtures/macro_preview/repeated.ves");
-const PURE: &str = include_str!("fixtures/macro_preview/helper_pure.ves");
-const FALLIBLE: &str = include_str!("fixtures/macro_preview/helper_fallible.ves");
-const LINEAR: &str = include_str!("fixtures/macro_preview/linear_duplicate.ves");
-const MALFORMED: &str = include_str!("fixtures/macro_preview/malformed.ves");
+const REPEATED: &str = include_str!("../../../tests/fixtures/macro_preview/repeated.ves");
+const PURE: &str = include_str!("../../../tests/fixtures/macro_preview/helper_pure.ves");
+const FALLIBLE: &str = include_str!("../../../tests/fixtures/macro_preview/helper_fallible.ves");
+const LINEAR: &str = include_str!("../../../tests/fixtures/macro_preview/linear_duplicate.ves");
+const MALFORMED: &str = include_str!("../../../tests/fixtures/macro_preview/malformed.ves");
 
 fn request(id: i32, method: &str, params: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
@@ -42,8 +44,7 @@ fn preview(id: i32, uri: &str, version: i32) -> Value {
 fn binary() -> PathBuf {
     let path = std::env::var_os("VESPER_MACRO_PREVIEW_BINARY")
         .map(PathBuf::from)
-        .or_else(|| option_env!("CARGO_BIN_EXE_vesper").map(PathBuf::from))
-        .expect("actual vesper executable or VESPER_MACRO_PREVIEW_BINARY required");
+        .unwrap_or_else(support::vesper_path);
     let exe = PathBuf::from(format!("{}.exe", path.display()));
     if exe.is_file() { exe } else { path }
 }
@@ -59,7 +60,7 @@ fn run(mut messages: Vec<Value>) -> Vec<Value> {
         bytes.extend_from_slice(&body);
         bytes
     });
-    let mut child = Command::new(binary())
+    let mut child = support::command(&binary())
         .arg("lsp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -1,6 +1,6 @@
 //! `vesper build --lib` (#878): the CLI writes the object and interface, and
 //! refuses flags it does not apply to libraries instead of ignoring them.
-use std::process::Command;
+mod support;
 
 fn scratch(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("vesper-lib-{name}-{}", std::process::id()));
@@ -10,7 +10,7 @@ fn scratch(name: &str) -> std::path::PathBuf {
 }
 
 fn build(dir: &std::path::Path, extra: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_vesper"))
+    support::vesper()
         .args(["build", "--lib"])
         .arg(dir.join("t.ves"))
         .arg("-o")
@@ -129,7 +129,7 @@ fn package_builds_read_directives_from_the_root_module_only() {
         "// @export instance id[u64]\npub fn id[T](sink x: T) -> T {\n    x\n}\n\npub fn twice(x: u64) -> u64 {\n    wrapping_add(x, x)\n}\n",
     );
     let interface = dir.join("app.json");
-    let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+    let out = support::vesper()
         .args(["build", "--lib", "--lib-name", "app"])
         .arg(dir.join("app"))
         .arg("-o")
@@ -153,7 +153,7 @@ fn package_builds_read_directives_from_the_root_module_only() {
 /// the interface text (empty when the build failed).
 fn build_package(dir: &std::path::Path, name: &str) -> (std::process::Output, String) {
     let interface = dir.join(format!("{name}.json"));
-    let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+    let out = support::vesper()
         .args(["build", "--lib", "--lib-name", name])
         .arg(dir)
         .arg("-o")
