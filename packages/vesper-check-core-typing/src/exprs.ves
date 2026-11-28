@@ -37,6 +37,9 @@ use self::methods::{
 };
 use self::vectors::{vector_call};
 use self::handlers::{handle_expr, mark_unknown, rows_differ, write_rows};
+use self::opfacts::{
+    OpFacts, begin_run, facts_new, finish_run, note_body, note_pattern, op_fails, write_ops
+};
 use self::regions::{
     contains_capability, region_active, region_annotation, region_capability, region_cross,
     region_op, row_label
@@ -504,6 +507,8 @@ pub struct Ck {
     // Every method name a trait in scope declares (`traits.resolve` finds
     // no trait for any other name).
     pub trait_methods: ChunkSeq[u32],
+    // The failing operations' facts (opfacts.ves).
+    facts: OpFacts,
 }
 
 pub fn put(inout out: ChunkSeq[u8], in text: Str) {
@@ -601,6 +606,7 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
         extra_rows: ChunkSeq::new[u64](),
         range_sym: 0,
         trait_methods: ChunkSeq::new[u32](),
+        facts: facts_new(),
     };
     let pats = pats_new(inout ck.ctx.names);
     ck.pats = pats;
@@ -1366,6 +1372,7 @@ pub fn binding(in ck: Ck, i: u32) -> Bind {
 
 fn bind_name(inout ck: Ck, name: u32, ty: u32, pass: u8, pat: u32) {
     note(inout ck, ty);
+    note_pattern(inout ck.facts, pat, ty);
     ck.env.push(Bind { name: name, ty: ty, pass: pass, pat: pat });
 }
 
@@ -3267,17 +3274,18 @@ fn closure_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
 
 // ----- effect inference -------------------------------------------------------
 
-// `primitive_failure` and `overflow_failure` at the operations the world
-// lists: `Fail[RuntimeError]` and `Fail[ArithOverflow]`.
+// `primitive_failure` and `overflow_failure` at the operations the walk of
+// the body finds (opfacts.ves): `Fail[RuntimeError]` and
+// `Fail[ArithOverflow]`.
 fn failure_effects(inout ck: Ck, ex: Ex) {
     let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    if ck.ctx.world.is_partial(ex.start, ex.end) {
+    if op_fails(inout ck.facts, ex.start, ex.end, true) {
         let error_sym = ck.ctx.names.intern(in RUNTIME_ERROR.as_bytes());
         let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
         args.push(ck.ctx.types.named(error_sym, in none));
         require_named(inout ck, FAIL_NAME, in args);
     }
-    if ck.ctx.world.may_overflow(ex.start, ex.end) {
+    if op_fails(inout ck.facts, ex.start, ex.end, false) {
         let overflow_sym = ck.ctx.names.intern(in ARITH_OVERFLOW.as_bytes());
         let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
         args.push(ck.ctx.types.named(overflow_sym, in none));
@@ -5304,6 +5312,7 @@ fn run_body(
     probe: bool
 ) {
     ck.skip = sig_index == NONE32;
+    begin_run(inout ck.facts, body);
     ck.env.truncate(0);
     ck.out.truncate(body_mark);
     for e in w(first)..ck.ex_types.len() {
@@ -5354,6 +5363,11 @@ fn run_body(
     };
     expect_type(inout ck, sig.result, actual, body_ex.start, body_ex.end);
     ck.fn_actual = refine_annotation(inout ck.ctx.types, sig.result, actual);
+    // A run that asked about failing operations before the walk of its
+    // body knew them is checked again.
+    if finish_run(inout ck, body, sig_index) {
+        run_body(inout ck, sig_index, body, first, body_mark, in hints, probe);
+    }
 }
 
 // `Checker::function_body` for the expression types: the parameters bound,
@@ -5454,6 +5468,7 @@ pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32,
         debug_type(in ck.ctx.types, in ck.ctx.names, ty, inout ck.out);
         ck.out.push(10);
     }
+    write_ops(inout ck);
 }
 
 // The task: the function table, then each checked function (name, span,
@@ -5475,7 +5490,9 @@ pub fn check_exprs(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) {
         spans.push(reader.word(in bytes));
         spans.push(reader.word(in bytes));
         firsts.push(n32(ck.exs.len()));
-        bodies.push(read_expr(inout reader, in bytes, inout ck));
+        let body = read_expr(inout reader, in bytes, inout ck);
+        bodies.push(body);
+        note_body(inout ck.facts, u32_at(in names, i), body);
     }
     // `check::check`'s inference loop: every function is checked with the
     // results of the round before (the input's, at first), until no
