@@ -5,6 +5,7 @@ load("//tools/bazel:defs.bzl", "vesper_crate")
 # imports under Wasmtime.
 STAGE2_FIXTURE_TESTS = [
     "test/checked_family",
+    "test/checker",
     "test/composed",
     "test/pilot",
     "test/seam",
