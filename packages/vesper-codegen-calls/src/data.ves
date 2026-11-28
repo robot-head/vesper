@@ -26,13 +26,21 @@
 // the row count of its subtree, so a pre-order walk is a range walk.
 
 use @vesper/check-data::util::{add, inc, inc32, n32, u32_at, w};
-use @vesper/check-data::input::{Ctx, Reader};
+use @vesper/check-data::input::{Ctx, Reader, put_world, read_ctx};
+use @vesper/check-data::types::{TyKind, Types};
 use @vesper/check-data::world::{set_by_symbol};
+use @vesper/place-ir::{put_names, put_program_section, put_types, read_program};
 
 const NONE32: u32 = 4294967295;
 // The world flags word's bits.
 const WORLD_TRACE_ACTIVE: u64 = 1;
 const WORLD_CONST_DENORM: u64 = 2;
+// A task's flags word (`Task`).
+const TASK_OPTIMIZE: u64 = 1;
+const TASK_TRACE_HOST: u64 = 2;
+const TASK_LIBRARY: u64 = 4;
+const TASK_MORE_ROOTS: u64 = 8;
+const WORD_BYTES: u64 = 8;
 
 // `ExprKind` tags (the encoder's `expr_kind`).
 pub enum ExprKind: _ {
@@ -464,11 +472,200 @@ pub fn read_calls(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Cal
         let flags = reader.word(in bytes);
         calls.tasks.push(Task {
             entry: entry,
-            optimize: flags & 1 != 0,
-            trace_host: flags & 2 != 0,
-            library: flags & 4 != 0,
-            more_roots: flags & 8 != 0
+            optimize: flags & TASK_OPTIMIZE != 0,
+            trace_host: flags & TASK_TRACE_HOST != 0,
+            library: flags & TASK_LIBRARY != 0,
+            more_roots: flags & TASK_MORE_ROOTS != 0
         });
     }
     calls
+}
+
+// ----- writing (bootstrap switch slice 3d, #2659) ---------------------------
+
+// The type id of a Row type whose row is `row`, or 0 (the `read_calls`
+// effects word names a Row type, and the table keeps its row).
+fn row_type_of(in t: Types, row: u32) -> u64 {
+    for id in 0..t.nodes.len() {
+        let node = t.node(n32(id));
+        if node.kind == TyKind::Row && node.r2 == row {
+            return id;
+        }
+    }
+    0
+}
+
+fn put_pairs(in calls: Calls, start: u32, count: u32, inout o: ChunkSeq[u64]) {
+    o.push(widen_u64(count));
+    for i in 0..widen_u64(count) {
+        let at = wrapping_add(widen_u64(start), i);
+        o.push(widen_u64(u32_at(in calls.pair_keys, at)));
+        o.push(widen_u64(u32_at(in calls.pair_tys, at)));
+    }
+}
+
+// The symbols a symbol-indexed table sets.
+fn put_name_set(in table: ChunkSeq[u32], inout o: ChunkSeq[u64]) {
+    let mut count: u64 = 0;
+    for s in 0..table.len() {
+        if u32_at(in table, s) != 0 {
+            count = inc(count);
+        }
+    }
+    o.push(count);
+    for s in 0..table.len() {
+        if u32_at(in table, s) != 0 {
+            o.push(s);
+        }
+    }
+}
+
+// The calls section as `read_calls` reads it, for a context written in
+// symbol and type-id order (@vesper/place-ir's `put_names`, `put_types`).
+pub fn put_calls(in calls: Calls, in t: Types, inout o: ChunkSeq[u64]) {
+    let mut world_flags: u64 = 0;
+    if calls.trace_active {
+        world_flags = world_flags | WORLD_TRACE_ACTIVE;
+    }
+    if calls.const_denorm {
+        world_flags = world_flags | WORLD_CONST_DENORM;
+    }
+    o.push(world_flags);
+    o.push(calls.fns.len());
+    for i in 0..calls.fns.len() {
+        let f = match calls.fns.try_get(i) {
+            Option::Some(f) => f,
+            Option::None => break,
+        };
+        o.push(widen_u64(f.name));
+        o.push(if f.fip { 1 } else { 0 });
+        o.push(f.s0);
+        o.push(f.s1);
+        o.push(widen_u64(f.generic_count));
+        for j in 0..widen_u64(f.generic_count) {
+            o.push(widen_u64(u32_at(
+                in calls.generics,
+                wrapping_add(widen_u64(f.generic_start), j)
+            )));
+        }
+        o.push(widen_u64(f.param_count));
+        for j in 0..widen_u64(f.param_count) {
+            let p = match calls.params.try_get(wrapping_add(widen_u64(f.param_start), j)) {
+                Option::Some(p) => p,
+                Option::None => ParamInfo { name: 0, pass: 0, ty: 0 },
+            };
+            o.push(widen_u64(p.name));
+            o.push(widen_u64(p.pass));
+            o.push(widen_u64(p.ty));
+        }
+        o.push(widen_u64(f.result));
+        o.push(row_type_of(in t, f.row));
+        o.push(
+            if f.body == NONE32 {
+                0
+            } else {
+                inc(widen_u64(f.body))
+            }
+        );
+    }
+    o.push(calls.exprs.len());
+    for i in 0..calls.exprs.len() {
+        let e = match calls.exprs.try_get(i) {
+            Option::Some(e) => e,
+            Option::None => break,
+        };
+        o.push(widen_u64(e.kind));
+        o.push(e.s0);
+        o.push(e.s1);
+        o.push(if e.sym == 0 { 0 } else { inc(widen_u64(e.sym)) });
+        o.push(widen_u64(e.children));
+        o.push(widen_u64(e.size));
+    }
+    o.push(calls.calls.len());
+    for i in 0..calls.calls.len() {
+        let row = match calls.calls.try_get(i) {
+            Option::Some(r) => r,
+            Option::None => break,
+        };
+        o.push(row.s0);
+        o.push(row.s1);
+        put_pairs(in calls, row.pair_start, row.pair_count, inout o);
+    }
+    o.push(calls.dyn_params.len());
+    for i in 0..calls.dyn_params.len() {
+        let row = match calls.dyn_params.try_get(i) {
+            Option::Some(r) => r,
+            Option::None => break,
+        };
+        o.push(widen_u64(row.name));
+        put_pairs(in calls, row.pair_start, row.pair_count, inout o);
+    }
+    put_name_set(in calls.stubs, inout o);
+    o.push(calls.vtables.len());
+    for i in 0..calls.vtables.len() {
+        let v = match calls.vtables.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => break,
+        };
+        o.push(widen_u64(v.object));
+        o.push(widen_u64(v.self_ty));
+        o.push(widen_u64(v.method_count));
+        for j in 0..widen_u64(v.method_count) {
+            let m = match calls.methods.try_get(wrapping_add(widen_u64(v.method_start), j)) {
+                Option::Some(m) => m,
+                Option::None => break,
+            };
+            o.push(widen_u64(m.name));
+            put_pairs(in calls, m.pair_start, m.pair_count, inout o);
+        }
+    }
+    put_name_set(in calls.caller_slot_fns, inout o);
+    o.push(calls.tasks.len());
+    for i in 0..calls.tasks.len() {
+        let task = match calls.tasks.try_get(i) {
+            Option::Some(t) => t,
+            Option::None => break,
+        };
+        let mut flags: u64 = 0;
+        if task.optimize {
+            flags = flags | TASK_OPTIMIZE;
+        }
+        if task.trace_host {
+            flags = flags | TASK_TRACE_HOST;
+        }
+        if task.library {
+            flags = flags | TASK_LIBRARY;
+        }
+        if task.more_roots {
+            flags = flags | TASK_MORE_ROOTS;
+        }
+        o.push(widen_u64(task.entry));
+        o.push(flags);
+    }
+}
+
+// A calls input read and written back: the context, the program and the
+// calls section as this package's writers spell them (#2659's check that
+// a Stage 2-written input reads as the Rust-encoded one did).
+pub fn calls_input_round_trip(in bytes: Slice[u8]) -> ChunkSeq[u8] {
+    let mut r = Reader { pos: 0 };
+    let c = read_ctx(inout r, in bytes);
+    let p = read_program(inout r, in bytes, in c);
+    let calls = read_calls(inout r, in bytes, in c);
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    put_names(inout o, in c.names);
+    put_types(inout o, in c.types);
+    put_world(in c.world, inout o);
+    put_program_section(in p, inout o);
+    put_calls(in calls, in c.types, inout o);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.resize(wrapping_mul(o.len(), WORD_BYTES), 0);
+    for i in 0..o.len() {
+        let ok = out.try_write_u64_le(wrapping_mul(i, WORD_BYTES), u64_at(in o, i));
+    }
+    out
+}
+
+fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    s.try_get(i).unwrap_or(0)
 }

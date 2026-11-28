@@ -276,6 +276,19 @@ fn calls_input_with(
     tasks: &[(String, u64)],
     wide: bool,
 ) -> Option<Vec<u8>> {
+    calls_input_pool(w, program, tasks, wide).map(|(input, _)| input)
+}
+
+/// [`calls_input_flags`] (or with `wide`, [`calls_input_flags_wide`]) and
+/// the payload pool of its program section, which `ir_words::decode_program`
+/// needs to read a program that a package writes back
+/// (crates/vesper-codegen-swap-test/tests/self_host_library_ir.rs).
+pub fn calls_input_pool(
+    w: &World,
+    program: &Program,
+    tasks: &[(String, u64)],
+    wide: bool,
+) -> Option<(Vec<u8>, ir_words::Pool)> {
     if !ir_words::encodable(w, program) || !calls_encodable(w, wide) {
         return None;
     }
@@ -287,5 +300,5 @@ fn calls_input_with(
     let mut tail = t.section();
     let world = t.enc.world(w);
     tail.extend(calls_section(&mut t.enc, w, tasks));
-    Some(t.enc.finish(&world, &tail))
+    Some((t.enc.finish(&world, &tail), t.pool))
 }
