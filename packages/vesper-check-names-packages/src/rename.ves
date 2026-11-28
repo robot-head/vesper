@@ -12,11 +12,11 @@ use @vesper/ast::{
     StmtNode, TraitNode, TraitRefNode, TypeNode, VariantNode, WhereNode, expr_at, list_at, list_len,
     none as ast_none, pat_at, type_at
 };
-use @vesper-std/collections::flat_table::{FlatTable};
 use @vesper-std/arena::{idx_from_raw};
 use self::state::{
-    St, at32, at64, at8, const_flags, emit, err, hi, inc, kind_has, kind_type, kind_value, lo, n32,
-    none, pair, push_sym, sym_byte, sym_len, sym_path_split, sym_slice, sym_starts, w
+    St, at32, at64, at8, const_flags, emit, err, hi, inc, intern_str, kind_has, kind_type,
+    kind_value, lo, n32, none, pair, push_sym, sym_byte, sym_len, sym_path_split, sym_slice,
+    sym_starts, w
 };
 use self::load::{adt_at, back, effect_decl_at, fn_at, tr};
 use self::resolve::{qualified, sugar_name, unknown_import};
@@ -29,12 +29,26 @@ fn sh(in loader: St, pos: u32) -> u32 {
     wrapping_add(pos, loader.shift)
 }
 
-// Marks `node` renamed; whether it already was.
-fn revisit(inout seen: FlatTable[u32, u8], node: u32) -> bool {
-    match seen.insert(node, 1) {
-        Option::Some(_) => true,
-        Option::None => false,
+// Node ids past this many are not AST nodes (no arena gets that long):
+// `revisit` reports them unseen instead of growing its marks to them.
+fn seen_limit() -> u32 {
+    16777216
+}
+
+// Marks `node` renamed; whether it already was. The marks are a byte per
+// node rather than a table: Stage 2 copies the whole loader on each insert
+// into one of its tables, once per renamed node.
+fn revisit(inout seen: ChunkSeq[u8], node: u32) -> bool {
+    if node >= seen_limit() {
+        return false;
     }
+    let index = w(node);
+    if index >= seen.len() {
+        seen.resize(inc(index), 0);
+    }
+    let was = at8(in seen, index) != 0;
+    let _ = seen.try_set(index, 1);
+    was
 }
 
 fn has(in stack: ChunkSeq[u32], sym: u32) -> bool {
@@ -276,7 +290,7 @@ fn type_name(inout loader: St, name: u32, start: u32, end: u32) -> u32 {
     out.push_str(in "::");
     let rest = sym_slice(inout loader, name, wrapping_add(cut, 2), len);
     push_sym(in loader, rest, inout out);
-    loader.interner.intern(in out).id()
+    intern_str(inout loader, in out)
 }
 
 fn value_name(inout loader: St, name: u32, start: u32, end: u32) -> u32 {
@@ -1010,5 +1024,5 @@ pub fn owner(inout loader: St, bound_owner: u32) -> u32 {
     out.push_str(in "::");
     let rest = sym_slice(inout loader, bound_owner, wrapping_add(cut, 2), len);
     push_sym(in loader, rest, inout out);
-    loader.interner.intern(in out).id()
+    intern_str(inout loader, in out)
 }
