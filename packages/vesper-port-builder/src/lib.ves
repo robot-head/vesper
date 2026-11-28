@@ -32,7 +32,7 @@
 use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset};
 use @vesper/codegen-export::native::{NativeExports, native_exports};
 use @vesper/export-build::{DECLINE_NONE, export_files_dir, target_os};
-use @vesper/export-build::calls_input::{CALLS_OK, stage2_calls_input};
+use @vesper/export-build::calls_input::{CALLS_OK, stage2_calls_input_with};
 use @vesper/native-lib::library_object;
 use @vesper-std/env::{arg_bytes, arg_count};
 use @vesper-std/fs::{IoError, read_path, write_path};
@@ -41,7 +41,7 @@ use @vesper-std/fs::{IoError, read_path, write_path};
 pub const OBJECT_BUILT: u64 = 0;
 // Stage 2's front end made no calls input for the library.
 pub const OBJECT_NO_CALLS: u64 = 1;
-// @vesper/native-lib answered with an error.
+// @vesper/native-lib answered with an error, which the object path holds.
 pub const OBJECT_FAILED: u64 = 2;
 // The export outputs were declined, so the object was not attempted.
 pub const OBJECT_SKIPPED: u64 = 3;
@@ -75,8 +75,10 @@ const EXIT_OK: u64 = 0;
 const EXIT_USAGE: u64 = 2;
 const EXIT_IO: u64 = 1;
 
-// @vesper/native-lib's answer: a status word, then the object.
+// @vesper/native-lib's answer: a status word, then the object (or the
+// error); a status no answer has, for one too short to hold it.
 const ANSWER_OK: u64 = 0;
+const ANSWER_MALFORMED: u64 = 18446744073709551615;
 const WORD_BYTES: u64 = 8;
 
 // The request's header (`native_export::object` and
@@ -211,16 +213,24 @@ fn request_of(
 }
 
 // @vesper/native-lib's request for the library at `root`, whose
-// interface (`native_exports`' input) is `interface`, as Stage 2 builds
+// interface (`native_exports`' input) is `interface` and whose root
+// module ends with the instance wrappers `wrappers`, as Stage 2 builds
 // it; or why it was not built.
 fn stage2_request(
     in root: Slice[u8],
     in triple: Slice[u8],
-    in interface: Slice[u8]
+    in interface: Slice[u8],
+    in wrappers: Slice[u8]
 ) -> (u64, ChunkSeq[u8]) eff [Ffi[StdFs]] {
     let e = native_exports(in interface);
     let os = target_os(in triple);
-    let calls = stage2_calls_input(in root, in os.as_slice(), in e.roots.as_slice(), OPTIMIZE);
+    let calls = stage2_calls_input_with(
+        in root,
+        in os.as_slice(),
+        in e.roots.as_slice(),
+        OPTIMIZE,
+        in wrappers
+    );
     if calls.declined != CALLS_OK {
         return (OBJECT_NO_CALLS, ChunkSeq::new[u8]());
     }
@@ -244,7 +254,19 @@ fn request_step(
             (OBJECT_BUILT, read_path(in request))
         } else {
             let parked = read_path(in object);
-            stage2_request(in root, in triple, in parked.as_slice())
+            let n = parked.as_slice().try_read_u64_le(0).unwrap_or(0);
+            let start = WORD_BYTES;
+            let end = wrapping_add(start, n);
+            if end < start || end > parked.len() {
+                (OBJECT_NO_CALLS, ChunkSeq::new[u8]())
+            } else {
+                stage2_request(
+                    in root,
+                    in triple,
+                    in parked[start..end],
+                    in parked[end..parked.len()]
+                )
+            }
         };
         write_path(in object, in req.as_slice());
         reason
@@ -254,29 +276,20 @@ fn request_step(
     }
 }
 
-// The object bytes of @vesper/native-lib's answer to `req`, if it built one.
-fn object_of(in req: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[Cranelift]] {
+// @vesper/native-lib's answer to `req`: whether it built the object, and
+// the object or the error text.
+fn object_of(in req: Slice[u8]) -> (bool, ChunkSeq[u8]) eff [Ffi[Cranelift]] {
     let answer = library_object(in req);
-    let status = match answer.as_slice().try_read_u64_le(0) {
-        Option::Some(v) => v,
-        Option::None => {
-            return Option::None;
-        },
-    };
-    let len = match answer.as_slice().try_read_u64_le(WORD_BYTES) {
-        Option::Some(v) => v,
-        Option::None => {
-            return Option::None;
-        },
-    };
+    let status = answer.as_slice().try_read_u64_le(0).unwrap_or(ANSWER_MALFORMED);
+    let len = answer.as_slice().try_read_u64_le(WORD_BYTES).unwrap_or(0);
     let start = wrapping_add(WORD_BYTES, WORD_BYTES);
     let end = wrapping_add(start, len);
-    if status != ANSWER_OK || end < start || end > answer.len() {
-        return Option::None;
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if end < start || end > answer.len() {
+        return (false, text);
     }
-    let mut object: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    object.extend(in answer[start..end]);
-    Option::Some(object)
+    text.extend(in answer[start..end]);
+    (status == ANSWER_OK, text)
 }
 
 pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[Cranelift]] {
@@ -371,12 +384,10 @@ pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[Cranelift]] {
             status_line(inout pending, TAG_OBJECT, OBJECT_TRAPPED);
             write_path(in status.as_slice(), in pending.as_slice());
             let req = read_path(in object.as_slice());
-            let (reason, bytes) = match object_of(in req.as_slice()) {
-                Option::Some(bytes) => (OBJECT_BUILT, bytes),
-                Option::None => (OBJECT_FAILED, ChunkSeq::new[u8]()),
-            };
+            // A refused object's path holds native-lib's error instead.
+            let (built, bytes) = object_of(in req.as_slice());
             write_path(in object.as_slice(), in bytes.as_slice());
-            reported = reason;
+            reported = if built { OBJECT_BUILT } else { OBJECT_FAILED };
         } else if export_reason == widen_u64(DECLINE_NONE) {
             // A declined object leaves the path empty, not what was parked.
             let empty: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -412,7 +423,12 @@ fn export_step(
     handle Fail[IoError] in {
         write_path(in interface, in files.interface.as_slice());
         write_path(in binding, in files.binding.as_slice());
-        write_path(in object, in files.native.as_slice());
+        // The parked interface: its length, its bytes, then the instance
+        // wrappers' source.
+        let mut parked: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_bytes(inout parked, in files.native.as_slice());
+        parked.extend(in files.wrappers.as_slice());
+        write_path(in object, in parked.as_slice());
         widen_u64(DECLINE_NONE)
     } with {
         return v => v,
