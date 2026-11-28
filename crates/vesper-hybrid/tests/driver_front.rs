@@ -210,6 +210,19 @@ fn front_passes_match_the_default_compiler() {
         std::fs::write(&path, text).unwrap();
         inputs.push((path, true));
     }
+    // Over the 1 MiB byte budget (#1893): E0003, printed raw; once plain
+    // and once after a sugar declaration and a multibyte character.
+    for (name, head) in [
+        ("oversize.ves", "fn main() -> i64 {\n    0\n}\n"),
+        (
+            "oversize_sugar.ves",
+            "sugar take_right: infix(`.+`, additive, left) { rule ($a:expr .+ $b:expr) => { $b } }\n// é\nfn main() -> i64 {\n    1 .+ 42\n}\n",
+        ),
+    ] {
+        let path = scratch.join(name);
+        std::fs::write(&path, oversize(head)).unwrap();
+        inputs.push((path, true));
+    }
     let stride: usize = std::env::var("VESPER_DRIVER_FRONT_STRIDE")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -335,6 +348,12 @@ fn passes_with(args: &[&str], swaps: &str) -> u64 {
         .unwrap_or_else(|| panic!("no driver report in {stderr:?}"))
 }
 
+/// `head` padded with spaces past the parser's 1 MiB byte budget.
+fn oversize(head: &str) -> String {
+    const OVER_BUDGET: usize = (1 << 20) + 4096;
+    format!("{head}{}\n", " ".repeat(OVER_BUDGET))
+}
+
 /// `--emit cst` of a standalone source runs no session pass after the
 /// load (Load; the driver decides whether the input is a package itself,
 /// #1896); a package still runs Parse and EmitCst.
@@ -357,6 +376,10 @@ fn emit_cst_runs_in_the_vesper_driver() {
     assert_eq!(passes(&["check", "--json", bad]), 1);
     // Under `--include-tests` too, with test blocks parsed in the driver.
     assert_eq!(passes(&["check", "--include-tests", bad]), 1);
+    // A source over the byte budget: the driver prints its E0003 raw.
+    let big = scratch.join("big.ves");
+    std::fs::write(&big, oversize("fn main() -> i64 {\n    0\n}\n")).unwrap();
+    assert_eq!(passes(&["check", big.to_str().unwrap()]), 1);
     // The sugar expansion's own error is reported by the driver too.
     let sugared = scratch.join("sugared.ves");
     std::fs::write(
