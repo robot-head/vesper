@@ -12,6 +12,14 @@ vesper_crate(
         # BUILD file, so //:files leaves it out.
         "//packages/vesper-codegen-numeric:files",
         "//packages/vesper-cranelift:files",
+        # Stage 2 slice 3 (#2662): self_host_library_ir reads the hybrid's
+        # port libraries (crates/vesper-hybrid/modules).
+        "//crates/vesper-hybrid:files",
+        # backend_checks and ebpf_backend depend on the Loom packages in
+        # vesper-resonance and vesper-ebpf, whose BUILD files keep them out
+        # of //:files.
+        "//crates/vesper-ebpf:files",
+        "//crates/vesper-resonance:files",
     ],
     test_tags = {
         # Runs whole-body Vesper emissions across the corpus in Self-host codegen differentials.
@@ -32,5 +40,8 @@ vesper_crate(
         "test/self_host_codegen_scalar_emit": "long",
         # Native walk part 6a (#2094): whole scalar bodies from Vesper.
         "test/self_host_native_walk_body": "long",
+        # Stage 2 slice 3 (#2662): the library IR pipeline over the port
+        # libraries.
+        "test/self_host_library_ir": "long",
     },
 )

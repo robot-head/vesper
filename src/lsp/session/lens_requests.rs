@@ -46,6 +46,46 @@ pub struct LensConfig {
 /// Obligations of each kind one background run covers.
 const BACKGROUND_BATCH: usize = 64;
 pub const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(150);
+/// The documents a background debouncer tracks at most.
+pub(super) const BACKGROUND_ENTRIES: usize = 256;
+/// The longest debounce a client may ask for, in milliseconds.
+const MAX_CLIENT_DEBOUNCE_MS: u64 = 60_000;
+
+/// The client's code-lens refresh support and the background-run delay
+/// that `initialize` negotiates: the client's `vesperLens` choice over the
+/// configured default, off without an auditor or past the debouncer's
+/// one-minute bound.
+pub(super) fn background_choice(
+    initialize: &serde_json::Map<String, Value>,
+    config: &LensConfig,
+) -> (bool, Option<Duration>) {
+    let refresh = initialize
+        .get("capabilities")
+        .and_then(|c| c.pointer("/workspace/codeLens/refreshSupport"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let options = initialize
+        .get("initializationOptions")
+        .and_then(|o| o.get("vesperLens"));
+    let requested = options
+        .and_then(|o| o.get("backgroundProofs"))
+        .and_then(Value::as_bool);
+    let debounce = options
+        .and_then(|o| o.get("debounceMs"))
+        .and_then(Value::as_u64)
+        .filter(|ms| *ms <= MAX_CLIENT_DEBOUNCE_MS)
+        .map(Duration::from_millis);
+    let delay = match (requested, config.background) {
+        (Some(false), _) => None,
+        (Some(true), configured) => Some(debounce.or(configured).unwrap_or(DEFAULT_DEBOUNCE)),
+        (None, configured) => configured.map(|d| debounce.unwrap_or(d)),
+    };
+    // Background runs need the auditor; without it they stay off.
+    let delay = delay
+        .filter(|_| config.auditor.is_some())
+        .filter(|delay| Debouncer::new(*delay, BACKGROUND_ENTRIES).is_ok());
+    (refresh, delay)
+}
 
 /// Lens's own analysis profile: the editor profile with larger node and
 /// type budgets (still inside the frontend's hard caps).
@@ -477,35 +517,6 @@ impl Session {
     ) -> Value {
         self.record(job, &outcome);
         proof_result_of(job.source, job.requested.as_ref(), &outcome)
-    }
-
-    /// Read the client's background-run choice and refresh support.
-    pub(super) fn configure_background(&mut self, initialize: &serde_json::Map<String, Value>) {
-        self.code_lens_refresh = initialize
-            .get("capabilities")
-            .and_then(|c| c.pointer("/workspace/codeLens/refreshSupport"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let options = initialize
-            .get("initializationOptions")
-            .and_then(|o| o.get("vesperLens"));
-        let requested = options
-            .and_then(|o| o.get("backgroundProofs"))
-            .and_then(Value::as_bool);
-        let debounce = options
-            .and_then(|o| o.get("debounceMs"))
-            .and_then(Value::as_u64)
-            .filter(|ms| *ms <= 60_000)
-            .map(Duration::from_millis);
-        let delay = match (requested, self.lens_config.background) {
-            (Some(false), _) => None,
-            (Some(true), configured) => Some(debounce.or(configured).unwrap_or(DEFAULT_DEBOUNCE)),
-            (None, configured) => configured.map(|d| debounce.unwrap_or(d)),
-        };
-        // Background runs need the auditor; without it they stay off.
-        self.background = delay
-            .filter(|_| self.lens_config.auditor.is_some())
-            .and_then(|delay| Debouncer::new(delay, 256).ok());
     }
 
     /// An accepted edit restarts the debounce for `uri`.
