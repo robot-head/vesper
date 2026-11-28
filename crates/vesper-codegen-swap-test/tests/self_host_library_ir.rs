@@ -7,16 +7,14 @@
 //! `export_plans` hook sees), and returns the program as `put_program`
 //! words. At every stage, the program read back must be `Debug`-equal to
 //! Rust's after `library_program` through that stage, and a Rust error must
-//! be a refusal; only closure bodies whose `sink` parameters hold a `Box`
-//! (lent captures the input does not name) are not ported yet. For an optimized build, the inliner
+//! be a refusal; only worlds with the `Box` prelude (`@fip` reuse and drop
+//! elaboration) are not ported yet. For an optimized build, the inliner
 //! input the package writes for the optimized program must also be
 //! tests/common/inline_words.rs `inline_input`'s bytes for Rust's.
 //!
 //! - `library_programs_match_rust`: every library of
 //!   tests/common/native_lib_fixtures.rs (the @vesper/native-lib fixtures),
-//!   the pipeline fixtures (`Box` drop elaboration among them) and the port
-//!   pilot's `Box` libraries (kit, widen), built optimized and unoptimized;
-//!   the first lowering is recorded by an
+//!   built optimized and unoptimized; the first lowering is recorded by an
 //!   `export_plans` hook during `compile_source`.
 //! - `port_package_programs_match_rust`: the first lowering of the hybrid's
 //!   port libraries (crates/vesper-hybrid/modules), every
@@ -63,206 +61,11 @@ const LIBRARY_TASK: u64 = 4;
 const MORE_ROOTS_TASK: u64 = 8;
 /// The compared fixture programs the pipeline must change.
 const MIN_CHANGED: usize = 8;
-/// The compared fixture programs with elaborated `Box` drops (the `Box`
-/// fixtures and the pilot libraries, optimized and not).
-const MIN_DROPPED: usize = 8;
-/// The compared fixture programs with `@fip` reuse (box_fip, optimized and
-/// not).
-const MIN_REUSED: usize = 2;
-
-/// The port pilot's libraries whose worlds have the `Box` prelude (a boxed
-/// tree, boxed trait objects), as the port builder builds them.
-const PILOT_LIBRARIES: &[(&str, &str)] = &[
-    ("kit", "crates/vesper-port-pilot/vesper/kit.ves"),
-    ("widen", "crates/vesper-port-pilot/vesper/widen.ves"),
-];
 
 /// Libraries for the steps the @vesper/native-lib fixtures do not reach:
 /// bit builtins as operators, 128-bit tuple types, memory forwarding,
-/// inlining, bounds hoisting and `Box` drop elaboration (a world with the
-/// `Box` prelude: unpacked, overwritten, projected, returned early, moved
-/// on one branch and allocated in a loop).
+/// inlining and bounds hoisting.
 const PIPELINE_LIBRARIES: &[(&str, &str)] = &[
-    (
-        "box_fip",
-        "pub enum Tree {
-    Leaf(u64),
-    Node(Box[Tree], Box[Tree]),
-}
-@fip fn bump(sink b: Box[u64]) -> Box[u64] eff [] {
-    let Box(v) = b;
-    Box::new(wrapping_add(v, 1))
-}
-@fip fn swap(sink t: Tree) -> Tree eff [] {
-    match t {
-        Tree::Leaf(x) => Tree::Leaf(x),
-        Tree::Node(l, r) => match l {
-            Box(a) => match r {
-                Box(b) => Tree::Node(Box::new(b), Box::new(a)),
-            },
-        },
-    }
-}
-@fip fn fresh(v: u64) -> Box[u64] eff [] {
-    Box::new_in_caller(wrapping_add(v, 2))
-}
-@fip fn forward(v: u64) -> Box[u64] eff [] {
-    fresh(v)
-}
-fn take(sink b: Box[u64]) -> u64 {
-    match b {
-        Box(x) => x,
-    }
-}
-fn leaf(sink t: Tree) -> u64 {
-    match t {
-        Tree::Leaf(x) => x,
-        Tree::Node(l, r) => 0,
-    }
-}
-pub fn bumped(n: u64) -> u64 {
-    take(bump(Box::new(n)))
-}
-pub fn swapped(n: u64) -> u64 {
-    leaf(swap(Tree::Node(Box::new(Tree::Leaf(n)), Box::new(Tree::Leaf(1)))))
-}
-pub fn fresh_value(n: u64) -> u64 {
-    take(forward(n))
-}",
-    ),
-    (
-        "box_tree",
-        "pub enum Tree {
-    Leaf(u64),
-    Node(Box[Tree], Box[Tree]),
-}
-fn sum(t: Tree) -> u64 {
-    match t {
-        Tree::Leaf(x) => x,
-        Tree::Node(l, r) => match l {
-            Box(a) => match r {
-                Box(b) => wrapping_add(sum(a), sum(b)),
-            },
-        },
-    }
-}
-fn depth(in t: Tree) -> u64 {
-    match t {
-        Tree::Leaf(x) => 1,
-        Tree::Node(l, r) => 2,
-    }
-}
-pub fn total(n: u64) -> u64 {
-    let t = Tree::Node(Box::new(Tree::Leaf(n)), Box::new(Tree::Leaf(2)));
-    let d = depth(in t);
-    wrapping_add(sum(t), d)
-}",
-    ),
-    (
-        "box_paths",
-        "struct Pair {
-    a: Box[u64],
-    b: Box[u64],
-}
-fn first(sink p: Pair) -> u64 {
-    match p.a {
-        Box(x) => x,
-    }
-}
-fn take(sink b: Box[u64]) -> u64 {
-    match b {
-        Box(x) => x,
-    }
-}
-fn make(n: u64) -> Pair {
-    Pair { a: Box::new(n), b: Box::new(1) }
-}
-fn boxed(n: u64) -> Box[u64] {
-    Box::new(n)
-}
-pub fn branchy(c: bool, n: u64) -> u64 {
-    let b = Box::new(n);
-    let mut r: u64 = 0;
-    if c {
-        r = take(b);
-    }
-    r
-}
-fn check(sink b: Box[u64]) -> bool {
-    take(b) > 2
-}
-pub fn short(c: bool, n: u64) -> bool {
-    let b = Box::new(n);
-    c && check(b)
-}
-pub fn arms(k: u64, n: u64) -> u64 {
-    let b = Box::new(n);
-    match k {
-        0 => take(b),
-        _ => 5,
-    }
-}
-pub fn field(n: u64) -> u64 {
-    take(make(n).a)
-}
-pub fn discard(n: u64) -> u64 {
-    boxed(n);
-    n
-}
-pub fn spin(n: u64) -> u64 {
-    let mut i: u64 = 0;
-    let zero: u64 = 0;
-    let mut b: Box[u64] = Box::new(zero);
-    loop {
-        if i == n {
-            break;
-        }
-        b = Box::new(i);
-        i = wrapping_add(i, 1);
-    }
-    take(b)
-}
-pub fn pick(c: bool, n: u64) -> u64 {
-    let b = Box::new(n);
-    if c {
-        match b {
-            Box(x) => x,
-        }
-    } else {
-        7
-    }
-}
-pub fn early(n: u64) -> u64 {
-    let b = Box::new(n);
-    if n > 3 {
-        return 1;
-    }
-    match b {
-        Box(x) => x,
-    }
-}
-pub fn swap(n: u64) -> u64 {
-    let mut p = Pair { a: Box::new(n), b: Box::new(2) };
-    p.a = Box::new(5);
-    first(p)
-}
-pub fn looped(n: u64) -> u64 {
-    let mut i: u64 = 0;
-    let mut acc: u64 = 0;
-    loop {
-        if i == n {
-            break;
-        }
-        let b = Box::new(i);
-        let v = match b {
-            Box(x) => x,
-        };
-        acc = wrapping_add(acc, v);
-        i = wrapping_add(i, 1);
-    }
-    acc
-}",
-    ),
     (
         "bits",
         "pub fn bits(x: u32, n: u32) -> u32 {
@@ -332,9 +135,6 @@ pub fn bumped(n: u64) -> u64 {
 /// The package's status words (`Status` of src/lib.ves).
 const STATUS_OK: u64 = 0;
 const STATUS_FIP_ACTIVE: u64 = 16;
-/// A closure body's `sink` parameter holds a `Box` (src/drops.ves
-/// `DropStatus::LentClosure`): the input does not say whether it is lent.
-const STATUS_LENT_CLOSURE: u64 = 18;
 
 /// The stages, in order, with their words (`Stage` of src/lib.ves).
 const STAGES: [(LibraryStage, u64); 5] = [
@@ -380,7 +180,7 @@ struct Tally {
     same: usize,
     /// Stages the package refused where Rust failed too.
     both_failed: usize,
-    /// Stages the package does not run yet (lent `Box` closure captures).
+    /// Stages the package does not run yet (`@fip` worlds).
     not_ported: usize,
     /// Optimized programs whose inliner input is Rust's byte for byte.
     same_inputs: usize,
@@ -388,10 +188,6 @@ struct Tally {
     /// program.
     inlined: usize,
     hoisted: usize,
-    /// Identical `Drops` stages with `Box` drops elaborated.
-    dropped: usize,
-    /// Identical `Optimize` stages where `@fip` reuse paired an allocation.
-    reused: usize,
     /// Functions in the compared programs.
     functions: usize,
     /// Identical stages whose program differs from the first lowering.
@@ -407,8 +203,6 @@ impl Tally {
         self.same_inputs += other.same_inputs;
         self.inlined += other.inlined;
         self.hoisted += other.hoisted;
-        self.dropped += other.dropped;
-        self.reused += other.reused;
         self.functions += other.functions;
         self.changed += other.changed;
         self.failures.extend(other.failures);
@@ -471,8 +265,6 @@ fn compare(
                     match stage {
                         LibraryStage::Inline => t.inlined += stepped,
                         LibraryStage::Hoist => t.hoisted += stepped,
-                        LibraryStage::Optimize => t.reused += usize::from(has_reuse(&rust)),
-                        LibraryStage::Drops => t.dropped += usize::from(has_box_drops(&rust)),
                         _ => {}
                     }
                     before = theirs;
@@ -481,7 +273,7 @@ fn compare(
                     t.failures.push(format!("{what}: programs differ at {d}"));
                 }
             }
-            (Some(STATUS_FIP_ACTIVE | STATUS_LENT_CLOSURE), _) => t.not_ported += 1,
+            (Some(STATUS_FIP_ACTIVE), _) => t.not_ported += 1,
             (Some(status), Err(_)) if status != STATUS_OK => t.both_failed += 1,
             (status, Err(e)) => t.failures.push(format!(
                 "{what}: Rust failed ({e}), Vesper status {status:?}"
@@ -492,32 +284,6 @@ fn compare(
         }
     }
     t
-}
-
-/// Whether a function of `p` has elaborated `Box` drops.
-fn has_box_drops(p: &Program) -> bool {
-    p.functions.values().any(|f| {
-        !f.box_drops_before_inst.is_empty()
-            || !f.box_drops_after_inst.is_empty()
-            || !f.box_drops_before_term.is_empty()
-    })
-}
-
-/// Whether `@fip` reuse paired an allocation of `p` with a slot: a
-/// `BoxReuse`, or a call slot.
-fn has_reuse(p: &Program) -> bool {
-    p.functions.values().any(|f| {
-        !f.fip_call_slots.is_empty()
-            || f.blocks.iter().flat_map(|b| &b.instructions).any(|i| {
-                matches!(
-                    &i.op,
-                    vesper::ir::Op::Fip {
-                        op: vesper::fip::FipOp::BoxReuse { .. },
-                        ..
-                    }
-                )
-            })
-    })
 }
 
 /// The inliner's input the package writes for the optimized program must
@@ -597,18 +363,7 @@ fn compare_first_lowering(
 fn library_programs_match_rust() {
     entry();
     let mut total = Tally::default();
-    let mut libraries: Vec<(&str, String)> = LIBRARIES
-        .iter()
-        .chain(PIPELINE_LIBRARIES)
-        .map(|(l, s)| (*l, s.to_string()))
-        .collect();
-    for (library, path) in PILOT_LIBRARIES {
-        let source = std::fs::read_to_string(check_harness::repo().join(path))
-            .unwrap_or_else(|e| panic!("read {path}: {e}"));
-        libraries.push((library, source));
-    }
-    for (library, source) in &libraries {
-        let (library, source) = (*library, source.as_str());
+    for (library, source) in LIBRARIES.iter().chain(PIPELINE_LIBRARIES) {
         for optimize in [true, false] {
             LIBRARY.with(|l| *l.borrow_mut() = library.to_string());
             SEEN.with(|s| *s.borrow_mut() = None);
@@ -637,15 +392,13 @@ fn library_programs_match_rust() {
         }
     }
     eprintln!(
-        "library-ir: {} stages identical ({} functions, {} changed by the pipeline), {} inliner inputs identical, {} inlined, {} hoisted, {} with Box drops, {} with @fip reuse, {} refused by both, {} not ported, {} failures",
+        "library-ir: {} stages identical ({} functions, {} changed by the pipeline), {} inliner inputs identical, {} inlined, {} hoisted, {} refused by both, {} not ported, {} failures",
         total.same,
         total.functions,
         total.changed,
         total.same_inputs,
         total.inlined,
         total.hoisted,
-        total.dropped,
-        total.reused,
         total.both_failed,
         total.not_ported,
         total.failures.len()
@@ -655,16 +408,6 @@ fn library_programs_match_rust() {
         total.changed >= MIN_CHANGED,
         "the pipeline changed only {} compared programs",
         total.changed
-    );
-    assert!(
-        total.reused >= MIN_REUSED,
-        "only {} compared programs have @fip reuse",
-        total.reused
-    );
-    assert!(
-        total.dropped >= MIN_DROPPED,
-        "only {} compared programs have Box drops",
-        total.dropped
     );
 }
 

@@ -44,7 +44,6 @@ const SELF_BOUND: u8 = 0;
 use @vesper/check-data::world::{
     Adt, EffectRow, Field, Generic, Known, Variant, World, known_new, set_by_symbol, world_new
 };
-use @vesper/check-collect::boxes::{needs_box};
 use @vesper/check-names-packages::{AssembledModule};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};
@@ -123,23 +122,6 @@ fn mod_asts_mention(in mods: ChunkSeq[AssembledModule], in name: Str) -> bool {
                 Option::Some(_) => true,
                 Option::None => false,
             },
-            Option::None => false,
-        };
-        if hit {
-            return true;
-        }
-    }
-    false
-}
-
-// Whether a module needs the `Box` prelude (check-collect's `needs_box`,
-// as @vesper/export-build asks). A name lookup in the AST's table is not
-// enough: the table also holds string literals, such as check-data's
-// `"Box"`.
-fn mods_need_box(in mods: ChunkSeq[AssembledModule]) -> bool {
-    for mi in 0..mods.len() {
-        let hit = match mods.try_get(mi) {
-            Option::Some(m) => needs_box(in m.ast),
             Option::None => false,
         };
         if hit {
@@ -1214,12 +1196,10 @@ fn collect_program_with(
             set_by_symbol(inout world.by_name, res_sym, inc32(res_idx));
         }
     }
-    // The built-in `Box[T]` (src/fip.rs `prelude`), when a module's code
-    // uses `Box` (`fip::needs_prelude`, which reads types, names and
-    // patterns, never string literals) and none declares it: an affine
-    // struct `Box[T: linear](T)` whose zero span marks it built in
-    // (`fip::active`).
-    if mods_need_box(in mods) {
+    // The built-in `Box[T]` (src/fip.rs `prelude`), when a module names
+    // `Box` and none declares it: an affine struct `Box[T: linear](T)`
+    // whose zero span marks it built in (`fip::active`).
+    if mod_asts_mention(in mods, in "Box") {
         let box_sym = names.intern(in "Box".as_bytes());
         let has_box = match world.by_name.try_get(w(box_sym)) {
             Option::Some(v) => v != 0,
