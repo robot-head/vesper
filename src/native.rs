@@ -4484,8 +4484,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         )
     }
     /// Whether the walk lowers graph `body`'s sequence and string
-    /// operations with no drops, fused `try_get` matches or hoisted
-    /// header reads (#2653): true for a graph with none.
+    /// operations with no drops, element view matches or hoisted header
+    /// reads (#2653): true for a graph with none. A `try_get` fused with
+    /// its `match` is planned by the body hook unless the world has
+    /// element views, whose binds name the element in place.
     fn seq_body_plain(&self, body: &crate::ir::FunctionIr) -> bool {
         use crate::ir::Op;
         let has_seq = body
@@ -4506,7 +4508,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 || !crate::fip::fail_exit_drops(self.world, graph).is_empty());
         !drops
             && crate::fip::seq_drop_plan(self.world, graph).is_empty()
-            && seq_native::fused_reads(graph).is_empty()
+            && (self.world.element_views.is_empty() || seq_native::fused_reads(graph).is_empty())
             && self.entry_views(body).is_some()
     }
     /// The header hoists of graph `body` the body hook emits (#2653): on
