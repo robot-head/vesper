@@ -364,6 +364,8 @@ copy struct Ops {
     seq_as_slice: u32,
     seq_set: u32,
     seq_try_set: u32,
+    seq_push: u32,
+    seq_new: u32,
     option_some: u32,
     option_none: u32,
 }
@@ -535,6 +537,8 @@ fn ops_new(inout names: Names, inout tables: Tables) -> Ops {
         seq_as_slice: intern(inout names, in "AsSlice"),
         seq_set: intern(inout names, in "Set"),
         seq_try_set: intern(inout names, in "TrySet"),
+        seq_push: intern(inout names, in "Push"),
+        seq_new: intern(inout names, in "New"),
         option_some: intern(inout names, in "Some"),
         option_none: intern(inout names, in "None"),
         amp: intern(inout names, in "&"),

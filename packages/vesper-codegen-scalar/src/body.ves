@@ -130,6 +130,16 @@ const SEQ_AS_SLICE: u64 = 33;
 // coerces to, then for `set` the raise of `IndexOutOfBounds`.
 const SEQ_TRY_SET: u64 = 34;
 const SEQ_SET: u64 = 35;
+// A `ChunkSeq`'s `push` (`seq_reserve_then` with the grown handle
+// written back to the receiver's local): the element's stride and kind,
+// then the receiver's local.
+const SEQ_PUSH: u64 = 36;
+// `ChunkSeq::new`: the shared empty header (`seq_empty_header`).
+const SEQ_NEW: u64 = 37;
+// The plan's runtime word: the body grows a sequence, or reads the
+// shared empty header (whose JIT address only the walk knows).
+const RUNTIME_GROWS: u64 = 1;
+const RUNTIME_EMPTY_HEADER: u64 = 2;
 // A sequence header's length word (src/seq/native.rs `LEN`).
 const HEADER_LEN_OFFSET: u64 = 0;
 // The bits of a literal byte and of the word it is packed into.
@@ -2812,7 +2822,11 @@ impl Gen {
             }
         }
         if n == 0 {
-            return false;
+            if label != self.ops.seq_new || kept != 0 || !self.body_seq_type(i.ty) {
+                return false;
+            }
+            extra.push(SEQ_NEW);
+            return true;
         }
         let receiver = default_type(inout self.ctx.types, n32(u64_at(in h.vty, u64_at(in ops, 0))));
         let node = self.ctx.types.node(receiver);
@@ -2885,6 +2899,19 @@ impl Gen {
                 ops_s.index_out_of_bounds,
                 inout extra
             );
+        }
+        if chunk && n == 2 && label == ops_s.seq_push {
+            let (stride, lane) = self.body_elem(receiver);
+            let l = self.body_receiver_local(in h, i);
+            if stride == 0 || l == NONE64 {
+                return false;
+            }
+            let elem = default_type(inout self.ctx.types, self.ctx.types.arg(receiver, 0));
+            extra.push(SEQ_PUSH);
+            extra.push(stride);
+            extra.push(self.body_kind(elem));
+            extra.push(l);
+            return true;
         }
         let get = (slice && label == ops_s.seq_slice_get) || (chunk && label == ops_s.seq_get);
         if n == 2 && get {
@@ -3208,6 +3235,46 @@ impl Gen {
     // The locals that keep a home slot on the optimize path as well
     // (`register_locals`): those lent `inout` or `sink` to a call that may
     // fail, which writes through the slot before it can leave (#2614).
+    // The local a growing sequence operation `i` writes its grown handle
+    // back to (`seq_write_back`): its receiver's place, a whole local.
+    // NONE64 for any other receiver.
+    fn body_receiver_local(in self, in h: Header, i: InstRow) -> u64 {
+        let at = add(i.a, CALL_ARGS);
+        let root = self.program.op(add(at, CALL_ARG_ROOT_OFFSET));
+        let path = self.program.path(self.program.op(add(at, CALL_ARG_PATH_OFFSET)));
+        if root == 0 || path.n != 0 {
+            return NONE64;
+        }
+        self.body_local(in h, wrapping_sub(root, 1))
+    }
+
+    // What of the sequence runtime graph `f` uses: RUNTIME_GROWS when it
+    // grows a sequence (`seq_runtime_call`), RUNTIME_EMPTY_HEADER when it
+    // makes an empty one (`seq_empty_header`). An AOT build needs the
+    // runtime in the module for either.
+    fn body_runtime(inout self, f: FnRow) -> u64 {
+        let mut uses: u64 = 0;
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            for ii in 0..row.ic {
+                let i = self.program.inst(add(row.i0, ii));
+                if i.op != Op::Seq {
+                    continue;
+                }
+                let pool = self.program.pool_row(self.program.op(i.a));
+                if pool.kind != POOL_SEQ {
+                    continue;
+                }
+                if pool.label == self.ops.seq_push {
+                    uses = uses | RUNTIME_GROWS;
+                } else if pool.label == self.ops.seq_new {
+                    uses = uses | RUNTIME_EMPTY_HEADER;
+                }
+            }
+        }
+        uses
+    }
+
     // Whether `t` is a `ChunkSeq[T]` (#2750).
     fn body_seq_type(inout self, t: u32) -> bool {
         let d = default_type(inout self.ctx.types, t);
@@ -3684,6 +3751,10 @@ impl Gen {
         // The words a small enum result is returned as (#2581), 0 for any
         // other result: the request's frame must agree.
         o.push(self.enums.returns(fi));
+        // What of the sequence runtime the body uses (#2750): an AOT
+        // build without the runtime yet leaves the body to the walk, which
+        // defines it.
+        o.push(self.body_runtime(f));
         o.extend(in graph_words.as_slice());
         o.extend(in block_words.as_slice());
         out.push(fi);

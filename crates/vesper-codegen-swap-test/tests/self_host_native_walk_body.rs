@@ -2706,8 +2706,11 @@ fn vesper_inout_arguments_to_fail_only_callees_match() {
 const MIN_FAIL_SRET: u64 = 16;
 
 /// ChunkSeq values (#2750): a sequence is its header's handle word, read
-/// through `len`, a checked element and `as_slice`, kept in a register or
-/// a home slot as the walk keeps it, passed `in` and `inout`.
+/// through `len`, a checked element and `as_slice`, written by `set`,
+/// `try_set` and `push`, made by `ChunkSeq::new`, kept in a register or a
+/// home slot as the walk keeps it, passed `in` and `inout`. The first
+/// body that uses the sequence runtime in an object is the walk's (it
+/// defines the runtime), and so is `ChunkSeq::new` under the JIT.
 const CHUNK_SEQS: &str = "
 fn count(in s: ChunkSeq[u64]) -> u64 {
     s.len()
@@ -2762,6 +2765,12 @@ fn set_at(inout s: ChunkSeq[u64], i: u64, x: u64) -> bool {
 fn put_at(inout s: ChunkSeq[u64], i: u64, x: u64) eff [Fail[RuntimeError]] {
     s.set(i, x);
 }
+fn fresh() -> ChunkSeq[u64] {
+    ChunkSeq::new[u64]()
+}
+fn fresh_bytes() -> ChunkSeq[u8] {
+    ChunkSeq::new[u8]()
+}
 fn made(n: u64) -> ChunkSeq[u64] {
     let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
     s.push(n);
@@ -2793,9 +2802,13 @@ fn main() -> i64 {
     let lens = count(in w) ^ count_plus(in b, 5) ^ via_slice(in w) ^ inout_len(inout w)
         ^ relay_len(in w) ^ g ^ (if ok { 1 } else { 0 });
     let m = pass_on(41);
+    let mut e = fresh();
+    grow(inout e, 3);
+    let mut eb = fresh_bytes();
+    eb.push(9);
     handle Fail[RuntimeError] in {
         put_at(inout w, 5, 17);
-        let a = word_at(in w, 1) ^ small_at(in b, in q, 0) ^ word_at(in m, 0);
+        let a = word_at(in w, 1) ^ small_at(in b, in q, 0) ^ word_at(in m, 0) ^ word_at(in e, 0) ^ count_plus(in eb, 1);
         let c = half_at(in h, in z, 1);
         let d = saturating_i64(float_at(in f, 1));
         let e = word_at(in w, 9);
@@ -2838,4 +2851,4 @@ fn vesper_chunk_seq_bodies_match() {
 
 /// `CHUNK_SEQS`'s functions emitted from Vesper, both settings, both
 /// comparisons of a JIT-running host.
-const MIN_CHUNK_SEQ_EMITTED: u64 = 44;
+const MIN_CHUNK_SEQ_EMITTED: u64 = 54;

@@ -180,6 +180,7 @@ vesper_hybrid(
             "//:check_layout_package",
             "//:codegen_scalar_emit_package",
             "//:codegen_scalar_package",
+            "//:codegen_seq_emit_package",
             "//:place_ir_package",
             "//packages/vesper-cranelift:cranelift_package",
         ],
