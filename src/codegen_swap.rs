@@ -1267,7 +1267,11 @@ pub mod body {
     /// builds it in a local buffer: its `sret` word is the buffer's value
     /// with the result's word count at [`RESULT_WORDS_SHIFT`]; one that
     /// returns a small enum's words (`FrameResult::Words`) has
-    /// [`NO_POINTER`] below its word count. No result.
+    /// [`NO_POINTER`] below its word count. Then `p, p words`: for each of
+    /// the function's `p` declared parameters the variable holding its
+    /// address, or [`NO_VALUE`] (#2563: an `inout` scalar parameter is
+    /// loaded at entry and stored through its address at every
+    /// definition). No result.
     pub const FUNCTION: u32 = 1;
 
     /// The low word of a [`FUNCTION`] request's `sret` word when a small
@@ -1314,6 +1318,25 @@ pub mod body {
     /// A [`FUNCTION`] request's callees, `sret` word and result homes, or
     /// `None` when the arguments do not have that layout.
     pub fn layout(args: &[u64]) -> Option<(&[u64], u64, &[u64])> {
+        full(args).map(|(callees, sret, homes, _, _)| (callees, sret, homes))
+    }
+
+    /// A [`FUNCTION`] request's parameter address words (#2563), or `None`
+    /// when the arguments do not have that layout.
+    pub fn pointers(args: &[u64]) -> Option<&[u64]> {
+        full(args).map(|(_, _, _, pointers, _)| pointers)
+    }
+    /// A [`FUNCTION`] request's entry views (#2653): for each slice
+    /// parameter read once at entry, its index, its read count and the
+    /// reads; `None` when the arguments do not have that layout.
+    pub fn entry_views(args: &[u64]) -> Option<&[u64]> {
+        full(args).map(|(_, _, _, _, views)| views)
+    }
+
+    /// A [`FUNCTION`] request's callees, `sret` word, result homes,
+    /// parameter addresses and entry view words.
+    #[allow(clippy::type_complexity)]
+    fn full(args: &[u64]) -> Option<(&[u64], u64, &[u64], &[u64], &[u64])> {
         let params = usize::try_from(*args.get(FLAGS)?).ok()?;
         // The parameter count, then the parameter variables.
         let count_at = FLAGS + 1 + params;
@@ -1322,9 +1345,26 @@ pub mod body {
         let callees = args.get(count_at + 1..sret_at)?;
         let sret = *args.get(sret_at)?;
         let homes = usize::try_from(*args.get(sret_at + 1)?).ok()?;
-        args.get(sret_at + 2..)
-            .filter(|rest| rest.len() == homes)
-            .map(|rest| (callees, sret, rest))
+        let pointers_at = sret_at + 2 + homes;
+        let result_homes = args.get(sret_at + 2..pointers_at)?;
+        let pointers = usize::try_from(*args.get(pointers_at)?).ok()?;
+        let views_at = pointers_at + 1 + pointers;
+        let pointer_words = args.get(pointers_at + 1..views_at)?;
+        // The slice parameters read once at entry (#2653): each one's
+        // parameter index, read count and reads.
+        let views = usize::try_from(*args.get(views_at)?).ok()?;
+        let mut at = views_at + 1;
+        for _ in 0..views {
+            let reads = usize::try_from(*args.get(at + 1)?).ok()?;
+            at += 2 + reads;
+        }
+        (at == args.len()).then_some((
+            callees,
+            sret,
+            result_homes,
+            pointer_words,
+            &args[views_at + 1..],
+        ))
     }
 }
 

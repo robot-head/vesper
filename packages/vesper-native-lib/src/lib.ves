@@ -15,7 +15,9 @@
 // scalar parameters and results, no failure record, sret, pointers or
 // capabilities). Slice 2a-2a (declare.ves) makes the instances and their
 // declarations in Vesper from the calls input; the request still names
-// what the walk decides: each definition's flags, callees and body plan.
+// what the walk decides: each definition's flags and callees. Slice 3a
+// plans each body (@vesper/codegen-scalar over the walk's program) and
+// takes its status from the instance's ABI.
 // Slice 2a-4 runs the CLIF passes of an optimized definition, and outlines
 // its cold paths into helpers.
 //
@@ -25,10 +27,12 @@
 //     n exports, each: instance key, symbol,
 //     the calls input (a string: @vesper/codegen-calls' input, whose
 //         first library task names the exports as its roots),
+//     the walk's program (a string: @vesper/check-data's context and
+//         @vesper/place-ir's program after optimize, inline, drop
+//         elaboration and hoisting, which the bodies are planned from),
 //     n definitions, each: instance index, flags (OPTIMIZE_FLAG,
-//         CONST_TIME_FLAG), status, source
-//         locations, n callees, callee instance indexes (or NO_CALLEE),
-//         n plan words, the plan words,
+//         CONST_TIME_FLAG), source locations, n callees, callee
+//         instance indexes (or NO_CALLEE),
 //     then the 128-bit export entries and the v2 section (exports.ves).
 //
 // Slice 2a-2b (#2642) adds what `compile_exports` defines after the walk:
@@ -49,6 +53,10 @@ use @vesper/codegen-scalar-emit::body::{emit_body_words};
 use @vesper/native-clif-opt::{STEP_MERGE_TAILS, is_ported, pass_steps, run_steps};
 use @vesper/native-vectorize::{vectorize_script};
 use @vesper/native-cold-outline::{outline_script};
+use @vesper/codegen-scalar::{codegen_scalar_body_plan_prefix};
+use @vesper/codegen-calls::data::{calls_input_round_trip};
+use @vesper/check-data::input::{Reader as IrReader, read_ctx};
+use @vesper/place-ir::{read_program};
 use self::declare::{Declared, declare_library, declared_new, exports_new};
 
 // The answer's status words.
@@ -82,6 +90,11 @@ const OPTIMIZE_FLAG: u64 = 1;
 const CONST_TIME_FLAG: u64 = 2;
 // The function words carry no pointer type (`function_words`'s 0).
 const NO_POINTER_TYPE: u32 = 0;
+// A program function with no body plan.
+const NO_PLAN: u64 = 18446744073709551615;
+// A body plan entry's function and word count, before its words.
+const PLAN_HEADER_WORDS: u64 = 2;
+const NO_BODY_PLAN: Str = "no body plan for a definition: ";
 
 pub struct Reader {
     pub pos: u64,
@@ -150,14 +163,14 @@ fn define_one(
     inout m: Module,
     in req: Slice[u8],
     inout r: Reader,
-    in d: Declared
+    in d: Declared,
+    in plans: Plans
 ) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let index = r.word(in req);
     let flags = r.word(in req);
     let optimize = flags & OPTIMIZE_FLAG;
     let const_time = flags & CONST_TIME_FLAG != 0;
-    let status = r.word(in req);
     let locations = r.word(in req);
     let nc = r.word(in req);
     let mut callees: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -171,11 +184,6 @@ fn define_one(
             }
         );
     }
-    let nplan = r.word(in req);
-    let mut plan: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for _ in 0..nplan {
-        plan.push(r.word(in req));
-    }
     if r.bad {
         err.extend(in MALFORMED.as_bytes());
         return err;
@@ -186,6 +194,20 @@ fn define_one(
         err.extend(in UNKNOWN_FUNCTION.as_bytes());
         return err;
     }
+    let status = at64(in d.status, index);
+    // The body plan of the instance's function (codegen-scalar's
+    // `[function, n, n words]` entry); a function without one is the
+    // walk's.
+    let at = match plans.at.try_get(index) {
+        Option::Some(v) => v,
+        Option::None => NO_PLAN,
+    };
+    if at == NO_PLAN {
+        err.extend(in NO_BODY_PLAN.as_bytes());
+        push_dec(inout err, index);
+        return err;
+    }
+    let plan_end = wrapping_add(at, at64(in plans.words, wrapping_sub(at, 1)));
     let sig_id = SigId { id: wrapping_u32(sig) };
     let mut b = match builder_new(in m, sig_id) {
         Option::Some(b) => b,
@@ -213,7 +235,15 @@ fn define_one(
     args.extend(in callees.as_slice());
     args.push(NO_VALUE);
     args.push(0);
-    args.extend(in plan.as_slice());
+    // No parameter has an address: every one is its block parameter
+    // (`codegen_swap::body::NO_VALUE` per parameter, #2563).
+    args.push(widen_u64(np));
+    for k in 0..np {
+        args.push(NO_VALUE);
+    }
+    // No slice parameter is read once at entry (#2653).
+    args.push(0);
+    args.extend(in plans.words[at..plan_end]);
     let answer = emit_body_words(args, inout b, inout m);
     if answer != HANDLED {
         builder_free(b);
@@ -317,6 +347,64 @@ fn optimize_function(inout b: Builder, in m: Module) -> ChunkSeq[u8] eff [Ffi[Cr
     err
 }
 
+// The body plans of the program the walk emits from (slice 3a of
+// #2349): the words of @vesper/codegen-scalar's `[function, n, n words]`
+// entries, and for each instance the start of its function's plan words
+// (`NO_PLAN` when it has none).
+pub struct Plans {
+    words: ChunkSeq[u64],
+    at: ChunkSeq[u64],
+}
+
+fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
+    let words = codegen_scalar_body_plan_prefix(in program);
+    // per program function: the start of its plan words
+    let mut by_row: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut k: u64 = 0;
+    loop {
+        if wrapping_add(k, PLAN_HEADER_WORDS) > words.len() {
+            break;
+        }
+        let row = at64(in words, k);
+        let n = at64(in words, wrapping_add(k, 1));
+        loop {
+            if by_row.len() > row {
+                break;
+            }
+            by_row.push(NO_PLAN);
+        }
+        let start = wrapping_add(k, PLAN_HEADER_WORDS);
+        let ok = by_row.try_set(row, start);
+        k = wrapping_add(start, n);
+    }
+    let mut r = IrReader { pos: 0 };
+    let c = read_ctx(inout r, in program);
+    let p = read_program(inout r, in program, in c);
+    let mut at: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let count = d.name_at.len();
+    for i in 0..count {
+        let start = at64(in d.name_at, i);
+        let end = if wrapping_add(i, 1) < count {
+            at64(in d.name_at, wrapping_add(i, 1))
+        } else {
+            d.names.len()
+        };
+        let sym = c.names.lookup(in d.names[start..end]);
+        let mut plan = NO_PLAN;
+        for j in 0..p.fn_count() {
+            if p.function(j).name == sym {
+                plan = match by_row.try_get(j) {
+                    Option::Some(v) => v,
+                    Option::None => NO_PLAN,
+                };
+                break;
+            }
+        }
+        at.push(plan);
+    }
+    Plans { words: words, at: at }
+}
+
 fn push_dec(inout out: ChunkSeq[u8], value: u64) {
     if value >= DECIMAL_BASE {
         push_dec(inout out, value / DECIMAL_BASE);
@@ -360,13 +448,19 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
         module_free(m);
         return failure(in declare_err.as_slice());
     }
+    let walk = r.bytes(in req);
+    if r.bad {
+        module_free(m);
+        return failure(in MALFORMED.as_bytes());
+    }
+    let plans = plans_of(in walk.as_slice(), in d);
     let nd = r.word(in req);
     if r.bad {
         module_free(m);
         return failure(in MALFORMED.as_bytes());
     }
     for _ in 0..nd {
-        let err = define_one(inout m, in req, inout r, in d);
+        let err = define_one(inout m, in req, inout r, in d, in plans);
         if err.len() != 0 {
             module_free(m);
             return failure(in err.as_slice());
@@ -399,4 +493,11 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
             failure(in message.as_slice())
         }
     }
+}
+
+// A calls input read and written back by @vesper/codegen-calls' writers
+// (slice 3d of #2349): the differential's check that a calls input Vesper
+// writes builds the same object as the Rust-encoded one.
+pub fn calls_round_trip(in calls: Slice[u8]) -> ChunkSeq[u8] {
+    calls_input_round_trip(in calls)
 }

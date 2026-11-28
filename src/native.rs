@@ -4051,7 +4051,8 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// The callee of an `Op::Call` that `call_function_into` lowers to one
     /// `call` of an imported function and nothing else (part 6b of the
     /// body hook, #2094): a compiled-once, pure, non-generic function of
-    /// scalar `in` parameters and a scalar result, with no status word,
+    /// scalar `in` parameters (or, for a pure callee, `inout` scalars
+    /// borrowed from whole locals, #2563) and a scalar result, with no status word,
     /// register result, caller slot or trace flag, not a reserved builtin,
     /// constant table or `dyn` stub. A `fail_only` callee (#2425) takes a
     /// failure record after its arguments: its word carries
@@ -4064,6 +4065,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         args: &[crate::ir::Argument],
         capability: Option<&str>,
         types: &[Type],
+        locals: &BTreeMap<String, Type>,
     ) -> Option<u64> {
         let source = self.world.functions.get(callee)?;
         let fails = fail_only(self.world, source);
@@ -4080,9 +4082,25 @@ impl<M: Module> Codegen<'_, '_, M> {
             || crate::arrays::table_function(callee).is_some()
             || self.world.dyn_objects.stubs.contains_key(callee)
             || args.len() != source.params.len()
-            || args.iter().any(|a| a.pass != Pass::In)
         {
             return None;
+        }
+        // A pure callee may borrow scalar locals `inout` (#2563): each
+        // such argument is a whole local, passed by its address (a scratch
+        // word for a register) and loaded back after the call.
+        for (a, p) in args.iter().zip(&source.params) {
+            let whole_local = a.place.as_ref().is_some_and(|place| {
+                place.path.is_empty()
+                    && locals.get(&place.root).is_some_and(|t| {
+                        Layout::of(self.world, &crate::numeric::default_type(t))
+                            .is_ok_and(|l| !l.aggregate())
+                    })
+            });
+            match (a.pass, p.pass) {
+                (Pass::In, Pass::In) => {}
+                (Pass::Inout, Pass::Inout) if !fails && whole_local => {}
+                _ => return None,
+            }
         }
         let scalar_type = |t: &Type| {
             !crate::seq::is_seq_type(t)
@@ -4164,7 +4182,6 @@ impl<M: Module> Codegen<'_, '_, M> {
             && self.trace_fail.is_none()
             && self.caller_slot.is_none()
             && frame.function_args.is_empty()
-            && self.pointers.is_empty()
             // A `fail_only` frame's capabilities are its failure exits
             // (#2425): the record pointer goes in the request after the
             // parameters.
@@ -4180,6 +4197,13 @@ impl<M: Module> Codegen<'_, '_, M> {
         // Without a `body` hook the request is never read, so the default
         // compiler skips building it (and the callee scan below).
         if !plain || crate::codegen_swap::installed().body.is_none() {
+            return Ok(false);
+        }
+        // Sequence and string operations (#2653): the body hook emits the
+        // plain ones only, so a graph whose sequences the walk drops,
+        // fuses into a match or reads through hoisted headers stays on
+        // the walk.
+        if !self.seq_body_plain(body) {
             return Ok(false);
         }
         let mut args = vec![
@@ -4216,7 +4240,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     capability,
                     types,
                 } => Some(
-                    self.plain_call(callee, args, capability.as_deref(), types)
+                    self.plain_call(callee, args, capability.as_deref(), types, &body.locals)
                         .unwrap_or(crate::codegen_swap::body::NO_CALLEE),
                 ),
                 _ => None,
@@ -4275,6 +4299,30 @@ impl<M: Module> Codegen<'_, '_, M> {
         });
         args.push(result_homes.len() as u64);
         args.extend(result_homes);
+        // Each parameter's address variable: an `inout` scalar is loaded
+        // at entry and stored through its address at every definition
+        // (`Codegen::use_var`, `def_homes`); any other parameter has none.
+        args.push(f.params.len() as u64);
+        for p in &f.params {
+            let address = self
+                .vars
+                .get(&p.name)
+                .and_then(|var| self.pointers.get(&var.as_u32()));
+            args.push(address.map_or(crate::codegen_swap::body::NO_VALUE, |a| {
+                u64::from(a.as_u32())
+            }));
+        }
+        // The slice parameters read once at entry (#2653): each one's
+        // parameter index and the reads that take its receiver.
+        let views = self
+            .entry_views(body)
+            .ok_or("a header hoist the body hook refused")?;
+        args.push(views.len() as u64);
+        for (param, reads) in views {
+            args.push(param as u64);
+            args.push(reads.len() as u64);
+            args.extend(reads);
+        }
         crate::codegen_swap::body_request(
             &mut self.b,
             &mut *self.m,
@@ -4283,6 +4331,63 @@ impl<M: Module> Codegen<'_, '_, M> {
             name,
             &args,
         )
+    }
+    /// Whether the walk lowers graph `body`'s sequence and string
+    /// operations with no drops, fused `try_get` matches or hoisted
+    /// header reads (#2653): true for a graph with none.
+    fn seq_body_plain(&self, body: &crate::ir::FunctionIr) -> bool {
+        use crate::ir::Op;
+        let has_seq = body
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .any(|i| matches!(i.op, Op::Seq { .. }));
+        if !has_seq {
+            return true;
+        }
+        // The graph `ir_graph_at` lowers: small enums kept as words.
+        let join = self.own_scalar_join(body);
+        let scalar_graph = self.scalar_graph(body, join.as_ref());
+        let graph = scalar_graph.as_ref().map_or(body, |s| &s.f);
+        let drops = self.drops_enabled()
+            && (!crate::fip::replace_drops(self.world, graph, None).is_empty()
+                || !crate::fip::temporary_drops(self.world, graph).is_empty()
+                || !crate::fip::fail_exit_drops(self.world, graph).is_empty());
+        !drops
+            && crate::fip::seq_drop_plan(self.world, graph).is_empty()
+            && seq_native::fused_reads(graph).is_empty()
+            && self.entry_views(body).is_some()
+    }
+    /// The header hoists of graph `body` the body hook emits (#2653): on
+    /// the optimize path, the slice parameters `ir_graph_at` reads once
+    /// at entry (`seq_entry_view`), as (parameter index, the indexes of
+    /// the reads given that receiver among the graph's values). `None`
+    /// when a hoist is any other (a loop preheader's, a sequence's, a
+    /// field's).
+    fn entry_views(&self, body: &crate::ir::FunctionIr) -> Option<Vec<(usize, Vec<u64>)>> {
+        if !self.operands_only {
+            return Some(vec![]);
+        }
+        let join = self.own_scalar_join(body);
+        let scalar_graph = self.scalar_graph(body, join.as_ref());
+        let graph = scalar_graph.as_ref().map_or(body, |s| &s.f);
+        let mut views = vec![];
+        for hoist in crate::bounds_hoist::header_hoists(graph) {
+            if !hoist.entry || !hoist.place.path.is_empty() || !crate::seq::is_slice_type(&hoist.ty)
+            {
+                return None;
+            }
+            let param = graph
+                .params
+                .iter()
+                .position(|p| p.name == hoist.place.root)?;
+            let mut reads = vec![];
+            for read in &hoist.reads {
+                reads.push(graph.values.keys().position(|v| v == read)? as u64);
+            }
+            views.push((param, reads));
+        }
+        Some(views)
     }
     /// The enum shape a top-level graph `f` returns as words: the
     /// function's own register-result ABI when its result is a small enum

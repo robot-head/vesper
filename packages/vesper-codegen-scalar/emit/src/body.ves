@@ -49,7 +49,8 @@ use @vesper/cranelift::{
     ins_udiv, ins_uextend, ins_unary, ins_urem, ins_ushr, inst_result, invalid, is_invalid,
     seal_block, set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i128, ty_i32, ty_i64,
     ty_i8, use_var, vals1, value_type, create_stack_slot, ins_iadd_imm, ins_load, ins_stack_addr,
-    ins_store, module_pointer_type
+    ins_store, module_pointer_type, ins_imul_imm, ins_uload8, ins_uload16, ins_uload32,
+    mem_can_move, mem_readonly, mem_trusted
 };
 use super::{
     BODY_ERROR, DECLINED, HANDLED, coerce, emit_overflow_test, kind_max_imm, kind_min_imm,
@@ -99,6 +100,11 @@ const RECORD_PAYLOAD: i64 = 8;
 // A re-raised error copied by words (`/codegen-scalar`).
 const AGGREGATE_ERROR: u64 = 18446744073709551615;
 const INST_FAIL_CALL: u64 = 41;
+// A direct call that borrows scalar locals `inout` (#2563), and its
+// argument tags.
+const INST_INOUT_CALL: u64 = 48;
+const ARG_IN: u64 = 0;
+const ARG_INOUT: u64 = 1;
 // `codegen_swap::body::FAIL_CALL` and `STATUS_CALL`, the flags of a callee
 // word above its 32-bit `FuncId`.
 const FAIL_CALL: u64 = 4294967296;
@@ -108,6 +114,30 @@ const STATUS_CALL: u64 = 8589934592;
 const WORDS_CALL: u64 = 17179869184;
 // A direct call whose small enum result comes back as words (#2581).
 const INST_WORDS_CALL: u64 = 56;
+// A sequence or string operation (#2653) and its forms (@vesper/codegen-scalar's
+// `body_seq`).
+const INST_SEQ: u64 = 80;
+const SEQ_WORD: u64 = 1;
+const SEQ_SAME: u64 = 2;
+const SEQ_AS_BYTES: u64 = 3;
+const SEQ_BYTE_AT: u64 = 4;
+const SEQ_GET: u64 = 5;
+const SEQ_VIEW_WORD: u64 = 6;
+// The header words (src/strings/native.rs, src/seq/native.rs): a
+// string's `{len, cap, data}`, a slice view's `{handle, start, len}`, a
+// sequence header's data pointer.
+const STR_LEN: i32 = 0;
+const STR_DATA: i32 = 16;
+const VIEW_HANDLE: i32 = 0;
+const VIEW_START: i32 = 8;
+const VIEW_LEN: i32 = 16;
+const HEADER_DATA: i32 = 16;
+// A slice view's storage (`seq_slice_value`, `str_value`).
+const VIEW_BYTES: u32 = 24;
+// `seq_load_elem`'s strides that load zero-extended.
+const STRIDE_BYTE: u64 = 1;
+const STRIDE_HALF: u64 = 2;
+const STRIDE_QUARTER: u64 = 4;
 const CALLEE_ID_MASK: u64 = 4294967295;
 const INST_ICONST: u64 = 16;
 const INST_F64CONST: u64 = 17;
@@ -852,9 +882,50 @@ struct Body {
     sret: u32,
     homes: ChunkSeq[u64],
     result_words: u64,
+    // The slice parameters read once at entry (#2653): value index -> the
+    // receiver its read takes (invalid for any other value), and the
+    // views and handles whose header words are read-only memory
+    // (`Codegen::invariant_headers`).
+    entry_reads: ChunkSeq[u32],
+    invariant: ChunkSeq[u32],
 }
 
 impl Body {
+    fn is_invariant(in self, v: Value) -> bool {
+        for k in 0..self.invariant.len() {
+            if at32(in self.invariant, k) == v.id {
+                return true;
+            }
+        }
+        false
+    }
+
+    // `seq_word`: a header word, loaded as read-only memory
+    // (`invariant_word`) from an invariant view or handle.
+    fn seq_word(
+        inout self,
+        inout b: Builder,
+        ptr: Value,
+        offset: i32
+    ) -> Value eff [Ffi[Cranelift]] {
+        let flags = if self.is_invariant(ptr) {
+            mem_trusted() | mem_readonly() | mem_can_move()
+        } else {
+            PLAIN
+        };
+        ins_load(inout b, ty_i64(), flags, ptr, offset)
+    }
+
+    // The receiver a read of value `i` takes, or an invalid value.
+    fn entry_read(in self, i: u64) -> Value {
+        Value {
+            id: match self.entry_reads.try_get(i) {
+                Option::Some(x) => x,
+                Option::None => invalid(),
+            }
+        }
+    }
+
     fn value(in self, i: u64) -> Value {
         Value { id: at32(in self.values, i) }
     }
@@ -1180,6 +1251,105 @@ impl Body {
         switch_to_block(inout b, good);
     }
 
+    // `Codegen::seq_op` of a string or slice operation (#2653) on
+    // receiver `x` and index `y`: `str_op`'s `len`, `as_str`, `as_bytes`
+    // and `byte_at` (`str_word`, `str_value`, `seq_guard`, `str_byte`),
+    // and a slice's `len` and checked element (`seq_view`, `seq_guard`,
+    // `seq_elem_addr`, `seq_load_elem`). An invalid value for a form the
+    // plan never writes.
+    fn seq(
+        inout self,
+        inout b: Builder,
+        in m: Module,
+        inout w: Words,
+        x: Value,
+        y: Value
+    ) -> Value eff [Ffi[Cranelift]] {
+        let form = w.next();
+        if form == SEQ_WORD {
+            let offset = w.next();
+            return ins_load(inout b, ty_i64(), PLAIN, x, wrapping_i32(offset));
+        }
+        if form == SEQ_VIEW_WORD {
+            let offset = w.next();
+            return self.seq_word(inout b, x, wrapping_i32(offset));
+        }
+        if form == SEQ_SAME {
+            return x;
+        }
+        if form == SEQ_AS_BYTES {
+            // `str_value(s, 0, len)`: the view `{s, 0, len}` in fresh
+            // zeroed storage (`Codegen::alloc`).
+            let len = ins_load(inout b, ty_i64(), PLAIN, x, STR_LEN);
+            let zero = ins_iconst(inout b, ty_i64(), 0);
+            let slot = create_stack_slot(inout b, VIEW_BYTES, SLOT_ALIGN_SHIFT);
+            let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+            let mut offset: u32 = 0;
+            loop {
+                if offset >= VIEW_BYTES {
+                    break;
+                }
+                let z = ins_iconst(inout b, ty_i64(), 0);
+                ins_store(inout b, PLAIN, z, ptr, wrapping_i32(offset));
+                offset = wrapping_add(offset, WORD_BYTES);
+            }
+            ins_store(inout b, PLAIN, x, ptr, VIEW_HANDLE);
+            ins_store(inout b, PLAIN, zero, ptr, VIEW_START);
+            ins_store(inout b, PLAIN, len, ptr, VIEW_LEN);
+            return ptr;
+        }
+        if form == SEQ_BYTE_AT {
+            let index = w.next();
+            let size = w.next();
+            let tag = w.next();
+            let len = ins_load(inout b, ty_i64(), PLAIN, x, STR_LEN);
+            let valid = ins_icmp(inout b, cc_ult(), y, len);
+            self.raising(inout b, in m, valid, false, index, size, tag);
+            let data = ins_load(inout b, ty_i64(), PLAIN, x, STR_DATA);
+            let at = ins_iadd(inout b, data, y);
+            return ins_uload8(inout b, ty_i64(), PLAIN, at, 0);
+        }
+        if form == SEQ_GET {
+            let stride = w.next();
+            let lane = w.next();
+            let index = w.next();
+            let size = w.next();
+            let tag = w.next();
+            // `seq_view`: an invariant view's handle is invariant too.
+            let handle = self.seq_word(inout b, x, VIEW_HANDLE);
+            if self.is_invariant(x) {
+                self.invariant.push(handle.id);
+            }
+            let start = self.seq_word(inout b, x, VIEW_START);
+            let len = self.seq_word(inout b, x, VIEW_LEN);
+            let valid = ins_icmp(inout b, cc_ult(), y, len);
+            self.raising(inout b, in m, valid, false, index, size, tag);
+            // `seq_elem_addr`: from an invariant handle, `data + start *
+            // stride` first, which Cranelift computes once.
+            let data = self.seq_word(inout b, handle, HEADER_DATA);
+            let addr = if self.is_invariant(handle) {
+                let first = ins_imul_imm(inout b, start, wrapping_i64(stride));
+                let base = ins_iadd(inout b, data, first);
+                let offset = ins_imul_imm(inout b, y, wrapping_i64(stride));
+                ins_iadd(inout b, base, offset)
+            } else {
+                let at = ins_iadd(inout b, start, y);
+                let offset = ins_imul_imm(inout b, at, wrapping_i64(stride));
+                ins_iadd(inout b, data, offset)
+            };
+            return if stride == STRIDE_BYTE {
+                ins_uload8(inout b, ty_i64(), PLAIN, addr, 0)
+            } else if stride == STRIDE_HALF {
+                ins_uload16(inout b, ty_i64(), PLAIN, addr, 0)
+            } else if stride == STRIDE_QUARTER {
+                ins_uload32(inout b, PLAIN, addr, 0)
+            } else {
+                ins_load(inout b, lane_type(lane), PLAIN, addr, 0)
+            };
+        }
+        Value { id: invalid() }
+    }
+
     // One instruction (`ir_graph_at`'s instruction loop): its operands
     // read from their registers, its arm, the `coerce` to its type and the
     // definition of its register. False on a word the plan never writes.
@@ -1199,6 +1369,14 @@ impl Body {
             ops.push(w.next());
         }
         self.read_operands(inout b, in ops);
+        // A read of a slice parameter read at entry is its receiver.
+        for k in 0..ops.len() {
+            let i = at64(in ops, k);
+            let receiver = self.entry_read(i);
+            if !is_invalid(receiver) {
+                let ok = self.values.try_set(i, receiver.id);
+            }
+        }
         // `set_location`, after the operands' reads; the arm's own
         // `expr_located` sets and restores the same location.
         if self.locations && location != NO_LOCATION {
@@ -1229,8 +1407,13 @@ impl Body {
             // local's type.
             let local = w.next();
             let read = w.next();
-            let raw = self.use_local(inout b, local);
-            body_coerce(inout b, raw, read, self.optimize)
+            let receiver = self.entry_read(dest);
+            if !is_invalid(receiver) {
+                receiver
+            } else {
+                let raw = self.use_local(inout b, local);
+                body_coerce(inout b, raw, read, self.optimize)
+            }
         } else if kind == INST_BIND {
             let local = w.next();
             if local != NO_LOCAL {
@@ -1336,6 +1519,92 @@ impl Body {
                 self.reraise(inout b, inout w, record, tag);
                 result
             }
+        } else if kind == INST_INOUT_CALL {
+            // A pure callee that borrows scalar locals `inout` (#2563):
+            // `ir_temp` of each `in` argument, then in argument order each
+            // `in` one read back and each `inout` one's address
+            // (`Codegen::address`: its own, or a scratch word holding the
+            // register's value) with the value stored to it again
+            // (`call_function_into`); the call; then each borrowed local
+            // loaded back and defined (`restores`).
+            let call_idx = w.next();
+            if call_idx >= self.callees.len() {
+                return false;
+            }
+            let word = at64(in self.callees, call_idx);
+            if (word & FAIL_CALL) != 0 {
+                return false;
+            }
+            let callee = FuncId { id: wrapping_u32(word & CALLEE_ID_MASK) };
+            let mut temps: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for k in 0..n {
+                temps.push(temp(inout b, self.value(at64(in ops, k))).id);
+            }
+            let nargs = w.next();
+            let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let mut lent: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            let mut lent_ptrs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let mut lent_lanes: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            let mut ti: u64 = 0;
+            for k in 0..nargs {
+                let tag = w.next();
+                if tag == ARG_IN {
+                    let read = w.next();
+                    if ti >= n {
+                        return false;
+                    }
+                    let tv = Var { id: at32(in temps, ti) };
+                    ti = wrapping_add(ti, 1);
+                    args.push(body_operand(inout b, tv, read, self.optimize).id);
+                } else if tag == ARG_INOUT {
+                    let l = w.next();
+                    let lane = w.next();
+                    if l >= self.locals.len() {
+                        return false;
+                    }
+                    let address = at32(in self.addresses, l);
+                    let ptr = if address != invalid() {
+                        use_var(inout b, Var { id: address })
+                    } else {
+                        let value = self.use_local(inout b, l);
+                        let bytes = if lane == LANE_I128 {
+                            WIDE_BYTES
+                        } else {
+                            WORD_BYTES
+                        };
+                        let slot = create_stack_slot(inout b, bytes, SLOT_ALIGN_SHIFT);
+                        let scratch = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+                        ins_store(inout b, PLAIN, value, scratch, 0);
+                        scratch
+                    };
+                    let value = self.use_local(inout b, l);
+                    ins_store(inout b, PLAIN, value, ptr, 0);
+                    lent.push(l);
+                    lent_ptrs.push(ptr.id);
+                    lent_lanes.push(lane);
+                    args.push(ptr.id);
+                } else {
+                    return false;
+                }
+            }
+            if ti != n {
+                return false;
+            }
+            let fun = import_function(inout b, inout m, callee);
+            let _ = ins_call(inout b, fun, in args.as_slice());
+            let result = inst_result(inout b, 0);
+            for k in 0..lent.len() {
+                let l = at64(in lent, k);
+                let ptr = Value { id: at32(in lent_ptrs, k) };
+                let value = ins_load(inout b, lane_type(at64(in lent_lanes, k)), PLAIN, ptr, 0);
+                self.def_local(inout b, l, value);
+                let address = at32(in self.addresses, l);
+                if address != invalid() {
+                    let destination = use_var(inout b, Var { id: address });
+                    ins_store(inout b, PLAIN, value, destination, 0);
+                }
+            }
+            result
         } else if kind == INST_CHECKED {
             // `expr_at`'s general `Binary` arm (#2425): both operands named
             // by temporaries and read back, the divisor test of a partial
@@ -1769,6 +2038,12 @@ impl Body {
                 ptr = ins_iadd_imm(inout b, ptr, wrapping_i64(off));
             }
             ins_load(inout b, lane_type(flane), PLAIN, ptr, 0)
+        } else if kind == INST_SEQ {
+            let v = self.seq(inout b, in m, inout w, x, y);
+            if is_invalid(v) {
+                return false;
+            }
+            v
         } else if kind == INST_READ_COPY {
             let local = w.next();
             let size = w.next();
@@ -1991,6 +2266,49 @@ pub fn emit_body_words(
     for k in 0..nh {
         homes.push(w.next());
     }
+    // Each declared parameter's address variable, or `NO_VALUE` (#2563):
+    // an `inout` scalar is loaded at entry and stored through its address
+    // at every definition, as a spilled local is.
+    if count < wrapping_add(w.at, 1) {
+        return BODY_ERROR;
+    }
+    let npointers = w.next();
+    if count < wrapping_add(w.at, npointers) {
+        return BODY_ERROR;
+    }
+    let mut pointers: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..npointers {
+        let word = w.next();
+        pointers.push(
+            if word == NO_VALUE {
+                invalid()
+            } else {
+                wrapping_u32(word)
+            }
+        );
+    }
+    // The slice parameters read once at entry (#2653): each one's
+    // parameter index, then the reads that take its receiver.
+    if count < wrapping_add(w.at, 1) {
+        return BODY_ERROR;
+    }
+    let nviews = w.next();
+    let mut views: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..nviews {
+        if count < wrapping_add(w.at, 2) {
+            return BODY_ERROR;
+        }
+        let p = w.next();
+        let nr = w.next();
+        if p >= np || count < wrapping_add(w.at, nr) {
+            return BODY_ERROR;
+        }
+        views.push(p);
+        views.push(nr);
+        for j in 0..nr {
+            views.push(w.next());
+        }
+    }
     if count < wrapping_add(w.at, 3) {
         return BODY_ERROR;
     }
@@ -2047,6 +2365,8 @@ pub fn emit_body_words(
         sret: sret,
         homes: homes,
         result_words: result_words,
+        entry_reads: ChunkSeq::new[u32](),
+        invariant: ChunkSeq::new[u32](),
     };
     // The graph's blocks: the entry is the current block.
     s.blocks.push(current_block(inout b).id);
@@ -2058,23 +2378,30 @@ pub fn emit_body_words(
     for k in 0..nl {
         let entry = w.next();
         s.kinds.push(w.next());
-        s.addresses.push(invalid());
+        let mut address = invalid();
+        let mut spilled = !optimize;
         if entry >= LOCAL_PARAM_PRODUCT {
+            // A product parameter is its storage's address: no slot.
             let p = wrapping_sub(entry, LOCAL_PARAM_PRODUCT);
             s.locals.push(wrapping_u32(w.arg(wrapping_add(wrapping_add(ARG_PARAMS, 1), p))));
+            spilled = false;
         } else if entry >= LOCAL_PARAM {
             let p = wrapping_sub(entry, LOCAL_PARAM);
             s.locals.push(wrapping_u32(w.arg(wrapping_add(wrapping_add(ARG_PARAMS, 1), p))));
-            if !optimize {
-                s.spill(inout b, in m, k);
+            if p < npointers {
+                address = at32(in pointers, p);
             }
         } else if entry == LANE_PRODUCT {
+            // A product local's register holds its storage's address.
             s.locals.push(zeroed(inout b, LANE_I64));
+            spilled = false;
         } else {
             s.locals.push(zeroed(inout b, entry));
-            if !optimize {
-                s.spill(inout b, in m, k);
-            }
+        }
+        s.addresses.push(address);
+        // A parameter with an address has no slot or register of its own.
+        if spilled && address == invalid() {
+            s.spill(inout b, in m, k);
         }
     }
     // Each value's register.
@@ -2124,6 +2451,32 @@ pub fn emit_body_words(
             let p = Value { id: at32(in s.params, i) };
             def_var(inout b, var_at(in s.registers, i), p);
             let ok = s.values.try_set(i, p.id);
+        }
+        // `seq_entry_view` in the entry block: each view's parameter
+        // read once, its header words read-only memory from then on.
+        if bi == 0 {
+            let mut v: u64 = 0;
+            for _ in 0..nviews {
+                let p = at64(in views, v);
+                let nr = at64(in views, wrapping_add(v, 1));
+                v = wrapping_add(v, 2);
+                let var = Var {
+                    id: wrapping_u32(w.arg(wrapping_add(wrapping_add(ARG_PARAMS, 1), p)))
+                };
+                let receiver = use_var(inout b, var);
+                s.invariant.push(receiver.id);
+                for _ in 0..nr {
+                    let i = at64(in views, v);
+                    v = wrapping_add(v, 1);
+                    loop {
+                        if s.entry_reads.len() > i {
+                            break;
+                        }
+                        s.entry_reads.push(invalid());
+                    }
+                    let ok = s.entry_reads.try_set(i, receiver.id);
+                }
+            }
         }
         let ic = w.next();
         for j in 0..ic {

@@ -151,13 +151,7 @@ impl Session {
         Ok(session)
     }
     fn running(&self) -> Result<(), ServerError> {
-        match self.state {
-            Lifecycle::Running => Ok(()),
-            Lifecycle::Uninitialized => Err(ServerError::new(-32002, "Server not initialized")),
-            Lifecycle::Shutdown | Lifecycle::Exited => {
-                Err(ServerError::new(-32600, "Server has shut down"))
-            }
-        }
+        running(self.state)
     }
     pub(crate) fn request(
         &mut self,
@@ -165,102 +159,25 @@ impl Session {
         params: Option<Value>,
     ) -> Result<Value, ServerError> {
         validate_input(method, params.as_ref())?;
-        if method == "initialize" {
-            if self.state != Lifecycle::Uninitialized {
-                return Err(ServerError::new(
-                    -32600,
-                    "initialize may be requested only once",
-                ));
-            }
-            let initialize = object(params.as_ref())?;
-            let publishes = initialize
-                .get("capabilities")
-                .and_then(|value| value.pointer("/textDocument/publishDiagnostics"));
-            self.diagnostic_related = publishes
-                .and_then(|value| value.get("relatedInformation"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            self.diagnostic_help_data = publishes
-                .and_then(|value| value.get("dataSupport"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            self.hierarchical_symbols = initialize
-                .get("capabilities")
-                .and_then(|value| {
-                    value.pointer("/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
-                })
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            self.code_actions_supported =
-                initialize.get("capabilities").is_some_and(|capabilities| {
-                    capabilities
-                        .pointer("/workspace/workspaceEdit/documentChanges")
-                        .and_then(Value::as_bool)
-                        == Some(true)
-                        && capabilities
-                            .pointer("/textDocument/codeAction/codeActionLiteralSupport")
-                            .is_some_and(Value::is_object)
+        let params = match route(self.state, method, params.as_ref(), &self.lens_config)? {
+            Route::Initialize(n, result) => {
+                self.diagnostic_related = n.diagnostic_related;
+                self.diagnostic_help_data = n.diagnostic_help_data;
+                self.hierarchical_symbols = n.hierarchical_symbols;
+                self.code_actions_supported = n.code_actions;
+                self.code_lens_refresh = n.code_lens_refresh;
+                self.background = n.background.and_then(|delay| {
+                    vesper_lsp::lens::Debouncer::new(delay, lens_requests::BACKGROUND_ENTRIES).ok()
                 });
-            self.configure_background(initialize);
-            let code_actions = if self.code_actions_supported {
-                json!({"codeActionKinds":["quickfix","source.fixAll.vesper"],"resolveProvider":false})
-            } else {
-                Value::Bool(false)
-            };
-            self.state = Lifecycle::Running;
-            return Ok(json!({"capabilities":{
-                "positionEncoding":"utf-16",
-                "textDocumentSync":{"openClose":true,"change":2},
-                "hoverProvider":true,"definitionProvider":true,
-                "documentSymbolProvider":true,"workspaceSymbolProvider":true,
-                "documentFormattingProvider":true,
-                "codeActionProvider":code_actions,
-                "completionProvider":{"triggerCharacters":["."],"resolveProvider":false},
-                "inlayHintProvider":true,
-                "codeLensProvider":{"resolveProvider":false},
-                "executeCommandProvider":{"commands":[lens_requests::PROOF_COMMAND]},
-                "experimental":{
-                    "vesperLens":{"version":1,"poisonedRecovery":"VESPER_POISONED_RECOVERY",
-                        "completion":"obligation_ranked_members",
-                        "proofLenses":[super::proof_lens::EXTRACTION_SCOPE,
-                            super::proof_lens::SEMANTIC_SCOPE],
-                        "backgroundProofs":self.background.as_ref()
-                            .map(|b| json!({"debounceMs": b.delay().as_millis() as u64}))
-                            .unwrap_or(Value::Null),
-                        "asyncCancellation":"all_requests"},
-                    "vesperRecoveryStatus":{"scope":"syntax_only","version":1},
-                    "vesperMacroPreview":{"version":1,"tier":1,"scope":"expanded_source_only"}
-                }
-            },"serverInfo":{"name":"vesper","version":env!("CARGO_PKG_VERSION")}}));
-        }
-        self.running()?;
-        if method == "shutdown" {
-            if params.as_ref().is_some_and(|value| {
-                !value.is_null() && !value.as_object().is_some_and(|object| object.is_empty())
-            }) {
-                return Err(ServerError::params("shutdown takes no parameters"));
+                self.state = Lifecycle::Running;
+                return Ok(result);
             }
-            self.state = Lifecycle::Shutdown;
-            return Ok(Value::Null);
-        }
-        if !matches!(
-            method,
-            "textDocument/hover"
-                | "textDocument/definition"
-                | "textDocument/documentSymbol"
-                | "workspace/symbol"
-                | "vesper/signatureSearch"
-                | "vesper/recoveryStatus"
-                | "vesper/macroPreview"
-                | "textDocument/formatting"
-                | "textDocument/codeAction"
-                | "textDocument/completion"
-                | "textDocument/inlayHint"
-                | "textDocument/codeLens"
-        ) {
-            return Err(ServerError::new(-32601, "Method not found"));
-        }
-        let params = object(params.as_ref())?;
+            Route::Shutdown => {
+                self.state = Lifecycle::Shutdown;
+                return Ok(Value::Null);
+            }
+            Route::Handler(params) => params,
+        };
         match method {
             "vesper/macroPreview" => self.macro_preview(params),
             "vesper/recoveryStatus" => self.recovery_status(document_uri(params)?),
@@ -915,6 +832,144 @@ impl Session {
     }
 }
 
+/// What `initialize` negotiated from the client's capabilities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Negotiated {
+    diagnostic_related: bool,
+    diagnostic_help_data: bool,
+    hierarchical_symbols: bool,
+    code_actions: bool,
+    code_lens_refresh: bool,
+    background: Option<std::time::Duration>,
+}
+/// Where a validated request goes.
+enum Route<'a> {
+    /// `initialize`: the negotiated capabilities and the result.
+    Initialize(Negotiated, Value),
+    Shutdown,
+    /// A handled method, with its parameter object.
+    Handler(&'a serde_json::Map<String, Value>),
+}
+/// The methods the session handles once running.
+const HANDLED_METHODS: [&str; 12] = [
+    "textDocument/hover",
+    "textDocument/definition",
+    "textDocument/documentSymbol",
+    "workspace/symbol",
+    "vesper/signatureSearch",
+    "vesper/recoveryStatus",
+    "vesper/macroPreview",
+    "textDocument/formatting",
+    "textDocument/codeAction",
+    "textDocument/completion",
+    "textDocument/inlayHint",
+    "textDocument/codeLens",
+];
+/// The lifecycle gate of `Session::request` after `validate_input`:
+/// `initialize` once and its capability negotiation, the running check,
+/// `shutdown`, unknown methods and the parameter object.
+fn route<'a>(
+    state: Lifecycle,
+    method: &str,
+    params: Option<&'a Value>,
+    lens: &LensConfig,
+) -> Result<Route<'a>, ServerError> {
+    if method == "initialize" {
+        if state != Lifecycle::Uninitialized {
+            return Err(ServerError::new(
+                -32600,
+                "initialize may be requested only once",
+            ));
+        }
+        let initialize = object(params)?;
+        let capabilities = initialize.get("capabilities");
+        let publishes =
+            capabilities.and_then(|value| value.pointer("/textDocument/publishDiagnostics"));
+        let flag = |value: Option<&Value>| value.and_then(Value::as_bool).unwrap_or(false);
+        let code_actions = capabilities.is_some_and(|capabilities| {
+            capabilities
+                .pointer("/workspace/workspaceEdit/documentChanges")
+                .and_then(Value::as_bool)
+                == Some(true)
+                && capabilities
+                    .pointer("/textDocument/codeAction/codeActionLiteralSupport")
+                    .is_some_and(Value::is_object)
+        });
+        let (code_lens_refresh, background) = lens_requests::background_choice(initialize, lens);
+        let negotiated = Negotiated {
+            diagnostic_related: flag(publishes.and_then(|value| value.get("relatedInformation"))),
+            diagnostic_help_data: flag(publishes.and_then(|value| value.get("dataSupport"))),
+            hierarchical_symbols: flag(capabilities.and_then(|value| {
+                value.pointer("/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
+            })),
+            code_actions,
+            code_lens_refresh,
+            background,
+        };
+        return Ok(Route::Initialize(
+            negotiated,
+            initialize_result(&negotiated),
+        ));
+    }
+    running(state)?;
+    if method == "shutdown" {
+        if params.is_some_and(|value| {
+            !value.is_null() && !value.as_object().is_some_and(|object| object.is_empty())
+        }) {
+            return Err(ServerError::params("shutdown takes no parameters"));
+        }
+        return Ok(Route::Shutdown);
+    }
+    if !HANDLED_METHODS.contains(&method) {
+        return Err(ServerError::new(-32601, "Method not found"));
+    }
+    object(params).map(Route::Handler)
+}
+/// Requests other than `initialize` need a running session.
+fn running(state: Lifecycle) -> Result<(), ServerError> {
+    match state {
+        Lifecycle::Running => Ok(()),
+        Lifecycle::Uninitialized => Err(ServerError::new(-32002, "Server not initialized")),
+        Lifecycle::Shutdown | Lifecycle::Exited => {
+            Err(ServerError::new(-32600, "Server has shut down"))
+        }
+    }
+}
+/// The `initialize` result: the server's capabilities for what the client
+/// negotiated, and its name and version.
+fn initialize_result(n: &Negotiated) -> Value {
+    let code_actions = if n.code_actions {
+        json!({"codeActionKinds":["quickfix","source.fixAll.vesper"],"resolveProvider":false})
+    } else {
+        Value::Bool(false)
+    };
+    json!({"capabilities":{
+        "positionEncoding":"utf-16",
+        "textDocumentSync":{"openClose":true,"change":2},
+        "hoverProvider":true,"definitionProvider":true,
+        "documentSymbolProvider":true,"workspaceSymbolProvider":true,
+        "documentFormattingProvider":true,
+        "codeActionProvider":code_actions,
+        "completionProvider":{"triggerCharacters":["."],"resolveProvider":false},
+        "inlayHintProvider":true,
+        "codeLensProvider":{"resolveProvider":false},
+        "executeCommandProvider":{"commands":[lens_requests::PROOF_COMMAND]},
+        "experimental":{
+            "vesperLens":{"version":1,"poisonedRecovery":"VESPER_POISONED_RECOVERY",
+                "completion":"obligation_ranked_members",
+                "proofLenses":[super::proof_lens::EXTRACTION_SCOPE,
+                    super::proof_lens::SEMANTIC_SCOPE],
+                "backgroundProofs":n.background
+                    .map(|delay| json!({"debounceMs": delay.as_millis() as u64}))
+                    .unwrap_or(Value::Null),
+                "asyncCancellation":"all_requests"},
+            "vesperRecoveryStatus":{"scope":"syntax_only","version":1},
+            "vesperMacroPreview":{"version":1,"tier":1,"scope":"expanded_source_only"}
+        }
+    },"serverInfo":{"name":"vesper","version":SERVER_VERSION}})
+}
+/// The version `initialize` reports.
+pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 fn notification(method: &str, params: Value) -> Envelope {
     Envelope::Notification {
         method: method.into(),
@@ -1328,8 +1383,21 @@ pub(crate) fn command_checks_dump(
 ) -> String {
     let version_of = |uri: &str| open.iter().find(|(u, _)| u == uri).map(|(_, v)| *v);
     let refused = |e: ServerError| format!("E {} {}", e.code, e.message);
+    let default_lens = LensConfig::default();
     let mut out = String::new();
     for (check, method, params) in checks {
+        let request_lens = match *check {
+            PortCheck::Request {
+                auditor,
+                background_ms,
+                ..
+            } => Some(LensConfig {
+                auditor: auditor.then(|| std::path::PathBuf::from(PORT_AUDITOR)),
+                background: background_ms.map(std::time::Duration::from_millis),
+                ..LensConfig::default()
+            }),
+            _ => None,
+        };
         let mut row = String::new();
         for _ in 0..rounds.max(1) {
             row = match check {
@@ -1351,6 +1419,31 @@ pub(crate) fn command_checks_dump(
                     ),
                     Err(e) => refused(e),
                 },
+                PortCheck::Request { state, .. } => {
+                    let lens = request_lens.as_ref().unwrap_or(&default_lens);
+                    match validate_input(method, params.as_ref())
+                        .and_then(|()| route(state.lifecycle(), method, params.as_ref(), lens))
+                    {
+                        Ok(Route::Initialize(n, result)) => {
+                            let flags = [
+                                n.diagnostic_related,
+                                n.diagnostic_help_data,
+                                n.hierarchical_symbols,
+                                n.code_actions,
+                                n.code_lens_refresh,
+                            ]
+                            .map(|flag| if flag { '1' } else { '0' });
+                            let background = n.background.map_or_else(
+                                || "-".to_owned(),
+                                |delay| delay.as_millis().to_string(),
+                            );
+                            format!("I {} {background} {result}", String::from_iter(flags))
+                        }
+                        Ok(Route::Shutdown) => "S".to_owned(),
+                        Ok(Route::Handler(_)) => "H".to_owned(),
+                        Err(e) => refused(e),
+                    }
+                }
             };
             std::hint::black_box(&row);
         }
@@ -1367,7 +1460,38 @@ pub enum PortCheck {
     Input,
     Cancel,
     Proof,
+    /// `Session::request`'s gate (`validate_input`, then the lifecycle,
+    /// `initialize` negotiation, `shutdown` and method checks) in `state`,
+    /// with or without an auditor and a configured background debounce.
+    Request {
+        state: PortState,
+        auditor: bool,
+        background_ms: Option<u64>,
+    },
 }
+
+/// The session state a `PortCheck::Request` row starts in.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortState {
+    Uninitialized,
+    Running,
+    Shutdown,
+}
+
+impl PortState {
+    fn lifecycle(self) -> Lifecycle {
+        match self {
+            PortState::Uninitialized => Lifecycle::Uninitialized,
+            PortState::Running => Lifecycle::Running,
+            PortState::Shutdown => Lifecycle::Shutdown,
+        }
+    }
+}
+
+/// The auditor path of a `PortCheck::Request` row that has one (only its
+/// presence matters to the gate).
+const PORT_AUDITOR: &str = "vesper";
 
 #[cfg(test)]
 mod tests {

@@ -745,7 +745,10 @@ pub fn vector_call(inout ck: Ck, ex: Ex, name: u32, expected: u32) -> u32 {
             record(inout ck, arg.expr, goal);
         }
         if i >= constants_from && i < constants_to {
-            let in_range = arg_ex.kind == E_INT && !arg_ex.neg && arg_ex.mag < shape.lanes;
+            let in_range = arg_ex.kind == E_INT
+                && !arg_ex.neg
+                && arg_ex.hi == 0
+                && arg_ex.mag < shape.lanes;
             if !in_range {
                 error(inout ck, "E1402", arg_ex.start, arg_ex.end);
             }

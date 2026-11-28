@@ -34,5 +34,8 @@ vesper_crate(
         "test/self_host_native_walk_body": "long",
         # Stage 2 slice 3b (#2660): direct callee words from Vesper.
         "test/self_host_native_walk_calls": "long",
+        # Stage 2 slice 3 (#2662): the library IR pipeline over the port
+        # libraries.
+        "test/self_host_library_ir": "long",
     },
 )

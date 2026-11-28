@@ -57,6 +57,7 @@ const E_BREAK: u64 = 20;
 const E_CONTINUE: u64 = 21;
 const E_HANDLE: u64 = 22;
 const E_TRY: u64 = 23;
+const E_WIDE_INT: u64 = 26;
 const E_INDEX: u64 = 40;
 
 // Statement kinds of the stream.
@@ -115,6 +116,7 @@ const L_INT: u8 = 1;
 const L_FLOAT: u8 = 2;
 const L_BOOL: u8 = 3;
 const L_STRING: u8 = 4;
+const L_WIDE_INT: u8 = 5;
 
 // @vesper/ast pattern kinds.
 const AP_WILD: u8 = 1;
@@ -873,6 +875,18 @@ fn fits(l: Lit) -> bool {
     l.hi == 0
 }
 
+// An integer literal past u64::MAX in magnitude (an `Int` or a `WideInt`).
+fn is_wide(l: Lit) -> bool {
+    (l.kind == L_INT || l.kind == L_WIDE_INT) && !fits(l)
+}
+
+// A wide literal's sign, then its magnitude's low and high words.
+fn wide_words(l: Lit, inout out: ChunkSeq[u64]) {
+    out.push(flag(l.neg));
+    out.push(l.bits);
+    out.push(l.hi);
+}
+
 fn pattern(inout e: Enc, in a: Ast, p: u32, shift: u32, inout out: ChunkSeq[u64]) {
     let n = pat_at(in a, p);
     let s = widen_u64(wrapping_add(n.start, shift));
@@ -916,6 +930,9 @@ fn pattern(inout e: Enc, in a: Ast, p: u32, shift: u32, inout out: ChunkSeq[u64]
             out.push(LIT_STRING);
         } else {
             out.push(LIT_WIDE_INT);
+            if is_wide(l) {
+                wide_words(l, inout out);
+            }
         }
     } else if n.kind == AP_TUPLE {
         let k = list_len(in a, n.a);
@@ -1042,6 +1059,9 @@ fn expr(inout e: Enc, in a: Ast, x: u32, shift: u32, fip: bool, inout out: Chunk
             out.push(flag(l.bits != 0));
         } else if l.kind == L_STRING {
             head(E_STRING, s, t, inout out);
+        } else if is_wide(l) {
+            head(E_WIDE_INT, s, t, inout out);
+            wide_words(l, inout out);
         } else {
             head(E_OTHER, s, t, inout out);
         }
