@@ -87,4 +87,4 @@ try-import %workspace%/user.bazelrc
 # --config=stage2-ports: build the port objects with the Stage 2 port builder
 # (`//:vesper-port-builder.wasm`), falling back to the Rust compiler for each
 # port it declines (#2666, bootstrap switch slice 3).
-common:stage2-ports --//tools/bazel:stage2_ports
+common:stage2-ports --//tools/bazel:stage2_ports=//tools/bazel:stage2_port_tools
