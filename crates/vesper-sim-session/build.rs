@@ -23,6 +23,17 @@ fn main() {
         };
         port.build();
     }
+    // Sessions run on `vesper sim-host` (src/machine.rs). A Cargo build
+    // finds the compiler the harness built; Bazel passes a prebuilt object
+    // and puts `vesper` on the tests' PATH instead.
+    if std::env::var_os(vesper_port_harness::OBJECT_ENV).is_none() {
+        let compiler =
+            vesper_port_harness::compiler().unwrap_or_else(|e| panic!("vesper-port: {e}"));
+        println!(
+            "cargo:rustc-env=VESPER_SIM_BUILT_COMPILER={}",
+            compiler.display()
+        );
+    }
 }
 
 /// One deliberate bug per ported module, `(module, from, to)` (asserted by

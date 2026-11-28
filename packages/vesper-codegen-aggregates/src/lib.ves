@@ -890,7 +890,7 @@ fn split_words(inout e: Env, inout c: Ctx, ty: u32, inout out: Leaves) -> bool {
 }
 
 // The symbol after the last "::" of `name` (`name.rsplit("::").next()`).
-fn short_name(inout names: Names, name: u32) -> u32 {
+pub fn short_name(inout names: Names, name: u32) -> u32 {
     let n = names.size(name);
     let mut cut: u64 = 0;
     let mut i: u64 = 1;

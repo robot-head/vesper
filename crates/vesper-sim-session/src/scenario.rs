@@ -14,17 +14,16 @@
 //! `XdpNic` operations. Their signatures are checked structurally against the
 //! checked source declarations at load (see [`warp_signature`]).
 use crate::{
+    machine::Value,
+    world::{Pass, Type, World},
+};
+use crate::{
     model::{self, ModelPlan, ModelSpec, warp::WarpOp},
     value::{self, type_name},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use std::collections::{BTreeMap, BTreeSet};
-use vesper::{
-    ast::{Pass, Type},
-    check::World,
-    runtime::Value,
-};
 use vesper_simpulse::IoResult;
 
 pub const SCENARIO_FORMAT: &str = "vesper-sim-scenario";
@@ -683,9 +682,9 @@ fn struct_fields(world: &World, ty: &Type, linear: bool) -> Option<Vec<(String, 
     };
     let adt = world.adts.get(name)?;
     let mode_ok = if linear {
-        adt.mode == vesper::ast::Mode::Linear
+        adt.mode == crate::world::Mode::Linear
     } else {
-        adt.mode == vesper::ast::Mode::Copy
+        adt.mode == crate::world::Mode::Copy
     };
     if adt.is_enum || !mode_ok || adt.generics.len() != args.len() || adt.variants.len() != 1 {
         return None;
@@ -702,7 +701,7 @@ fn struct_fields(world: &World, ty: &Type, linear: bool) -> Option<Vec<(String, 
         .map(|f| {
             (
                 f.name.clone(),
-                type_name(&vesper::ast::substitute(&f.ty, &vars)),
+                type_name(&crate::world::substitute(&f.ty, &vars)),
             )
         })
         .collect();
@@ -799,7 +798,7 @@ fn lease_type(world: &World, ty: &Type) -> Result<(String, String), String> {
         .fields
         .iter()
         .find(|f| f.name == "held_frame")
-        .map(|f| vesper::ast::substitute(&f.ty, &vars))
+        .map(|f| crate::world::substitute(&f.ty, &vars))
         .ok_or_else(err)?;
     Ok((type_name(ty), frame_type(world, &field_ty)?))
 }
@@ -944,7 +943,6 @@ fn task_plan(
     let function = world
         .functions
         .get(&task.entry)
-        .filter(|f| f.body.is_some())
         .ok_or_else(|| context(format!("unknown entry function {}", task.entry)))?;
     if !function.generics.is_empty() {
         return Err(context("generic entry functions are unsupported".into()));
@@ -1016,11 +1014,8 @@ fn task_plan(
         }
         arguments.push(value::decode(world, &param.ty, json).map_err(context)?);
     }
-    let result = world
-        .function_results
-        .get(&task.entry)
-        .cloned()
-        .unwrap_or_else(|| function.result.clone());
+    // The host reports each function's checked result.
+    let result = function.result.clone();
     supported(world, &result).map_err(context)?;
     let installed: BTreeSet<&str> = function
         .effects
@@ -1128,7 +1123,7 @@ fn supported(world: &World, ty: &Type) -> Result<(), String> {
                         .collect();
                     for variant in &adt.variants {
                         for field in &variant.fields {
-                            walk(world, &vesper::ast::substitute(&field.ty, &vars), seen)?;
+                            walk(world, &crate::world::substitute(&field.ty, &vars), seen)?;
                         }
                     }
                     Ok(())
