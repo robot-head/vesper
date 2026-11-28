@@ -433,10 +433,15 @@ pub fn arg_bytes(inout c: ProcCommand, in a: Slice[u8]) {
 }
 
 pub fn env(inout c: ProcCommand, in key: Str, in value: Str) {
+    env_bytes(inout c, in key, in value.as_bytes());
+}
+
+// `env` with a value that need not be UTF-8 (a path the host gave).
+pub fn env_bytes(inout c: ProcCommand, in key: Str, in value: Slice[u8]) {
     c.env_ops.push(1);
     c.env_keys.extend(in key.as_bytes());
     c.env_key_ends.push(c.env_keys.len());
-    c.env_vals.extend(in value.as_bytes());
+    c.env_vals.extend(in value);
     c.env_val_ends.push(c.env_vals.len());
 }
 

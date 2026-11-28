@@ -91,7 +91,11 @@ path = "src/bin/vesper-traceparent.rs"
 # Compiler services (checking, native batches, interfaces, proof replay).
 vesper = { path = "../.." }
 blake3 = "1.8"
+# `vesper bench` loads the machine code the compiler built for a kernel into
+# a JIT module of its own (src/native_kernel.rs, #2670).
 cranelift-codegen = { version = "0.125", features = ["arm64", "riscv64"] }
+cranelift-jit = "0.125"
+cranelift-module = "0.125"
 cranelift-native = "0.125"
 serde = { workspace = true }
 serde_json = { workspace = true }

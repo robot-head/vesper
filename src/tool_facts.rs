@@ -17,6 +17,13 @@
 //!   function's effect instances, and the interface JSON the release records.
 //! - `top --entry <fn> --fuel <steps>`: run the module with the linear
 //!   resource trace and report the effect stack and live obligations.
+//! - `bench --entry <fn> [--steps N] [--asm]`: the checked scalar kernel as
+//!   machine code and relocations for `vesper bench` to load, with the
+//!   evaluator's step count and the CLIF and machine listing when asked for
+//!   (src/tool_facts_bench.rs).
+//! - `fuzz-serve --source <file> --fuel <steps>`: not one answer but a
+//!   request loop over the standard streams for a whole `vesper fuzz` or
+//!   `vesper verify --refute` campaign (src/tool_facts_fuzz.rs).
 //! - `chroma`: Chroma's Tier 1 semantic facts (`vesper highlight`), or why
 //!   the snippet falls back to Tier 0.
 //! - `shot [--doctest <file>] [--span <start>..<end> ...]`: what
@@ -80,11 +87,17 @@ const MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
 pub fn run(args: Vec<String>) -> Result<(), String> {
     let mut it = args.into_iter();
     let kind = it.next().ok_or("tool-facts requires a kind")?;
+    // One process for a whole campaign, answering over its standard streams.
+    if kind == crate::tool_facts_fuzz::KIND {
+        return crate::tool_facts_fuzz::serve(it.collect());
+    }
     let mut out = None;
     let mut source_path = None;
     let mut package = None;
     let mut entry = None;
     let mut fuel = None;
+    let mut steps = None;
+    let mut asm = false;
     let mut spans = vec![];
     let mut doctest_path = None;
     while let Some(arg) = it.next() {
@@ -101,6 +114,14 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                         .map_err(|e| format!("--fuel: {e}"))?,
                 )
             }
+            "--steps" => {
+                steps = Some(
+                    value()?
+                        .parse::<usize>()
+                        .map_err(|e| format!("--steps: {e}"))?,
+                )
+            }
+            "--asm" => asm = true,
             "--doctest" => doctest_path = Some(PathBuf::from(value()?)),
             "--span" => {
                 let text = value()?;
@@ -122,6 +143,12 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             &source,
             &entry.ok_or("top facts require --entry")?,
             fuel.ok_or("top facts require --fuel")?,
+        ),
+        crate::tool_facts_bench::KIND => crate::tool_facts_bench::bench(
+            &source,
+            &entry.ok_or("bench facts require --entry")?,
+            steps,
+            asm,
         ),
         CHROMA => Ok(chroma_facts(&source)),
         SHOT => shot(&source, doctest_path.as_deref(), &spans),

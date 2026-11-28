@@ -6912,6 +6912,8 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "cranelift-codegen 0.125.4",
+ "cranelift-jit",
+ "cranelift-module",
  "cranelift-native 0.125.4",
  "libc",
  "serde",

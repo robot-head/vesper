@@ -712,6 +712,58 @@ const ZIGZAG_SITE: u32 = 0x8000_0000;
 /// Site-label bit and edge offset of a shadow target ([`NativeCoverage::feed_shadow`]).
 const SHADOW_SITE: u32 = 0x2000_0000;
 
+/// The most hits of one edge slot a feed reports: Crucible's top hit-count
+/// bucket.
+const MAX_EDGE_HITS: u64 = 128;
+
+/// One report of [`NativeCoverage::feed`], recorded for a probe in another
+/// process ([`NativeCoverage::feed_events`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedEvent {
+    /// `probe.edge(slot)`, `hits` times.
+    Edge { slot: u32, hits: u32 },
+    /// `probe.cmp(site, kind, lhs, rhs)`.
+    Cmp {
+        site: u32,
+        kind: CmpKind,
+        lhs: u64,
+        rhs: u64,
+    },
+}
+
+/// Where a feed goes: a Crucible probe, or a log of [`FeedEvent`]s.
+trait FeedSink {
+    fn edge(&mut self, slot: u32, hits: u32);
+    fn cmp(&mut self, site: u32, kind: CmpKind, lhs: u64, rhs: u64);
+}
+
+struct ProbeSink<'a>(&'a mut Probe);
+impl FeedSink for ProbeSink<'_> {
+    fn edge(&mut self, slot: u32, hits: u32) {
+        for _ in 0..hits {
+            self.0.edge(slot);
+        }
+    }
+    fn cmp(&mut self, site: u32, kind: CmpKind, lhs: u64, rhs: u64) {
+        self.0.cmp(site, kind, lhs, rhs);
+    }
+}
+
+struct FeedLog(Vec<FeedEvent>);
+impl FeedSink for FeedLog {
+    fn edge(&mut self, slot: u32, hits: u32) {
+        self.0.push(FeedEvent::Edge { slot, hits });
+    }
+    fn cmp(&mut self, site: u32, kind: CmpKind, lhs: u64, rhs: u64) {
+        self.0.push(FeedEvent::Cmp {
+            site,
+            kind,
+            lhs,
+            rhs,
+        });
+    }
+}
+
 /// A fuzz target compiled once with coverage instrumentation.
 pub struct NativeCoverage {
     // Field order: the JIT is dropped before the buffer it writes.
@@ -981,7 +1033,7 @@ impl NativeCoverage {
     /// taken bit is the one the code computed; a `br_table` index is also
     /// reported as `index == k` for each of its first 256 cases.
     pub fn feed(&self, probe: &mut Probe) {
-        self.feed_labelled(probe, 0, 0);
+        self.feed_labelled(&mut ProbeSink(probe), 0, 0);
     }
 
     /// [`Self::feed`] for a second target in the same campaign (the shadow
@@ -989,14 +1041,25 @@ impl NativeCoverage {
     /// its site labels carry a separate bit, so the two targets' features
     /// stay distinct.
     pub fn feed_shadow(&self, probe: &mut Probe) {
-        self.feed_labelled(probe, EDGE_SLOTS as u32, SHADOW_SITE);
+        self.feed_labelled(&mut ProbeSink(probe), EDGE_SLOTS as u32, SHADOW_SITE);
     }
 
-    fn feed_labelled(&self, probe: &mut Probe, edge_offset: u32, site_bit: u32) {
+    /// What [`Self::feed`] (or, with `shadow`, [`Self::feed_shadow`]) would
+    /// report, in order, for a probe in another process (`vesper fuzz`
+    /// asks the compiler, #2670).
+    pub fn feed_events(&self, shadow: bool) -> Vec<FeedEvent> {
+        let mut events = FeedLog(Vec::new());
+        if shadow {
+            self.feed_labelled(&mut events, EDGE_SLOTS as u32, SHADOW_SITE);
+        } else {
+            self.feed_labelled(&mut events, 0, 0);
+        }
+        events.0
+    }
+
+    fn feed_labelled(&self, probe: &mut dyn FeedSink, edge_offset: u32, site_bit: u32) {
         for (slot, hits) in self.buffer.edges() {
-            for _ in 0..hits.min(128) {
-                probe.edge(slot + edge_offset);
-            }
+            probe.edge(slot + edge_offset, hits.min(MAX_EDGE_HITS) as u32);
         }
         let zigzag = self.params.contains(&NativeParam::I64);
         for (site, lhs, rhs) in self.buffer.comparisons() {
