@@ -29,12 +29,13 @@ use self::ast_lower::{build_ir_ast, build_ir_ast_for_entry};
 use self::collect::{collect_program};
 use self::facts::{record_failure_ops};
 use self::tables::{lower_table_reads};
-use self::loader::{load_package_graph_bytes, load_package_graph_bytes_for};
+use self::loader::{load_package_graph_bytes_for};
 use self::sugar_policy::{
     PolicyFailure, PolicyFailureKind, PolicyInputs, copy_inputs, explicit_access_valid, has_failure,
     policy_inputs, resolve_rows
 };
 use self::typecheck::{typecheck_ast};
+use self::linear::{LinearCode, check_linear, write_linear_fault};
 
 const INVALID_SUGAR_POLICY: Str = "invalid sugar policy metadata";
 
@@ -78,7 +79,7 @@ pub fn sugar_policy_exports_valid(
 /// Load, assemble, and collect declarations of a Loom package from `root_dir`
 /// via `@vesper-std/fs`, returning `(module_count, fn_count, adt_count, diagnostic_bytes)`.
 pub fn stage2_collect_dir(in root_dir: Str) -> (u64, u64, u64, u64) eff [Ffi[StdFs]] {
-    let encoded = match load_package_graph_bytes(in root_dir.as_bytes()) {
+    let encoded = match load_graph_compact(in root_dir.as_bytes(), in "".as_bytes()) {
         Option::Some(b) => b,
         Option::None => {
             return (0, 0, 0, 0);
@@ -269,6 +270,49 @@ fn write_policy_diagnostic(problem: PolicyFailure, inout msg: ChunkSeq[u8]) {
     }
 }
 
+// Room kept below the loader's scratch for the encoded package graph, and
+// the slack its copy's sequence header and rounding may take.
+const LOAD_KEEP_BYTES: u64 = 268435456;
+const LOAD_KEEP_SLACK: u64 = 65536;
+
+// `load_package_graph_bytes` with the loader's scratch freed: the encoded
+// graph is copied into a hole reserved below the scratch and the heap is
+// reset to the copy's end, so only the graph outlives the load. Under a
+// host without Stage 2's heap, or when the graph does not fit the hole, the
+// graph is returned where the loader left it.
+fn load_graph_compact(
+    in root_dir: Slice[u8],
+    in os: Slice[u8]
+) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    if stage2_heap_mark() == 0 {
+        return load_package_graph_bytes_for(in root_dir, in os);
+    }
+    let mut hole = ChunkSeq::new[u8]();
+    hole.reserve(LOAD_KEEP_BYTES);
+    let scratch = stage2_heap_mark();
+    let keep = wrapping_sub(scratch, LOAD_KEEP_BYTES);
+    let encoded = match load_package_graph_bytes_for(in root_dir, in os) {
+        Option::Some(b) => b,
+        Option::None => {
+            return Option::None;
+        },
+    };
+    if wrapping_add(encoded.len(), LOAD_KEEP_SLACK) > LOAD_KEEP_BYTES {
+        return Option::Some(encoded);
+    }
+    let s_load = stage2_heap_swap(keep);
+    let mut copied = ChunkSeq::with_capacity[u8](encoded.len());
+    copied.extend(in encoded.as_slice());
+    let keep_after = stage2_heap_mark();
+    let _ = stage2_heap_swap(s_load);
+    if keep_after > scratch {
+        return Option::Some(encoded);
+    }
+    // Nothing past the copy is live: the rest of the hole is reused.
+    stage2_heap_reset(keep_after);
+    Option::Some(copied)
+}
+
 fn move_front_to_perm(
     sink ir_ast0: IrAst,
     sink names0: Names,
@@ -318,7 +362,7 @@ pub fn stage2_lower_dir(
     in os: Slice[u8],
     inout err: ChunkSeq[u8]
 ) -> Option[Lowered] eff [Ffi[StdFs]] {
-    let encoded = match load_package_graph_bytes_for(in root_dir, in os) {
+    let encoded = match load_graph_compact(in root_dir, in os) {
         Option::Some(b) => b,
         Option::None => {
             err.extend(in "load_package_graph".as_bytes());
@@ -414,7 +458,7 @@ fn stage2_compile_dir_impl(
     let mut stage_log = ChunkSeq::new[u8]();
     stage_log.reserve(4096);
     write_stage(want_syms, in out_wasm, in "load_package_graph", inout stage_log);
-    let encoded = match load_package_graph_bytes(in root_dir.as_bytes()) {
+    let encoded = match load_graph_compact(in root_dir.as_bytes(), in "".as_bytes()) {
         Option::Some(b) => b,
         Option::None => {
             let mut d = ChunkSeq::new[u8]();
@@ -533,6 +577,14 @@ fn stage2_compile_dir_impl(
         tmap: ChunkSeq::new[u32](),
         nmap: ChunkSeq::new[u32]()
     };
+    write_stage(want_syms, in out_wasm, in "linearity", inout stage_log);
+    let linear_fault = check_linear(in ir_ast, inout c);
+    if linear_fault.code != LinearCode::None {
+        let mut detail = ChunkSeq::new[u8]();
+        write_linear_fault(in c.names, linear_fault, inout detail);
+        write_err_header(in out_wasm, in "linearity", in detail.as_slice());
+        return (2, detail.len());
+    }
     let entry_sym = c.names.intern(in entry_name.as_bytes());
     let mut facts = empty_facts(entry_sym, 65535, 65536, 50000000);
     facts.calls = call_rows;

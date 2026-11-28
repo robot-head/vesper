@@ -178,21 +178,9 @@ pub fn seam_outline() -> u64 eff [Ffi[Cranelift]] {
     // no trap, live in value 0, nothing rematerialized, no slots, no
     // other blocks.
     plan.push(e_outline());
-    // One push per word: Stage 2 runs a loop over an array literal zero
-    // times (#2703).
-    plan.push(0);
-    plan.push(2);
-    plan.push(1);
-    plan.push(2);
-    plan.push(0);
-    plan.push(1);
-    plan.push(0);
-    plan.push(1);
-    plan.push(0);
-    plan.push(0);
-    plan.push(0);
-    plan.push(0);
-    plan.push(0);
+    for w in [0, 2, 1, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0] {
+        plan.push(w);
+    }
     plan.push(e_end());
     if outline_cold(inout b, inout m, in plan.as_slice()) != 1 {
         builder_free(b);
@@ -245,21 +233,9 @@ pub fn seam_outline_together() -> u64 eff [Ffi[Cranelift]] {
     };
     let mut plan: ChunkSeq[u64] = ChunkSeq::new[u64]();
     plan.push(e_outline());
-    // One push per word: Stage 2 runs a loop over an array literal zero
-    // times (#2703).
-    plan.push(0);
-    plan.push(2);
-    plan.push(1);
-    plan.push(2);
-    plan.push(0);
-    plan.push(1);
-    plan.push(0);
-    plan.push(1);
-    plan.push(0);
-    plan.push(0);
-    plan.push(0);
-    plan.push(0);
-    plan.push(0);
+    for w in [0, 2, 1, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0] {
+        plan.push(w);
+    }
     plan.push(e_end());
     if outline_cold(inout b, inout m, in plan.as_slice()) != 1 {
         builder_free(b);

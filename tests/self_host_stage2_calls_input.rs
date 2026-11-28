@@ -81,7 +81,7 @@ const DECLINES: &[&str] = &[
 /// The functions Stage 2 must lower as Rust does today. The rest differ
 /// where Stage 2's checker records less than Rust's: overflow and partial
 /// operations (`fallible`) and the unit type of statements.
-const MIN_SAME_FUNCTIONS: usize = 32;
+const MIN_SAME_FUNCTIONS: usize = 37;
 
 /// The port functions Stage 2 must lower as Rust does today.
 const MIN_SAME_PORT_FUNCTIONS: usize = 11438;
@@ -94,21 +94,29 @@ const SHOW_DIFFS: &str = "VESPER_STAGE2_CALLS_DIFFS";
 /// offsets by the modules assembled before the package, and leaves out of
 /// parameters) left out.
 fn functions(dump: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+    let dump = &nested_by_order(dump);
     let mut paths = std::collections::HashMap::new();
+    let mut pool = std::collections::HashMap::new();
     let mut out = std::collections::BTreeMap::new();
     let mut current: Option<String> = None;
     for line in dump.lines() {
         if let Some(rest) = line.strip_prefix("path ") {
             let (id, named) = rest.split_once(' ').unwrap_or((rest, ""));
             paths.insert(id.to_string(), named.to_string());
+        } else if let Some(rest) = line.strip_prefix("pool ")
+            && current.is_none()
+        {
+            let (id, entry) = rest.split_once(' ').unwrap_or((rest, ""));
+            pool.insert(id.to_string(), entry.to_string());
         } else if let Some(name) = line.strip_prefix("fn ") {
             current = Some(name.to_string());
             out.insert(name.to_string(), vec![]);
         } else if let Some(name) = &current {
             let words: Vec<String> = line
                 .split_whitespace()
-                .map(|w| match paths.get(w) {
-                    Some(p) if w.starts_with('p') => format!("[{p}]"),
+                .map(|w| match (paths.get(w), pool.get(w)) {
+                    (Some(p), _) if w.starts_with('p') => format!("[{p}]"),
+                    (_, Some(e)) if w.starts_with('#') => format!("{{{e}}}"),
                     _ => w.to_string(),
                 })
                 .collect();
@@ -120,17 +128,80 @@ fn functions(dump: &str) -> std::collections::BTreeMap<String, Vec<String>> {
     out
 }
 
-/// Whether two bodies agree once spans are left out: `@a..b` tokens and
-/// every number of a header line (parameter spans sit among them).
+/// The prefixes of the functions the lowering names by their body's span
+/// (`nested_name` in packages/vesper-place-ir-lower/src/lower.ves).
+const NESTED: &[&str] = &["$closure_", "$handler_body_", "$handler_clause_"];
+
+/// `dump` with each nested function's `<start>_<end>` replaced by its
+/// place in span order: Stage 2's spans carry the module's offset, so the
+/// two names differ while the order agrees.
+fn nested_by_order(dump: &str) -> String {
+    let spans = |text: &str| -> Vec<(usize, usize, (u64, u64))> {
+        let mut out = vec![];
+        for prefix in NESTED {
+            let mut from = 0;
+            while let Some(i) = text[from..].find(prefix) {
+                let start = from + i + prefix.len();
+                let digits =
+                    |at: usize| at + text[at..].bytes().take_while(u8::is_ascii_digit).count();
+                let mid = digits(start);
+                let end = if text[mid..].starts_with('_') {
+                    digits(mid + 1)
+                } else {
+                    mid
+                };
+                if let (Ok(a), Some(Ok(b))) = (
+                    text[start..mid].parse(),
+                    text.get(mid + 1..end).map(str::parse),
+                ) {
+                    out.push((start, end, (a, b)));
+                }
+                from = end.max(start);
+            }
+        }
+        out.sort();
+        out
+    };
+    let found = spans(dump);
+    let mut order: Vec<(u64, u64)> = found.iter().map(|f| f.2).collect();
+    order.sort();
+    order.dedup();
+    let mut out = String::with_capacity(dump.len());
+    let mut at = 0;
+    for (start, end, span) in found {
+        out.push_str(&dump[at..start]);
+        let place = order.binary_search(&span).unwrap_or(usize::MAX);
+        out.push_str(&format!("#{place}"));
+        at = end;
+    }
+    out.push_str(&dump[at..]);
+    out
+}
+
+/// The first span of a module after the first in Stage 2's lowering: its
+/// spans carry the module's index above the low 32 bits.
+const MODULE_SPAN: u64 = 1 << 32;
+
+/// Whether two bodies agree once spans are left out: `@a..b` tokens, every
+/// number of a header line (parameter spans sit among them), and the
+/// numbers Stage 2 offsets by a module (a binding's span).
 fn same_body(a: &[String], b: &[String]) -> bool {
-    let strip = |l: &String| -> String {
+    let strip = |l: &String| -> Vec<String> {
         let header = l.starts_with("header");
         l.split(' ')
             .filter(|w| !w.starts_with('@') && !(header && w.parse::<u64>().is_ok()))
-            .collect::<Vec<_>>()
-            .join(" ")
+            .map(str::to_string)
+            .collect()
     };
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| strip(x) == strip(y))
+    let same_word = |x: &String, y: &String| match (x.parse::<u64>(), y.parse::<u64>()) {
+        (Ok(m), Ok(n)) => m == n || m.max(n) >= MODULE_SPAN,
+        _ => x == y,
+    };
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            let (x, y) = (strip(x), strip(y));
+            x.len() == y.len() && x.iter().zip(&y).all(|(m, n)| same_word(m, n))
+        })
 }
 
 /// The calls task flags (packages/vesper-codegen-calls/src/data.ves).
@@ -210,6 +281,14 @@ pub fn steps() -> u32 eff [Fail[ArithOverflow]] { let mut t: u32 = 0; for i in 0
 pub fn sum_arr() -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] { let t: [u32; 4] = [1, 2, 3, 4]; let mut s: u32 = 0; for i in 0..4 { s = s + t[i]; } s }
 pub fn second(n: u64) -> u64 eff [Fail[RuntimeError]] { let mut v = ChunkSeq::new[u64](); v.push(n); v[0] }",
         &["second", "shift3", "steps", "sum_arr"],
+    ),
+    // Generic arguments inferred from the expected result (`apply`).
+    (
+        "results",
+        "fn fail_with[T](code: u64) -> Result[T, u64] { Result::Err(code) }
+pub fn checked(x: u64) -> Result[bool, u64] { if x == 0 { return fail_with(x); } Result::Ok(true) }
+pub fn tagged(x: u64) -> Result[u8, u64] { fail_with(x) }",
+        &["checked", "tagged"],
     ),
     (
         "floats",
@@ -389,6 +468,7 @@ fn compare(
     t.same_calls += 1;
     let rust_fns = functions(&readers.dump.text(&rust));
     let stage2_fns = functions(&readers.dump.text(&written));
+    let mut missing = vec![];
     for (name, body) in &rust_fns {
         match stage2_fns.get(name) {
             Some(b) if same_body(body, b) => t.same_fns += 1,
@@ -402,10 +482,22 @@ fn compare(
                 }
                 t.differing.push(format!("{library}::{name}"))
             }
-            None => t
-                .failures
-                .push(format!("{library}: Stage 2 did not lower {name}")),
+            None => missing.push(name.as_str()),
         }
+    }
+    if !missing.is_empty() {
+        let extra: Vec<&str> = stage2_fns
+            .keys()
+            .filter(|n| !rust_fns.contains_key(*n))
+            .map(String::as_str)
+            .collect();
+        t.failures.push(format!(
+            "{library}: Stage 2 did not lower {} functions: {}; it lowered {} others: {}",
+            missing.len(),
+            missing.join(" "),
+            extra.len(),
+            extra.join(" ")
+        ));
     }
 }
 
