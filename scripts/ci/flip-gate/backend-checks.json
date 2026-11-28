@@ -1,0 +1,121 @@
+{
+  "notes": [
+    "Flip gate for the backend verifiers (`native_verifiers::verify_emitted`), ported",
+    "as @vesper/backend-checks and installed as the hybrid's `verifiers` swap",
+    "(crates/vesper-hybrid/src/swap/backend_checks.rs). The `verifiers-swap-path`",
+    "workload times `verify_emitted` with every verifier against the swap's path",
+    "(backend_checks_input::encode, the Vesper verifiers, decode_report) over every",
+    "corpus program with a `main`."
+  ],
+  "name": "backend-checks",
+  "lane": "SH4-17",
+  "rust": [
+    "src/native_verifiers.rs"
+  ],
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0"
+  },
+  "build": [
+    [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "--test",
+      "self_host_backend_checks",
+      "--no-run"
+    ]
+  ],
+  "tests": [
+    {
+      "run": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--test",
+        "self_host_backend_checks"
+      ]
+    }
+  ],
+  "differential": {
+    "run": {
+      "sequence": [
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_backend_checks",
+          "verifier_fixture_reports_match_rust",
+          "--",
+          "--exact",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_backend_checks",
+          "capability_reports_match_rust",
+          "--",
+          "--exact",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_backend_checks",
+          "corpus_reports_match_rust",
+          "--",
+          "--exact",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_backend_checks",
+          "structured_report_matches_rust_on_cli_fixture",
+          "--",
+          "--exact",
+          "--nocapture"
+        ]
+      ]
+    }
+  },
+  "abba": [
+    {
+      "workload": "verifiers-swap-path",
+      "run": {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_backend_checks",
+          "backend_checks_speed",
+          "--",
+          "--exact",
+          "--ignored",
+          "--nocapture"
+        ],
+        "env": {
+          "FLIP_GATE": "1",
+          "CHECK_HARNESS_SPEED": "1"
+        }
+      }
+    }
+  ]
+}

@@ -29,7 +29,7 @@ use @vesper/codegen-calls::instances::{Conc, Syms, specialized, syms_new};
 use @vesper/place-ir::{FnRow, InstRow, Program, read_program};
 use self::blocks::{block_plan_bytes};
 use self::calls::{call_words_bytes};
-use self::frame::{frames_bytes, frames_text};
+use self::frame::{frames_bytes, frames_text, gates_text, graph_gates_text};
 use @vesper/place-ir::codes::{Op, Pat, Tag};
 
 const NONE32: u32 = 4294967295;
@@ -883,6 +883,18 @@ pub fn native_walk_frames(in input: Str) -> ChunkSeq[u64] {
 // `frame_plans` swap hook.
 pub fn native_walk_frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
     frames_bytes(in b)
+}
+
+// Slice 3c of the Stage 2 bootstrap switch (#2661): per task, the instance
+// half of each instance's body-hook gate (frame.ves).
+pub fn native_walk_gates(in input: Str) -> ChunkSeq[u64] {
+    gates_text(in input)
+}
+
+// #2661: the graph half of the body-hook gate of every graph of a place-ir
+// input (frame.ves).
+pub fn native_walk_graph_gates(in input: Str) -> ChunkSeq[u64] {
+    graph_gates_text(in input)
 }
 
 // Part 6a (#2094): one graph's block plan (blocks.ves, `native::block_plan`)

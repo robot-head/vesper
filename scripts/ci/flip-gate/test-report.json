@@ -1,0 +1,81 @@
+{
+  "notes": [
+    "Flip gate for the text reports of `vesper test` and `vesper test --doc`",
+    "(`test_report::rust_*_text`), ported in @vesper/test-runner (report.ves) and",
+    "installed as the hybrid's `test_report` swap. The `test-report-end-to-end`",
+    "workload times Rust's renderers against the swap's path (encoding the reports,",
+    "the Vesper renderers, decoding the text) over the reports of every repository",
+    "`.ves` file."
+  ],
+  "name": "test-report",
+  "lane": "SH5-14",
+  "rust": [
+    "src/test_report.rs"
+  ],
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0"
+  },
+  "build": [
+    [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "--test",
+      "self_host_test_report",
+      "--no-run"
+    ]
+  ],
+  "tests": [
+    {
+      "run": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--test",
+        "self_host_test_report"
+      ]
+    }
+  ],
+  "differential": {
+    "run": [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "--test",
+      "self_host_test_report",
+      "test_report_matches_rust_on_the_corpus",
+      "--",
+      "--exact",
+      "--nocapture"
+    ]
+  },
+  "abba": [
+    {
+      "workload": "test-report-end-to-end",
+      "run": {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_test_report",
+          "test_report_speed",
+          "--",
+          "--exact",
+          "--ignored",
+          "--nocapture"
+        ],
+        "env": {
+          "FLIP_GATE": "1",
+          "CHECK_HARNESS_SPEED": "1"
+        }
+      }
+    }
+  ]
+}
