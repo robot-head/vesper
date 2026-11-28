@@ -24,8 +24,12 @@ fn executable(name: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("{name} not found on PATH"))
 }
 
+/// The compiler under test as a real file: Bazel's PATH entries are
+/// runfiles symlinks, and a hard link to the symlink would still find the
+/// tools beside its target.
 fn vesper() -> PathBuf {
-    support::vesper_path()
+    let path = support::vesper_path();
+    fs::canonicalize(&path).unwrap_or(path)
 }
 
 /// The tool binary `vesper` would run: beside it, else on PATH.
