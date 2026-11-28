@@ -1,0 +1,120 @@
+// `ir::thread_tokens` (src/ir.rs) on @vesper/place-ir's tables: each
+// block's entry token is its id, every state action takes a fresh token
+// and a read observes the current one, and each block lists the outgoing
+// token of every edge into it. `ir_opt::optimize` ends with it.
+
+use @vesper/check-data::util::{add, inc, n32, u64_at};
+use @vesper/check-data::names::{Names};
+use @vesper/place-ir::{InstRow, Program};
+use @vesper/place-ir::codes::{Op, Tag};
+
+// `state_action`: writes, ownership binds, calls and the operations that
+// can fail produce a fresh state token.
+fn state_action(in p: Program, in names: Names, inst: InstRow) -> bool {
+    let op = inst.op;
+    if op == Op::Bind
+        || op == Op::Write
+        || op == Op::Call
+        || op == Op::Indirect
+        || op == Op::Try
+        || op == Op::Handle
+        || op == Op::Closure
+        || op == Op::Index
+        || op == Op::Tiled
+        || op == Op::Seq
+        || op == Op::Fip
+        || op == Op::Exit
+        || inst.fallible != 0
+    {
+        return true;
+    }
+    if op != Op::Binary {
+        return false;
+    }
+    let o = n32(p.op(inst.a));
+    names.spells(o, in "/".as_bytes())
+        || names.spells(o, in "%".as_bytes())
+        || names.spells(o, in "<<".as_bytes())
+        || names.spells(o, in ">>".as_bytes())
+}
+
+pub fn thread_tokens(inout p: Program, in names: Names) {
+    for fi in 0..p.fn_count() {
+        thread_function(inout p, in names, fi);
+    }
+}
+
+fn thread_function(inout p: Program, in names: Names, fi: u64) {
+    let f = p.function(fi);
+    let mut next = f.bc;
+    let mut outgoing: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](f.bc);
+    for k in 0..f.bc {
+        let b = p.block(add(f.b0, k));
+        let mut current = k;
+        for i in b.i0..add(b.i0, b.ic) {
+            let mut row = p.inst(i);
+            if state_action(in p, in names, row) {
+                row.has_token = 1;
+                row.tin = current;
+                row.tout = next;
+                current = next;
+                next = inc(next);
+            } else if row.op == Op::Read {
+                row.has_token = 1;
+                row.tin = current;
+                row.tout = current;
+            } else {
+                row.has_token = 0;
+                row.tin = 0;
+                row.tout = 0;
+            }
+            let ok = p.insts.try_set(i, row);
+        }
+        outgoing.push(current);
+    }
+    // The edges into each block, in source order: (target, source).
+    let mut targets: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut sources: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..f.bc {
+        let b = p.block(add(f.b0, k));
+        for j in b.ta..add(b.ta, b.tn) {
+            if p.tag(j) == Tag::Block {
+                targets.push(p.op(j));
+                sources.push(k);
+            }
+        }
+    }
+    for k in 0..f.bc {
+        let bi = add(f.b0, k);
+        let b = p.block(bi);
+        // old header: entry, ni, ni x (block, token), outgoing, np, params
+        let ni = p.op(inc(b.ha));
+        let params_at = add(b.ha, add(3, wrapping_mul(ni, 2)));
+        let start = p.ops.len();
+        p.put(k, Tag::Raw);
+        let mut n: u64 = 0;
+        for e in 0..targets.len() {
+            if u64_at(in targets, e) == k {
+                n = inc(n);
+            }
+        }
+        p.put(n, Tag::Raw);
+        for e in 0..targets.len() {
+            if u64_at(in targets, e) == k {
+                let source = u64_at(in sources, e);
+                p.put(source, Tag::Block);
+                p.put(u64_at(in outgoing, source), Tag::Raw);
+            }
+        }
+        p.put(u64_at(in outgoing, k), Tag::Raw);
+        for j in params_at..add(b.ha, b.hn) {
+            let x = p.op(j);
+            let tag = p.tag(j);
+            p.put(x, tag);
+        }
+        let mut row = b;
+        row.ha = start;
+        row.hn = wrapping_sub(p.ops.len(), start);
+        let ok = p.blocks.try_set(bi, row);
+    }
+}

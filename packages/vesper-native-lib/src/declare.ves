@@ -101,6 +101,12 @@ pub struct Declared {
     pub params_n: ChunkSeq[u64],
     pub returns_at: ChunkSeq[u64],
     pub returns_n: ChunkSeq[u64],
+    // per instance: its function's name (`names[name_at[i]..name_at[i+1]]`),
+    // and whether it returns its status in a register (`FnAbi::status`,
+    // the body request's first word)
+    pub names: ChunkSeq[u8],
+    pub name_at: ChunkSeq[u64],
+    pub status: ChunkSeq[u64],
 }
 
 pub fn declared_new() -> Declared {
@@ -112,6 +118,9 @@ pub fn declared_new() -> Declared {
         params_n: ChunkSeq::new[u64](),
         returns_at: ChunkSeq::new[u64](),
         returns_n: ChunkSeq::new[u64](),
+        names: ChunkSeq::new[u8](),
+        name_at: ChunkSeq::new[u64](),
+        status: ChunkSeq::new[u64](),
     }
 }
 
@@ -293,6 +302,9 @@ pub fn declare_library(
         let id = declare_function(inout m, in symbol.as_slice(), linkage, s);
         d.ids.push(widen_u64(id.id));
         d.sigs.push(widen_u64(s.id));
+        d.status.push(if abi.status { 1 } else { 0 });
+        d.name_at.push(d.names.len());
+        c.names.write(inst.name, inout d.names);
     }
     err
 }

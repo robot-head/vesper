@@ -32,5 +32,8 @@ vesper_crate(
         "test/self_host_codegen_scalar_emit": "long",
         # Native walk part 6a (#2094): whole scalar bodies from Vesper.
         "test/self_host_native_walk_body": "long",
+        # Stage 2 slice 3 (#2662): the library IR pipeline over the port
+        # libraries.
+        "test/self_host_library_ir": "long",
     },
 )
