@@ -79,7 +79,7 @@ const DECLINES: &[&str] = &[
 /// The functions Stage 2 must lower as Rust does today. The rest differ
 /// where Stage 2's checker records less than Rust's: overflow and partial
 /// operations (`fallible`) and the unit type of statements.
-const MIN_SAME_FUNCTIONS: usize = 37;
+const MIN_SAME_FUNCTIONS: usize = 38;
 
 /// The port functions Stage 2 must lower as Rust does today.
 const MIN_SAME_PORT_FUNCTIONS: usize = 5300;
@@ -287,6 +287,12 @@ pub fn second(n: u64) -> u64 eff [Fail[RuntimeError]] { let mut v = ChunkSeq::ne
 pub fn checked(x: u64) -> Result[bool, u64] { if x == 0 { return fail_with(x); } Result::Ok(true) }
 pub fn tagged(x: u64) -> Result[u8, u64] { fail_with(x) }",
         &["checked", "tagged"],
+    ),
+    // A `break` statement ends its block, not the `if` around it.
+    (
+        "breaks",
+        "pub fn digits(n: u64) -> u64 { let mut d: u64 = 1; let mut x = n; loop { if x < 10 { break; } x = x / 10; d = wrapping_add(d, 1); } d }",
+        &["digits"],
     ),
     (
         "floats",

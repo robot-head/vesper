@@ -69,6 +69,8 @@ copy struct LitUse {
 const LITERAL_PROBE_ROUNDS: u64 = 4;
 // The literal-typing rows reserved before the functions are checked.
 const LITERAL_RESERVE: u64 = 1024;
+// `fill(start, end, value)`, Rust's `FillRange`; `copy_within` takes as many.
+const SEQ_FILL_RANGE_ARGS: u64 = 3;
 
 struct Tc {
     names: Names,
@@ -452,6 +454,173 @@ fn bind_pat(inout tc: Tc, in a: Ast, pid: u64, ty: u32) {
             }
         }
     }
+}
+
+// Whether symbol `sym` spells `lit` from byte `at` on.
+fn spells_at(in tc: Tc, sym: u32, at: u64, in lit: Str) -> bool {
+    let b = lit.as_bytes();
+    if tc.names.size(sym) < wrapping_add(at, b.len()) {
+        return false;
+    }
+    for i in 0..b.len() {
+        let want = match b.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if tc.names.byte(sym, wrapping_add(at, i)) != want {
+            return false;
+        }
+    }
+    true
+}
+
+// The integer type a wide access (Rust's `WIDE_NAMES`: `read_`/`write_`,
+// or `try_` of either, then `u16`/`u32`/`u64` and `_le`/`_be`) reads or
+// writes (`Wide::int_type`), or NONE32 for any other method.
+fn wide_int_ty(inout tc: Tc, mname: u32) -> u32 {
+    let mut at: u64 = 0;
+    if spells_at(in tc, mname, at, in "try_") {
+        at = wrapping_add(at, "try_".len());
+    }
+    if spells_at(in tc, mname, at, in "read_") {
+        at = wrapping_add(at, "read_".len());
+    } else if spells_at(in tc, mname, at, in "write_") {
+        at = wrapping_add(at, "write_".len());
+    } else {
+        return NONE32;
+    }
+    let width = if spells_at(in tc, mname, at, in "u16") {
+        tc.world.k.u16_
+    } else if spells_at(in tc, mname, at, in "u32") {
+        tc.world.k.u32_
+    } else if spells_at(in tc, mname, at, in "u64") {
+        tc.world.k.u64_
+    } else {
+        return NONE32;
+    };
+    at = wrapping_add(at, "u16".len());
+    let endian = spells_at(in tc, mname, at, in "_le") || spells_at(in tc, mname, at, in "_be");
+    if !endian || tc.names.size(mname) != wrapping_add(at, "_le".len()) {
+        return NONE32;
+    }
+    tc.types.named0(width)
+}
+
+// Whether `mname` is a wide write (`write_u32_le`, `try_write_u64_be`, ...).
+fn is_wide_write(in tc: Tc, mname: u32) -> bool {
+    tc.names.has_prefix(mname, in "write_".as_bytes())
+        || tc.names.has_prefix(mname, in "try_write_".as_bytes())
+}
+
+// The result of the sequence and slice block operations Rust's
+// `seq_method` types apart from the other builtin methods: the plain ones
+// are `Unit`, their total (`try_`) forms and the comparisons `bool`;
+// NONE32 for any other method or receiver.
+fn seq_method_result(inout tc: Tc, bt: u32, mname: u32) -> u32 {
+    if tc.types.arity(bt) == 0 {
+        return NONE32;
+    }
+    let tname = tc.types.name(bt);
+    if tname != tc.world.k.chunk_seq && tname != tc.world.k.slice {
+        return NONE32;
+    }
+    let wide = wide_int_ty(inout tc, mname);
+    let total_wide_write = wide != NONE32 && tc.names.has_prefix(mname, in "try_write_".as_bytes());
+    let plain_wide_write = wide != NONE32 && tc.names.has_prefix(mname, in "write_".as_bytes());
+    if is_op(in tc, mname, in "set")
+        || is_op(in tc, mname, in "copy_from")
+        || is_op(in tc, mname, in "copy_within")
+        || is_op(in tc, mname, in "extend_from_within")
+        || is_op(in tc, mname, in "make_ascii_lowercase")
+        || is_op(in tc, mname, in "extend_ascii_lowercase")
+        || is_op(in tc, mname, in "extend_reversed")
+        || plain_wide_write
+    {
+        tc.unit_ty
+    } else if is_op(in tc, mname, in "try_copy_from")
+        || is_op(in tc, mname, in "try_copy_within")
+        || is_op(in tc, mname, in "try_extend_from_within")
+        || is_op(in tc, mname, in "try_make_ascii_lowercase")
+        || is_op(in tc, mname, in "eq_ignore_ascii_case")
+        || total_wide_write
+    {
+        tc.bool_ty
+    } else if is_op(in tc, mname, in "sum_be16") {
+        tc.u64_ty
+    } else {
+        NONE32
+    }
+}
+
+// The type a sequence or slice method expects of argument `ai` of `n`, as
+// Rust's `seq_method` checks it: indices and lengths are `u64`, elements
+// the element type, a wide write's value its width; otherwise no goal.
+fn seq_arg_goal(inout tc: Tc, bt: u32, mname: u32, ai: u64, n: u64) -> u32 {
+    if tc.types.arity(bt) == 0 {
+        return tc.infer_ty;
+    }
+    let tname = tc.types.name(bt);
+    if tname != tc.world.k.chunk_seq && tname != tc.world.k.slice {
+        return tc.infer_ty;
+    }
+    let elem = tc.types.arg(bt, 0);
+    let wide = wide_int_ty(inout tc, mname);
+    let first_index = is_op(in tc, mname, in "get")
+        || is_op(in tc, mname, in "set")
+        || is_op(in tc, mname, in "try_get")
+        || is_op(in tc, mname, in "try_get_mut")
+        || is_op(in tc, mname, in "try_set")
+        || is_op(in tc, mname, in "truncate")
+        || is_op(in tc, mname, in "reserve")
+        || is_op(in tc, mname, in "copy_from")
+        || is_op(in tc, mname, in "try_copy_from")
+        || is_op(in tc, mname, in "resize")
+        || wide != NONE32
+        || is_op(in tc, mname, in "try_atomic_load")
+        || is_op(in tc, mname, in "try_atomic_load_u32")
+        || is_op(in tc, mname, in "try_atomic_load_u64")
+        || is_op(in tc, mname, in "try_atomic_store")
+        || is_op(in tc, mname, in "try_atomic_store_u32")
+        || is_op(in tc, mname, in "try_atomic_store_u64");
+    let two_index = is_op(in tc, mname, in "extend_from_within")
+        || is_op(in tc, mname, in "try_extend_from_within")
+        || is_op(in tc, mname, in "make_ascii_lowercase")
+        || is_op(in tc, mname, in "try_make_ascii_lowercase")
+        || is_op(in tc, mname, in "try_fill")
+        || is_op(in tc, mname, in "find_not_in")
+        || (is_op(in tc, mname, in "fill") && n == SEQ_FILL_RANGE_ARGS);
+    let three_index = is_op(in tc, mname, in "copy_within")
+        || is_op(in tc, mname, in "try_copy_within");
+    if (ai == 0 && first_index)
+        || (ai < 2 && two_index)
+        || (ai < SEQ_FILL_RANGE_ARGS && three_index)
+    {
+        return tc.u64_ty;
+    }
+    if is_op(in tc, mname, in "find_not_in") {
+        return tc.bool_ty;
+    }
+    if ai == 1 && wide != NONE32 && is_wide_write(in tc, mname) {
+        return wide;
+    }
+    if ai == 1 && is_op(in tc, mname, in "try_atomic_store_u32") {
+        return tc.types.named0(tc.world.k.u32_);
+    }
+    if ai == 1 && is_op(in tc, mname, in "try_atomic_store_u64") {
+        return tc.u64_ty;
+    }
+    let elem_arg = ((is_op(in tc, mname, in "push")
+        || is_op(in tc, mname, in "fill")
+        || is_op(in tc, mname, in "find_byte"))
+        && ai == 0)
+        || ((is_op(in tc, mname, in "set")
+            || is_op(in tc, mname, in "try_set")
+            || is_op(in tc, mname, in "resize")
+            || is_op(in tc, mname, in "try_atomic_store"))
+            && ai == 1)
+        || (is_op(in tc, mname, in "find_either") && ai < 2)
+        || ((is_op(in tc, mname, in "try_fill") || is_op(in tc, mname, in "fill")) && ai == 2);
+    if elem_arg { elem } else { tc.infer_ty }
 }
 
 fn is_op(in tc: Tc, sym: u32, in lit: Str) -> bool {
@@ -1173,6 +1342,45 @@ fn constrain_literals(inout tc: Tc, in a: Ast, eid: u64, target: u32) {
         && (e.a == Lit::Int || e.a == Lit::WideInt)
     {
         retype_span(inout tc, e.s0, e.s1, target);
+    } else if target != tc.never_ty
+        && tc.types.kind(target) != TyKind::Infer
+        && span_ty(in tc, e.s0, e.s1) == tc.never_ty
+    {
+        // A diverging branch takes its context's type (`refine_annotation`
+        // of a compatible `Never`).
+        retype_span(inout tc, e.s0, e.s1, target);
+    }
+    if e.kind == X_BLOCK && e.b != NONE64 {
+        constrain_literals(inout tc, in a, e.b, target);
+    } else if e.kind == X_IF {
+        constrain_literals(inout tc, in a, e.b, target);
+        if e.c != NONE64 {
+            constrain_literals(inout tc, in a, e.c, target);
+        }
+    } else if e.kind == X_MATCH {
+        for i in 0..e.n {
+            let body = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
+            constrain_literals(inout tc, in a, body, target);
+        }
+    }
+}
+
+// The type recorded last at `s0..s1`, or NONE32.
+fn span_ty(in tc: Tc, s0: u64, s1: u64) -> u32 {
+    let mut i = tc.spans.len();
+    loop {
+        if i == 0 {
+            return NONE32;
+        }
+        i = wrapping_sub(i, 1);
+        match tc.spans.try_get(i) {
+            Option::Some(r) => {
+                if r.start == s0 && r.end == s1 {
+                    return r.ty;
+                }
+            },
+            Option::None => return NONE32,
+        }
     }
 }
 
@@ -1217,6 +1425,26 @@ fn is_int_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
             } else if ex.kind == X_NAME {
                 // In a probe run an open binding reads as a literal.
                 tc.lit_probe && open_pid(in tc, n32(ex.a)) != NONE64
+            } else if ex.kind == X_BLOCK {
+                // A block, `if` or `match` of literals joins them into a
+                // literal (`IntLiteral`).
+                ex.b != NONE64 && is_int_lit_expr(in tc, in a, ex.b)
+            } else if ex.kind == X_IF {
+                ex.c != NONE64
+                    && is_int_lit_expr(in tc, in a, ex.b)
+                    && is_int_lit_expr(in tc, in a, ex.c)
+            } else if ex.kind == X_MATCH {
+                let mut all = ex.n > 0;
+                for i in 0..ex.n {
+                    let body = u64_at(
+                        in a.xs,
+                        wrapping_add(ex.b, wrapping_add(wrapping_mul(i, 2), 1))
+                    );
+                    if !is_int_lit_expr(in tc, in a, body) {
+                        all = false;
+                    }
+                }
+                all
             } else {
                 false
             }
@@ -1663,7 +1891,13 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         tc.unit_ty
     } else if e.kind == X_BLOCK {
         push_scope(inout tc);
+        // Rust's block: once an expression statement has type `Never`, the
+        // rest of the block goes unchecked and the block is `Never`.
+        let mut diverged = false;
         for i in 0..e.n {
+            if diverged {
+                break;
+            }
             let is_let = u64_at(in a.xs, wrapping_add(e.a, wrapping_mul(i, 3)));
             let pt = u64_at(in a.xs, wrapping_add(e.a, wrapping_add(wrapping_mul(i, 3), 1)));
             let val = u64_at(in a.xs, wrapping_add(e.a, wrapping_add(wrapping_mul(i, 3), 2)));
@@ -1710,9 +1944,13 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                 if open && is_int_ty(in tc, bound) {
                     open_last(inout tc, pt);
                 }
+            } else if vt == tc.never_ty {
+                diverged = true;
             }
         }
-        let tail_ty = if e.b == NONE64 {
+        let tail_ty = if diverged {
+            tc.never_ty
+        } else if e.b == NONE64 {
             tc.unit_ty
         } else {
             check_owned_expr(inout tc, in a, e.b, expected)
@@ -1725,11 +1963,21 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         let _ct = check_owned_expr(inout tc, in a, e.a, tc.bool_ty);
         let tt = check_owned_expr(inout tc, in a, e.b, expected);
         if e.c == NONE64 {
+            constrain_literals(inout tc, in a, e.b, tc.unit_ty);
             tc.unit_ty
         } else {
-            let exp_e = if tt == tc.never_ty { expected } else { tt };
+            // A literal branch joins as a literal (`IntLiteral`): the other
+            // branch's integer kind wins.
+            let then_lit = is_int_lit_expr(in tc, in a, e.b);
+            let exp_e = if tt == tc.never_ty || then_lit {
+                expected
+            } else {
+                tt
+            };
             let et = check_owned_expr(inout tc, in a, e.c, exp_e);
             let result = if tt == tc.never_ty || tc.types.kind(tt) == TyKind::Infer {
+                et
+            } else if then_lit && !is_int_lit_expr(in tc, in a, e.c) && is_int_ty(in tc, et) {
                 et
             } else {
                 tt
@@ -1744,18 +1992,37 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             let borrowed = borrowed_match_place(in tc, in a, e.a);
             check_value_place(inout tc, in a, e.a, vt, !borrowed);
         }
-        let mut res = expected;
+        // Rust's match type: `Never` joined with each arm's.
+        let mut res = tc.never_ty;
+        // Whether `res` is a literal arm's, which a typed arm overrides.
+        let mut res_lit = false;
         for i in 0..e.n {
             let pt = u64_at(in a.xs, wrapping_add(e.b, wrapping_mul(i, 2)));
             let body = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
             push_scope(inout tc);
             bind_pat(inout tc, in a, pt, vt);
-            let exp_b = if res == tc.never_ty { expected } else { res };
+            let exp_b = if res == tc.never_ty || res_lit {
+                expected
+            } else {
+                res
+            };
             let bt = check_owned_expr(inout tc, in a, body, exp_b);
-            if (tc.types.kind(res) == TyKind::Infer || res == tc.never_ty) && bt != tc.never_ty {
+            let body_lit = is_int_lit_expr(in tc, in a, body);
+            if res == tc.never_ty || (tc.types.kind(res) == TyKind::Infer && bt != tc.never_ty) {
                 res = bt;
+                res_lit = body_lit;
+            } else if res_lit && !body_lit && is_int_ty(in tc, bt) {
+                res = bt;
+                res_lit = false;
             }
             pop_scope(inout tc);
+        }
+        if tc.types.kind(res) == TyKind::Infer {
+            res = expected;
+        }
+        for i in 0..e.n {
+            let body = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
+            constrain_literals(inout tc, in a, body, res);
         }
         res
     } else if e.kind == X_LOOP {
@@ -1840,6 +2107,10 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
     } else if e.kind == X_RETURN {
         if e.a != NONE64 {
             let _vt = check_owned_expr(inout tc, in a, e.a, tc.ret_ty);
+            // `return_expr`: the value's literals take the result type.
+            if tc.types.kind(tc.ret_ty) != TyKind::Infer {
+                constrain_literals(inout tc, in a, e.a, tc.ret_ty);
+            }
         }
         tc.never_ty
     } else if e.kind == X_CONTINUE {
@@ -2027,6 +2298,12 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                             pt = bits_pt;
                                         }
                                     }
+                                    // A capacity is a `u64` (`SeqOp::WithCapacity`).
+                                    if is_op(in tc, cname, in "ChunkSeq::with_capacity")
+                                        || is_op(in tc, cname, in "String::with_capacity")
+                                    {
+                                        pt = tc.u64_ty;
+                                    }
                                     if adt != NONE32 {
                                         let v = tc.world.variant(vi);
                                         if ai < w(v.fc) {
@@ -2079,6 +2356,11 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                             {
                                 let cs_nm = tc.names.intern(in "ChunkSeq".as_bytes());
                                 named1(inout tc, cs_nm, n32(u64_at(in a.xs, e.c)))
+                            } else if is_op(in tc, cname, in "swap") {
+                                // The place primitives (`SeqOp::Swap`, `SeqOp::Replace`).
+                                tc.unit_ty
+                            } else if is_op(in tc, cname, in "replace") {
+                                arg0_ty
                             } else if is_op(in tc, cname, in "String::new") {
                                 tc.types.named0(tc.names.intern(in "String".as_bytes()))
                             } else if is_op(in tc, cname, in "String::from_utf8") {
@@ -2145,23 +2427,13 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                     in a.xs,
                                     wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1))
                                 );
-                                let mut pt = tc.infer_ty;
-                                if tc.types.arity(bt) > 0 {
-                                    if (is_op(in tc, mname, in "push")
-                                        || is_op(in tc, mname, in "fill"))
-                                        && ai == 0
-                                    {
-                                        pt = tc.types.arg(bt, 0);
-                                    } else if (is_op(in tc, mname, in "try_set")
-                                        || is_op(in tc, mname, in "set"))
-                                        && ai == 1
-                                    {
-                                        pt = tc.types.arg(bt, 0);
-                                    }
-                                }
+                                let pt = seq_arg_goal(inout tc, bt, mname, ai, e.n);
                                 let _at = check_expr(inout tc, in a, av, pt);
                             }
-                            let rty = if is_op(in tc, mname, in "len") {
+                            let seq_result = seq_method_result(inout tc, bt, mname);
+                            let rty = if seq_result != NONE32 {
+                                seq_result
+                            } else if is_op(in tc, mname, in "len") {
                                 tc.u64_ty
                             } else if is_op(in tc, mname, in "is_empty")
                                 || is_op(in tc, mname, in "try_set")
