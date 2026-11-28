@@ -10,11 +10,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-const REPEATED: &str = include_str!("fixtures/macro_preview/repeated.ves");
-const PURE: &str = include_str!("fixtures/macro_preview/helper_pure.ves");
-const FALLIBLE: &str = include_str!("fixtures/macro_preview/helper_fallible.ves");
-const LINEAR: &str = include_str!("fixtures/macro_preview/linear_duplicate.ves");
-const MALFORMED: &str = include_str!("fixtures/macro_preview/malformed.ves");
+const REPEATED: &str = include_str!("../../../tests/fixtures/macro_preview/repeated.ves");
+const PURE: &str = include_str!("../../../tests/fixtures/macro_preview/helper_pure.ves");
+const FALLIBLE: &str = include_str!("../../../tests/fixtures/macro_preview/helper_fallible.ves");
+const LINEAR: &str = include_str!("../../../tests/fixtures/macro_preview/linear_duplicate.ves");
+const MALFORMED: &str = include_str!("../../../tests/fixtures/macro_preview/malformed.ves");
 
 fn request(id: i32, method: &str, params: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
