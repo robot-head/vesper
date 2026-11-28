@@ -26,6 +26,9 @@ jobs:
       VESPER_DEFAULT_COMPILER: ${{ github.workspace }}/target/debug/vesper
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The Stage 2 seed is in Git LFS (#2671).
+          lfs: true
       - uses: ./.github/actions/aspect
       - name: Install the bootstrap toolchain
         # wasm32-wasip2 builds the Cranelift component Stage 2 calls (#2210).
@@ -41,10 +44,14 @@ jobs:
         run: cargo build --locked -p vesper --bin vesper
       - name: Compare the C seed runner with Wasmtime and the Stage 1 lock
         run: cargo test --locked -p vesper --test stage2_seed_runner -- --test-threads=1
-      - name: Exercise Wasm packages and verify the Stage 2 and per-package fixed points
+      - name: Exercise Wasm packages under the Rust-built boot Stage 2
         env:
           WASMTIME_BIN: ${{ runner.temp }}/wasmtime/wasmtime
         run: cargo test --locked -p vesper --test wasm_seed_breadth --test wasm_seed_package_io -- --test-threads=1
+      - name: Verify the Stage 2 fixed point from the committed seed
+        env:
+          WASMTIME_BIN: ${{ runner.temp }}/wasmtime/wasmtime
+        run: cargo test --locked -p vesper-stage2-gate -- --test-threads=1
       - name: Compare the Cranelift component's objects with the native shim's
         run: cargo test --locked -p vesper-cranelift-component --test objects -- --test-threads=1
       - name: Install pinned wac CLI (v0.8.1) for the Cranelift component

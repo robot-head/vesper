@@ -1,0 +1,518 @@
+// The world's answers @vesper/ir-inline reads as fact bits, which
+// tests/common/inline_words.rs computes in Rust (`type_facts` and the
+// function flags): a type's layout class, whether it holds a sequence, a
+// `Box` or a function, whether it may need a drop; a function's borrowed
+// match scrutinees.
+
+use @vesper/check-data::util::{add, inc, n32, u32_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, TyPass, Types, default_type, substitute};
+use @vesper/check-data::world::{Bounds, Known, World, mode_of, vector_words};
+use @vesper/check-layout::{Layouts, L_SCALAR, layout_of};
+use @vesper/codegen-calls::instances::{contains_function};
+use @vesper/place-ir::{FnRow, InstRow, Program};
+use @vesper/place-ir::codes::{Op, Pat, Term};
+
+const NONE32: u32 = 4294967295;
+
+// Type facts (bits of a type's first word, `F_*` of inline_words.rs).
+pub const F_SCALAR: u64 = 1;
+pub const F_AGGREGATE: u64 = 2;
+pub const F_SEQUENCE: u64 = 4;
+pub const F_SLICE: u64 = 8;
+pub const F_BOX: u64 = 16;
+pub const F_FUNCTION: u64 = 32;
+pub const F_PLAIN: u64 = 64;
+pub const F_NEVER: u64 = 128;
+
+// `Mode::Copy` as `World::mode` returns it.
+const MODE_COPY: u8 = 0;
+
+// Words of a pattern before its kind's own words: kind, span start, end.
+const PAT_HEAD: u64 = 3;
+// Words of a literal.
+const LIT_WORDS: u64 = 3;
+
+// The names the predicates compare against, interned once.
+pub copy struct FactNames {
+    dyn_prefix_ok: bool,
+    try_get: u32,
+    hoisted_try_get: u32,
+}
+
+pub fn fact_names(inout names: Names) -> FactNames {
+    FactNames {
+        dyn_prefix_ok: true,
+        try_get: names.intern(in "TryGet".as_bytes()),
+        hoisted_try_get: names.intern(in "Hoisted(TryGet)".as_bytes()),
+    }
+}
+
+fn named_is(in t: Types, ty: u32, name: u32, arity: u64) -> bool {
+    let n = t.node(ty);
+    n.kind == TyKind::Named && n.name == name && w(n.n) == arity
+}
+
+fn is_seq(in t: Types, k: Known, ty: u32) -> bool {
+    named_is(in t, ty, k.chunk_seq, 1)
+}
+
+pub fn is_slice(in t: Types, k: Known, ty: u32) -> bool {
+    named_is(in t, ty, k.slice, 1)
+}
+
+fn is_string(in t: Types, k: Known, ty: u32) -> bool {
+    named_is(in t, ty, k.string, 0)
+}
+
+fn is_text(in t: Types, k: Known, ty: u32) -> bool {
+    is_string(in t, k, ty) || named_is(in t, ty, k.str_, 0)
+}
+
+fn contains32(in xs: ChunkSeq[u32], x: u32) -> bool {
+    for i in 0..xs.len() {
+        if u32_at(in xs, i) == x {
+            return true;
+        }
+    }
+    false
+}
+
+// `seq::holds_sequence` (no defaulting; `seen` is by ADT name).
+fn holds_visit(in t: Types, in wd: World, ty: u32, inout seen: ChunkSeq[u32]) -> bool {
+    let k = wd.k;
+    if is_seq(in t, k, ty) || is_slice(in t, k, ty) {
+        return true;
+    }
+    let n = t.node(ty);
+    if n.kind == TyKind::Tuple {
+        for i in 0..w(n.n) {
+            if holds_visit(in t, in wd, t.arg(ty, i), inout seen) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind != TyKind::Named {
+        return false;
+    }
+    for i in 0..w(n.n) {
+        if holds_visit(in t, in wd, t.arg(ty, i), inout seen) {
+            return true;
+        }
+    }
+    let ai = wd.lookup(n.name);
+    if ai == NONE32 || contains32(in seen, n.name) {
+        return false;
+    }
+    seen.push(n.name);
+    let a = wd.adt(ai);
+    let mut found = false;
+    for vi in 0..w(a.vn) {
+        let v = wd.variant(add(w(a.va), vi));
+        for fi in 0..w(v.fc) {
+            let f = wd.field(add(w(v.fa), fi));
+            if !found && holds_visit(in t, in wd, f.ty, inout seen) {
+                found = true;
+            }
+        }
+    }
+    let last = seen.pop();
+    found
+}
+
+pub fn holds_sequence(in t: Types, in wd: World, ty: u32) -> bool {
+    let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    holds_visit(in t, in wd, ty, inout seen)
+}
+
+// `fip::type_mentions_box`: `Box` anywhere in the type's own words.
+fn type_mentions_box(in t: Types, k: Known, ty: u32) -> bool {
+    let n = t.node(ty);
+    if n.kind == TyKind::Named {
+        if n.name == k.box_ {
+            return true;
+        }
+        for i in 0..w(n.n) {
+            if type_mentions_box(in t, k, t.arg(ty, i)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind == TyKind::Tuple {
+        for i in 0..w(n.n) {
+            if type_mentions_box(in t, k, t.arg(ty, i)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind == TyKind::Fn {
+        for i in 0..w(n.n) {
+            if type_mentions_box(in t, k, t.arg(ty, i)) {
+                return true;
+            }
+        }
+        return type_mentions_box(in t, k, n.r) || row_mentions_box(in t, k, n.r2);
+    }
+    if n.kind == TyKind::Row {
+        return row_mentions_box(in t, k, n.r2);
+    }
+    false
+}
+
+fn row_mentions_box(in t: Types, k: Known, row_id: u32) -> bool {
+    let row = t.row(row_id);
+    for e in 0..w(row.n) {
+        let eff = t.effect_at(add(w(row.a), e));
+        for j in 0..w(eff.n) {
+            if type_mentions_box(in t, k, u32_at(in t.items, add(w(eff.a), j))) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// `fip::mentions_box`.
+pub fn mentions_box(in t: Types, in wd: World, ty: u32) -> bool {
+    wd.box_active && type_mentions_box(in t, wd.k, ty)
+}
+
+fn is_box_type(in t: Types, in wd: World, ty: u32) -> bool {
+    wd.box_active && named_is(in t, ty, wd.k.box_, 1)
+}
+
+// `fip::type_contains_box`.
+fn contains_box_visit(inout t: Types, in wd: World, ty: u32, inout seen: ChunkSeq[u32]) -> bool {
+    if is_box_type(in t, in wd, ty) {
+        return true;
+    }
+    let n = t.node(ty);
+    if n.kind == TyKind::Tuple {
+        for i in 0..w(n.n) {
+            let a = t.arg(ty, i);
+            if contains_box_visit(inout t, in wd, a, inout seen) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind != TyKind::Named {
+        return false;
+    }
+    for i in 0..w(n.n) {
+        let a = t.arg(ty, i);
+        if contains_box_visit(inout t, in wd, a, inout seen) {
+            return true;
+        }
+    }
+    let ai = wd.lookup(n.name);
+    if ai == NONE32 || contains32(in seen, n.name) {
+        return false;
+    }
+    seen.push(n.name);
+    let adt = wd.adt(ai);
+    let vars = wd.vars_of(in t, adt, ty);
+    let mut found = false;
+    for vi in 0..w(adt.vn) {
+        let v = wd.variant(add(w(adt.va), vi));
+        for fi in 0..w(v.fc) {
+            let f = wd.field(add(w(v.fa), fi));
+            if !found {
+                let ft = substitute(inout t, f.ty, in vars);
+                found = contains_box_visit(inout t, in wd, ft, inout seen);
+            }
+        }
+    }
+    let last = seen.pop();
+    found
+}
+
+pub fn type_contains_box(inout t: Types, in wd: World, ty: u32) -> bool {
+    let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    contains_box_visit(inout t, in wd, ty, inout seen)
+}
+
+// `fip::drop_visit` with `unknown` set: `may_need_drop`.
+fn drop_visit(
+    inout t: Types,
+    in names: Names,
+    in wd: World,
+    ty0: u32,
+    inout seen: ChunkSeq[u32]
+) -> bool {
+    let k = wd.k;
+    let ty = default_type(inout t, ty0);
+    if is_seq(in t, k, ty) || is_string(in t, k, ty) {
+        return true;
+    }
+    let n = t.node(ty);
+    if n.kind == TyKind::Named && n.name == k.dyn_ && n.n == 1 {
+        return true;
+    }
+    if n.kind == TyKind::Named && n.n == 0 && names.has_prefix(n.name, in "__dyn__".as_bytes()) {
+        return true;
+    }
+    if n.kind == TyKind::Tuple {
+        for i in 0..w(n.n) {
+            let a = t.arg(ty, i);
+            if drop_visit(inout t, in names, in wd, a, inout seen) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind == TyKind::Named {
+        let tiled = n.name == k.tiled_seq && (n.n == 1 || n.n == 2);
+        let handle = n.name == k.region_box || n.name == k.watermark;
+        if is_box_type(in t, in wd, ty) || is_slice(in t, k, ty) || tiled || handle {
+            return false;
+        }
+        let ai = wd.lookup(n.name);
+        if ai == NONE32 {
+            return !k.is_scalar(n.name)
+                && n.name != k.never
+                && !is_text(in t, k, ty)
+                && vector_words(in t, in names, k, ty) == 0;
+        }
+        let a = wd.adt(ai);
+        if w(a.gn) != w(n.n) {
+            return true;
+        }
+        if contains32(in seen, ty) {
+            return false;
+        }
+        seen.push(ty);
+        let vars = wd.vars_of(in t, a, ty);
+        let mut found = false;
+        for vi in 0..w(a.vn) {
+            let v = wd.variant(add(w(a.va), vi));
+            for fi in 0..w(v.fc) {
+                let f = wd.field(add(w(v.fa), fi));
+                if !found {
+                    let ft = substitute(inout t, f.ty, in vars);
+                    found = drop_visit(inout t, in names, in wd, ft, inout seen);
+                }
+            }
+        }
+        let last = seen.pop();
+        return found;
+    }
+    n.kind == TyKind::Infer
+}
+
+pub fn may_need_drop(inout t: Types, in names: Names, in wd: World, ty: u32) -> bool {
+    let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    drop_visit(inout t, in names, in wd, ty, inout seen)
+}
+
+// `type_facts` of tests/common/inline_words.rs.
+pub fn type_facts(
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    inout ls: Layouts,
+    ty: u32
+) -> u64 {
+    let lid = layout_of(inout ls, inout t, inout names, in wd, ty);
+    let laid = lid != NONE32;
+    let aggregate = !laid || ls.node(lid).kind != L_SCALAR;
+    let sequence = holds_sequence(in t, in wd, ty);
+    let boxed = mentions_box(in t, in wd, ty) || type_contains_box(inout t, in wd, ty);
+    let function = contains_function(inout t, in wd, ty);
+    let mut f: u64 = 0;
+    if laid && !aggregate && !sequence {
+        f = f | F_SCALAR;
+    }
+    if aggregate {
+        f = f | F_AGGREGATE;
+    }
+    if sequence {
+        f = f | F_SEQUENCE;
+    }
+    if is_slice(in t, wd.k, ty) {
+        f = f | F_SLICE;
+    }
+    if boxed {
+        f = f | F_BOX;
+    }
+    if function {
+        f = f | F_FUNCTION;
+    }
+    if laid && !boxed && !function && !may_need_drop(inout t, in names, in wd, ty) {
+        f = f | F_PLAIN;
+    }
+    if t.kind(ty) == TyKind::Named && t.name(ty) == wd.k.never {
+        f = f | F_NEVER;
+    }
+    f
+}
+
+// ----- borrowed match scrutinees ---------------------------------------------------
+
+fn set_flag(inout xs: ChunkSeq[u8], i: u64) -> bool {
+    loop {
+        if xs.len() > i {
+            break;
+        }
+        xs.push(0);
+    }
+    if u8_at(in xs, i) != 0 {
+        return false;
+    }
+    let ok = xs.try_set(i, 1);
+    true
+}
+
+fn flag(in xs: ChunkSeq[u8], i: u64) -> bool {
+    u8_at(in xs, i) != 0
+}
+
+// The names a pattern at `at` binds, into `names` (by symbol); whether any
+// was new.
+fn bind_pattern_names(in p: Program, at: u64, inout names: ChunkSeq[u8]) -> bool {
+    let kind = p.op(at);
+    let body = add(at, PAT_HEAD);
+    if kind == Pat::Bind {
+        return set_flag(inout names, p.op(body));
+    }
+    let mut any = false;
+    if kind == Pat::Tuple {
+        let n = p.op(body);
+        let mut q = inc(body);
+        for i in 0..n {
+            if bind_pattern_names(in p, q, inout names) {
+                any = true;
+            }
+            q = pattern_end(in p, q);
+        }
+    } else if kind == Pat::Constructor {
+        let n = p.op(add(body, 2));
+        let mut q = add(body, 3);
+        for i in 0..n {
+            if bind_pattern_names(in p, inc(q), inout names) {
+                any = true;
+            }
+            q = pattern_end(in p, inc(q));
+        }
+    }
+    any
+}
+
+pub fn pattern_end(in p: Program, at: u64) -> u64 {
+    let kind = p.op(at);
+    let body = add(at, PAT_HEAD);
+    if kind == Pat::Bind {
+        inc(body)
+    } else if kind == Pat::Literal {
+        add(body, LIT_WORDS)
+    } else if kind == Pat::Tuple {
+        let n = p.op(body);
+        let mut q = inc(body);
+        for i in 0..n {
+            q = pattern_end(in p, q);
+        }
+        q
+    } else if kind == Pat::Constructor {
+        let n = p.op(add(body, 2));
+        let mut q = add(body, 3);
+        for i in 0..n {
+            q = pattern_end(in p, inc(q));
+        }
+        q
+    } else {
+        body
+    }
+}
+
+fn is_try_get(in p: Program, fx: FactNames, inst: InstRow) -> bool {
+    if inst.op != Op::Seq {
+        return false;
+    }
+    let label = p.pool_row(p.op(inst.a)).label;
+    label == fx.try_get || label == fx.hoisted_try_get
+}
+
+// `fip::borrowed_scrutinees` (`params` set) or `ir_inline::view_scrutinees`
+// (`params` clear) of function `f`: per value id, 1 when it is in the set.
+pub fn scrutinees(in p: Program, fx: FactNames, f: FnRow, params: bool) -> ChunkSeq[u8] {
+    let mut matched: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for bi in 0..f.bc {
+        let b = p.block(add(f.b0, bi));
+        if b.term == Term::Match {
+            let fresh = set_flag(inout matched, p.op(b.ta));
+        }
+    }
+    let mut names: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if params {
+        // header: np, np x (name, pass, k, k paths, type, start, end)
+        let np = p.op(f.ha);
+        let mut at = inc(f.ha);
+        for i in 0..np {
+            if p.op(inc(at)) != widen_u64(TyPass::Sink) {
+                let fresh = set_flag(inout names, p.op(at));
+            }
+            let k = p.op(add(at, 2));
+            at = add(add(at, 3), add(k, 3));
+        }
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    loop {
+        let mut changed = false;
+        for bi in 0..f.bc {
+            let b = p.block(add(f.b0, bi));
+            for i in b.i0..add(b.i0, b.ic) {
+                let inst = p.inst(i);
+                let d = w(inst.dest);
+                if inst.op == Op::Read {
+                    if flag(in matched, d)
+                        && flag(in names, p.op(inst.a))
+                        && set_flag(inout out, d)
+                    {
+                        changed = true;
+                    }
+                } else if is_try_get(in p, fx, inst) {
+                    if flag(in matched, d) && set_flag(inout out, d) {
+                        changed = true;
+                    }
+                } else if inst.op == Op::Bind && flag(in out, p.op(inst.a)) {
+                    if bind_pattern_names(in p, inc(inst.a), inout names) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    out
+}
+
+// Whether `f` matches a borrowed non-copy place that is not an element
+// view (`W_BORROWED_MATCH`, `ir_inline::inlinable`'s "borrowed match").
+pub fn borrowed_match(
+    inout t: Types,
+    in names: Names,
+    in wd: World,
+    in p: Program,
+    fx: FactNames,
+    f: FnRow,
+    in value_types: ChunkSeq[u32],
+    in bounds: Bounds
+) -> bool {
+    let borrowed = scrutinees(in p, fx, f, true);
+    let views = scrutinees(in p, fx, f, false);
+    for v in 0..borrowed.len() {
+        if !flag(in borrowed, v) || flag(in views, v) {
+            continue;
+        }
+        let ty = u32_at(in value_types, v);
+        if ty != NONE32 && mode_of(inout t, in names, in wd, ty, in bounds) != MODE_COPY {
+            return true;
+        }
+    }
+    false
+}

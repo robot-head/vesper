@@ -65,6 +65,9 @@ pub const LANE_WORDS: u64 = 6;
 // `LOCAL_PARAM` plus the parameter's index for one of the parameters.
 pub const LOCAL_PARAM: u64 = 16;
 pub const LOCAL_PARAM_PRODUCT: u64 = 65536;
+// Added to a local's entry when it keeps a home slot on the optimize path
+// too (`body_homed`, #2614).
+pub const LOCAL_HOME: u64 = 4294967296;
 
 // The instruction kinds of the plan.
 pub const INST_PLANNED: u64 = 1;
@@ -2243,11 +2246,14 @@ impl Gen {
                     // A pure callee that borrows scalar locals `inout`
                     // (#2563): the `In` arguments are operands; each
                     // `inout` one names its local and lane.
-                    if kind != INST_CALL {
-                        return false;
-                    }
+                    // A `fail_only` callee also takes a failure record,
+                    // whose failure is raised again (#2614).
+                    let fails = kind == INST_FAIL_CALL;
                     kind = INST_INOUT_CALL;
                     if !self.body_inout_args(in h, i, n, inout ops, inout extra) {
+                        return false;
+                    }
+                    if fails && !self.body_reraise(in h, in callee_fails, inout extra) {
                         return false;
                     }
                     n = 0;
@@ -2728,6 +2734,42 @@ impl Gen {
         false
     }
 
+    // The locals that keep a home slot on the optimize path as well
+    // (`register_locals`): those lent `inout` or `sink` to a call that may
+    // fail, which writes through the slot before it can leave (#2614).
+    fn body_homed(inout self, f: FnRow) -> ChunkSeq[u64] {
+        let mut homed: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            for ii in 0..row.ic {
+                let i = self.program.inst(add(row.i0, ii));
+                if i.op != Op::Call {
+                    continue;
+                }
+                let n = self.program.op(inc(i.a));
+                if !self.body_has_inout(i, n) {
+                    continue;
+                }
+                let callee = self.body_function(n32(self.program.op(i.a)));
+                if callee == NONE64 {
+                    continue;
+                }
+                let ch = self.body_header(self.program.function(callee));
+                if ch.fails.len() == 0 {
+                    continue;
+                }
+                for k in 0..n {
+                    let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
+                    let root = self.program.op(add(at, CALL_ARG_ROOT_OFFSET));
+                    if self.program.op(at) != PASS_IN && root != 0 {
+                        homed.push(wrapping_sub(root, 1));
+                    }
+                }
+            }
+        }
+        homed
+    }
+
     // Whether one of call `i`'s `n` arguments is not passed `in`.
     fn body_has_inout(in self, i: InstRow, n: u64) -> bool {
         for k in 0..n {
@@ -2834,6 +2876,7 @@ impl Gen {
         let mut graph_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
         // `ir_graph_at`'s locals, in name order: a parameter has its
         // variable; every other local gets a zeroed one. Each has its kind.
+        let homed = self.body_homed(f);
         graph_words.push(h.lname.len());
         for k in 0..h.lname.len() {
             let t = n32(u64_at(in h.lty, k));
@@ -2855,6 +2898,12 @@ impl Gen {
             }
             if entry == 0 {
                 return;
+            }
+            for j in 0..homed.len() {
+                if u64_at(in homed, j) == name {
+                    entry = add(entry, LOCAL_HOME);
+                    break;
+                }
             }
             graph_words.push(entry);
             // The kind its stores coerce to, on the unoptimized path that

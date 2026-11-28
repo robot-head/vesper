@@ -29,6 +29,16 @@
 // roots following with flags 8) plans `native_export::compile_exports`:
 // one discovery from every export, each export a boundary of the
 // conventions, one block for the whole library.
+//
+// The body hook's plain gate (#2661, `native::BodyGate` of src/native.rs):
+// the walk asks the `body` hook for an instance's body only when the
+// instance half (`frame_plan`'s `plain`, and no `ConstDenorm` span in the
+// world) and the graph half (`graph_plain` over the program the walk
+// defines from) both hold. `gates_text` (lib.ves: `native_walk_gates`)
+// runs the discovery of `frames_text` and writes, per instance after its
+// `F` block, `G <key> <0|1>` with the instance half; `graph_gates_text`
+// (`native_walk_graph_gates`) reads a place-ir input and writes `<name>
+// <0|1>` per graph.
 
 use @vesper/check-data::pack_text;
 use @vesper/check-data::util::{add, inc, push_decimal, u32_at, u64_at, w};
@@ -37,7 +47,7 @@ use @vesper/check-data::types::{TyKind, TyPass, Types, default_type, display};
 use @vesper/check-data::world::{World};
 use @vesper/check-data::input::{Reader, read_ctx};
 use @vesper/check-layout::{L_ENUM, Layouts, layout_of, layouts_new, out_new};
-use @vesper/place-ir::{read_program};
+use @vesper/place-ir::{Program, read_program};
 use @vesper/codegen-calls::data::{Calls, read_calls};
 use @vesper/codegen-calls::instances::{
     Conc, Found, IVars, Syms, bare_trace, concrete, discover_roots, fail_only, is_root,
@@ -50,6 +60,11 @@ use @vesper/codegen-calls::abi::{
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
+// A graph's trailer (the fip side tables of tests/common/ir_words.rs
+// `trailer`): the counts of fip_call_slots, fip_join_slots,
+// box_drops_before_inst, box_drops_after_inst and box_drops_before_term,
+// each followed by its entries.
+const TRAILER_TABLES: u64 = 5;
 // `scalar` refused.
 const V_NONE: u8 = 255;
 // `native_aggregates::MAX_ENUM_WORDS`.
@@ -366,14 +381,23 @@ fn fail_identities(
 
 // The trace host's identities: for each bare `Trace` of the row (at row
 // index `index`), `native-trace-host` under `$effect:Trace` and
-// `$static:$fncap:<name>:<index>`.
-fn trace_identities(in t: Types, in names: Names, k: Syms, name: u32, row: u32, inout caps: Caps) {
+// `$static:$fncap:<name>:<index>`; answers how many it found.
+fn trace_identities(
+    in t: Types,
+    in names: Names,
+    k: Syms,
+    name: u32,
+    row: u32,
+    inout caps: Caps
+) -> u64 {
     let r = t.row(row);
+    let mut found: u64 = 0;
     for index in 0..w(r.n) {
         let e = t.effect_at(add(w(r.a), index));
         if !bare_trace(k, e) {
             continue;
         }
+        found = inc(found);
         let id_a = caps.text.len();
         put(inout caps.text, "native-trace-host");
         let id_e = caps.text.len();
@@ -390,6 +414,7 @@ fn trace_identities(in t: Types, in names: Names, k: Syms, name: u32, row: u32, 
         let k2e = caps.text.len();
         caps.insert(k2, k2e, id_a, id_e);
     }
+    found
 }
 
 // ----- the plan ---------------------------------------------------------------------
@@ -397,7 +422,13 @@ fn trace_identities(in t: Types, in names: Names, k: Syms, name: u32, row: u32, 
 // `frame_plan` of instance `name` (`f`) under `abi`, written as
 // `FramePlan::text`; false with the message in `err` when a layout or
 // `scalar` refuses. `pass_trace` is the trailing trace flag
-// (`uses_trace_fail`), `trace_host` the task's `trace_ok`.
+// (`uses_trace_fail`), `trace_host` the task's `trace_ok`. `plain` is set
+// to the plan's part of the body hook's gate (`Codegen::body_gate`): not
+// `@fip`, no instance variable (a generic or a `$fn:` binding), no trace
+// flag or caller slot, and no trace-host identity
+// (a `fail_only` record's exits are its only allowed identities). Its
+// `result_ok` always holds here: the walk takes the result pointer from
+// the plan's own result.
 pub fn frame_plan(
     inout ls: Layouts,
     inout t: Types,
@@ -413,11 +444,13 @@ pub fn frame_plan(
     pass_trace: bool,
     trace_host: bool,
     inout o: ChunkSeq[u8],
-    inout err: Errs
+    inout err: Errs,
+    inout plain: bool
 ) -> bool {
     let info = d.fn_info(f.func_index);
     let fail_record = fail_only(inout t, in names, in wd, k, in f);
     let caller_slot = uses_caller_slot(in d, info);
+    plain = !info.fip && vars.len() == 0 && !pass_trace && !caller_slot;
     let result = layout_facts(inout ls, inout t, inout names, in wd, f.result, inout err);
     if !result.ok {
         return false;
@@ -486,8 +519,8 @@ pub fn frame_plan(
     if fail_record {
         fail_identities(inout t, in names, k, name, f.row, inout caps);
     }
-    if trace_host {
-        trace_identities(in t, in names, k, name, f.row, inout caps);
+    if trace_host && trace_identities(in t, in names, k, name, f.row, inout caps) > 0 {
+        plain = false;
     }
     caps.write(inout line);
     o.extend(in line.as_slice());
@@ -522,14 +555,57 @@ fn all_roots_found(
     true
 }
 
+// The graph half of the body hook's gate (`BodyGate::graph`): graph `fi`
+// of `p` has no fip reuse slots and no `Box` drops, so every table of its
+// trailer is empty.
+pub fn graph_plain(in p: Program, fi: u64) -> bool {
+    let f = p.function(fi);
+    if f.tn != TRAILER_TABLES {
+        return false;
+    }
+    for i in 0..TRAILER_TABLES {
+        if p.op(add(f.ta, i)) != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+// The harness dump of `graph_plain`: per graph of the place-ir input,
+// `<name> <0|1>`.
+pub fn graph_gates_text(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader { pos: 0 };
+    let c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for fi in 0..p.fn_count() {
+        c.names.write(p.function(fi).name, inout o);
+        o.push(32);
+        bit(inout o, graph_plain(in p, fi));
+        o.push(10);
+    }
+    pack_text(in o)
+}
+
 // The harness dump: see the header.
 pub fn frames_text(in input: Str) -> ChunkSeq[u64] {
     frames_bytes(in input.as_bytes())
 }
 
+// `frames_text` with each instance's `G` line: see the header.
+pub fn gates_text(in input: Str) -> ChunkSeq[u64] {
+    plan_tasks(in input.as_bytes(), true)
+}
+
 // `frames_text` over the input's bytes: the `frame_plans` swap hook's entry
 // (part 3b, #1509).
 pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
+    plan_tasks(in b, false)
+}
+
+// The plans of every task of the input; `gates` adds the `G` lines.
+fn plan_tasks(in b: Slice[u8], gates: bool) -> ChunkSeq[u64] {
     let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
@@ -662,6 +738,7 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
                 let pass_trace = trace_ok
                     && (x.key == task.entry
                         || trace_host_direct(inout c.types, in c.world, in d, k, in f));
+                let mut plain = false;
                 if !frame_plan(
                     inout ls,
                     inout c.types,
@@ -677,10 +754,18 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
                     pass_trace,
                     trace_ok,
                     inout o,
-                    inout err
+                    inout err,
+                    inout plain
                 ) {
                     ok = false;
                     break;
+                }
+                if gates {
+                    put(inout o, "G ");
+                    c.names.write(x.key, inout o);
+                    o.push(32);
+                    bit(inout o, plain && !d.const_denorm);
+                    o.push(10);
                 }
             }
         }
