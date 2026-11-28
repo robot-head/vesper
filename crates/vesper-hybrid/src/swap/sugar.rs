@@ -52,6 +52,14 @@ const VESPER_SUGAR: vesper_syntax::sugar_expand::SugarExpandTable =
         },
     };
 
+/// The sugar expansion the Vesper driver ran itself (`expand_words` of
+/// `@vesper/sugar`, modules/driver/src/front.ves, #1893), read back like
+/// this swap's.
+pub(crate) fn driver_expansion(words: &[u64]) -> vesper_syntax::sugar_expand::Expansion {
+    SUGAR_CALLS.fetch_add(1, Relaxed);
+    sugar_words::decode(words)
+}
+
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[pass("sugar", "sugar", "#1157")];
 

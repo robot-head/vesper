@@ -26,6 +26,11 @@
 // |     fn hd_step(inout s: Session, step: u32, nocapture in arg: CSlice[u8]) -> ForeignVal[i64];
 // |     fn hd_text(in s: Session, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
 // |     fn hd_parsed(inout s: Session, nocapture in words: CSlice[u64]) -> ForeignVal[i64];
+// |     fn hd_parsed_sugar(
+// |         inout s: Session,
+// |         nocapture in words: CSlice[u64],
+// |         nocapture in expansion: CSlice[u64]
+// |     ) -> ForeignVal[i64];
 // |     fn hd_assembled(inout s: Session, nocapture in words: CSlice[u64]) -> ForeignVal[i64];
 // |     fn hd_front_begin() -> ForeignVal[u32];
 // |     fn hd_write(inout s: Session, nocapture in text: CSlice[u8]) -> ForeignVal[i64];
@@ -531,6 +536,7 @@ fn drive(
         }
     }
     let mut r = declined();
+    let mut sugared = false;
     if front && !o.include_tests && !emit_cst_format {
         let input = value(in o, slot_input());
         match parse_front(in source, in input.as_slice(), o.json) {
@@ -539,6 +545,18 @@ fn drive(
                 if is_failure(r) {
                     return pass_failed(in s, r);
                 }
+            },
+            // The module is the expansion's parse, not `source`'s.
+            FrontParse::ParsedSugar(words, expansion) => {
+                r = HybridDriver::hd_parsed_sugar(
+                    inout s,
+                    in words.as_slice(),
+                    in expansion.as_slice()
+                );
+                if is_failure(r) {
+                    return pass_failed(in s, r);
+                }
+                sugared = true;
             },
             // `ReportSyntax`'s report, without the session's `Parse`.
             FrontParse::SyntaxErrors(n, report) => {
@@ -556,7 +574,7 @@ fn drive(
     }
     // The session's module is the parse of `source` itself, so the Vesper
     // collector can give its checked world's declarations.
-    let held = r != declined();
+    let held = r != declined() && !sugared;
     if r == declined() {
         r = step(inout s, step_parse());
     }

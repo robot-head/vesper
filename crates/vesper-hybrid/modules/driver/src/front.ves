@@ -20,6 +20,7 @@ use @vesper/front::source_macro::{macro_limits_default, parse_macro_surface_toke
 use @vesper-std/fmt::{fmt, write_str, write_u64};
 use @vesper-std/toml::debug::{put_debug_str};
 use @vesper/sugar::driver::{expand_words, imports_none};
+use @vesper/driver::{remap_diagnostics_stream};
 use @vesper/diagnostics::{prepare_check, terminal, Caps, Failure, Sizes, Totals};
 
 fn word_at(in w: ChunkSeq[u64], i: u64) -> u64 {
@@ -248,6 +249,10 @@ pub enum FrontParse {
     // the report `ReportSyntax` would leave in the session's text, for
     // `emit_report`.
     SyntaxErrors(u64, ChunkSeq[u8]),
+    // No diagnostics in the parse of the source's sugar expansion: that
+    // `parse_words` stream and the expansion (`expand_words`), for the
+    // session's `Parse` (`hd_parsed_sugar`).
+    ParsedSugar(ChunkSeq[u64], ChunkSeq[u64]),
     // The sugar expansion's diagnostic: its report, for `emit_report`, and
     // the `Parse` pass's error message (`<code>: <message>`).
     ExpansionError(ChunkSeq[u8], ChunkSeq[u8]),
@@ -259,9 +264,8 @@ pub enum FrontParse {
 // for a standalone source, with `ReportSyntax`'s report when the parse has
 // diagnostics (crates/vesper-hybrid/src/driver/front.rs) and the `Parse`
 // pass's when the sugar expansion fails. The session keeps what the
-// driver does not cover: a source over the byte budget, a source whose
-// sugar expands (the session expands it again and parses the expansion),
-// and a report the `@vesper/diagnostics` port refuses (the session's
+// driver does not cover: a source over the byte budget, an expansion that
+// declares `macro`s and does not parse (Forge), and a report the `@vesper/diagnostics` port refuses (the session's
 // renderer prints the raw diagnostics with its own reason).
 pub fn parse_front(in source: ChunkSeq[u8], in file: Slice[u8], json: bool) -> FrontParse {
     let bytes = source.as_slice();
@@ -278,7 +282,8 @@ pub fn parse_front(in source: ChunkSeq[u8], in file: Slice[u8], json: bool) -> F
         return FrontParse::ParsedClean(words);
     }
     // `expand_sugar_for_execution(source, false)`: `Ok(None)` keeps the
-    // parse's own diagnostics, and `Err` reports the expansion's.
+    // parse's own diagnostics, `Ok(Some)` parses the expansion and `Err`
+    // reports the expansion's.
     let expanded = expand_words(in source, in imports_none(), false);
     let outcome = word_at(in expanded, 0);
     if outcome == SUGAR_NONE {
@@ -287,6 +292,9 @@ pub fn parse_front(in source: ChunkSeq[u8], in file: Slice[u8], json: bool) -> F
             Option::Some(report) => FrontParse::SyntaxErrors(count, report),
             Option::None => FrontParse::ParseDeclined,
         };
+    }
+    if outcome == SUGAR_EXPANDED {
+        return parse_expansion(in text, in file, expanded, json);
     }
     if outcome != SUGAR_ERROR {
         return FrontParse::ParseDeclined;
@@ -297,6 +305,129 @@ pub fn parse_front(in source: ChunkSeq[u8], in file: Slice[u8], json: bool) -> F
         Option::Some(report) => FrontParse::ExpansionError(report, message),
         Option::None => FrontParse::ParseDeclined,
     }
+}
+
+// `parse_resolved` of src/forge_frontend/sugar.rs over the expansion of
+// `text`: the parse of the expanded text, reported under the expansion's
+// source map when it has diagnostics. An expanded text that declares
+// `macro`s goes to Forge in the session instead (`has_macro_declaration`
+// is the lexer's check; any `macro` bytes decline here).
+fn parse_expansion(
+    in text: Str,
+    in file: Slice[u8],
+    sink expanded: ChunkSeq[u64],
+    json: bool
+) -> FrontParse {
+    let mut at: u64 = 1;
+    let mut source: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_word_bytes(inout source, in expanded, inout at);
+    let expanded_text = match String::from_utf8(in source.as_slice()) {
+        Option::Some(t) => t,
+        Option::None => return FrontParse::ParseDeclined,
+    };
+    let words = parse_words(in expanded_text);
+    let count = diagnostic_count(in words);
+    if count == 0 {
+        return FrontParse::ParsedSugar(words, expanded);
+    }
+    if has_bytes(in source.as_slice(), in MACRO_KEYWORD.as_bytes()) {
+        return FrontParse::ParseDeclined;
+    }
+    let map = expansion_map(in expanded);
+    let fields = syntax_fields(in words);
+    if json {
+        let mut report: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        report.push(DIAG_JSON_SINGLE);
+        put_u64_le(inout report, map.len() / MAP_SEG_WORDS);
+        for i in 0..map.len() {
+            put_u64_le(inout report, word_at(in map, i));
+        }
+        report.extend(in fields.as_slice());
+        return FrontParse::SyntaxErrors(count, report);
+    }
+    // `original_diagnostic` of each, rendered over the source as read.
+    let mapped = remap_diagnostics_stream(in map.as_slice(), in fields.as_slice());
+    match report_of(in text, in file, in mapped, false) {
+        Option::Some(report) => FrontParse::SyntaxErrors(count, report),
+        Option::None => FrontParse::ParseDeclined,
+    }
+}
+
+const MACRO_KEYWORD: Str = "macro";
+
+// Whether `needle` occurs in `hay`.
+fn has_bytes(in hay: Slice[u8], in needle: Slice[u8]) -> bool {
+    let n = needle.len();
+    if n > hay.len() {
+        return false;
+    }
+    for i in 0..wrapping_add(wrapping_sub(hay.len(), n), 1) {
+        let mut hit = true;
+        for k in 0..n {
+            if hay.try_get(wrapping_add(i, k)).unwrap_or(0) != needle.try_get(k).unwrap_or(0) {
+                hit = false;
+                break;
+            }
+        }
+        if hit {
+            return true;
+        }
+    }
+    false
+}
+
+// The words of a region in `expand_words`' expansion after its holes and
+// places: the emits row text, then the call and rule spans and the import.
+const REGION_TAIL_WORDS: u64 = 5;
+// A place: its span and its pass.
+const PLACE_WORDS: u64 = 3;
+// A span: start and end.
+const SPAN_WORDS: u64 = 2;
+// `SourceMapSegment`'s flat layout for `remap_diagnostics_stream`:
+// expanded start, end, original start, end, kind (0 source, 1 generated).
+const MAP_SEG_WORDS: u64 = 5;
+const MAP_KIND_SOURCE: u64 = 0;
+const MAP_KIND_GENERATED: u64 = 1;
+
+// Moves `at` past a text of `expand_words` (its length, then a byte a
+// word).
+fn skip_word_text(in w: ChunkSeq[u64], inout at: u64) {
+    let len = word_at(in w, at);
+    at = wrapping_add(wrapping_add(at, 1), len);
+}
+
+// The expansion's source map from `expand_words`: its mappings (expanded
+// span, original span, copied) as `SourceMapSegment`s.
+fn expansion_map(in w: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut at: u64 = 1;
+    skip_word_text(in w, inout at);
+    skip_word_text(in w, inout at);
+    let regions = next_word(in w, inout at);
+    for _ in 0..regions {
+        at = wrapping_add(at, SPAN_WORDS);
+        let holes = next_word(in w, inout at);
+        at = wrapping_add(at, wrapping_mul(holes, SPAN_WORDS));
+        let places = next_word(in w, inout at);
+        at = wrapping_add(at, wrapping_mul(places, PLACE_WORDS));
+        skip_word_text(in w, inout at);
+        at = wrapping_add(at, REGION_TAIL_WORDS);
+    }
+    let mappings = next_word(in w, inout at);
+    let mut map: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for _ in 0..mappings {
+        for _ in 0..wrapping_mul(SPAN_WORDS, 2) {
+            map.push(next_word(in w, inout at));
+        }
+        let copied = next_word(in w, inout at);
+        map.push(
+            if copied != 0 {
+                MAP_KIND_SOURCE
+            } else {
+                MAP_KIND_GENERATED
+            }
+        );
+    }
+    map
 }
 
 // The diagnostics report of `fields` (`push_diag_fields` of
@@ -336,6 +467,7 @@ fn report_of(
 
 // `expand_words`' first word: no sugar, or the expansion's diagnostic.
 const SUGAR_NONE: u64 = 0;
+const SUGAR_EXPANDED: u64 = 1;
 const SUGAR_ERROR: u64 = 2;
 
 // The report tags of driver/front.rs (`emit_report` in lib.ves reads them).
@@ -442,6 +574,16 @@ fn put_word_text(inout out: ChunkSeq[u8], in w: ChunkSeq[u64], inout at: u64) {
     let len = word_at(in w, at);
     at = wrapping_add(at, 1);
     put_u64_le(inout out, len);
+    for i in 0..len {
+        out.push(wrapping_u8(word_at(in w, wrapping_add(at, i)) & BYTE_MASK));
+    }
+    at = wrapping_add(at, len);
+}
+
+// The bytes of a text of `expand_words` at word `at`; `at` moves past it.
+fn put_word_bytes(inout out: ChunkSeq[u8], in w: ChunkSeq[u64], inout at: u64) {
+    let len = word_at(in w, at);
+    at = wrapping_add(at, 1);
     for i in 0..len {
         out.push(wrapping_u8(word_at(in w, wrapping_add(at, i)) & BYTE_MASK));
     }
