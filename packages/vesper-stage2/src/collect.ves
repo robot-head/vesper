@@ -9,7 +9,7 @@ use @vesper/ast::{
 };
 use @vesper/check-data::names::{Names, names_new};
 use @vesper/check-data::types::{
-    EffNode, TyKind, TyMode, Types, substitute, substitute_row, types_new
+    EffNode, TyKind, TyMode, Types, Vars, substitute, substitute_row, types_new, vars_new
 };
 use @vesper/check-data::util::{inc32, n32, u32_at, u64_at, u8_at, w};
 
@@ -43,7 +43,8 @@ use @vesper-std/intern::{symbol_from_id};
 use self::vcl_decls::{vcl_decl, vcl_decl_count};
 use self::traits::{
     BoundRow, ConfRow, MonoPlan, TraitInfo, TraitRow, generated_name, inst_at, inst_vars,
-    is_dropped, key_segment, mark_bounded, mark_stub, mono_plan_new, stub_name, trait_info_new
+    is_dropped, key_segment, mark_bounded, mark_stub, mono_plan_new, stub_name, stub_of, thunk_at,
+    trait_index, trait_info_new, vtable_stub_name
 };
 
 pub copy struct FnInfo {
@@ -60,6 +61,9 @@ pub copy struct FnInfo {
     // The monomorphized instance this function is (traits.ves `Inst`, by
     // id + 1), or 0.
     inst: u32,
+    // The vtable slot function this function is (traits.ves `Thunk`, by id
+    // + 1), or 0: its body is generated (ast_lower.ves `lower_thunk`).
+    thunk: u32,
 }
 
 pub copy struct ParamInfo {
@@ -481,7 +485,8 @@ fn collect_fn_into(
         effects: effs,
         mod_idx: mod_idx,
         body: fn_node.body,
-        inst: 0
+        inst: 0,
+        thunk: 0
     });
 }
 
@@ -1066,6 +1071,15 @@ fn collect_program_with(
         }
     }
     if plan.active {
+        add_dyn_functions(
+            in plan,
+            in tr,
+            inout names,
+            inout types,
+            inout fn_generics,
+            inout params,
+            inout fns
+        );
         add_instances(in plan, inout types, inout params, inout fns);
     }
     let opt_sym = names.intern(in "Option".as_bytes());
@@ -1959,8 +1973,142 @@ fn add_instances(
             effects: substitute_row(inout types, o.effects, in vars),
             mod_idx: o.mod_idx,
             body: o.body,
-            inst: n32(wrapping_add(ii, 1))
+            inst: n32(wrapping_add(ii, 1)),
+            thunk: 0
         });
     }
     fns = kept;
+}
+
+// `Self` in a vtable stub (src/pact_frontend/mono.rs `stub_declarations`).
+const VTABLE_SELF: Str = "$Self";
+
+// The second pass's `dyn` functions (§7.3): a bodiless vtable stub
+// `vtable$Trait$method[$Self]` per method of each boxed trait, and each
+// vtable slot function of `plan` with the method's signature at its type,
+// from the trait's stubs (before `add_instances` leaves them out).
+fn add_dyn_functions(
+    in plan: MonoPlan,
+    in tr: TraitInfo,
+    inout names: Names,
+    inout types: Types,
+    inout fn_generics: ChunkSeq[Generic],
+    inout params: ChunkSeq[ParamInfo],
+    inout fns: ChunkSeq[FnInfo]
+) {
+    let mut stubs = ChunkSeq::new[FnInfo]();
+    let self_new = names.intern(in VTABLE_SELF.as_bytes());
+    let self_new_ty = types.named0(self_new);
+    for bi in 0..plan.boxed.len() {
+        let trait_name = u32_at(in plan.boxed, bi);
+        let ti = trait_index(in tr, trait_name);
+        let t = match tr.traits.try_get(ti) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        for k in 0..w(t.mn) {
+            let method = u32_at(in tr.methods, wrapping_add(w(t.m0), k));
+            let stub = match fn_named(in fns, stub_of(in tr, trait_name, method)) {
+                Option::Some(v) => v,
+                Option::None => continue,
+            };
+            let self_old = match fn_generics.try_get(w(stub.ga)) {
+                Option::Some(g) => g,
+                Option::None => continue,
+            };
+            let mut vars = vars_new();
+            vars.set(self_old.name, self_new_ty);
+            let ga = n32(fn_generics.len());
+            fn_generics.push(Generic { name: self_new, bound: self_old.bound, row: false });
+            for gi in 1..w(stub.gn) {
+                match fn_generics.try_get(wrapping_add(w(stub.ga), gi)) {
+                    Option::Some(g) => fn_generics.push(g),
+                    Option::None => {},
+                }
+            }
+            let pa = copy_params(inout params, inout types, stub.pa, stub.pn, in vars);
+            let mut f = stub;
+            f.name = vtable_stub_name(inout names, trait_name, method);
+            f.ga = ga;
+            f.pa = pa;
+            f.result = substitute(inout types, stub.result, in vars);
+            f.effects = substitute_row(inout types, stub.effects, in vars);
+            stubs.push(f);
+        }
+    }
+    for i in 0..plan.thunks.len() {
+        let th = thunk_at(in plan, i);
+        let stub = match fn_named(in fns, stub_of(in tr, th.trait_name, th.method)) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        let self_old = match fn_generics.try_get(w(stub.ga)) {
+            Option::Some(g) => g,
+            Option::None => continue,
+        };
+        let mut vars = vars_new();
+        vars.set(self_old.name, th.self_ty);
+        let pa = copy_params(inout params, inout types, stub.pa, stub.pn, in vars);
+        stubs.push(FnInfo {
+            name: th.name,
+            fip: stub.fip,
+            ga: 0,
+            gn: 0,
+            pa: pa,
+            pn: stub.pn,
+            result: substitute(inout types, stub.result, in vars),
+            effects: substitute_row(inout types, stub.effects, in vars),
+            mod_idx: stub.mod_idx,
+            body: ast_none(),
+            inst: 0,
+            thunk: n32(wrapping_add(i, 1))
+        });
+    }
+    for i in 0..stubs.len() {
+        match stubs.try_get(i) {
+            Option::Some(f) => fns.push(f),
+            Option::None => {},
+        }
+    }
+}
+
+fn fn_named(in fns: ChunkSeq[FnInfo], name: u32) -> Option[FnInfo] {
+    for i in 0..fns.len() {
+        match fns.try_get(i) {
+            Option::Some(f) => {
+                if f.name == name {
+                    return Option::Some(f);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    Option::None
+}
+
+// Copies params `pa..pa+pn` with `vars` substituted; returns the copy's start.
+fn copy_params(
+    inout params: ChunkSeq[ParamInfo],
+    inout types: Types,
+    pa: u32,
+    pn: u32,
+    in vars: Vars
+) -> u32 {
+    let start = n32(params.len());
+    for pi in 0..w(pn) {
+        match params.try_get(wrapping_add(w(pa), pi)) {
+            Option::Some(p) => {
+                let ty = substitute(inout types, p.ty, in vars);
+                params.push(ParamInfo {
+                    name: p.name,
+                    pass: p.pass,
+                    ty: ty,
+                    start: p.start,
+                    end: p.end
+                });
+            },
+            Option::None => {},
+        }
+    }
+    start
 }

@@ -27,7 +27,7 @@ use @vesper-std/env::{arg, arg_count, var};
 use @vesper-std/fs::{IoError, write_path};
 use self::ast_lower::{build_ir_ast, build_ir_ast_for_entry, build_ir_ast_traits};
 use self::collect::{collect_program, collect_program_traits};
-use self::traits::{mono_plan, mono_plan_new};
+use self::traits::{DynOut, dyn_out, dyn_out_new, mono_plan, mono_plan_new};
 use self::facts::{record_failure_ops};
 use self::tables::{lower_table_reads};
 use self::loader::{load_package_graph_bytes_traits};
@@ -351,6 +351,8 @@ pub struct Lowered {
     low: L,
     call_rows: ChunkSeq[CallRow],
     call_pairs: ChunkSeq[Pair],
+    // The vtable stubs and vtables of boxed trait objects (traits.ves).
+    dyn_out: DynOut,
 }
 
 /// `stage2_compile_dir`'s front end for the package at `root_dir`, for
@@ -392,7 +394,7 @@ pub fn stage2_lower_dir(
             return Option::None;
         },
     };
-    let (ir_ast, names_seed, types_seed, world0) = front_with_traits(in mods);
+    let (ir_ast, names_seed, types_seed, world0, dyn_out) = front_with_traits(in mods);
     let mut names0 = names_seed;
     let mut types0 = types_seed;
     if !resolve_rows(inout sugar, inout a, inout names0, inout types0) {
@@ -433,19 +435,25 @@ pub fn stage2_lower_dir(
     };
     let mut low = l_new(sink c, sink ir_ast);
     lower_all(inout low);
-    Option::Some(Lowered { low: low, call_rows: call_rows, call_pairs: call_pairs })
+    Option::Some(Lowered {
+        low: low,
+        call_rows: call_rows,
+        call_pairs: call_pairs,
+        dyn_out: dyn_out
+    })
 }
 
 // Collects and lowers `mods` through the trait frontend (traits.ves): a
 // package with traits or conformances is checked once to plan its
 // instances, then collected and lowered again with them, as Rust's
 // `check_lowered_package` checks pass 1 and then the elaborated module.
-fn front_with_traits(in mods: ChunkSeq[AssembledModule]) -> (IrAst, Names, Types, World) {
+fn front_with_traits(in mods: ChunkSeq[AssembledModule]) -> (IrAst, Names, Types, World, DynOut) {
     let mut names0 = names_new();
     let types0 = types_new(inout names0);
     let first = collect_program_traits(in mods, sink names0, sink types0, sink mono_plan_new());
     if first.tr.traits.len() == 0 && first.tr.confs.len() == 0 {
-        return build_ir_ast_for_entry(sink first, in mods, in "");
+        let (ir, n, t, wd) = build_ir_ast_for_entry(sink first, in mods, in "");
+        return (ir, n, t, wd, dyn_out_new());
     }
     let (ir1, names1, types1, world1, tr1) = build_ir_ast_traits(sink first, in mods, in "");
     let (names2, types2, _world2, _rows, _pairs, _bad, calls, tr2) = typecheck_ast_traits(
@@ -459,8 +467,10 @@ fn front_with_traits(in mods: ChunkSeq[AssembledModule]) -> (IrAst, Names, Types
     let mut names = names2;
     let mut types = types2;
     let plan = mono_plan(in ir1, in tr2, in calls, inout names, inout types);
+    let dyn_objects = dyn_out(in plan, in tr2, inout names);
     let second = collect_program_traits(in mods, sink names, sink types, sink plan);
-    build_ir_ast_for_entry(sink second, in mods, in "")
+    let (ir, n, t, wd) = build_ir_ast_for_entry(sink second, in mods, in "");
+    (ir, n, t, wd, dyn_objects)
 }
 
 /// Compile a Loom package from `root_dir` to a core Wasm module at `out_wasm`

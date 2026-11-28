@@ -19,8 +19,8 @@ use @vesper/wasm-backend::ir::{CallRow, Pair};
 use @vesper/place-ir-lower::ast::{Ast, Ef, Eop, Ex, FnR, Hd, Pm, Pt};
 use self::facts::{loop_breaks, loop_never_breaks, loop_plain_breaks};
 use self::traits::{
-    GenCall, TraitCall, TraitCalls, TraitInfo, bound_stub, resolve_conf, stub_trait,
-    trait_calls_new, trait_index, trait_info_new
+    BoxCo, GenCall, TraitCall, TraitCalls, TraitInfo, boxed_object, boxed_trait, bound_stub,
+    is_object, resolve_conf, stub_of, stub_trait, trait_calls_new, trait_index, trait_info_new
 };
 use self::sugar_policy::{
     POLICY_BAD_METADATA, POLICY_OK, PolicyFailure, PolicyInputs, PolicySpan, caller_supplied,
@@ -2152,6 +2152,9 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                     Option::None => expected,
                                 }
                             };
+                            if tc.tr.active && is_op(in tc, cname, in "Box::new") {
+                                record_box_coercion(inout tc, rty, arg0_ty);
+                            }
                             record_span(inout tc, ce.s0, ce.s1, rty);
                             record_span(inout tc, e.s0, e.s1, rty);
                             return rty;
@@ -2945,6 +2948,21 @@ pub fn typecheck_ast_traits(
     )
 }
 
+// A `Box::new` call typed `Box[dyn Trait]` whose value has the concrete
+// type `value` boxes it as a trait object (§7.3): the trait frontend
+// builds the value type's vtable (traits.ves `dyn_vtable`).
+fn record_box_coercion(inout tc: Tc, boxed: u32, value: u32) {
+    let object = boxed_object(inout tc.names, in tc.types, boxed);
+    if object == NONE32 || value == NONE32 {
+        return;
+    }
+    let vk = tc.types.kind(value);
+    if vk == TyKind::Infer || is_object(inout tc.names, in tc.types, value) {
+        return;
+    }
+    tc.trait_calls.cos.push(BoxCo { caller: tc.cur_fn, self_ty: value, object: object });
+}
+
 // Whether `ty` is a generic parameter of the function being checked.
 fn is_own_generic(in tc: Tc, in a: Ast, ty: u32) -> bool {
     if tc.types.kind(ty) != TyKind::Named || tc.types.arity(ty) != 0 {
@@ -2979,9 +2997,20 @@ fn trait_call(
     expected: u32
 ) -> Option[u32] {
     let mut stub = false;
+    let mut boxed = false;
     let mut target = NONE32;
     let mut tname = trait_name;
-    if is_own_generic(in tc, in a, recv) {
+    let object_trait = boxed_trait(inout tc.names, in tc.types, recv);
+    if object_trait != NONE32 && trait_index(in tc.tr, object_trait) != NONE64 {
+        // A call on a boxed trait object (§7.3): typed by the trait's stub,
+        // with `Self` the box, and made through its vtable stub.
+        if trait_name != NONE32 && trait_name != object_trait {
+            return Option::None;
+        }
+        target = stub_of(in tc.tr, object_trait, method);
+        boxed = true;
+        tname = object_trait;
+    } else if is_own_generic(in tc, in a, recv) {
         target = bound_stub(in tc.tr, tc.cur_fn, tc.types.name(recv), method);
         stub = true;
         if target != NONE32 && tname == NONE32 {
@@ -3005,6 +3034,7 @@ fn trait_call(
         target: target,
         recv: recv,
         stub: stub,
+        boxed: boxed,
         trait_name: tname,
         method: method
     });

@@ -39,6 +39,11 @@ const NONE64: u64 = 18446744073709551615;
 const KEY_JOIN: u8 = 46;
 // `$`, which joins the parts of generated names.
 const DOLLAR: u8 = 36;
+// src/fip.rs `BOX_TYPE`, crates/vesper-core/src/ast.rs `DYN_TYPE` and
+// src/dyn_trait.rs `VTABLE_STUB`.
+const BOX_TYPE: Str = "Box";
+const DYN_TYPE: Str = "dyn";
+const VTABLE_STUB: Str = "vtable$";
 
 // A trait: its method names are `methods[m0..m0+mn]`, their stubs
 // `stubs[m0..m0+mn]`.
@@ -362,8 +367,19 @@ pub copy struct TraitCall {
     target: u32,
     recv: u32,
     stub: bool,
+    // On a boxed object `Box[dyn trait_name]`: the call goes through the
+    // object's vtable stub `vtable$Trait$method`.
+    boxed: bool,
     trait_name: u32,
     method: u32,
+}
+
+// A boxed-object coercion (§7.3) in function `caller`: a `Box::new` call
+// typed `Box[object]` whose value has the concrete type `self_ty`.
+pub copy struct BoxCo {
+    caller: u32,
+    self_ty: u32,
+    object: u32,
 }
 
 // A call at `s0..s1` in function `caller` of generic function `callee`,
@@ -381,14 +397,69 @@ pub struct TraitCalls {
     calls: ChunkSeq[TraitCall],
     gcalls: ChunkSeq[GenCall],
     pairs: ChunkSeq[Pair],
+    cos: ChunkSeq[BoxCo],
 }
 
 pub fn trait_calls_new() -> TraitCalls {
     TraitCalls {
         calls: ChunkSeq::new[TraitCall](),
         gcalls: ChunkSeq::new[GenCall](),
-        pairs: ChunkSeq::new[Pair]()
+        pairs: ChunkSeq::new[Pair](),
+        cos: ChunkSeq::new[BoxCo]()
     }
+}
+
+// The trait `T` of a boxed object type `Box[dyn T[args]]`, or NONE32.
+pub fn boxed_trait(inout names: Names, in types: Types, ty: u32) -> u32 {
+    let object = boxed_object(inout names, in types, ty);
+    if object == NONE32 {
+        return NONE32;
+    }
+    let inner = types.arg(object, 0);
+    if types.kind(inner) != TyKind::Named {
+        return NONE32;
+    }
+    types.name(inner)
+}
+
+// The object type `dyn T[args]` of a boxed object type, or NONE32.
+pub fn boxed_object(inout names: Names, in types: Types, ty: u32) -> u32 {
+    if types.kind(ty) != TyKind::Named || types.arity(ty) != 1 {
+        return NONE32;
+    }
+    if types.name(ty) != names.intern(in BOX_TYPE.as_bytes()) {
+        return NONE32;
+    }
+    let object = types.arg(ty, 0);
+    if types.kind(object) != TyKind::Named || types.arity(object) != 1 {
+        return NONE32;
+    }
+    if types.name(object) != names.intern(in DYN_TYPE.as_bytes()) {
+        return NONE32;
+    }
+    object
+}
+
+// Whether `ty` is an object type `dyn T[args]`.
+pub fn is_object(inout names: Names, in types: Types, ty: u32) -> bool {
+    types.kind(ty) == TyKind::Named
+        && types.arity(ty) == 1
+        && types.name(ty) == names.intern(in DYN_TYPE.as_bytes())
+}
+
+// The vtable stub of a trait method, `vtable$<Trait>$<method>`
+// (src/dyn_trait.rs `stub_name`).
+pub fn vtable_stub_name(inout names: Names, trait_name: u32, method: u32) -> u32 {
+    let mut buf = ChunkSeq::new[u8]();
+    vtable_stub_text(inout names, trait_name, method, inout buf);
+    names.intern(in buf.as_slice())
+}
+
+fn vtable_stub_text(inout names: Names, trait_name: u32, method: u32, inout buf: ChunkSeq[u8]) {
+    buf.extend(in VTABLE_STUB.as_bytes());
+    names.write(trait_name, inout buf);
+    buf.push(DOLLAR);
+    names.write(method, inout buf);
 }
 
 // ---------------------------------------------------------------------------
@@ -415,6 +486,25 @@ pub copy struct Rename {
     inst: bool,
 }
 
+// A vtable slot function `name` (`Elaborator::dyn_thunk`): method
+// `method` of `trait_name` for `self_ty`, whose body calls `target`.
+pub copy struct Thunk {
+    name: u32,
+    trait_name: u32,
+    method: u32,
+    self_ty: u32,
+    target: u32,
+}
+
+// The vtable of `self_ty` as `object` (src/dyn_trait.rs `VTable`): its
+// slot functions are `thunks[t0..t0+tn]`.
+pub copy struct VTab {
+    object: u32,
+    self_ty: u32,
+    t0: u64,
+    tn: u64,
+}
+
 pub struct MonoPlan {
     active: bool,
     insts: ChunkSeq[Inst],
@@ -423,6 +513,11 @@ pub struct MonoPlan {
     // By function symbol: 1 for the bounded originals and the stubs the
     // second pass leaves out.
     dropped: ChunkSeq[u32],
+    // The traits used as boxed objects, whose vtable stubs the second
+    // pass declares.
+    boxed: ChunkSeq[u32],
+    thunks: ChunkSeq[Thunk],
+    vtabs: ChunkSeq[VTab],
 }
 
 pub fn mono_plan_new() -> MonoPlan {
@@ -431,8 +526,71 @@ pub fn mono_plan_new() -> MonoPlan {
         insts: ChunkSeq::new[Inst](),
         pairs: ChunkSeq::new[Pair](),
         renames: ChunkSeq::new[Rename](),
-        dropped: ChunkSeq::new[u32]()
+        dropped: ChunkSeq::new[u32](),
+        boxed: ChunkSeq::new[u32](),
+        thunks: ChunkSeq::new[Thunk](),
+        vtabs: ChunkSeq::new[VTab]()
     }
+}
+
+pub fn thunk_at(in plan: MonoPlan, i: u64) -> Thunk {
+    match plan.thunks.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => Thunk {
+            name: NONE32,
+            trait_name: NONE32,
+            method: NONE32,
+            self_ty: NONE32,
+            target: NONE32
+        },
+    }
+}
+
+fn mark_boxed(inout plan: MonoPlan, trait_name: u32) {
+    for i in 0..plan.boxed.len() {
+        if u32_at(in plan.boxed, i) == trait_name {
+            return;
+        }
+    }
+    plan.boxed.push(trait_name);
+}
+
+// The `dyn` metadata of the calls input (src/dyn_trait.rs `DynObjects`):
+// the vtable stubs and the vtables, each method its slot function.
+pub struct DynOut {
+    stubs: ChunkSeq[u32],
+    vtabs: ChunkSeq[VTab],
+    slots: ChunkSeq[u32],
+}
+
+pub fn dyn_out_new() -> DynOut {
+    DynOut {
+        stubs: ChunkSeq::new[u32](),
+        vtabs: ChunkSeq::new[VTab](),
+        slots: ChunkSeq::new[u32]()
+    }
+}
+
+// `plan`'s vtable stubs (every method of each boxed trait) and vtables.
+pub fn dyn_out(in plan: MonoPlan, in tr: TraitInfo, inout names: Names) -> DynOut {
+    let mut out = dyn_out_new();
+    for bi in 0..plan.boxed.len() {
+        let t = trait_at(in tr, trait_index(in tr, u32_at(in plan.boxed, bi)));
+        for k in 0..w(t.mn) {
+            let m = u32_at(in tr.methods, wrapping_add(w(t.m0), k));
+            out.stubs.push(vtable_stub_name(inout names, t.name, m));
+        }
+    }
+    for vi in 0..plan.vtabs.len() {
+        match plan.vtabs.try_get(vi) {
+            Option::Some(v) => out.vtabs.push(v),
+            Option::None => {},
+        }
+    }
+    for ti in 0..plan.thunks.len() {
+        out.slots.push(thunk_at(in plan, ti).name);
+    }
+    out
 }
 
 pub fn is_dropped(in plan: MonoPlan, sym: u32) -> bool {
@@ -702,7 +860,11 @@ fn visit(
             Option::Some(v) => v,
             Option::None => continue,
         };
-        if c.stub {
+        if c.boxed {
+            let stub = vtable_stub_name(inout names, c.trait_name, c.method);
+            mark_boxed(inout p.plan, c.trait_name);
+            push_rename(inout p, ctx, c.s0, c.s1, stub, first_pass(in a, c.target), false);
+        } else if c.stub {
             let recv = substitute(inout types, c.recv, in vars);
             if mentions_generic(in a, in types, in f, recv) {
                 continue;
@@ -766,6 +928,101 @@ fn visit(
         let name = instance(inout p, in a, inout names, in types, g.callee, in args);
         push_rename(inout p, ctx, g.s0, g.s1, name, first_pass(in a, g.callee), true);
     }
+    for ci in 0..out.cos.len() {
+        let co = match out.cos.try_get(ci) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        if co.caller != fsym {
+            continue;
+        }
+        let ty = substitute(inout types, co.self_ty, in vars);
+        let object = substitute(inout types, co.object, in vars);
+        if mentions_generic(in a, in types, in f, ty)
+            || mentions_generic(in a, in types, in f, object)
+        {
+            continue;
+        }
+        dyn_vtable(inout p, in a, in tr, inout names, inout types, object, ty);
+    }
+}
+
+// `Mono::dyn_vtable`: the vtable of `ty` as `object`, with a slot
+// function per trait method calling the conformance's generated function
+// (or its instance), made once per (object, type).
+fn dyn_vtable(
+    inout p: Planner,
+    in a: IrAst,
+    in tr: TraitInfo,
+    inout names: Names,
+    inout types: Types,
+    object: u32,
+    ty: u32
+) {
+    for vi in 0..p.plan.vtabs.len() {
+        match p.plan.vtabs.try_get(vi) {
+            Option::Some(v) => {
+                if v.object == object && v.self_ty == ty {
+                    return;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    let inner = types.arg(object, 0);
+    let trait_name = types.name(inner);
+    let ti = trait_index(in tr, trait_name);
+    if ti == NONE64 {
+        return;
+    }
+    mark_boxed(inout p.plan, trait_name);
+    let t = trait_at(in tr, ti);
+    let t0 = p.plan.thunks.len();
+    for k in 0..w(t.mn) {
+        let m = u32_at(in tr.methods, wrapping_add(w(t.m0), k));
+        let (generated, conf) = resolve_conf(in tr, inout types, trait_name, m, ty);
+        if generated == NONE32 {
+            return;
+        }
+        let cr = conf_at(in tr, conf);
+        let target = if cr.gn > 0 && is_bounded(in tr, generated) {
+            let mut hv = vars_new();
+            let _ok = ty_bind(
+                inout types,
+                cr.self_ty,
+                ty,
+                in tr.conf_gens,
+                w(cr.g0),
+                w(cr.gn),
+                inout hv
+            );
+            instance(inout p, in a, inout names, in types, generated, in hv)
+        } else {
+            generated
+        };
+        let mut buf = ChunkSeq::new[u8]();
+        vtable_stub_text(inout names, trait_name, m, inout buf);
+        buf.push(DOLLAR);
+        key_segment(in types, in names, ty, inout buf);
+        let mut name = names.intern(in buf.as_slice());
+        for j in 0..p.plan.thunks.len() {
+            if thunk_at(in p.plan, j).name == name {
+                buf.push(DOLLAR);
+                push_dec(inout buf, p.plan.thunks.len());
+                name = names.intern(in buf.as_slice());
+                break;
+            }
+        }
+        p.plan.thunks.push(Thunk {
+            name: name,
+            trait_name: trait_name,
+            method: m,
+            self_ty: ty,
+            target: target
+        });
+    }
+    let tn = wrapping_sub(p.plan.thunks.len(), t0);
+    p.plan.vtabs.push(VTab { object: object, self_ty: ty, t0: t0, tn: tn });
 }
 
 fn sort_renames(inout rs: ChunkSeq[Rename]) {

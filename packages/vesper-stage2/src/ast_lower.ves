@@ -14,7 +14,7 @@ use @vesper/place-ir::codes::{Lit, Pat};
 use @vesper/place-ir-lower::ast::{Ast as IrAst, Cl, Ef, Eop, Ex, FnR, Gn, Hd, PathR, Pm, Pt};
 use @vesper-std/arena::{idx_from_raw};
 use self::collect::{CollectedProgram, ParamInfo, lower_effects, lower_ty, translate_sym};
-use self::traits::{MonoPlan, Rename, TraitInfo, find_rename, inst_vars};
+use self::traits::{MonoPlan, Rename, TraitInfo, find_rename, inst_vars, thunk_at};
 
 const NONE64: u64 = 18446744073709551615;
 const NONE32: u32 = 4294967295;
@@ -1003,6 +1003,69 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
 // `rewrite_calls` and `Mono::instance` do): the callee becomes the
 // selected function, a method call's receiver its first argument, and an
 // instance's type arguments go.
+// The body of vtable slot function `thunk` (traits.ves `Thunk`, by id + 1)
+// with params `pms[pa..pa+pn]`: a call of its target passing each
+// parameter as it is taken (`Elaborator::dyn_thunk`), its spans numbered
+// from `off` in Rust's order: the parameters, the arguments, the callee,
+// then the call.
+fn lower_thunk(inout lc: LowerCtx, pa: u64, pn: u64, thunk: u32, off: u64) -> u64 {
+    let th = thunk_at(in lc.mono, wrapping_sub(widen_u64(thunk), 1));
+    let mut next = pn;
+    let mut args = ChunkSeq::new[u64]();
+    for pi in 0..pn {
+        let pm = match lc.ir.pms.try_get(wrapping_add(pa, pi)) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        let id = lc.ir.exs.len();
+        lc.ir.exs.push(Ex {
+            kind: X_NAME,
+            s0: off | next,
+            s1: off | wrapping_add(next, 1),
+            a: widen_u64(pm.name),
+            b: 0,
+            c: 0,
+            n: 0,
+            m: 0,
+            x: 0
+        });
+        next = wrapping_add(next, 1);
+        args.push(widen_u64(pm.pass));
+        args.push(id);
+    }
+    let callee = lc.ir.exs.len();
+    lc.ir.exs.push(Ex {
+        kind: X_NAME,
+        s0: off | next,
+        s1: off | wrapping_add(next, 1),
+        a: widen_u64(th.target),
+        b: 0,
+        c: 0,
+        n: 0,
+        m: 0,
+        x: 0
+    });
+    next = wrapping_add(next, 1);
+    let b0 = if pn == 0 {
+        0
+    } else {
+        push_xs(inout lc, in args)
+    };
+    let idx = lc.ir.exs.len();
+    lc.ir.exs.push(Ex {
+        kind: X_CALL,
+        s0: off | next,
+        s1: off | wrapping_add(next, 1),
+        a: callee,
+        b: b0,
+        c: 0,
+        n: pn,
+        m: 0,
+        x: 0
+    });
+    idx
+}
+
 fn lower_renamed_call(
     inout lc: LowerCtx,
     in ast: SurfAst,
@@ -1218,8 +1281,14 @@ pub fn build_ir_ast_traits(
             }
         }
         let ex0 = lc.ir.exs.len();
-        let has_b = f.body != ast_none();
-        let body_id = if !has_b {
+        let has_b = f.body != ast_none() || f.thunk != 0;
+        let body_id = if f.thunk != 0 {
+            let off = wrapping_shl_u64(
+                wrapping_add(wrapping_add(mods.len(), lc.mono.insts.len()), widen_u64(f.thunk)),
+                32
+            );
+            lower_thunk(inout lc, pa, widen_u64(f.pn), f.thunk, off)
+        } else if !has_b {
             NONE64
         } else {
             match mods.try_get(w(f.mod_idx)) {
