@@ -718,19 +718,21 @@ fn vsys_names(inout l: Ld, t: u64, in text: Slice[u8], pkg: u64, names: bool) ->
         in "@ABI@".as_bytes(),
         in vsys_target_abi(wrapping_u32(t)).as_bytes()
     );
+    let mut declared: ChunkSeq[ChunkSeq[u8]] = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut statically = false;
     let parsed = handle Fail[VsysError] in {
-        Option::Some(parse_library(in source.as_slice()))
+        let _ = parse_library(in source.as_slice(), inout declared, inout statically);
+        true
     } with {
         return v => v,
-        raise(_e, _) => Option::None,
+        raise(_e, _) => false,
     };
-    let library = match parsed {
-        Option::Some(library) => library,
-        Option::None => return VSYS_NO_PARSE,
-    };
+    if !parsed {
+        return VSYS_NO_PARSE;
+    }
     if names {
-        for k in 0..library.names.len() {
-            match library.names.try_get(k) {
+        for k in 0..declared.len() {
+            match declared.try_get(k) {
                 Option::Some(n) => {
                     let (ks, ke) = keep(inout l, in n.as_slice());
                     l.foreign.push(pkg);
@@ -741,7 +743,7 @@ fn vsys_names(inout l: Ld, t: u64, in text: Slice[u8], pkg: u64, names: bool) ->
             }
         }
     }
-    if library.statically {
+    if statically {
         VSYS_STATIC
     } else {
         VSYS_DYNAMIC

@@ -1208,16 +1208,6 @@ fn check_handles(
     }
 }
 
-// A parsed library: its canonical bytes, whether it links statically and
-// the type names it declares (its extern and callback types, wire structs
-// and enums, each sorted by name), as `vesper_ffi::sys::parse`'s
-// descriptor lists them.
-pub struct Library {
-    pub canonical: ChunkSeq[u8],
-    pub statically: bool,
-    pub names: ChunkSeq[ChunkSeq[u8]],
-}
-
 fn push_name(inout names: ChunkSeq[ChunkSeq[u8]], in arena: Slice[u8], start: u64, end: u64) {
     let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
     name.extend(in arena[start..end]);
@@ -1227,8 +1217,16 @@ fn push_name(inout names: ChunkSeq[ChunkSeq[u8]], in arena: Slice[u8], start: u6
 // ---------------------------------------------------------------------------
 // Top-level `.vsys` parser + canonical encoder.
 
-// Parses, validates and canonicalizes the library `source`.
-pub fn parse_library(in source: Slice[u8]) -> Library eff [Fail[VsysError]] {
+// Parses, validates and canonicalizes the library `source`: its canonical
+// bytes. `statically` says whether it links statically and `names` gets the
+// type names it declares (its extern and callback types, wire structs and
+// enums, each sorted by name), as `vesper_ffi::sys::parse`'s descriptor
+// lists them.
+pub fn parse_library(
+    in source: Slice[u8],
+    inout names: ChunkSeq[ChunkSeq[u8]],
+    inout statically: bool
+) -> ChunkSeq[u8] eff [Fail[VsysError]] {
     let lexed = lex(in source);
     let mut parser = P {
         toks: lexed.toks,
@@ -2296,7 +2294,6 @@ pub fn parse_library(in source: Slice[u8]) -> Library eff [Fail[VsysError]] {
             put_decimal_const(inout encoder, const_def.negative, const_def.magnitude);
         }
     }
-    let mut names: ChunkSeq[ChunkSeq[u8]] = ChunkSeq::new[ChunkSeq[u8]]();
     for extern_index in 0..externs.len() {
         match externs.try_get(extern_index) {
             Option::Some(t) => push_name(
@@ -2330,16 +2327,15 @@ pub fn parse_library(in source: Slice[u8]) -> Library eff [Fail[VsysError]] {
             Option::None => (),
         }
     }
-    Library {
-        canonical: encoder.out,
-        statically: eq_str(in parser.arena.as_slice(), link_start, link_end, in "static"),
-        names: names,
-    }
+    statically = eq_str(in parser.arena.as_slice(), link_start, link_end, in "static");
+    encoder.out
 }
 
 // The canonical bytes of the library `source`.
 pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysError]] {
-    parse_library(in source).canonical
+    let mut names: ChunkSeq[ChunkSeq[u8]] = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut statically = false;
+    parse_library(in source, inout names, inout statically)
 }
 
 fn pack_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {
@@ -2390,15 +2386,17 @@ pub fn run_vsys_check(in source: Str) -> ChunkSeq[u64] {
 // then each type name followed by a newline.
 pub fn run_vsys_names(in source: Str) -> ChunkSeq[u64] {
     let raw = handle Fail[VsysError] in {
-        let library = parse_library(in source.as_bytes());
+        let mut names: ChunkSeq[ChunkSeq[u8]] = ChunkSeq::new[ChunkSeq[u8]]();
+        let mut statically = false;
+        let _ = parse_library(in source.as_bytes(), inout names, inout statically);
         let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        if library.statically {
+        if statically {
             out.extend(in "s".as_bytes());
         } else {
             out.extend(in "d".as_bytes());
         }
-        for k in 0..library.names.len() {
-            match library.names.try_get(k) {
+        for k in 0..names.len() {
+            match names.try_get(k) {
                 Option::Some(name) => {
                     out.extend(in name.as_slice());
                     out.extend(in "\n".as_bytes());
