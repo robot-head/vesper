@@ -760,8 +760,8 @@ pub fn vector_call(inout ck: Ck, ex: Ex, name: u32, expected: u32) -> u32 {
 
 // `Checker::vector_slice_io`: `Vec::load[T, N](in s, at)`,
 // `Vec::store(inout s, at, v)` and their masked forms on a `Slice[T]` or
-// `ChunkSeq[T]`. The unmasked forms' `Fail[RuntimeError]` comes from the
-// world's partial operations, as for every expression.
+// `ChunkSeq[T]`. The unmasked forms' `Fail[RuntimeError]` is marked for the
+// failure walk (opfacts.ves).
 fn slice_io(inout ck: Ck, ex: Ex, family: u8, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
     let known = ck.ctx.world.k;

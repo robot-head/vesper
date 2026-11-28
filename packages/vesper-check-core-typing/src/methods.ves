@@ -1199,7 +1199,7 @@ pub fn index_expr(inout ck: Ck, ex: Ex) -> u32 {
 // `Checker::seq_call` for `ChunkSeq::new` and `ChunkSeq::with_capacity`
 // (`capacity`), called when the world has no function of that name.
 // `ChunkSeq::finish(s)` (`Checker::seq_call`): consumes an empty sequence.
-// Its `Fail[RuntimeError]` comes from the world's partial operations.
+// Its `Fail[RuntimeError]` is marked for the failure walk (opfacts.ves).
 pub fn seq_finish(inout ck: Ck, ex: Ex) -> u32 {
     let hole = ck.ctx.types.infer;
     if ex.m != 0 || ex.n != 1 {

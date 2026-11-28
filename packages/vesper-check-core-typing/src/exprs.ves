@@ -37,7 +37,9 @@ use self::methods::{
 };
 use self::vectors::{vector_call};
 use self::handlers::{handle_expr, mark_unknown, rows_differ, write_rows};
-use self::opfacts::{OpFacts, begin_run, facts_new, finish_run, note_body, note_pattern, write_ops};
+use self::opfacts::{
+    OpFacts, begin_run, facts_new, finish_run, note_body, note_pattern, op_fails, write_ops
+};
 use self::regions::{
     contains_capability, region_active, region_annotation, region_capability, region_cross,
     region_op, row_label
@@ -3272,17 +3274,18 @@ fn closure_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
 
 // ----- effect inference -------------------------------------------------------
 
-// `primitive_failure` and `overflow_failure` at the operations the world
-// lists: `Fail[RuntimeError]` and `Fail[ArithOverflow]`.
+// `primitive_failure` and `overflow_failure` at the operations the walk of
+// the body finds (opfacts.ves): `Fail[RuntimeError]` and
+// `Fail[ArithOverflow]`.
 fn failure_effects(inout ck: Ck, ex: Ex) {
     let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    if ck.ctx.world.is_partial(ex.start, ex.end) {
+    if op_fails(inout ck.facts, ex.start, ex.end, true) {
         let error_sym = ck.ctx.names.intern(in RUNTIME_ERROR.as_bytes());
         let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
         args.push(ck.ctx.types.named(error_sym, in none));
         require_named(inout ck, FAIL_NAME, in args);
     }
-    if ck.ctx.world.may_overflow(ex.start, ex.end) {
+    if op_fails(inout ck.facts, ex.start, ex.end, false) {
         let overflow_sym = ck.ctx.names.intern(in ARITH_OVERFLOW.as_bytes());
         let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
         args.push(ck.ctx.types.named(overflow_sym, in none));
