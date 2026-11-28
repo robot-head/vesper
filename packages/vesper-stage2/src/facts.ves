@@ -1672,7 +1672,7 @@ fn visit_written(in a: Ast, id: u64, inout written: ChunkSeq[u32]) -> bool {
 }
 
 // Every child expression of a row.
-fn children(in a: Ast, e: Ex, inout out: ChunkSeq[u64]) {
+pub fn children(in a: Ast, e: Ex, inout out: ChunkSeq[u64]) {
     if e.kind == X_TUPLE {
         for i in 0..e.n {
             out.push(xs(in a, wrapping_add(e.a, i)));

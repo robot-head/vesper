@@ -81,11 +81,10 @@ const DECLINES: &[&str] = &[
 /// The functions Stage 2 must lower as Rust does today. The rest differ
 /// where Stage 2's checker records less than Rust's: overflow and partial
 /// operations (`fallible`) and the unit type of statements.
-const MIN_SAME_FUNCTIONS: usize = 40;
+const MIN_SAME_FUNCTIONS: usize = 71;
 
-/// The port functions Stage 2 must lower as Rust does today (main's 18872
-/// plus the trait frontend's instances).
-const MIN_SAME_PORT_FUNCTIONS: usize = 20201;
+/// The port functions Stage 2 must lower as Rust does today.
+const MIN_SAME_PORT_FUNCTIONS: usize = 20349;
 
 /// Set to print the Rust and Stage 2 bodies of each function that differs.
 const SHOW_DIFFS: &str = "VESPER_STAGE2_CALLS_DIFFS";
@@ -220,6 +219,7 @@ fn same_body(a: &[String], b: &[String]) -> bool {
         (Ok(m), Ok(n)) => m == n || m.max(n) >= MODULE_SPAN,
         _ => x == y,
     };
+    let (a, b) = (&caps_by_order(a), &caps_by_order(b));
     let (ra, rb) = (span_range(a), span_range(b));
     // Bodies in the same range compare their spans as they are.
     let (ra, rb) = if ra.map(|r| r.0) == rb.map(|r| r.0) {
@@ -232,6 +232,43 @@ fn same_body(a: &[String], b: &[String]) -> bool {
             let (x, y) = (strip(x, ra), strip(y, rb));
             x.len() == y.len() && x.iter().zip(&y).all(|(m, n)| same_word(m, n))
         })
+}
+
+/// A handler's capability label (`$cap<start>`, src/check.rs `handle`).
+const HANDLER_CAP: &str = "$cap";
+
+/// `body` with each handler capability label `$cap<start>` replaced by its
+/// place in order of first use: the start is a span, which Stage 2 counts
+/// from its module and Rust from the package's first module.
+fn caps_by_order(body: &[String]) -> Vec<String> {
+    let mut seen: Vec<String> = vec![];
+    body.iter()
+        .map(|line| {
+            let mut out = String::with_capacity(line.len());
+            let mut rest = line.as_str();
+            while let Some(i) = rest.find(HANDLER_CAP) {
+                let digits = rest[i + HANDLER_CAP.len()..]
+                    .bytes()
+                    .take_while(u8::is_ascii_digit)
+                    .count();
+                let end = i + HANDLER_CAP.len() + digits;
+                out.push_str(&rest[..i]);
+                if digits == 0 {
+                    out.push_str(HANDLER_CAP);
+                } else {
+                    let label = &rest[i..end];
+                    let place = seen.iter().position(|s| s == label).unwrap_or_else(|| {
+                        seen.push(label.to_string());
+                        seen.len() - 1
+                    });
+                    out.push_str(&format!("{HANDLER_CAP}#{place}"));
+                }
+                rest = &rest[end..];
+            }
+            out.push_str(rest);
+            out
+        })
+        .collect()
 }
 
 /// The calls task flags (packages/vesper-codegen-calls/src/data.ves).
@@ -330,8 +367,33 @@ pub fn tagged(x: u64) -> Result[u8, u64] { fail_with(x) }",
     (
         "views",
         "fn same(in a: Slice[u8], in b: Slice[u8]) -> bool { a.len() == b.len() }
-pub fn prefix_same(in x: ChunkSeq[u8], in y: ChunkSeq[u8], n: u64) -> bool { if n <= x.len() && n <= y.len() { same(in x[0..n], in y[0..n]) } else { false } }",
-        &["prefix_same"],
+pub fn prefix_same(in x: ChunkSeq[u8], in y: ChunkSeq[u8], n: u64) -> bool { if n <= x.len() && n <= y.len() { same(in x[0..n], in y[0..n]) } else { false } }
+pub fn bytes_eq(in a: Slice[u8], in b: Slice[u8]) -> bool { a.eq(in b) }",
+        &["bytes_eq", "prefix_same"],
+    ),
+    // A tuple branch's literals take the other branch's integer kinds.
+    (
+        "joins",
+        "pub fn bounds(n: u64, role: u64, next: u64) -> bool { let (lo, hi) = if role == 0 { (0, n) } else { (role, next) }; lo <= hi }
+fn stop() -> Never { loop {} }
+fn take(x: u64) -> u64 { x }
+pub fn pick(t: u64) -> u64 { let c = if t == 1 { 0 } else if t == 2 { 1 } else { stop() }; take(c) }
+pub fn pick2(t: u64) -> u64 { let c = if t == 1 { 0 } else { stop() }; take(c) }
+pub fn pick3(t: u64) -> u64 { let c = if t == 1 { 0 } else { 1 }; take(c) }
+pub fn done(t: u64) -> Result[Unit, u64] { if t == 0 { return Result::Ok(()); } Result::Err(t) }
+const REGS: u64 = 4;
+pub fn count(k: u64) -> u64 { let mut r = 0; loop { if r == REGS { break; } r = wrapping_add(r, 1); } k }
+pub fn count2(k: u64) -> u64 { let mut r = 0; loop { if r == k { break; } r = wrapping_add(r, 1); } k }
+pub fn triple(i: u64, b: u64, v: u64) -> (bool, u64, u64) { if i > b { (true, v, i) } else if i < v { (false, 0, i) } else { (true, 0, i) } }
+pub fn first(k: u64) -> u64 { let mut j: u64 = 0; loop { if j >= k { break 0; } j = wrapping_add(j, 1); } }",
+        &["bounds", "count", "count2", "done", "first", "pick", "pick2", "pick3", "triple"],
+    ),
+    // A handler's outgoing row: what its body and clauses use, less its
+    // own capability.
+    (
+        "handlers",
+        "pub fn quot(v: u64, d: u64) -> u64 eff [Fail[ArithOverflow]] { handle Fail[RuntimeError] in { v / d + 1 } with { return q => q, raise(e, k) => 0, } }",
+        &["quot"],
     ),
     (
         "floats",
@@ -527,9 +589,23 @@ fn compare(
     let rust_fns = functions(&readers.dump.text(&rust));
     let stage2_fns = functions(&readers.dump.text(&written));
     let mut missing = vec![];
+    // Nothing names a nested function but its span order, which Stage 2's
+    // module order changes: one whose body some unmatched nested function
+    // of Stage 2's has is the same function.
+    let nested = |n: &str| NESTED.iter().any(|p| n.contains(p));
+    let mut spare: Vec<&Vec<String>> = stage2_fns
+        .iter()
+        .filter(|(n, b)| nested(n) && !rust_fns.get(*n).is_some_and(|r| same_body(r, b)))
+        .map(|(_, b)| b)
+        .collect();
     for (name, body) in &rust_fns {
         match stage2_fns.get(name) {
             Some(b) if same_body(body, b) => t.same_fns += 1,
+            Some(_) if nested(name) && spare.iter().any(|b| same_body(body, b)) => {
+                let at = spare.iter().position(|b| same_body(body, b)).unwrap();
+                spare.swap_remove(at);
+                t.same_fns += 1;
+            }
             Some(b) => {
                 if std::env::var_os(SHOW_DIFFS).is_some() {
                     eprintln!(

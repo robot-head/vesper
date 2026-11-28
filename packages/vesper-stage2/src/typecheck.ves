@@ -117,6 +117,12 @@ struct Tc {
     lit_probe: bool,
     lit_mismatch: bool,
     lit_peak: u64,
+    // The starts of the `Never` spans constrain_literals retyped in this
+    // function: diverging branches, which a literal join absorbs.
+    lit_never: ChunkSeq[u64],
+    // The innermost value loop's expected type, which its `break` values
+    // are checked against (`LoopFrame.expected`); NONE32 outside one.
+    loop_goal: u32,
 }
 
 fn tc_new(sink names: Names, sink types: Types, sink world: World, sink sugar: PolicyInputs) -> Tc {
@@ -168,7 +174,9 @@ fn tc_new(sink names: Names, sink types: Types, sink world: World, sink sugar: P
         lit_hints: ChunkSeq::new[LitUse](),
         lit_probe: false,
         lit_mismatch: false,
-        lit_peak: 0
+        lit_peak: 0,
+        lit_never: ChunkSeq::new[u64](),
+        loop_goal: NONE32,
     }
 }
 
@@ -252,6 +260,14 @@ fn is_int_ty(in tc: Tc, ty: u32) -> bool {
     tc.types.kind(ty) == TyKind::Named && tc.world.k.is_integer(tc.types.name(ty))
 }
 
+// Operands of two integer kinds fail Rust's first check, which then
+// types open bindings from their uses (`function_with_literal_typing`).
+fn note_int_mismatch(inout tc: Tc, lt: u32, rt: u32) {
+    if lt != rt && is_int_ty(in tc, lt) && is_int_ty(in tc, rt) {
+        tc.lit_mismatch = true;
+    }
+}
+
 // In a probe run, a use of an open binding that settled to `ty`.
 fn note_lit_use(inout tc: Tc, pid: u64, ty: u32) {
     if is_int_ty(in tc, ty) && ty != tc.i64_ty {
@@ -325,7 +341,7 @@ fn find_fn(in a: Ast, name: u32) -> Option[FnR] {
     Option::None
 }
 
-fn find_eop(in a: Ast, inout names: Names, cname: u32) -> Option[(Ef, Eop)] {
+pub fn find_eop(in a: Ast, inout names: Names, cname: u32) -> Option[(Ef, Eop)] {
     let (ename, opname) = split_last_colon(inout names, cname);
     find_effect_method(in a, ename, opname)
 }
@@ -1397,6 +1413,21 @@ fn call_arg_expr(in a: Ast, e: Ex, ai: u64) -> u64 {
     u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, CALL_ARG_STRIDE), 1)))
 }
 
+// The name a call `e` calls when it is a plain name not bound as a local
+// (a constructor candidate), else NONE32.
+fn lookup_ctor_callee(in tc: Tc, in a: Ast, e: Ex) -> u32 {
+    match a.exs.try_get(e.a) {
+        Option::Some(ce) => {
+            if ce.kind == X_NAME && lookup_var(in tc, n32(ce.a)) == NONE32 {
+                n32(ce.a)
+            } else {
+                NONE32
+            }
+        },
+        Option::None => NONE32,
+    }
+}
+
 // Rust's `constrain_literals`: the integer literals of `eid` (through
 // tuples) take their kinds from `target`, the type their context settled.
 fn constrain_literals(inout tc: Tc, in a: Ast, eid: u64, target: u32) {
@@ -1404,7 +1435,17 @@ fn constrain_literals(inout tc: Tc, in a: Ast, eid: u64, target: u32) {
         Option::Some(v) => v,
         Option::None => return,
     };
-    if e.kind == X_TUPLE {
+    if e.kind == X_TUPLE && e.n == 0 {
+        // `()` against a written `Unit` takes it (`refine_annotation` of
+        // the compatible empty tuple).
+        if !tc.lit_probe
+            && tc.types.kind(target) == TyKind::Named
+            && tc.types.name(target) == tc.world.k.unit
+            && tc.types.arity(target) == 0
+        {
+            retype_span(inout tc, e.s0, e.s1, target);
+        }
+    } else if e.kind == X_TUPLE {
         let dt = default_type(inout tc.types, target);
         if tc.types.kind(dt) == TyKind::Tuple && tc.types.arity(dt) == e.n {
             let mut same = !tc.lit_probe;
@@ -1441,8 +1482,25 @@ fn constrain_literals(inout tc: Tc, in a: Ast, eid: u64, target: u32) {
         // A diverging branch takes its context's type (`refine_annotation`
         // of a compatible `Never`).
         retype_span(inout tc, e.s0, e.s1, target);
+        tc.lit_never.push(e.s0);
     }
-    if e.kind == X_BLOCK && e.b != NONE64 {
+    if e.kind == X_CALL && lookup_ctor_callee(in tc, in a, e) != NONE32 {
+        // A constructor's arguments take its fields' types, its generics
+        // bound by `target`.
+        let cname = lookup_ctor_callee(in tc, in a, e);
+        let dt = default_type(inout tc.types, target);
+        let (adt, vi, vars) = ctor_info(inout tc, cname, dt);
+        if adt != NONE32 {
+            let v = tc.world.variant(vi);
+            for ai in 0..e.n {
+                if ai < w(v.fc) {
+                    let f = tc.world.field(wrapping_add(w(v.fa), ai));
+                    let pt = substitute(inout tc.types, f.ty, in vars);
+                    constrain_literals(inout tc, in a, call_arg_expr(in a, e, ai), pt);
+                }
+            }
+        }
+    } else if e.kind == X_BLOCK && e.b != NONE64 {
         constrain_literals(inout tc, in a, e.b, target);
     } else if e.kind == X_IF {
         constrain_literals(inout tc, in a, e.b, target);
@@ -1454,6 +1512,42 @@ fn constrain_literals(inout tc: Tc, in a: Ast, eid: u64, target: u32) {
             let body = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
             constrain_literals(inout tc, in a, body, target);
         }
+    }
+    // A block, `if` or `match` whose branches settled to `target` takes it
+    // too (`refine_annotation` of its compatible joined type).
+    if !tc.lit_probe
+        && (e.kind == X_BLOCK || e.kind == X_IF || e.kind == X_MATCH)
+        && (tc.types.kind(target) == TyKind::Tuple || is_int_ty(in tc, target))
+        && branches_settled(in tc, in a, e, target)
+    {
+        retype_span(inout tc, e.s0, e.s1, target);
+    }
+}
+
+// Whether each branch of the block, `if` or `match` `e` (its tail, both
+// arms, every arm) has `target`'s type or diverges.
+fn branches_settled(in tc: Tc, in a: Ast, e: Ex, target: u32) -> bool {
+    if e.kind == X_BLOCK {
+        return e.b != NONE64 && branch_settled(in tc, in a, e.b, target);
+    }
+    if e.kind == X_IF {
+        return e.c != NONE64
+            && branch_settled(in tc, in a, e.b, target)
+            && branch_settled(in tc, in a, e.c, target);
+    }
+    for i in 0..e.n {
+        let body = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
+        if !branch_settled(in tc, in a, body, target) {
+            return false;
+        }
+    }
+    e.n > 0
+}
+
+fn branch_settled(in tc: Tc, in a: Ast, eid: u64, target: u32) -> bool {
+    match a.exs.try_get(eid) {
+        Option::Some(b) => span_ty(in tc, b.s0, b.s1) == target || diverges_expr(in tc, in a, eid),
+        Option::None => false,
     }
 }
 
@@ -1507,6 +1601,85 @@ fn assigns_open(in tc: Tc, in a: Ast, e: Ex) -> bool {
     }
 }
 
+// Whether `eid` is a tuple with an integer literal among its elements
+// (through nested tuples), whose kinds its join settles.
+fn tuple_has_int_lit(in tc: Tc, in a: Ast, eid: u64) -> bool {
+    match a.exs.try_get(eid) {
+        Option::Some(ex) => {
+            if ex.kind == X_BLOCK {
+                return ex.b != NONE64 && tuple_has_int_lit(in tc, in a, ex.b);
+            }
+            if ex.kind != X_TUPLE {
+                return false;
+            }
+            for i in 0..ex.n {
+                let sub = u64_at(in a.xs, wrapping_add(ex.a, i));
+                if is_int_lit_expr(in tc, in a, sub) || tuple_has_int_lit(in tc, in a, sub) {
+                    return true;
+                }
+            }
+            false
+        },
+        Option::None => false,
+    }
+}
+
+// Rust's `join_types` of a branch `eid` (type `ty`) with `other`: each
+// integer literal of `eid` (through tuples) loses to `other`'s integer kind.
+fn lit_join(inout tc: Tc, in a: Ast, eid: u64, ty: u32, other: u32) -> u32 {
+    if is_int_lit_expr(in tc, in a, eid) && is_int_ty(in tc, other) {
+        return other;
+    }
+    let ex = match a.exs.try_get(eid) {
+        Option::Some(v) => v,
+        Option::None => return ty,
+    };
+    if ex.kind == X_BLOCK {
+        return if ex.b == NONE64 {
+            ty
+        } else {
+            lit_join(inout tc, in a, ex.b, ty, other)
+        };
+    }
+    if ex.kind != X_TUPLE
+        || tc.types.kind(ty) != TyKind::Tuple
+        || tc.types.kind(other) != TyKind::Tuple
+        || tc.types.arity(ty) != ex.n
+        || tc.types.arity(other) != ex.n
+    {
+        return ty;
+    }
+    let mut elems = ChunkSeq::new[u32]();
+    elems.reserve(ex.n);
+    for i in 0..ex.n {
+        let sub = u64_at(in a.xs, wrapping_add(ex.a, i));
+        let ti = tc.types.arg(ty, i);
+        let oi = tc.types.arg(other, i);
+        elems.push(lit_join(inout tc, in a, sub, ti, oi));
+    }
+    tc.types.tuple(in elems)
+}
+
+fn has_u64(in xs: ChunkSeq[u64], x: u64) -> bool {
+    for i in 0..xs.len() {
+        if u64_at(in xs, i) == x {
+            return true;
+        }
+    }
+    false
+}
+
+// Whether `eid` was checked as `Never` (a diverging branch).
+fn diverges_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
+    match a.exs.try_get(eid) {
+        Option::Some(ex) => {
+            let ty = span_ty(in tc, ex.s0, ex.s1);
+            ty == tc.never_ty || (ty != NONE32 && has_u64(in tc.lit_never, ex.s0))
+        },
+        Option::None => false,
+    }
+}
+
 fn is_int_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
     match a.exs.try_get(eid) {
         Option::Some(ex) => {
@@ -1522,21 +1695,31 @@ fn is_int_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
                 // literal (`IntLiteral`).
                 ex.b != NONE64 && is_int_lit_expr(in tc, in a, ex.b)
             } else if ex.kind == X_IF {
-                ex.c != NONE64
-                    && is_int_lit_expr(in tc, in a, ex.b)
-                    && is_int_lit_expr(in tc, in a, ex.c)
+                // A diverging branch joins as `Never`, which the literal
+                // branch's `IntLiteral` absorbs.
+                if ex.c == NONE64 {
+                    return false;
+                }
+                let then_lit = is_int_lit_expr(in tc, in a, ex.b);
+                let else_lit = is_int_lit_expr(in tc, in a, ex.c);
+                (then_lit || else_lit)
+                    && (then_lit || diverges_expr(in tc, in a, ex.b))
+                    && (else_lit || diverges_expr(in tc, in a, ex.c))
             } else if ex.kind == X_MATCH {
                 let mut all = ex.n > 0;
+                let mut any = false;
                 for i in 0..ex.n {
                     let body = u64_at(
                         in a.xs,
                         wrapping_add(ex.b, wrapping_add(wrapping_mul(i, 2), 1))
                     );
-                    if !is_int_lit_expr(in tc, in a, body) {
+                    if is_int_lit_expr(in tc, in a, body) {
+                        any = true;
+                    } else if !diverges_expr(in tc, in a, body) {
                         all = false;
                     }
                 }
-                all
+                all && any
             } else {
                 false
             }
@@ -1913,7 +2096,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                 let _lt = check_expr(inout tc, in a, e.b, rt);
             } else {
                 let lt = check_expr(inout tc, in a, e.b, tc.infer_ty);
-                let _rt = check_expr(inout tc, in a, e.c, lt);
+                let rt = check_expr(inout tc, in a, e.c, lt);
+                note_int_mismatch(inout tc, lt, rt);
             }
             tc.bool_ty
         } else if tc.types.kind(expected) == TyKind::Infer
@@ -1943,6 +2127,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         } else {
             let lt = check_expr(inout tc, in a, e.b, expected);
             let rt = check_expr(inout tc, in a, e.c, lt);
+            note_int_mismatch(inout tc, lt, rt);
             if tc.types.kind(lt) == TyKind::Infer {
                 rt
             } else {
@@ -2016,14 +2201,13 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             } else {
                 NONE32
             };
-            let open = plain
-                && hint == NONE32
-                && tc.types.kind(exp) == TyKind::Infer
-                && is_int_lit_expr(in tc, in a, val);
+            let may_open = plain && hint == NONE32 && tc.types.kind(exp) == TyKind::Infer;
             if hint != NONE32 {
                 exp = hint;
             }
             let vt = check_owned_expr(inout tc, in a, val, exp);
+            // Checked first: a diverging branch of `val` joins as `Never`.
+            let open = may_open && is_int_lit_expr(in tc, in a, val);
             if is_let != 0 {
                 // An annotated binding has its annotation's type
                 // (`refine_annotation`), whatever its literals settled to.
@@ -2061,7 +2245,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             // A literal branch joins as a literal (`IntLiteral`): the other
             // branch's integer kind wins.
             let then_lit = is_int_lit_expr(in tc, in a, e.b);
-            let exp_e = if tt == tc.never_ty || then_lit {
+            let then_tuple_lit = tuple_has_int_lit(in tc, in a, e.b);
+            let exp_e = if tt == tc.never_ty || then_lit || then_tuple_lit {
                 expected
             } else {
                 tt
@@ -2071,6 +2256,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                 et
             } else if then_lit && !is_int_lit_expr(in tc, in a, e.c) && is_int_ty(in tc, et) {
                 et
+            } else if then_tuple_lit {
+                lit_join(inout tc, in a, e.b, tt, et)
             } else {
                 tt
             };
@@ -2118,7 +2305,10 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         }
         res
     } else if e.kind == X_LOOP {
+        let outer_goal = tc.loop_goal;
+        tc.loop_goal = expected;
         let _bt = check_expr(inout tc, in a, e.a, tc.unit_ty);
+        tc.loop_goal = outer_goal;
         // Rust's loop type: the join of its `break` values, `Unit` for
         // plain `break`s and `Never` without any.
         let breaks = loop_breaks(in a, e.a);
@@ -2193,7 +2383,16 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         }
     } else if e.kind == X_BREAK {
         if e.a != NONE64 {
-            let _vt = check_owned_expr(inout tc, in a, e.a, tc.infer_ty);
+            let goal = if tc.loop_goal == NONE32 {
+                tc.infer_ty
+            } else {
+                tc.loop_goal
+            };
+            let _vt = check_owned_expr(inout tc, in a, e.a, goal);
+            // The loop's `break` values take its result's literal kinds.
+            if tc.types.kind(goal) != TyKind::Infer {
+                constrain_literals(inout tc, in a, e.a, goal);
+            }
         }
         tc.never_ty
     } else if e.kind == X_RETURN {
@@ -2216,7 +2415,9 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                 }
                 let outer_handler_row = tc.sugar_handler_row;
                 tc.sugar_handler_row = policy_handler_row(inout tc, in a, h);
-                let bt = check_owned_expr(inout tc, in a, h.body, expected);
+                // Rust's `handle` checks the handled body with no expected
+                // type: only the return clause sees the context's.
+                let bt = check_owned_expr(inout tc, in a, h.body, tc.infer_ty);
                 tc.sugar_handler_row = outer_handler_row;
                 let mut rt = expected;
                 match a.cls.try_get(h.return_clause) {
@@ -2836,6 +3037,7 @@ fn sort_calls(inout calls: ChunkSeq[CallRow]) {
 }
 
 fn check_fn_body(inout tc: Tc, in a: Ast, f: FnR) {
+    tc.lit_never.clear();
     push_scope(inout tc);
     for pi in 0..f.param_count {
         match a.pms.try_get(wrapping_add(f.param_start, pi)) {
@@ -2850,7 +3052,10 @@ fn check_fn_body(inout tc: Tc, in a: Ast, f: FnR) {
     tc.sugar_generic_count = f.generic_count;
     let _rt = check_owned_expr(inout tc, in a, f.body, f.result);
     pop_scope(inout tc);
-    let peak = max_u64(max_u64(tc.lit_open.len(), tc.lit_uses.len()), tc.lit_hints.len());
+    let peak = max_u64(
+        max_u64(max_u64(tc.lit_open.len(), tc.lit_uses.len()), tc.lit_hints.len()),
+        tc.lit_never.len()
+    );
     tc.lit_peak = max_u64(tc.lit_peak, peak);
 }
 
@@ -2961,6 +3166,8 @@ fn dummy_tc(k: Known) -> Tc {
         lit_probe: false,
         lit_mismatch: false,
         lit_peak: 0,
+        lit_never: ChunkSeq::new[u64](),
+        loop_goal: NONE32,
     }
 }
 
@@ -3011,6 +3218,8 @@ fn rebuild_tc(
         lit_probe: tc_lit_probe,
         lit_mismatch: tc_lit_mismatch,
         lit_peak: tc_lit_peak,
+        lit_never: tc_lit_never,
+        loop_goal: tc_loop_goal,
     } = old_tc;
     let mut tc_spans = tc_spans_in;
     let mut tc_calls = tc_calls_in;
@@ -3104,6 +3313,8 @@ fn rebuild_tc(
         lit_probe: tc_lit_probe,
         lit_mismatch: tc_lit_mismatch,
         lit_peak: tc_lit_peak,
+        lit_never: tc_lit_never,
+        loop_goal: tc_loop_goal,
     };
     let next_perm = stage2_heap_swap(s_rb);
     if next_perm < tc_perm_end {
@@ -3169,6 +3380,7 @@ pub fn typecheck_ast_traits(
     tc.lit_open.reserve(max_lit);
     tc.lit_uses.reserve(max_lit);
     tc.lit_hints.reserve(max_lit);
+    tc.lit_never.reserve(max_lit);
     let mut max_names = wrapping_add(tc.names.len(), 16384);
     let mut max_text = wrapping_add(tc.names.text_len(), 262144);
     tc.names.reserve_names(max_names, max_text);
@@ -3260,6 +3472,7 @@ pub fn typecheck_ast_traits(
                 tc.lit_open.reserve(max_lit);
                 tc.lit_uses.reserve(max_lit);
                 tc.lit_hints.reserve(max_lit);
+                tc.lit_never.reserve(max_lit);
             }
             max_spans = wrapping_add(tc.spans.len(), 131072);
             max_calls = wrapping_add(tc.calls.len(), 65536);

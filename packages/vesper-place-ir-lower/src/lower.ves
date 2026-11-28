@@ -26,7 +26,7 @@ use @vesper/check-data::types::{
 use @vesper/check-data::world::{Adt, Variant, constructor, field_step, set_by_symbol};
 use @vesper/check-data::input::{Ctx, ctx_new};
 use @vesper/place-ir::{BlockRow, FnRow, InstRow, PoolRow, Program, program_new};
-use self::ast::{Ast, Ex, FnR, Gn, Pm, Pt, ast_empty};
+use self::ast::{Ast, Ex, FnR, Gn, Pm, Pt, ast_empty, hd_body_ty, hd_out_ty};
 use self::ops::{
     SeqRes, TiledRes, VecRes, is_seq_type, is_slice_type, resolve_seq_call, resolve_tiled,
     resolve_vector, seq_arg_pass
@@ -2290,8 +2290,18 @@ fn nest_clause(
 fn prepare_handler(inout l: L, ex: Ex) {
     let handler_row = l.ast.handler(ex.a);
     let body_ex = l.ast.ex(handler_row.body);
-    let body_type = span_type(in l, body_ex.s0, body_ex.s1);
-    let output = span_type(in l, ex.s0, ex.s1);
+    let body_lit = hd_body_ty(handler_row);
+    let body_type = if body_lit == NONE32 {
+        span_type(in l, body_ex.s0, body_ex.s1)
+    } else {
+        body_lit
+    };
+    let out_lit = hd_out_ty(handler_row);
+    let output = if out_lit == NONE32 {
+        span_type(in l, ex.s0, ex.s1)
+    } else {
+        out_lit
+    };
     let outgoing = handler_row.outgoing;
     let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let known = free_names_of(inout l, handler_row.body, inout names);
