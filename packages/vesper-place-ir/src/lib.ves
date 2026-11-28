@@ -996,7 +996,7 @@ fn put_row(inout o: ChunkSeq[u64], in t: Types, r: u32) {
 // Every type of the arena, in id order: a type's parts have smaller ids
 // (hash-consing builds them first), so id order is the post-order the
 // decoder reads, and an output type index is the type id.
-fn put_types(inout o: ChunkSeq[u64], in t: Types) {
+pub fn put_types(inout o: ChunkSeq[u64], in t: Types) {
     let n = t.nodes.len();
     o.push(n);
     for id in 0..n {
@@ -1036,7 +1036,7 @@ fn put_types(inout o: ChunkSeq[u64], in t: Types) {
 
 // Every name, in symbol order (an output name index is the symbol): its
 // byte length, then the bytes eight per word, little-endian.
-fn put_names(inout o: ChunkSeq[u64], in names: Names) {
+pub fn put_names(inout o: ChunkSeq[u64], in names: Names) {
     let n = names.len();
     o.push(n);
     for s in 0..n {
@@ -1073,6 +1073,12 @@ fn put_words(inout o: ChunkSeq[u64], in p: Program, a: u64, n: u64) {
 pub fn put_program(in p: Program, in t: Types, in names: Names, inout o: ChunkSeq[u64]) {
     put_names(inout o, in names);
     put_types(inout o, in t);
+    put_program_section(in p, inout o);
+}
+
+// The program section alone, as `read_program` reads it after a context
+// (a calls input writes the world between, #2659).
+pub fn put_program_section(in p: Program, inout o: ChunkSeq[u64]) {
     o.push(p.pool.len());
     for i in 0..p.pool.len() {
         let row = p.pool_row(i);

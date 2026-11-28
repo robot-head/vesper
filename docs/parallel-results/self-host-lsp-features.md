@@ -1317,3 +1317,100 @@ round and filtered byte by byte. Lending the source as a `Str` slice of the
 input, and skipping strings with `find_either` while copying runs as
 slices, brought it to 0.32x. Rust lines deleted: 0; the session does not
 call the port yet.
+
+# Part 14a: the session request gate and initialize handshake (#1828)
+
+`Session::request` in `src/lsp/session.rs` checks every request before a
+handler runs. After `validate_input` it refuses a second `initialize`, a
+request before `initialize` or after `shutdown`, `shutdown` with
+parameters, unknown methods and parameters that are not an object.
+`initialize` negotiates the client's capabilities (related information,
+diagnostic data, hierarchical symbols, code actions, code-lens refresh)
+and the background proof debounce, then answers with the server's
+capabilities. Part 14a moves this gate into the pure function `route`
+(with `initialize_result` and `background_choice`), so the session only
+stores what `route` returns. The Vesper port is a new check kind of
+`lsp_commands` in `@vesper/lsp`.
+
+## What changed
+
+- `src/lsp/session.rs`: `route`, `initialize_result`, `running` and
+  `SERVER_VERSION`; `Session::request` calls `route`. The hidden
+  `PortCheck::Request` (state, auditor, configured debounce) and
+  `PortState` rows go through `command_checks_for_port`.
+- `src/lsp/session/lens_requests.rs`: `background_choice` replaces
+  `configure_background`, with the named bounds `BACKGROUND_ENTRIES` and
+  `MAX_CLIENT_DEBOUNCE_MS`.
+- `packages/vesper-lsp/src/commands.ves`: the request check, the
+  negotiation over the tape and the `initialize` result as serde_json
+  writes it (sorted keys). The input header gains the server version.
+- `tests/self_host_lsp_core.rs`: `request_cases` joins `command_cases`,
+  so `commands_match_rust` and `commands_speed` cover it.
+
+## Differential
+
+1,583 request checks among the 2,218 command checks. Every state against
+22 methods and 9 parameter shapes, then 100 `initialize` parameter sets
+under 7 auditor and debounce settings. The sets cover each capability as
+true, false, a number, a string and null, wrong container shapes,
+escaped keys, code-action literal support shapes, and `debounceMs` as 0,
+the bounds, negative, `-0`, fractions, exponents, `u64::MAX` and past it.
+0 diffs.
+
+## Numbers
+
+64 rounds per check, best of five ABBA pairs, release build. Rust takes
+parsed `serde_json::Value` parameters; Vesper parses the tape once per
+check. Rust builds the `initialize` result as a `Value` and writes it.
+
+| Checks | Rust | Vesper | Ratio |
+|--|--:|--:|--:|
+| Request (1,583) | 4.33 µs | 0.33 µs | **0.08x** |
+| All commands (2,187) | 3.00 µs | 0.25 µs | **0.08x** |
+
+Rust lines deleted: 0; the session does not call the port yet.
+
+# Part 14b: the notification gate (#1828)
+
+`Session::notification` checks every notification before the document
+store sees it. After `validate_input` it answers `exit` (clean only after
+`shutdown`), refuses notifications outside a running session, reads the
+`didOpen`, `didChange` and `didClose` parameters (the document URI and
+version, the text, and each content change's range, `rangeLength` and
+text, at most 64 changes) and ignores other notifications. Part 14b
+moves this into the pure function `note_route`, and ports it as another
+check kind of `lsp_commands` in `@vesper/lsp`. The row also reports
+whether the URI names a `Loom.toml` manifest, which picks the store.
+
+## What changed
+
+- `src/lsp/session.rs`: `note_route` and its result `Note`;
+  `Session::notification` acts on it. The hidden `PortCheck::Note` and
+  `PortState::Exited` rows render a `Note` with `note_row`.
+- `packages/vesper-lsp/src/commands.ves`: the notification check, the
+  parameter readings and their refusals, in Rust's order.
+- `tests/self_host_lsp_core.rs`: `note_cases` joins `command_cases`.
+
+## Differential
+
+430 notification checks among 2,648 command checks. Every state
+(uninitialized, running, shut down, exited) against 9 notifications and
+6 parameter shapes, then `didOpen` and `didClose` documents with
+missing, mistyped and escaped members, every version edge, manifest and
+near-manifest URIs and a 200,000-byte text, and `didChange` with 0 to 100
+changes and every range, position and `rangeLength` edge (`-0`,
+fractions, exponents, `u32::MAX` and past it) alone and between valid
+changes. 0 diffs.
+
+## Numbers
+
+64 rounds per check, best of five ABBA pairs, release build, without the
+cases over 4 KiB.
+
+| Checks | Rust | Vesper | Ratio |
+|--|--:|--:|--:|
+| Notification (428) | 271 ns | 277 ns | **1.02x** |
+| All commands (2,615) | 2.65 µs | 0.28 µs | **0.11x** |
+
+Rust lines deleted: 0; the session does not call the port yet.
+

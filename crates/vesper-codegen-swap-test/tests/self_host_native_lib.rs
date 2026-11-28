@@ -4,10 +4,12 @@
 //! (`native_export::compile_source`).
 //!
 //! The Rust build runs with a recording `body` hook: for every function the
-//! walk would hand to Vesper it records the request (status and location
-//! flags, parameter count, direct callees) and the function's
-//! @vesper/codegen-scalar body plan, then declines, so the Rust walk emits
-//! the object. A recording `export_plans` hook keeps the calls input of
+//! walk would hand to Vesper it records the request (location flag,
+//! parameter count, direct callees), then declines, so the Rust walk emits
+//! the object. The driver plans each body with @vesper/codegen-scalar over
+//! the calls input's program and takes the status flag from the instance's
+//! ABI itself (slice 3a); a function without a Rust-side body plan keeps
+//! the library out of the comparison. A recording `export_plans` hook keeps the calls input of
 //! the library's first lowering, from which the driver makes the instances
 //! and their declarations itself (slice 2a-2a); the request names only the
 //! exports' symbols, read from the lent module. The request built from
@@ -35,7 +37,7 @@ mod ir_words;
 mod native_lib_fixtures;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use native_lib_fixtures::LIBRARIES;
@@ -89,6 +91,7 @@ fn repo() -> std::path::PathBuf {
 struct Vesper {
     plan: check_harness::Entry,
     driver: WordFunction,
+    round_trip: WordFunction,
 }
 
 fn vesper() -> &'static Vesper {
@@ -103,6 +106,9 @@ fn vesper() -> &'static Vesper {
                 driver: checked
                     .word_function("library_object", &symbols, true)
                     .unwrap_or_else(|e| panic!("library_object: {e}")),
+                round_trip: checked
+                    .word_function("calls_round_trip", &symbols, true)
+                    .unwrap_or_else(|e| panic!("calls_round_trip: {e}")),
             }
         })
     })
@@ -120,7 +126,10 @@ const JIT_RUNTIME: vesper_port_abi::SeqRuntime = {
 };
 
 fn call(request: &[u8]) -> Vec<u8> {
-    let f = &vesper().driver;
+    call_entry(&vesper().driver, request)
+}
+
+fn call_entry(f: &WordFunction, request: &[u8]) -> Vec<u8> {
     let call = vesper_port_abi::HostCall::new().bytes(request);
     // SAFETY: the entry takes one `in Slice[u8]` (passed as the address of
     // its view) and returns a live sequence of the JIT runtime holding
@@ -146,10 +155,8 @@ struct Defined {
     optimize: bool,
     /// A `ConstTime` function, whose cold paths stay in place.
     const_time: bool,
-    status: u64,
     locations: u64,
     callees: Vec<u64>,
-    plan: Vec<u64>,
 }
 
 /// What the recording hook saw during one Rust build.
@@ -159,8 +166,9 @@ struct Record {
     defined: Vec<Defined>,
     /// Why the build cannot be asked of the driver, if it cannot.
     refused: Option<String>,
-    /// The body plans of the lent program, by function name.
-    plans: Option<HashMap<String, Vec<u64>>>,
+    /// The program the walk emits from (`walk_program`), and the
+    /// functions it has a body plan for.
+    program: Option<(Vec<u8>, HashSet<String>)>,
     /// The calls input of the library's first lowering, which the
     /// `export_plans` hook saw.
     calls: Option<Vec<u8>>,
@@ -172,22 +180,25 @@ thread_local! {
     static RECORD: RefCell<Record> = RefCell::new(Record::default());
 }
 
-fn plans_of(
+/// The program the walk emits from (after bit builtins, wide tuples,
+/// optimize, inline, drop elaboration and hoisting), as
+/// @vesper/codegen-scalar reads it, and the functions it plans a body for.
+fn walk_program(
     world: &vesper::check::World,
     program: &vesper::ir::Program,
-) -> HashMap<String, Vec<u64>> {
-    let mut bodies = HashMap::new();
-    if let Some((input, _)) = ir_words::program_input(world, program) {
-        let names: Vec<&String> = program.functions.keys().collect();
-        let words = vesper().plan.words(&input);
-        let mut rest = &words[..];
-        while let [fi, n, tail @ ..] = rest {
-            let n = *n as usize;
-            bodies.insert(names[*fi as usize].clone(), tail[..n].to_vec());
-            rest = &tail[n..];
-        }
+) -> (Vec<u8>, HashSet<String>) {
+    let mut planned = HashSet::new();
+    let Some((input, _)) = ir_words::program_input(world, program) else {
+        return (vec![], planned);
+    };
+    let names: Vec<&String> = program.functions.keys().collect();
+    let words = vesper().plan.words(&input);
+    let mut rest = &words[..];
+    while let [fi, n, tail @ ..] = rest {
+        planned.insert(names[*fi as usize].clone());
+        rest = &tail[*n as usize..];
     }
-    bodies
+    (input, planned)
 }
 
 /// A parameter or result the shim's `sig_param`/`sig_return` can spell.
@@ -254,13 +265,19 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
                 return;
             }
         }
-        if r.plans.is_none() {
-            r.plans = Some(plans_of(world, program));
+        if r.program.is_none() {
+            r.program = Some(walk_program(world, program));
         }
-        let Some(plan) = r.plans.as_ref().and_then(|p| p.get(&function)).cloned() else {
+        // The driver plans each body itself (slice 3a of #2349); a function
+        // without a plan stays with the walk.
+        if !r
+            .program
+            .as_ref()
+            .is_some_and(|(_, p)| p.contains(&function))
+        {
             r.refused = Some(format!("{function}: no body plan"));
             return;
-        };
+        }
         let args = lent.args;
         let np = args[2] as usize;
         let Some((callees, sret, homes)) = codegen_swap::body::layout(args) else {
@@ -273,7 +290,20 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
             r.refused = Some(format!("{function}: returns through a result pointer"));
             return;
         }
-        let homes = homes.len();
+        // @vesper/native-lib binds each parameter to its block parameter,
+        // so an `inout` scalar read through its address stays with the walk.
+        let pointers = codegen_swap::body::pointers(args).unwrap_or_default();
+        if pointers.iter().any(|p| *p != codegen_swap::body::NO_VALUE) {
+            r.refused = Some(format!("{function}: an inout scalar parameter"));
+            return;
+        }
+        // @vesper/native-lib reads no slice parameter at entry (#2653).
+        let views = codegen_swap::body::entry_views(args).unwrap_or_default();
+        if !views.is_empty() {
+            r.refused = Some(format!("{function}: a slice parameter read at entry"));
+            return;
+        }
+        let homes = homes.len() + 1 + pointers.len() + 1;
         let callees = callees.to_vec();
         if module_has_data(&*lent.module) {
             r.refused = Some("the module declares data".into());
@@ -288,10 +318,8 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
             key: function,
             optimize: lent.optimize,
             const_time,
-            status: args[0],
             locations: args[1],
             callees,
-            plan,
         });
     });
     Ok(false)
@@ -382,16 +410,14 @@ fn request(r: &Record) -> Vec<u8> {
         q.bytes(symbol.as_bytes());
     }
     q.bytes(r.calls.as_deref().unwrap_or_default());
+    q.bytes(r.program.as_ref().map_or(&[][..], |(p, _)| p));
     q.word(r.defined.len() as u64);
     for d in &r.defined {
         q.word(d.func);
         q.word(u64::from(d.optimize) | if d.const_time { CONST_TIME_FLAG } else { 0 });
-        q.word(d.status);
         q.word(d.locations);
         q.word(d.callees.len() as u64);
         d.callees.iter().for_each(|&c| q.word(c));
-        q.word(d.plan.len() as u64);
-        d.plan.iter().for_each(|&w| q.word(w));
     }
     q.word(wide.len() as u64);
     for f in wide {
@@ -587,6 +613,38 @@ fn vesper_library_objects_match_vesper_build_lib() {
         changed_by_passes >= MIN_CHANGED_BY_PASSES,
         "the CLIF passes changed only {changed_by_passes} library objects"
     );
+}
+
+/// The calls input read and written back by @vesper/codegen-calls'
+/// writers (slice 3d of #2349) builds the same objects as the
+/// Rust-encoded one, and writing it again changes nothing.
+#[test]
+fn rewritten_calls_inputs_build_the_same_objects() {
+    let mut failures = vec![];
+    for (library, source) in LIBRARIES {
+        let Ok((rust, mut record)) = rust_build_passes_on(library, source) else {
+            continue;
+        };
+        let Some(calls) = record.calls.take() else {
+            continue;
+        };
+        let written = call_entry(&vesper().round_trip, &calls);
+        if call_entry(&vesper().round_trip, &written) != written {
+            failures.push(format!(
+                "{library}: writing the calls input again changed it"
+            ));
+        }
+        record.calls = Some(written);
+        let answer = call(&request(&record));
+        let mut at = 0;
+        if read_word(&answer, &mut at) != BUILT {
+            let why = String::from_utf8_lossy(read_bytes(&answer, &mut at));
+            failures.push(format!("{library}: the driver failed: {why}"));
+        } else if read_bytes(&answer, &mut at) != rust {
+            failures.push(format!("{library}: objects differ"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// A request that does not read is an error answer, not a crash.
