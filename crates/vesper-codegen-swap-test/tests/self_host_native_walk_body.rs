@@ -78,13 +78,8 @@ struct Plan {
 }
 
 thread_local! {
-    /// The plans of the last programs lent: the compile's program and the
-    /// generic instances it lends beside it (#2715).
-    static PLAN: RefCell<Vec<Plan>> = const { RefCell::new(Vec::new()) };
+    static PLAN: RefCell<Option<Plan>> = const { RefCell::new(None) };
 }
-
-/// How many programs' plans [`PLAN`] keeps.
-const PLANS_KEPT: usize = 16;
 
 /// Functions emitted from Vesper, and functions the Rust walk kept
 /// (unplanned).
@@ -156,27 +151,23 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     if lent.op != codegen_swap::body::FUNCTION {
         return Ok(false);
     }
-    // A generic instance (#2715) is planned from its own program.
+    // A generic instance (#2715) is planned from its own program, made
+    // for this request only (so its plan is not cached).
     let instance = codegen_swap::body_instance();
-    let (program, function): (&Program, &str) = match &instance {
-        Some((p, name)) => (p, name),
-        None => (lent.program, lent.site.function),
-    };
-    let words = PLAN.with(|cell| {
-        let mut plans = cell.borrow_mut();
-        let key = (program_key(program), lent.optimize);
-        let at = match plans.iter().position(|p| p.key == key) {
-            Some(at) => at,
-            None => {
-                if plans.len() == PLANS_KEPT {
-                    plans.remove(0);
-                }
-                plans.push(plan_of(lent.world, program, lent.optimize));
-                plans.len() - 1
+    let words = match &instance {
+        Some((program, name)) => plan_of(lent.world, program, lent.optimize)
+            .bodies
+            .remove(name),
+        None => PLAN.with(|cell| {
+            let mut cell = cell.borrow_mut();
+            let key = (program_key(lent.program), lent.optimize);
+            if cell.as_ref().is_none_or(|p| p.key != key) {
+                *cell = Some(plan_of(lent.world, lent.program, lent.optimize));
             }
-        };
-        plans[at].bodies.get(function).cloned()
-    });
+            let plan = cell.as_ref().expect("just planned");
+            plan.bodies.get(lent.site.function).cloned()
+        }),
+    };
     let Some(words) = words else {
         UNPLANNED.fetch_add(1, Ordering::Relaxed);
         return Ok(false);
@@ -286,7 +277,7 @@ fn runs(index: usize, case: &check_harness::Case) -> bool {
 fn both(name: &str, world: &vesper::check::World, run: bool) -> Diff {
     let mut total = Diff::default();
     for optimize in [true, false] {
-        PLAN.with(|p| p.borrow_mut().clear());
+        PLAN.with(|p| *p.borrow_mut() = None);
         total.add(compare(name, world, "main", hooks(), optimize, run));
     }
     total
@@ -2930,6 +2921,98 @@ fn vesper_scalar_bodies_try_byte_at_and_try_get_options() {
     });
 }
 
+// #2653: a slice's `try_get` fused with its block's `match`
+// (`seq_native::fused_reads`): the bounds check and element address in
+// variables, the arms' tests on the check and `Some(x)` loading the
+// element.
+const FUSED_TRY_GET: &str = "
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+fn word(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::None => 5,
+        Option::Some(v) => v,
+    }
+}
+fn has(in s: Slice[u32], i: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(_) => true,
+        _ => false,
+    }
+}
+fn half_or(in s: Slice[u16], i: u64, d: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(h) => wrapping_add(widen_u64(h), d),
+        _ => d,
+    }
+}
+fn real(in s: Slice[f64], i: u64) -> f64 {
+    match s.try_get(i) {
+        Option::Some(x) => x * 2.0,
+        Option::None => 0.5,
+    }
+}
+fn main() -> i64 {
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    bytes.push(7);
+    bytes.push(9);
+    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    words.push(11);
+    let mut quads: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    quads.push(3);
+    let mut halves: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    halves.push(300);
+    let mut reals: ChunkSeq[f64] = ChunkSeq::new[f64]();
+    reals.push(1.25);
+    let a = widen_u64(byte(in bytes.as_slice(), 1)) ^ widen_u64(byte(in bytes.as_slice(), 4));
+    let b = word(in words.as_slice(), 0) ^ word(in words.as_slice(), 2);
+    let c = if has(in quads.as_slice(), 0) && !has(in quads.as_slice(), 1) { 13 } else { 17 };
+    let d = half_or(in halves.as_slice(), 0, 1) ^ half_or(in halves.as_slice(), 3, 2);
+    let e = if real(in reals.as_slice(), 0) > real(in reals.as_slice(), 1) { 19 } else { 23 };
+    wrapping_i64(a ^ b ^ c ^ d ^ e)
+}
+";
+
+/// `FUSED_TRY_GET`'s five functions, both settings, both comparisons of
+/// a JIT-running host.
+const MIN_FUSED_TRY_GET: u64 = 20;
+
+#[test]
+fn vesper_fused_try_get_matches_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(FUSED_TRY_GET);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the fused try_get program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("fused_try_get", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "fused_try_get: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() {
+            MIN_FUSED_TRY_GET / 2
+        } else {
+            MIN_FUSED_TRY_GET
+        };
+        assert!(
+            emitted >= min_emitted,
+            "fused try_get functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
 /// Generic function instances (#2715), lent with their types substituted:
 /// type parameters at scalar arguments (`i64`, `u8`, `bool`, `f64`) and at
 /// a plain generic struct, a generic calling a non-generic function, and
@@ -3023,95 +3106,3 @@ fn vesper_generic_instances_match() {
 /// host compares each setting twice). The `Pair` instances wait on plain
 /// generic products in the planner (#2689).
 const MIN_GENERIC_INSTANCES: u64 = 14;
-
-// #2653: a slice's `try_get` fused with its block's `match`
-// (`seq_native::fused_reads`): the bounds check and element address in
-// variables, the arms' tests on the check and `Some(x)` loading the
-// element.
-const FUSED_TRY_GET: &str = "
-fn byte(in s: Slice[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(b) => b,
-        Option::None => 0,
-    }
-}
-fn word(in s: Slice[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::None => 5,
-        Option::Some(v) => v,
-    }
-}
-fn has(in s: Slice[u32], i: u64) -> bool {
-    match s.try_get(i) {
-        Option::Some(_) => true,
-        _ => false,
-    }
-}
-fn half_or(in s: Slice[u16], i: u64, d: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(h) => wrapping_add(widen_u64(h), d),
-        _ => d,
-    }
-}
-fn real(in s: Slice[f64], i: u64) -> f64 {
-    match s.try_get(i) {
-        Option::Some(x) => x * 2.0,
-        Option::None => 0.5,
-    }
-}
-fn main() -> i64 {
-    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    bytes.push(7);
-    bytes.push(9);
-    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    words.push(11);
-    let mut quads: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    quads.push(3);
-    let mut halves: ChunkSeq[u16] = ChunkSeq::new[u16]();
-    halves.push(300);
-    let mut reals: ChunkSeq[f64] = ChunkSeq::new[f64]();
-    reals.push(1.25);
-    let a = widen_u64(byte(in bytes.as_slice(), 1)) ^ widen_u64(byte(in bytes.as_slice(), 4));
-    let b = word(in words.as_slice(), 0) ^ word(in words.as_slice(), 2);
-    let c = if has(in quads.as_slice(), 0) && !has(in quads.as_slice(), 1) { 13 } else { 17 };
-    let d = half_or(in halves.as_slice(), 0, 1) ^ half_or(in halves.as_slice(), 3, 2);
-    let e = if real(in reals.as_slice(), 0) > real(in reals.as_slice(), 1) { 19 } else { 23 };
-    wrapping_i64(a ^ b ^ c ^ d ^ e)
-}
-";
-
-/// `FUSED_TRY_GET`'s five functions, both settings, both comparisons of
-/// a JIT-running host.
-const MIN_FUSED_TRY_GET: u64 = 20;
-
-#[test]
-fn vesper_fused_try_get_matches_match() {
-    big_stack(|| {
-        let parsed = vesper::parser::parse(FUSED_TRY_GET);
-        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-        let checked = vesper::check::check(&parsed.module);
-        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
-        if let Err(e) = build(&checked.world, "main", true) {
-            panic!("the fused try_get program does not build: {e}");
-        }
-        let before = EMITTED.load(Ordering::Relaxed);
-        let total = both("fused_try_get", &checked.world, true);
-        let emitted = EMITTED.load(Ordering::Relaxed) - before;
-        eprintln!(
-            "fused_try_get: {}; {emitted} functions emitted from Vesper",
-            total.summary()
-        );
-        let ran = if cross() { 0 } else { 2 };
-        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
-        let min_emitted = if cross() {
-            MIN_FUSED_TRY_GET / 2
-        } else {
-            MIN_FUSED_TRY_GET
-        };
-        assert!(
-            emitted >= min_emitted,
-            "fused try_get functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
-        );
-        assert!(total.is_clean(), "{}", total.summary());
-    });
-}
