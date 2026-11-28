@@ -93,7 +93,7 @@ does not touch).
 | `verify --refute` | `run_tool` (`vesper-refute`) | `vesper-crucible` | Routed in Vesper (`lib.ves`, #1648) |
 | `doc` | `HybridCommands::hc_doc_run` | `vesper-doc` (port) | CLI option parsing, validation, `store-olean`, and `--help` in Vesper (`doc.ves`, #1738) |
 | `test` (and `--doc`) | `HybridCommands::hc_test_run` | test runner, doctests | CLI option parsing, validation, and `--help` in Vesper (`test.ves`, #1745) |
-| `lsp` | `HybridCommands::hc_lsp_serve` | `vesper::lsp` (lanes 16 and 17: #1339, #1340) | CLI routing, option validation, and `--help` in Vesper (`lsp.ves`, #1790 / #1809) |
+| `lsp` | @vesper/lsp-server over `HybridCommands::hc_lsp_engine_*` (#1828 part 15c) | `vesper::lsp` (lanes 16 and 17: #1339, #1340) | CLI routing, option validation, and `--help` in Vesper (`lsp.ves`, #1790 / #1809) |
 | `verify --extract` | `HybridCommands::hc_verify_run` | Lean | CLI option parsing, validation, `--json` errors and `--help` in Vesper (`verify.ves`, #1784, #1996); `--format` runs in @vesper/verify (below) |
 | top-level `--help` text | `HELP` in src/main.rs | | printed by the host (`hc_help`), shared with the driver's `hd_help`; the routing to it is Vesper |
 

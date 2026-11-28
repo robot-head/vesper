@@ -824,33 +824,29 @@ copy struct Negotiated {
 // over the configured default, or none.
 fn background_delay(requested: Option[bool], debounce: Option[u64], kind: u64) -> Option[u64] {
     let configured = (kind & BACKGROUND_BIT) != 0;
-    let configured_ms = kind >> BACKGROUND_MS_SHIFT;
-    let fallback = if configured {
+    let configured_ms: u64 = kind >> BACKGROUND_MS_SHIFT;
+    let on: bool = match requested {
+        Option::Some(on) => on,
+        Option::None => configured,
+    };
+    if !on {
+        return Option::None;
+    }
+    let fallback: u64 = if configured {
         configured_ms
     } else {
         DEFAULT_DEBOUNCE_MS
     };
-    let delay = match requested {
-        Option::Some(on) => if on {
-            Option::Some(debounce.unwrap_or(fallback))
-        } else {
-            Option::None
-        },
-        Option::None => if configured {
-            Option::Some(debounce.unwrap_or(configured_ms))
-        } else {
-            Option::None
-        },
+    let ms: u64 = match debounce {
+        Option::Some(ms) => ms,
+        Option::None => fallback,
     };
     // Background runs need the auditor, and the debouncer refuses a delay
     // past a minute.
-    match delay {
-        Option::Some(ms) => if (kind & AUDITOR_BIT) != 0 && ms <= MAX_DEBOUNCE_MS {
-            Option::Some(ms)
-        } else {
-            Option::None
-        },
-        Option::None => Option::None,
+    if (kind & AUDITOR_BIT) != 0 && ms <= MAX_DEBOUNCE_MS {
+        Option::Some(ms)
+    } else {
+        Option::None
     }
 }
 
