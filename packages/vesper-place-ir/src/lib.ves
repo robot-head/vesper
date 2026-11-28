@@ -318,6 +318,14 @@ impl Program {
         self.fns.len()
     }
 
+    pub fn pool_count(in self) -> u64 {
+        self.pool.len()
+    }
+
+    pub fn path_count(in self) -> u64 {
+        self.paths.len()
+    }
+
     pub fn function(in self, i: u64) -> FnRow {
         match self.fns.try_get(i) {
             Option::Some(x) => x,

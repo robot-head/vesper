@@ -66,6 +66,9 @@ use @vesper/native-walk::{native_walk_call_words_bytes};
 use @vesper/native-walk::frame::{graph_plain};
 use @vesper/library-ir::{Status as IrStatus, library_walk_calls_input};
 use self::declare::{Declared, declare_library, declared_new, exports_new};
+use self::generic::{NO_INSTANCE_PLAN, instance_plans};
+use self::enums::{graph_enums};
+use @vesper/check-layout::{layouts_new};
 
 // The answer's status words.
 const OK: u64 = 0;
@@ -417,7 +420,10 @@ fn call_words_of(in walk: Slice[u8], count: u64) -> CallWords {
 }
 
 fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
-    let words = codegen_scalar_body_plan_prefix(in program);
+    let mut words = codegen_scalar_body_plan_prefix(in program);
+    // A generic instance takes the plan of its own substituted graph
+    // (generic.ves), never its generic graph's.
+    let generic = instance_plans(in program, d.name_at.len(), d.optimize);
     // per program function: the start of its plan words
     let mut by_row: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut k: u64 = 0;
@@ -438,8 +444,9 @@ fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
         k = wrapping_add(start, n);
     }
     let mut r = IrReader { pos: 0 };
-    let c = read_ctx(inout r, in program);
+    let mut c = read_ctx(inout r, in program);
     let p = read_program(inout r, in program, in c);
+    let mut ls = layouts_new();
     let mut at: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut graph: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let count = d.name_at.len();
@@ -460,12 +467,26 @@ fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
                     Option::None => NO_PLAN,
                 };
                 plain = if graph_plain(in p, j) { SET } else { 0 };
+                // An enum on the optimize path waits on the small-enum
+                // facts (enums.ves).
+                if d.optimize && graph_enums(inout ls, inout c, in p, j) {
+                    plan = NO_PLAN;
+                }
                 break;
             }
+        }
+        if at64(in generic.generic, i) == SET {
+            let own = at64(in generic.at, i);
+            plan = if own == NO_INSTANCE_PLAN {
+                NO_PLAN
+            } else {
+                wrapping_add(words.len(), own)
+            };
         }
         at.push(plan);
         graph.push(plain);
     }
+    words.extend(in generic.words.as_slice());
     Plans { words: words, at: at, graph: graph }
 }
 
