@@ -319,7 +319,11 @@ fn corpus() -> &'static [Source] {
             }
             out.push(Source { label, text });
         }
-        for suite in ["tests/doctest_cli.rs", "src/doctest.rs"] {
+        for suite in [
+            "tests/doctest_cli.rs",
+            "crates/vesper-cli-tests/tests/doctest_cli.rs",
+            "src/doctest.rs",
+        ] {
             let Ok(text) = std::fs::read_to_string(root.join(suite)) else {
                 continue;
             };

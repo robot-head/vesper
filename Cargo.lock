@@ -5810,9 +5810,11 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "vesper-bench-seed",
  "vesper-chrono",
  "vesper-doc",
+ "vesper-ebpf-seed",
  "vesper-ffi",
  "vesper-highlight-seed",
  "vesper-lean-syntax-seed",
@@ -5821,6 +5823,7 @@ dependencies = [
  "vesper-lsp",
  "vesper-semver-seed",
  "vesper-simd-seed",
+ "wasmtime",
 ]
 
 [[package]]

@@ -853,7 +853,10 @@ vesper_crate(
             "tests/**/*.ves",
             "src/doctest.rs",
             "tests/doctest_cli.rs",
-        ]),
+        ]) + [
+            # The CLI half of doctest_cli moved there (#2743).
+            "//crates/vesper-cli-tests:files",
+        ],
         # Part 6: the generated module of a doctest example against
         # doctest_generate::rust_generate on snippets of the same files.
         "test/self_host_doctest_generate": glob([
@@ -864,7 +867,10 @@ vesper_crate(
             "src/doctest.rs",
             "src/doctest_extract.rs",
             "tests/doctest_cli.rs",
-        ]),
+        ]) + [
+            # The CLI half of doctest_cli moved there (#2743).
+            "//crates/vesper-cli-tests:files",
+        ],
         # Part 7: doctest wrapper names and verdicts against
         # doctest_verdict::{rust_wrappers, rust_verdict} on examples of the
         # same files.
@@ -2380,6 +2386,7 @@ filegroup(
         "tests/fixtures/doc_links/**",
         "tests/fixtures/doc_navigation/**",
         "tests/fixtures/format_proof/**",
+        "tests/fixtures/lean_extract/**",
         "tests/fixtures/macro_preview/**",
         "tests/fixtures/source_macro_parameters/**",
         "tests/fixtures/source_macro_tuples/**",
