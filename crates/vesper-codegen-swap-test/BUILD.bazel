@@ -12,6 +12,9 @@ vesper_crate(
         # BUILD file, so //:files leaves it out.
         "//packages/vesper-codegen-numeric:files",
         "//packages/vesper-cranelift:files",
+        # Stage 2 slice 3 (#2662): self_host_library_ir reads the hybrid's
+        # port libraries (crates/vesper-hybrid/modules).
+        "//crates/vesper-hybrid:files",
     ],
     test_tags = {
         # Runs whole-body Vesper emissions across the corpus in Self-host codegen differentials.
