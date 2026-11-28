@@ -710,7 +710,8 @@ fn integer_literal(in ctx: Ctx, in a: IrAst, e: Ex) -> Option[IntLit] {
         return match integer_literal(in ctx, in a, a.ex(e.b)) {
             Option::Some(value) => Option::Some(IntLit {
                 neg: !value.neg && value.mag != 0,
-                mag: value.mag
+                mag: value.mag,
+                hi: 0
             }),
             Option::None => Option::None,
         };
@@ -719,9 +720,9 @@ fn integer_literal(in ctx: Ctx, in a: IrAst, e: Ex) -> Option[IntLit] {
         return Option::None;
     }
     if e.c == 0 {
-        Option::Some(IntLit { neg: false, mag: e.b })
+        Option::Some(IntLit { neg: false, mag: e.b, hi: 0 })
     } else if e.c == ALL_HIGH_BITS && e.b != 0 {
-        Option::Some(IntLit { neg: true, mag: wrapping_sub(0, e.b) })
+        Option::Some(IntLit { neg: true, mag: wrapping_sub(0, e.b), hi: 0 })
     } else {
         Option::None
     }
@@ -737,15 +738,15 @@ fn literal_sum(a: IntLit, b: IntLit) -> Option[IntLit] {
     if a.neg != b.neg {
         if a.mag >= b.mag {
             let mag = wrapping_sub(a.mag, b.mag);
-            return Option::Some(IntLit { neg: a.neg && mag != 0, mag: mag });
+            return Option::Some(IntLit { neg: a.neg && mag != 0, mag: mag, hi: 0 });
         }
-        return Option::Some(IntLit { neg: b.neg, mag: wrapping_sub(b.mag, a.mag) });
+        return Option::Some(IntLit { neg: b.neg, mag: wrapping_sub(b.mag, a.mag), hi: 0 });
     }
     let mag = wrapping_add(a.mag, b.mag);
     if mag < a.mag {
         Option::None
     } else {
-        Option::Some(IntLit { neg: a.neg, mag: mag })
+        Option::Some(IntLit { neg: a.neg, mag: mag, hi: 0 })
     }
 }
 
@@ -756,7 +757,7 @@ fn literal_product(a: IntLit, b: IntLit) -> Option[IntLit] {
         Option::None
     } else {
         let mag = wrapping_u64(product);
-        Option::Some(IntLit { neg: mag != 0 && a.neg != b.neg, mag: mag })
+        Option::Some(IntLit { neg: mag != 0 && a.neg != b.neg, mag: mag, hi: 0 })
     }
 }
 
@@ -848,7 +849,7 @@ fn arithmetic_policy(
                             Option::Some(l) => fits(
                                 ctx.world.k,
                                 name,
-                                IntLit { neg: !l.neg && l.mag != 0, mag: l.mag }
+                                IntLit { neg: !l.neg && l.mag != 0, mag: l.mag, hi: 0 }
                             ),
                             Option::None => false,
                         }
@@ -860,7 +861,7 @@ fn arithmetic_policy(
     } else {
         let fact: Option[IntLit] = if unary {
             match left {
-                Option::Some(l) => Option::Some(IntLit { neg: !l.neg && l.mag != 0, mag: l.mag }),
+                Option::Some(l) => Option::Some(IntLit { neg: !l.neg && l.mag != 0, mag: l.mag, hi: 0 }),
                 Option::None => Option::None,
             }
         } else {
@@ -869,7 +870,7 @@ fn arithmetic_policy(
                     if mul {
                         literal_product(l, r)
                     } else if sub {
-                        literal_sum(l, IntLit { neg: !r.neg && r.mag != 0, mag: r.mag })
+                        literal_sum(l, IntLit { neg: !r.neg && r.mag != 0, mag: r.mag, hi: 0 })
                     } else {
                         literal_sum(l, r)
                     }
@@ -1299,10 +1300,10 @@ test {
     }
 
     fn test_policy_literal_proofs_do_not_wrap() -> bool {
-        let max = IntLit { neg: false, mag: ALL_HIGH_BITS };
-        let one = IntLit { neg: false, mag: 1 };
-        let minus_one = IntLit { neg: true, mag: 1 };
-        let two = IntLit { neg: false, mag: 2 };
+        let max = IntLit { neg: false, mag: ALL_HIGH_BITS, hi: 0 };
+        let one = IntLit { neg: false, mag: 1, hi: 0 };
+        let minus_one = IntLit { neg: true, mag: 1, hi: 0 };
+        let two = IntLit { neg: false, mag: 2, hi: 0 };
         match (
             literal_sum(max, one),
             literal_sum(one, minus_one),
