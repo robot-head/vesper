@@ -2234,9 +2234,6 @@ fn builtin_wanted_agrees_with_rust() {
             let mut yes = 0usize;
             for (name, m) in &cases {
                 let input = pact_words::encode_builtin_wanted(m);
-                if input.len() > 512 * 1024 {
-                    continue;
-                }
                 checked += 1;
                 let rust = pact_frontend::builtin_traits_wanted(m);
                 let words = wanted_fn.words(&input);
@@ -2357,6 +2354,8 @@ fn deps_agrees_with_rust() {
             ];
 
             let mut with_errors = 0usize;
+            let mut swap_differ: Vec<String> = vec![];
+            let mut timed: Vec<(Module, World, Vec<pact_frontend::Dependency>)> = vec![];
             for (name, local_src, deps) in cases {
                 let m = parse(local_src);
                 let base = base_world(&m);
@@ -2384,10 +2383,129 @@ fn deps_agrees_with_rust() {
                         .unwrap();
                 let vesper = pact_words::decode_declaration_text(&deps_fn.text(&input));
                 assert_eq!(vesper, rust, "{name}: deps diagnostics mismatch");
+                // The swap point's encoding (crates/vesper-hybrid/src/swap/pact.rs
+                // `VESPER_DEPS_PASS`): each dependency's package name and
+                // whole identity, and its collected world.
+                let swap_worlds: Vec<World> = rust_deps
+                    .iter()
+                    .map(|d| World::collect(&d.module).0)
+                    .collect();
+                let swap_ids: Vec<String> =
+                    rust_deps.iter().map(|d| d.identity.to_string()).collect();
+                let swap_refs: Vec<(&str, &str, &Module, &World)> = rust_deps
+                    .iter()
+                    .zip(&swap_worlds)
+                    .zip(&swap_ids)
+                    .map(|((d, w), id)| (d.identity.name.as_str(), id.as_str(), &d.module, w))
+                    .collect();
+                let swap_input =
+                    pact_words::encode_deps_input(&m, &base, &local_id.to_string(), &swap_refs)
+                        .unwrap();
+                let swap = pact_words::decode_declaration_text(&deps_fn.text(&swap_input));
+                timed.push((m.clone(), base.clone(), rust_deps.clone()));
+                if swap != rust {
+                    swap_differ.push(format!("{name}:\n  rust {rust:?}\n  swap {swap:?}"));
+                }
+            }
+            assert!(
+                swap_differ.is_empty(),
+                "the swap point's encoding differs from Rust:\n{}",
+                swap_differ.join("\n")
+            );
+            if flip_gate::on() {
+                deps_pass_pairs(&deps_fn, &local_id, &timed);
             }
             assert!(with_errors > 0);
         })
         .unwrap()
         .join()
         .unwrap();
+}
+
+/// The `builtin_wanted` swap's path over every corpus module: Rust's
+/// `builtin_traits::wanted` against encoding the module, the Vesper entry
+/// and reading the answer, as crates/vesper-hybrid/src/swap/pact.rs does.
+/// `FLIP_GATE=1` prints the gate's pairs.
+#[test]
+#[ignore = "timing: FLIP_GATE=1 cargo test --release --test self_host_check_pact builtin_wanted_speed -- --ignored"]
+fn builtin_wanted_speed() {
+    if !flip_gate::on() {
+        return;
+    }
+    let wanted_fn = package().entry("check_pact_builtin_wanted", true);
+    let modules: Vec<&Module> = corpus().iter().map(|c| &c.module).collect();
+    eprintln!("{} corpus modules", modules.len());
+    flip_gate::pairs(
+        "builtin-wanted-swap-path",
+        &mut || {
+            time(|| {
+                for m in &modules {
+                    std::hint::black_box(pact_frontend::builtin_traits_wanted(m));
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for m in &modules {
+                    let input = pact_words::encode_builtin_wanted(m);
+                    let words = wanted_fn.words(&input);
+                    std::hint::black_box(words.first().copied().unwrap_or(0) != 0);
+                }
+            })
+        },
+    );
+}
+
+/// Rounds of the dependency cases per timed side: one pass over them is
+/// too short to time.
+const DEPS_ROUNDS: usize = 200;
+
+/// The `deps_pass` swap's path (crates/vesper-hybrid/src/swap/pact.rs
+/// `VESPER_DEPS_PASS`: each dependency's world collected, the input encoded,
+/// the Vesper pass, decoding) against Rust's dependency declaration pass
+/// (`probe_deps_declarations`), over the dependency cases.
+fn deps_pass_pairs(
+    deps_fn: &Entry,
+    local_id: &vesper_pact_binding::PackageIdentity,
+    cases: &[(Module, World, Vec<pact_frontend::Dependency>)],
+) {
+    let local = local_id.to_string();
+    flip_gate::pairs(
+        "deps-pass-swap-path",
+        &mut || {
+            time(|| {
+                for _ in 0..DEPS_ROUNDS {
+                    for (m, _, deps) in cases {
+                        std::hint::black_box(pact_frontend::probe_deps_declarations(
+                            m, local_id, deps,
+                        ));
+                    }
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for _ in 0..DEPS_ROUNDS {
+                    for (m, base, deps) in cases {
+                        let worlds: Vec<World> =
+                            deps.iter().map(|d| World::collect(&d.module).0).collect();
+                        let ids: Vec<String> =
+                            deps.iter().map(|d| d.identity.to_string()).collect();
+                        let refs: Vec<(&str, &str, &Module, &World)> = deps
+                            .iter()
+                            .zip(&worlds)
+                            .zip(&ids)
+                            .map(|((d, w), id)| {
+                                (d.identity.name.as_str(), id.as_str(), &d.module, w)
+                            })
+                            .collect();
+                        let input = pact_words::encode_deps_input(m, base, &local, &refs).unwrap();
+                        std::hint::black_box(pact_words::decode_declarations(
+                            &deps_fn.words(&input),
+                        ));
+                    }
+                }
+            })
+        },
+    );
 }
