@@ -6,8 +6,8 @@ use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset};
 use @vesper/check-names-packages::{resolve_sugar_imports_bytes};
 use @vesper/sugar::driver::{
     BootstrapSugarOutput, FREE_NAME_WORDS, Imports, PackageSugarBinding, PackageSugarDefinition,
-    expand_bootstrap_module, expand_module, inspect_module_sugars, may_declare_sugar,
-    plan_bootstrap_definitions, plan_bootstrap_sugars
+    SugarDeclarationSpan, SugarImportSpan, expand_bootstrap_module, expand_module,
+    inspect_module_sugars, may_declare_sugar, plan_bootstrap_definitions, plan_bootstrap_sugars
 };
 
 use @vesper-std/fs::{IoError, kind_dir, kind_file, kind_symlink, read_path};
@@ -2455,15 +2455,31 @@ fn expand_graph_module(
 }
 
 fn has_bootstrap_sugar_candidate(in source: ChunkSeq[u8]) -> bool {
-    if !contains_word(in source.as_slice(), in "sugar") {
-        return false;
-    }
     let scratch = stage2_heap_mark();
-    let possible = may_declare_sugar(in source);
+    let possible = contains_word(in source.as_slice(), in "sugar") && may_declare_sugar(in source);
     if scratch != 0 {
         stage2_heap_reset(scratch);
     }
     possible
+}
+
+// Whether the sugar pass must parse `source`: a module of a package near a
+// sugar that names `sugar`, `use` or `Option`. The word scans' temporaries
+// are freed, since the self-built compiler frees nothing in a loop and
+// they add up over every module's bytes (#2711).
+fn worth_inspecting(near: bool, in source: ChunkSeq[u8]) -> bool {
+    if !near {
+        return false;
+    }
+    let scratch = stage2_heap_mark();
+    let text = source.as_slice();
+    let worth = contains_word(in text, in "sugar")
+        || contains_word(in text, in "use")
+        || contains_word(in text, in "Option");
+    if scratch != 0 {
+        stage2_heap_reset(scratch);
+    }
+    worth
 }
 
 // Headroom for package paths, file rows and source mappings beyond the
@@ -2563,6 +2579,61 @@ fn packages_near_sugar(in pkgs: ChunkSeq[PkgNode], in mods: ChunkSeq[ModEntry]) 
     near
 }
 
+// A module's sugar surface flags, its rows left in the caller's buffers.
+copy struct SurfaceFlags {
+    has_sugar: bool,
+    has_calls: bool,
+    shadows_bootstrap_prelude: bool,
+}
+
+// `inspect_module_sugars` with the parse freed: the surface's rows are
+// copied into `declarations` and `imports`, which the caller reserved
+// before the parse to hold `row_room` rows each (pushes within capacity
+// allocate nothing), and the heap is reset past them. The self-built
+// compiler frees nothing on its own, so every module's surface tree would
+// otherwise stay on the heap until the sugar pass ends (#2711).
+fn inspect_surface(
+    in source: ChunkSeq[u8],
+    inout declarations: ChunkSeq[SugarDeclarationSpan],
+    inout imports: ChunkSeq[SugarImportSpan],
+    row_room: u64
+) -> Option[SurfaceFlags] {
+    declarations.clear();
+    imports.clear();
+    let scratch = stage2_heap_mark();
+    let surface = match inspect_module_sugars(in source, false) {
+        Option::Some(surface) => surface,
+        Option::None => {
+            if scratch != 0 {
+                stage2_heap_reset(scratch);
+            }
+            return Option::None;
+        },
+    };
+    let fits = surface.declarations.len() <= row_room && surface.imports.len() <= row_room;
+    for i in 0..surface.declarations.len() {
+        match surface.declarations.try_get(i) {
+            Option::Some(row) => declarations.push(row),
+            Option::None => {},
+        }
+    }
+    for i in 0..surface.imports.len() {
+        match surface.imports.try_get(i) {
+            Option::Some(row) => imports.push(row),
+            Option::None => {},
+        }
+    }
+    let flags = SurfaceFlags {
+        has_sugar: surface.has_sugar,
+        has_calls: surface.has_calls,
+        shadows_bootstrap_prelude: surface.shadows_bootstrap_prelude
+    };
+    if scratch != 0 && fits {
+        stage2_heap_reset(scratch);
+    }
+    Option::Some(flags)
+}
+
 fn prepare_sugar_graph_in_scratch(
     in pkgs: ChunkSeq[PkgNode],
     inout files: ChunkSeq[FileEntry],
@@ -2581,6 +2652,21 @@ fn prepare_sugar_graph_in_scratch(
     let mut sugar_policy_words = ChunkSeq::new[u64]();
     if possible_sugar {
         let near_sugar = packages_near_sugar(in pkgs, in mods);
+        // Rows are disjoint spans of a module, so no module has more rows
+        // of a kind than bytes.
+        let mut row_room: u64 = 0;
+        for module in 0..mods.len() {
+            match mods.try_get(module) {
+                Option::Some(source) => {
+                    if source.text.len() > row_room {
+                        row_room = source.text.len();
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        let mut surface_declarations = ChunkSeq::with_capacity[SugarDeclarationSpan](row_room);
+        let mut surface_imports = ChunkSeq::with_capacity[SugarImportSpan](row_room);
         for module in 0..mods.len() {
             let mut import_text = ChunkSeq::new[u8]();
             let mut has_surface_sugar = false;
@@ -2588,19 +2674,23 @@ fn prepare_sugar_graph_in_scratch(
             let mut calls_own_sugar = false;
             match mods.try_get(module) {
                 Option::Some(source) => {
-                    if near_sugar.try_get(source.pkg) == Option::Some(true)
-                        && (contains_word(in source.text.as_slice(), in "sugar")
-                            || contains_word(in source.text.as_slice(), in "use")
-                            || contains_word(in source.text.as_slice(), in "Option"))
-                    {
-                        match inspect_module_sugars(in source.text, false) {
+                    if worth_inspecting(
+                        near_sugar.try_get(source.pkg) == Option::Some(true),
+                        in source.text
+                    ) {
+                        match inspect_surface(
+                            in source.text,
+                            inout surface_declarations,
+                            inout surface_imports,
+                            row_room
+                        ) {
                             Option::Some(surface) => {
                                 has_surface_sugar = surface.has_sugar;
                                 calls_own_sugar = surface.has_calls
-                                    && surface.declarations.len() != 0;
+                                    && surface_declarations.len() != 0;
                                 shadows_prelude = surface.shadows_bootstrap_prelude;
-                                for i in 0..surface.declarations.len() {
-                                    match surface.declarations.try_get(i) {
+                                for i in 0..surface_declarations.len() {
+                                    match surface_declarations.try_get(i) {
                                         Option::Some(row) => {
                                             let mut name = ChunkSeq::new[u8]();
                                             name.extend(
@@ -2630,8 +2720,8 @@ fn prepare_sugar_graph_in_scratch(
                                         Option::None => {},
                                     }
                                 }
-                                for i in 0..surface.imports.len() {
-                                    match surface.imports.try_get(i) {
+                                for i in 0..surface_imports.len() {
+                                    match surface_imports.try_get(i) {
                                         Option::Some(row) => {
                                             import_text.extend(in source.text[row.start..row.end]);
                                             import_text.push(10);
