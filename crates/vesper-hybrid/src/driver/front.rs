@@ -221,14 +221,8 @@ impl Session {
         match step {
             Step::Parse => {
                 let parsed = match &self.loaded {
-                    Some(p) => {
-                        self.source = self.original.clone();
-                        parser::Parse {
-                            module: p.module.clone(),
-                            green: parser::parse("").green,
-                            diagnostics: vec![],
-                        }
-                    }
+                    // A package's load parses it (`package_loaded`).
+                    Some(_) => return Err("driver: a package is parsed by its load".into()),
                     // `--emit cst` parses in its own pass.
                     None if o.command == "emit" && o.format() == "cst" => return Ok(0),
                     None => {

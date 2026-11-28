@@ -576,7 +576,12 @@ fn drive(
     // collector can give its checked world's declarations.
     let held = r != declined() && !sugared;
     if r == declined() {
-        r = step(inout s, step_parse());
+        // A package's load parsed it (the assembled module).
+        r = if package {
+            0
+        } else {
+            step(inout s, step_parse())
+        };
     }
     if is_failure(r) {
         return pass_failed(in s, r);
