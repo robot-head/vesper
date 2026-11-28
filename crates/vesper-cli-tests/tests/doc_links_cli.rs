@@ -1,4 +1,6 @@
 //! Actual executable acceptance of checked local intra-doc references.
+mod support;
+
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -28,8 +30,7 @@ const EXPECTED: &[&str] = &[
 fn binary() -> PathBuf {
     let path = std::env::var_os("VESPER_DOC_LINKS_BINARY")
         .map(PathBuf::from)
-        .or_else(|| option_env!("CARGO_BIN_EXE_vesper").map(PathBuf::from))
-        .expect("actual vesper or VESPER_DOC_LINKS_BINARY required");
+        .unwrap_or_else(support::vesper_path);
     let exe = PathBuf::from(format!("{}.exe", path.display()));
     if exe.is_file() { exe } else { path }
 }
@@ -106,7 +107,12 @@ impl Fixture {
         }
     }
     fn command(&self, args: &[&str]) -> Output {
-        let result = output(Command::new(binary()).arg("doc").arg(&self.path).args(args));
+        let result = output(
+            support::command(&binary())
+                .arg("doc")
+                .arg(&self.path)
+                .args(args),
+        );
         assert_eq!(fs::read(&self.path).unwrap(), self.source.as_bytes());
         result
     }
@@ -373,7 +379,7 @@ fn actual_cli_keeps_source_and_existing_output_bytes_unchanged() {
         let symlink = fixture.dir.join("source-link.ves");
         std::os::unix::fs::symlink(&fixture.path, &symlink).unwrap();
         let result = output(
-            Command::new(binary())
+            support::command(&binary())
                 .arg("doc")
                 .arg(&symlink)
                 .arg("--json"),

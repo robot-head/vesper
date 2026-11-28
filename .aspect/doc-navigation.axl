@@ -20,7 +20,7 @@ def _location(uri, source, marker, skip, name):
     return {"uri": uri, "range": {"start": position(source, start), "end": position(source, end)}}
 
 def _fixture(ctx, root, name):
-    return ctx.std.fs.read_to_string(root + "/tests/fixtures/doc_navigation/" + name + ".ves")
+    return ctx.std.fs.read_to_string(root + "/crates/vesper-cli-tests/tests/fixtures/doc_navigation/" + name + ".ves")
 
 def _harness(ctx, root, binary, work):
     disk = work + "/unchanged-🦀.ves"

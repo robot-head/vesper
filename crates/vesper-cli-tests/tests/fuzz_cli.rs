@@ -1,14 +1,16 @@
 //! Integration B (#136): `vesper fuzz` and `vesper verify --refute` over
 //! source functions with Vesper Crucible.
+mod support;
+
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Output,
     sync::atomic::{AtomicU64, Ordering},
 };
 
 fn fixture() -> String {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    support::repo_root()
         .join("tests/fixtures/integration_b/fuzz.ves")
         .to_string_lossy()
         .into_owned()
@@ -37,10 +39,7 @@ impl Drop for Temp {
 }
 
 fn vesper(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_vesper"))
-        .args(args)
-        .output()
-        .unwrap()
+    support::vesper().args(args).output().unwrap()
 }
 
 fn text(o: &Output) -> String {

@@ -6,7 +6,13 @@ load("//tools/bazel:defs.bzl", "vesper_crate")
 # `vesper-<tool>` binaries beside it, and start it in the repository root,
 # where they ran as root integration tests (`//:files`).
 vesper_crate(
-    extra_test_data = ["//:files"],
+    extra_test_data = [
+        "//:files",
+        # attestation_cli and publish_cli sign with the Loom trust fixtures;
+        # grammar_cli reads the grammar's IPC fixtures.
+        "//crates/vesper-grammar:files",
+        "//crates/vesper-loom-trust:files",
+    ],
     extra_test_path_binaries = [
         "//:vesper_shipped",
         "//:vesper_tools",

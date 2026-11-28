@@ -1,9 +1,11 @@
 //! Actual opt-in stdio previews remain separate from original-source semantics.
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
     path::PathBuf,
-    process::{Command, Stdio},
+    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
@@ -42,8 +44,7 @@ fn preview(id: i32, uri: &str, version: i32) -> Value {
 fn binary() -> PathBuf {
     let path = std::env::var_os("VESPER_MACRO_PREVIEW_BINARY")
         .map(PathBuf::from)
-        .or_else(|| option_env!("CARGO_BIN_EXE_vesper").map(PathBuf::from))
-        .expect("actual vesper executable or VESPER_MACRO_PREVIEW_BINARY required");
+        .unwrap_or_else(support::vesper_path);
     let exe = PathBuf::from(format!("{}.exe", path.display()));
     if exe.is_file() { exe } else { path }
 }
@@ -59,7 +60,7 @@ fn run(mut messages: Vec<Value>) -> Vec<Value> {
         bytes.extend_from_slice(&body);
         bytes
     });
-    let mut child = Command::new(binary())
+    let mut child = support::command(&binary())
         .arg("lsp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -1,8 +1,10 @@
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     fs,
-    path::{Path, PathBuf},
-    process::{Command, Output},
+    path::PathBuf,
+    process::Output,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -16,8 +18,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).unwrap();
-        let trust_fixtures =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/vesper-loom-trust/tests/fixtures");
+        let trust_fixtures = support::repo_root().join("crates/vesper-loom-trust/tests/fixtures");
         for name in [
             "identity.json",
             "policy.json",
@@ -38,7 +39,7 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_vesper"))
+        support::vesper()
             .current_dir(&self.0)
             .arg("publish")
             .args(args)
@@ -177,7 +178,7 @@ fn publish_semver_rejects_breaking_change_without_major_bump_and_keeps_cas_clean
     f.write_str("Loom.toml", &manifest_toml("@test/package", "1.2.3"));
     f.write_str("old.ves", "fn transform(x: i64) -> i64 {\n    x\n}\n");
     // Emit baseline .vhir interface.
-    let emit_out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+    let emit_out = support::vesper()
         .current_dir(&f.0)
         .args([
             "emit",

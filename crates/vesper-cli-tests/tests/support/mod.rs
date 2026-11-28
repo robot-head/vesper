@@ -48,44 +48,45 @@ pub fn repo_root() -> PathBuf {
 
 /// The compiler under test, as an absolute path.
 pub fn vesper_path() -> PathBuf {
-    compiler().0
-}
-
-/// A command for the compiler under test, started in the repository root.
-pub fn vesper() -> Command {
-    let (path, cargo_hybrid) = compiler();
-    let mut command = Command::new(path);
-    command.current_dir(repo_root());
-    if cargo_hybrid && env::var_os(SWAPS_VARIABLE).is_none() {
-        command.env(SWAPS_VARIABLE, SHIPPED_SWAPS);
-    }
-    command
-}
-
-/// The compiler, and whether it is the Cargo-built hybrid this module
-/// found on its own (which needs the shipped swap set named).
-fn compiler() -> (PathBuf, bool) {
     if let Some(named) = env::var_os(COMPILER_VARIABLE).filter(|v| !v.is_empty()) {
-        let path = resolve(&named).unwrap_or_else(|| {
+        return resolve(&named).unwrap_or_else(|| {
             panic!(
                 "${COMPILER_VARIABLE}={} is not an executable",
                 Path::new(&named).display()
             )
         });
-        return (path, false);
     }
     if let Some(path) = cargo_hybrid() {
-        return (path, true);
+        return path;
     }
     if env::var_os(BAZEL_TEST_VARIABLE).is_some()
         && let Some(path) = resolve(&OsString::from(SHIPPED_NAME))
     {
-        return (path, false);
+        return path;
     }
     panic!(
         "no compiler to test: set ${COMPILER_VARIABLE}, or build the shipped compiler with \
          `cargo build -p {CARGO_HYBRID} -p vesper-tools` into this target directory"
     )
+}
+
+/// A command for the compiler under test, started in the repository root.
+pub fn vesper() -> Command {
+    command(&vesper_path())
+}
+
+/// A command for a compiler at `path`, started in the repository root. A
+/// hybrid started under its Cargo name runs the shipped swap set unless the
+/// caller's environment names one.
+pub fn command(path: &Path) -> Command {
+    let mut command = Command::new(path);
+    command.current_dir(repo_root());
+    if path.file_stem().is_some_and(|stem| stem == CARGO_HYBRID)
+        && env::var_os(SWAPS_VARIABLE).is_none()
+    {
+        command.env(SWAPS_VARIABLE, SHIPPED_SWAPS);
+    }
+    command
 }
 
 /// `<target>/<profile>/vesper-hybrid`: the nearest directory above this
