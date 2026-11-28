@@ -34,8 +34,17 @@ fn vesper_parse(source: &str) -> Parse {
 
 /// The first difference between the two parses, if any.
 fn compare(source: &str) -> Option<String> {
-    let rust = parser::rust_parse(source);
-    let vesper = vesper_parse(source);
+    differ(parser::rust_parse(source), vesper_parse(source))
+}
+
+/// [`compare`] with test blocks parsed: `parse_words_tests` against
+/// `parser::parse_for_tests` (`--include-tests`).
+fn compare_tests(source: &str) -> Option<String> {
+    let vesper = parse_words::decode(source, &binding::parse_words_tests(source));
+    differ(parser::parse_for_tests(source), vesper)
+}
+
+fn differ(rust: Parse, vesper: Parse) -> Option<String> {
     if rust == vesper {
         return None;
     }
@@ -121,6 +130,53 @@ fn repository_sources_parse_the_same() {
         "{} of {} sources differ:\n{}",
         failures.len(),
         files.len(),
+        failures.join("\n")
+    );
+}
+
+/// Under `--include-tests` (`parse_for_tests`) every repository `.ves` file
+/// with a test block or test attribute, and the test-block edge cases,
+/// parse the same.
+#[test]
+fn test_blocks_parse_the_same() {
+    let mut sources: Vec<(String, String)> = repository_sources()
+        .iter()
+        .filter_map(|path| {
+            let source = std::fs::read_to_string(path).ok()?;
+            source
+                .contains("test")
+                .then(|| (path.display().to_string(), source))
+        })
+        .collect();
+    let floor = if under_bazel() { 20 } else { 100 };
+    assert!(
+        sources.len() >= floor,
+        "{} sources with tests",
+        sources.len()
+    );
+    for (i, case) in [
+        "fn f() {} test { fn t() { f() } @test fn u() {} }",
+        "test { fn break() {} } fn g() { break }",
+        "test { test { fn t() {} } }",
+        "test { fn t() {}",
+        "test {} test { struct S {} } @test fn a() {} @test_case(1) fn b(x: u8) {} @test_case fn c() {}",
+        "fn f() { test { } } test",
+        "pub @test fn t() {} test { const N: u8 = 1; fn n() -> u8 { N } }",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        sources.push((format!("case {i}"), case.to_owned()));
+    }
+    let failures: Vec<String> = sources
+        .iter()
+        .filter_map(|(name, source)| compare_tests(source).map(|d| format!("{name}: {d}")))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} of {} sources differ:\n{}",
+        failures.len(),
+        sources.len(),
         failures.join("\n")
     );
 }

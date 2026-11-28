@@ -3326,6 +3326,30 @@ pub fn parse_tokens(
     max_diag: u64,
     max_depth: u64
 ) -> P {
+    parse_core_tokens(in source, t, d, max_diag, max_depth, false)
+}
+
+// `parse_for_tests` after lexing: `parse_tokens` with test blocks parsed.
+pub fn parse_test_tokens(
+    in source: Slice[u8],
+    sink t: Tokens,
+    sink d: Diags,
+    max_diag: u64,
+    max_depth: u64
+) -> P {
+    parse_core_tokens(in source, t, d, max_diag, max_depth, true)
+}
+
+// The core profile (`parse_module_profile` without `surface`), with test
+// blocks parsed (`include_tests`) or skipped as declarations.
+fn parse_core_tokens(
+    in source: Slice[u8],
+    sink t: Tokens,
+    sink d: Diags,
+    max_diag: u64,
+    max_depth: u64,
+    include_tests: bool
+) -> P {
     let nsyms = inc(t.sym_start.len());
     let mut p = parse_tokens_new(in source, t, d, nsyms, max_diag, max_depth);
     start_node(inout p, NodeKind::Module);
@@ -3338,23 +3362,43 @@ pub fn parse_tokens(
         finish_node(inout p);
         return p;
     }
-    contextual_item_names(inout p);
+    item_names(inout p, include_tests);
     loop {
         if at(in p, k_eof()) {
             break;
         }
-        let before = p.pos;
-        start_node(inout p, NodeKind::Item);
-        declaration(inout p);
-        finish_node(inout p);
-        if p.pos == before {
-            err(inout p, in "expected a declaration");
-            bump(inout p);
+        if include_tests && at_test_block(in p) {
+            test_block_items(inout p);
+        } else {
+            push_item(inout p);
         }
     }
     trivia(inout p);
     finish_node(inout p);
     p
+}
+
+// `Parser::at_test_block`: `test { ... }`.
+fn at_test_block(in p: P) -> bool {
+    at_word(in p, 0, w_test()) && nth(in p, 1) == k_l_brace()
+}
+
+// A module-scope test block parsed as one item of its declarations.
+fn test_block_items(inout p: P) {
+    start_node(inout p, NodeKind::Item);
+    bump(inout p);
+    bump(inout p);
+    loop {
+        if at(in p, k_r_brace()) || at(in p, k_eof()) {
+            break;
+        }
+        if at_test_block(in p) {
+            err(inout p, in "test blocks must be at module scope");
+        }
+        push_item(inout p);
+    }
+    expect(inout p, k_r_brace());
+    finish_node(inout p);
 }
 
 // A parser over `t` in batch mode, its tokens indexed.
@@ -4557,21 +4601,8 @@ fn parse_profile_tokens(
         if at(in p, k_eof()) {
             break;
         }
-        if include_tests && at_word(in p, 0, w_test()) && nth(in p, 1) == k_l_brace() {
-            start_node(inout p, NodeKind::Item);
-            bump(inout p);
-            bump(inout p);
-            loop {
-                if at(in p, k_r_brace()) || at(in p, k_eof()) {
-                    break;
-                }
-                if at_word(in p, 0, w_test()) && nth(in p, 1) == k_l_brace() {
-                    err(inout p, in "test blocks must be at module scope");
-                }
-                push_item(inout p);
-            }
-            expect(inout p, k_r_brace());
-            finish_node(inout p);
+        if include_tests && at_test_block(in p) {
+            test_block_items(inout p);
         } else {
             push_item(inout p);
         }

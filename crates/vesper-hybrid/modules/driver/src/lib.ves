@@ -537,9 +537,9 @@ fn drive(
     }
     let mut r = declined();
     let mut sugared = false;
-    if front && !o.include_tests && !emit_cst_format {
+    if front && !emit_cst_format {
         let input = value(in o, slot_input());
-        match parse_front(in source, in input.as_slice(), o.json) {
+        match parse_front(in source, in input.as_slice(), o.json, o.include_tests) {
             FrontParse::ParsedClean(words) => {
                 r = HybridDriver::hd_parsed(inout s, in words.as_slice());
                 if is_failure(r) {
@@ -572,9 +572,10 @@ fn drive(
             FrontParse::ParseDeclined => (),
         }
     }
-    // The session's module is the parse of `source` itself, so the Vesper
-    // collector can give its checked world's declarations.
-    let held = r != declined() && !sugared;
+    // The session's module is the parse of `source` itself (without its
+    // test blocks), so the Vesper collector can give its checked world's
+    // declarations.
+    let held = r != declined() && !sugared && !o.include_tests;
     if r == declined() {
         // A package's load parsed it (the assembled module).
         r = if package {

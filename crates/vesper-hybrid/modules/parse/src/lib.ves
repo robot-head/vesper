@@ -33,7 +33,7 @@
 // @export abi 4
 
 use @vesper/ast::words::{put_ast_words};
-use @vesper/ast::lower::{lower_source};
+use @vesper/ast::lower::{L, lower_source, lower_source_tests};
 use @vesper/front::Diags;
 use @vesper/front::lex::{max_source_bytes, token_end};
 use @vesper/front::diag::{limit_message_observed};
@@ -162,6 +162,16 @@ fn oversized(inout o: ChunkSeq[u64], in b: Slice[u8]) {
 // Parses `source` (`vesper_syntax::parser::parse`) into the word stream
 // described above.
 pub fn parse_words(in source: Str) -> ChunkSeq[u64] {
+    words_of(in source, false)
+}
+
+// `parse_words` of `vesper_syntax::parser::parse_for_tests`: test blocks
+// parsed and their declarations lowered.
+pub fn parse_words_tests(in source: Str) -> ChunkSeq[u64] {
+    words_of(in source, true)
+}
+
+fn words_of(in source: Str, include_tests: bool) -> ChunkSeq[u64] {
     let b = source.as_bytes();
     let mut o = ChunkSeq::new[u64]();
     o.push(format());
@@ -169,7 +179,11 @@ pub fn parse_words(in source: Str) -> ChunkSeq[u64] {
         oversized(inout o, in b);
         return o;
     }
-    let l = lower_source(in source);
+    let l: L = if include_tests {
+        lower_source_tests(in source)
+    } else {
+        lower_source(in source)
+    };
     let nev = l.p.ev.len();
     o.reserve(wrapping_add(nev, 64));
     o.push(nev);

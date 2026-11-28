@@ -75,6 +75,22 @@ fn default_compiler() -> PathBuf {
 /// sugar) and source sugar (the session's expansion).
 const PROGRAMS: &[(&str, &str)] = &[
     (
+        "tests_block.ves",
+        "fn add(a: i64, b: i64) -> i64 {\n    a + b\n}\ntest {\n    @test\n    fn adds() {\n        assert(add(1, 2) == 3);\n    }\n}\nfn main() -> i64 {\n    add(1, 2)\n}\n",
+    ),
+    (
+        "tests_nested.ves",
+        "test {\n    test {\n        fn t() {}\n    }\n}\nfn main() -> i64 {\n    0\n}\n",
+    ),
+    (
+        "tests_unclosed.ves",
+        "fn main() -> i64 {\n    0\n}\ntest {\n    fn t() -> i64 { missing }\n",
+    ),
+    (
+        "tests_sugar.ves",
+        "sugar take_right: infix(`.+`, additive, left) { rule ($a:expr .+ $b:expr) => { $b } }\ntest {\n    fn t() -> i64 {\n        1 .+ 2\n    }\n}\nfn main() -> i64 {\n    1 .+ 42\n}\n",
+    ),
+    (
         "long_tokens.ves",
         "fn main() -> i64 {\n    let a_very_long_identifier_name_here = 1;\n    let s = \"tab\\there \\\"quoted\\\" and 'single' and more\";\n    a_very_long_identifier_name_here\n}\n",
     ),
@@ -231,6 +247,19 @@ fn front_passes_match_the_default_compiler() {
         if *check {
             sets.push(vec!["check".into(), input.clone()]);
             sets.push(vec!["check".into(), "--json".into(), input.clone()]);
+            // `--include-tests`: `parse_for_tests` and the sugar expansion
+            // with test blocks (#1893).
+            sets.push(vec![
+                "check".into(),
+                "--include-tests".into(),
+                input.clone(),
+            ]);
+            sets.push(vec![
+                "check".into(),
+                "--json".into(),
+                "--include-tests".into(),
+                input.clone(),
+            ]);
             // `--no-opt`: the AST optimizer swap folds some programs
             // differently from Rust's on main too (tests/fixtures/
             // wide_literals.ves), which is not the parse this checks.
@@ -326,6 +355,8 @@ fn emit_cst_runs_in_the_vesper_driver() {
     assert_eq!(passes(&["emit", "--emit", "cst", bad]), 1);
     assert_eq!(passes(&["check", bad]), 1);
     assert_eq!(passes(&["check", "--json", bad]), 1);
+    // Under `--include-tests` too, with test blocks parsed in the driver.
+    assert_eq!(passes(&["check", "--include-tests", bad]), 1);
     // The sugar expansion's own error is reported by the driver too.
     let sugared = scratch.join("sugared.ves");
     std::fs::write(
