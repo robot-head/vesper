@@ -638,7 +638,10 @@ fn repository() -> Result<PathBuf, String> {
 
 /// The `vesper` executable: [`COMPILER_ENV`], or the in-tree compiler built
 /// by a nested Cargo build (see the crate documentation).
-fn compiler() -> Result<PathBuf, String> {
+/// The `vesper` executable ports are compiled with: [`COMPILER_ENV`], else
+/// the one built from this repository (a no-op build when fresh). Crates
+/// that also run it, such as `vesper-sim-session`, call this from build.rs.
+pub fn compiler() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os(COMPILER_ENV) {
         let path = PathBuf::from(path);
         if !path.is_file() {

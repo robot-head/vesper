@@ -10,3 +10,6 @@ docs/manuscript/*.typ text eol=lf
 # Unified-diff context lines and this verbatim upstream license retain their bytes.
 tools/logos42/patches/*.patch whitespace=-blank-at-eol
 tools/logos42/controls/ARENA-LICENSE whitespace=-blank-at-eof
+
+# The committed Stage 2 seed (#2671) lives in Git LFS.
+bootstrap/stage2-seed/*.wasm filter=lfs diff=lfs merge=lfs -text

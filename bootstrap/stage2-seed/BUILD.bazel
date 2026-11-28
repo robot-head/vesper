@@ -1,0 +1,7 @@
+# The committed Stage 2 seed (#2671): its own package, so the large binary
+# stays out of //bootstrap:files.
+filegroup(
+    name = "seed",
+    srcs = ["stage2.wasm"],
+    visibility = ["//visibility:public"],
+)

@@ -2,8 +2,9 @@
 //! operation routed through a SimPulse-owned task token.
 //!
 //! Each task's payload owns either its unstarted `Runtime` or the unique
-//! `Suspension` holding the evaluator continuation. The checked `World` is
-//! borrowed from a `CheckedProgram` that outlives the session, so no payload is
+//! `Suspension` token of the evaluator continuation, which lives in the
+//! program's `vesper sim-host` process ([`crate::machine`]). Both borrow the
+//! `CheckedProgram`, which outlives the session, so no payload is
 //! self-referential. Adapter errors detected before a consuming runtime call
 //! leave the owner in the session; failures reported by `begin_external` or
 //! `Suspension::resume` are terminal because those calls consume the machine.
@@ -15,6 +16,7 @@
 //! [`LostOwner`] state. See [`crate::model`].
 mod model_ops;
 
+use crate::machine::{Execution, Runtime, Suspension, Value};
 use crate::{
     identity::{ExecutionIdentity, IdentityMismatch},
     model::{
@@ -29,7 +31,6 @@ use model_ops::{Internal, ModelStep};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use std::collections::BTreeMap;
-use vesper::runtime::{Execution, Runtime, Suspension, Value};
 use vesper_simpulse::{
     CompletionId, Journal, RunToken, Simulator, TaskId, TransitionError, WakeReason,
 };
@@ -550,7 +551,7 @@ impl<'w> Session<'w> {
         epoch: u32,
     ) -> Result<(), SessionError> {
         let options = &self.plan.scenario().runtime;
-        let mut runtime = Runtime::new(self.program.world());
+        let mut runtime = Runtime::new(self.program.connection());
         runtime.fuel = options.fuel;
         runtime.optimize = options.optimize;
         let id = self
@@ -688,7 +689,7 @@ impl<'w> Session<'w> {
                 .params
                 .get(write.argument)
                 .ok_or_else(|| invalid(format!("no argument {}", write.argument)))?;
-            if *pass != vesper::ast::Pass::Inout
+            if *pass != crate::world::Pass::Inout
                 || checked.iter().any(|(i, _, _)| *i == write.argument)
             {
                 return Err(invalid(format!(
@@ -1223,7 +1224,7 @@ impl<'w> Session<'w> {
                 Ok(Execution::Suspended(continuation)) => continuation,
             };
             let request = continuation.request();
-            let key = (request.effect.name.clone(), request.operation.clone());
+            let key = (request.effect.clone(), request.operation.clone());
             let Some(bound) = self.plan.bindings.get(&key).cloned() else {
                 token.payload_mut().owner = Owner::Routing(continuation);
                 return Err(Fault::stall(
