@@ -81,10 +81,10 @@ const DECLINES: &[&str] = &[
 /// The functions Stage 2 must lower as Rust does today. The rest differ
 /// where Stage 2's checker records less than Rust's: overflow and partial
 /// operations (`fallible`) and the unit type of statements.
-const MIN_SAME_FUNCTIONS: usize = 40;
+const MIN_SAME_FUNCTIONS: usize = 46;
 
 /// The port functions Stage 2 must lower as Rust does today.
-const MIN_SAME_PORT_FUNCTIONS: usize = 18872;
+const MIN_SAME_PORT_FUNCTIONS: usize = 18887;
 
 /// Set to print the Rust and Stage 2 bodies of each function that differs.
 const SHOW_DIFFS: &str = "VESPER_STAGE2_CALLS_DIFFS";
@@ -302,6 +302,17 @@ pub fn tagged(x: u64) -> Result[u8, u64] { fail_with(x) }",
         "fn same(in a: Slice[u8], in b: Slice[u8]) -> bool { a.len() == b.len() }
 pub fn prefix_same(in x: ChunkSeq[u8], in y: ChunkSeq[u8], n: u64) -> bool { if n <= x.len() && n <= y.len() { same(in x[0..n], in y[0..n]) } else { false } }",
         &["prefix_same"],
+    ),
+    // A tuple branch's literals take the other branch's integer kinds.
+    (
+        "joins",
+        "pub fn bounds(n: u64, role: u64, next: u64) -> bool { let (lo, hi) = if role == 0 { (0, n) } else { (role, next) }; lo <= hi }
+fn stop() -> Never { loop {} }
+fn take(x: u64) -> u64 { x }
+pub fn pick(t: u64) -> u64 { let c = if t == 1 { 0 } else if t == 2 { 1 } else { stop() }; take(c) }
+pub fn pick2(t: u64) -> u64 { let c = if t == 1 { 0 } else { stop() }; take(c) }
+pub fn pick3(t: u64) -> u64 { let c = if t == 1 { 0 } else { 1 }; take(c) }",
+        &["bounds", "pick", "pick2", "pick3"],
     ),
     (
         "floats",
