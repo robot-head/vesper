@@ -265,10 +265,10 @@ pub struct St {
     // nodes where Rust's parser clones them (an array repetition's element,
     // an or-pattern arm's body, a generic impl's bound): a revisit renames
     // again from the node's file-local span, and the span moves once.
-    seen_expr: FlatTable[u32, u8],
-    seen_pat: FlatTable[u32, u8],
-    seen_param: FlatTable[u32, u8],
-    seen_tref: FlatTable[u32, u8],
+    seen_expr: ChunkSeq[u8],
+    seen_pat: ChunkSeq[u8],
+    seen_param: ChunkSeq[u8],
+    seen_tref: ChunkSeq[u8],
     // `const_flags` of each global symbol asked about, by symbol id (with
     // bit 2 set; 0 when not computed yet).
     const_flag: ChunkSeq[u8],
@@ -416,10 +416,10 @@ pub fn st_new() -> St {
         shift: 0,
         ast_to_global: ChunkSeq::new[u32](),
         global_to_ast: flat_table_new[u32, u32](),
-        seen_expr: flat_table_new[u32, u8](),
-        seen_pat: flat_table_new[u32, u8](),
-        seen_param: flat_table_new[u32, u8](),
-        seen_tref: flat_table_new[u32, u8](),
+        seen_expr: ChunkSeq::new[u8](),
+        seen_pat: ChunkSeq::new[u8](),
+        seen_param: ChunkSeq::new[u8](),
+        seen_tref: ChunkSeq::new[u8](),
         const_flag: ChunkSeq::new[u8](),
         cached_lowerings: ChunkSeq::new[L](),
         parse_errors: 0,
@@ -467,11 +467,21 @@ pub fn push_sym(in loader: St, sym: u32, inout out: String) {
 
 // Interns `loader.buf`.
 pub fn intern_buf(inout loader: St) -> u32 {
-    loader.interner.intern(in loader.buf).id()
+    match loader.interner.lookup(in loader.buf) {
+        Option::Some(sym) => sym.id(),
+        Option::None => loader.interner.intern(in loader.buf).id(),
+    }
 }
 
+// The global symbol of `text`, interned if it is new. It is looked up
+// first: Stage 2 copies the whole loader each time a call changes one of
+// its fields in place (`inout loader.interner`), so a name the interner
+// already holds is found without that copy.
 pub fn intern_str(inout loader: St, in text: Str) -> u32 {
-    loader.interner.intern(in text).id()
+    match loader.interner.lookup(in text) {
+        Option::Some(sym) => sym.id(),
+        Option::None => loader.interner.intern(in text).id(),
+    }
 }
 
 // Whether `sym` starts with `prefix`.
@@ -510,17 +520,23 @@ pub fn sym_path_split(in loader: St, sym: u32) -> u64 {
 
 // Symbol of bytes `a..b` of `sym`.
 pub fn sym_slice(inout loader: St, sym: u32, from: u64, to: u64) -> u32 {
-    loader.buf.clear();
     let (start, end) = sym_range(in loader, sym);
     let abs_from = wrapping_add(start, from);
     let mut abs_to = wrapping_add(start, to);
     if abs_to > end {
         abs_to = end;
     }
-    loader.interner.resolve_into(symbol_from_id(sym), inout loader.buf);
     let rel_from = wrapping_sub(abs_from, start);
     let rel_to = wrapping_sub(abs_to, start);
-    loader.interner.intern(in loader.buf[rel_from..rel_to]).id()
+    match loader.interner.lookup_span(symbol_from_id(sym), rel_from, rel_to) {
+        Option::Some(found) => {
+            return found.id();
+        },
+        Option::None => {},
+    }
+    let mut text = String::new();
+    loader.interner.resolve_into(symbol_from_id(sym), inout text);
+    intern_str(inout loader, in text[rel_from..rel_to])
 }
 
 // Whether two symbols' texts are in byte order `a < b` (Rust's `String`
@@ -600,19 +616,19 @@ pub fn const_prefix() -> Str {
 
 // `const$` followed by the text of `sym`.
 pub fn const_of(inout loader: St, sym: u32) -> u32 {
-    loader.buf.clear();
-    loader.buf.push_str(in const_prefix());
-    loader.interner.resolve_into(symbol_from_id(sym), inout loader.buf);
-    loader.interner.intern(in loader.buf).id()
+    let mut text = String::new();
+    text.push_str(in const_prefix());
+    loader.interner.resolve_into(symbol_from_id(sym), inout text);
+    intern_str(inout loader, in text)
 }
 
 // `a::b`.
 pub fn join_path(inout loader: St, head: u32, tail: u32) -> u32 {
-    loader.buf.clear();
-    loader.interner.resolve_into(symbol_from_id(head), inout loader.buf);
-    loader.buf.push_str(in "::");
-    loader.interner.resolve_into(symbol_from_id(tail), inout loader.buf);
-    loader.interner.intern(in loader.buf).id()
+    let mut text = String::new();
+    loader.interner.resolve_into(symbol_from_id(head), inout text);
+    text.push_str(in "::");
+    loader.interner.resolve_into(symbol_from_id(tail), inout text);
+    intern_str(inout loader, in text)
 }
 
 // `is_const_function`: `const$NAME`, or one renamed into a package

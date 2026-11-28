@@ -3802,14 +3802,24 @@ fn syms_new(inout a: Ast) -> Syms {
     }
 }
 
-// Lexes and parses `source` with the front end, then lowers its tables to
-// the AST (`parse(source).module`).
-pub fn lower_source_perm(in source: Str, inout ast_perm: u64, ast_perm_end: u64) -> L {
+// `lower_source` of the UTF-8 text `source` (of `""` when it is not UTF-8).
+fn lower_utf8(in source: Slice[u8]) -> L {
+    match String::from_utf8(in source) {
+        Option::Some(text) => lower_source(in text.as_str()),
+        Option::None => lower_source(in ""),
+    }
+}
+
+// `lower_utf8` with the result copied to the region at `ast_perm` (up to
+// `ast_perm_end`) and everything else the parse allocated freed. The text
+// copy is scratch too: `String::from_utf8` allocates an `Option` for every
+// byte it reads, many times the source's size.
+pub fn lower_source_perm(in source: Slice[u8], inout ast_perm: u64, ast_perm_end: u64) -> L {
     if ast_perm >= ast_perm_end || wrapping_sub(ast_perm_end, ast_perm) < 16777216 {
-        return lower_source(in source);
+        return lower_utf8(in source);
     }
     let m_parse = stage2_heap_mark();
-    let raw = lower_source(in source);
+    let raw = lower_utf8(in source);
     let mut tmp = String::new();
     let s_ast = stage2_heap_swap(ast_perm);
     let mut ed = diags_new();

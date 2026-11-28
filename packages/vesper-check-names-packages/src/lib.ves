@@ -26,8 +26,8 @@ use @vesper-std/intern::{Interner};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper/check-data::{pack_text};
 use self::state::{
-    St, at32, at64, at8, join_path, kind_value, emit, err, hi, inc, kind_has, kind_sugar, lo, n32,
-    none, pair, push_sym, put, put_sym, st_new, w
+    St, at32, at64, at8, intern_str, join_path, kind_value, emit, err, hi, inc, kind_has,
+    kind_sugar, lo, n32, none, pair, push_sym, put, put_sym, st_new, w
 };
 use self::load::{
     adt_at, back, begin_module, collect_all, collect_all_bytes, decode, decode_bytes,
@@ -425,7 +425,7 @@ fn generic_scopes(inout loader: St, inout ast: Ast) {
                 key.push_str(in "::");
                 let method_name = tr(inout loader, in ast, method.name);
                 push_sym(in loader, method_name, inout key);
-                let key_sym = loader.interner.intern(in key).id();
+                let key_sym = intern_str(inout loader, in key);
                 scope_put(inout loader, key_sym, first);
             }
         }

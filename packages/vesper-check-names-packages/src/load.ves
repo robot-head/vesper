@@ -37,8 +37,9 @@ use @vesper/ast::lower::{L, lower_source, lower_source_perm};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};
 use self::state::{
-    SourceSegment, St, at32, at8, const_of, const_prefix, sym_byte, sym_len, sym_slice, sym_starts,
-    find_module, inc, kind_both, kind_sugar, kind_type, kind_value, mod_hash, n32, none, pair, w
+    SourceSegment, St, at32, at8, const_of, const_prefix, intern_str, sym_byte, sym_len, sym_slice,
+    sym_starts, find_module, inc, kind_both, kind_sugar, kind_type, kind_value, mod_hash, n32, none,
+    pair, w
 };
 
 fn rd(in bytes: Slice[u8], inout pos: u64) -> u64 {
@@ -61,8 +62,8 @@ fn rd_str(in bytes: Slice[u8], inout pos: u64) -> (u64, u64) {
 fn rd_sym_bytes(inout loader: St, in input: Slice[u8], inout pos: u64) -> u32 {
     let (start, end) = rd_str(in input, inout pos);
     match String::from_utf8(in input[start..end]) {
-        Option::Some(text) => loader.interner.intern(in text.as_str()).id(),
-        Option::None => loader.interner.intern(in "").id(),
+        Option::Some(text) => intern_str(inout loader, in text.as_str()),
+        Option::None => intern_str(inout loader, in ""),
     }
 }
 
@@ -296,9 +297,9 @@ pub fn tr(inout loader: St, in ast: Ast, sym: u32) -> u32 {
     if cached != none() && cached != 0 {
         return wrapping_sub(cached, 1);
     }
-    loader.buf.clear();
-    ast.names.resolve_into(symbol_from_id(sym), inout loader.buf);
-    let global = loader.interner.intern(in loader.buf).id();
+    let mut text = String::new();
+    ast.names.resolve_into(symbol_from_id(sym), inout text);
+    let global = intern_str(inout loader, in text);
     if index >= loader.ast_to_global.len() {
         loader.ast_to_global.resize(inc(index), 0);
     }
@@ -314,9 +315,9 @@ pub fn back(inout loader: St, inout ast: Ast, global: u32) -> u32 {
         },
         Option::None => {},
     }
-    loader.buf.clear();
-    loader.interner.resolve_into(symbol_from_id(global), inout loader.buf);
-    let ast_sym = ast.names.intern(in loader.buf).id();
+    let mut text = String::new();
+    loader.interner.resolve_into(symbol_from_id(global), inout text);
+    let ast_sym = ast.names.intern(in text).id();
     loader.global_to_ast.insert(global, ast_sym);
     let index = w(ast_sym);
     if index >= loader.ast_to_global.len() {
@@ -599,10 +600,7 @@ pub fn collect_all_bytes(inout loader: St, in input: Slice[u8]) {
             },
             Option::None => (0, 0),
         };
-        let lowered = match String::from_utf8(in input[start..end]) {
-            Option::Some(src) => lower_source_perm(in src.as_str(), inout ast_perm, ast_perm_end),
-            Option::None => lower_source_perm(in "", inout ast_perm, ast_perm_end),
-        };
+        let lowered = lower_source_perm(in input[start..end], inout ast_perm, ast_perm_end);
         loader.parse_errors = wrapping_add(loader.parse_errors, lowered.p.d.code.len());
         begin_module(inout loader);
         collect(inout loader, in lowered.ast, n32(module));

@@ -34,7 +34,8 @@ use self::facts::{record_failure_ops};
 use self::tables::{lower_table_reads};
 pub use self::ffi::{ForeignSource, foreign_source};
 use self::ffi::{
-    Foreign, add_foreign_decls, close_foreign_ops, foreign_none, foreign_read, rename_foreign_calls
+    Foreign, add_foreign_decls, close_foreign_ops, define_foreign_consts, foreign_none,
+    foreign_read, rename_foreign_calls
 };
 use self::loader::{load_package_graph_bytes_full};
 use self::sugar_policy::{
@@ -451,6 +452,7 @@ pub fn stage2_lower_dir_with(
     let mut names0 = names_seed;
     let mut ir_ast = ir_ast0;
     rename_foreign_calls(inout ir_ast, inout names0, in foreign);
+    define_foreign_consts(inout ir_ast, inout names0, in foreign);
     let mut types0 = types_seed;
     if !resolve_rows(inout sugar, inout a, inout names0, inout types0) {
         err.extend(in INVALID_SUGAR_POLICY.as_bytes());

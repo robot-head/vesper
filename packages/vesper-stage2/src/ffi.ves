@@ -19,22 +19,24 @@
 // the function or type out (Rust's shape refusal), and the calls input
 // shows the difference.
 use @vesper/check-data::names::{Names};
-use @vesper/check-data::types::{TyKind, Types};
+use @vesper/check-data::types::{EffNode, TyKind, Types};
 use @vesper/check-data::util::{inc32, n32, u64_at, w};
 use @vesper/check-data::world::{Adt, EffectRow, Field, Variant, World, set_by_symbol};
 use @vesper/ffi-lowering::{
     S, Sh, Sp, find_ge, find_gh, find_gs, generate, read_library, s_new, slice_count, sort_funs,
     sorted_enum_names, sorted_handle_names, sorted_struct_rows
 };
-use @vesper/place-ir-lower::ast::{Ast, Ef, Eop, Pm};
+use @vesper/place-ir::codes::{Lit};
+use @vesper/place-ir-lower::ast::{Ast, Ef, Eop, Ex, Pm};
 use @vesper/vsys::{parse_and_encode};
 use @vesper/vsys::lexer::{VsysError};
-use self::collect::{CollectedProgram, EffDeclInfo, EffOpInfo, ParamInfo};
+use self::collect::{CollectedProgram, EffDeclInfo, EffOpInfo, FnInfo, ParamInfo};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
 
 // The IR AST's expression kinds (@vesper/place-ir-lower ast.ves `X_*`).
+const X_LITERAL: u8 = 1;
 const X_NAME: u8 = 2;
 const X_CALL: u8 = 11;
 
@@ -58,6 +60,16 @@ pub const OPEN_TYPE: Str = "$open";
 // A handle type's one field (`ffi_lowering::HANDLE_FIELD`) and its type.
 const HANDLE_FIELD: Str = "$handle";
 const HANDLE_WORD: Str = "u64";
+// The error of a validated foreign result (`ffi_lowering::INVALID_TYPE`)
+// and its one field, the raw word C returned.
+const INVALID_TYPE: Str = "ForeignInvalid";
+const INVALID_FIELD: Str = "raw";
+// The function a `.vsys` constant `Lib::NAME` becomes
+// (`types::const_function_name`): `const$FfiConst$Lib$NAME`.
+const CONST_FUNCTION_PREFIX: Str = "const$FfiConst$";
+const CONST_FUNCTION_SEPARATOR: u8 = 36;
+// A collected function without a source body (`ast_none()`).
+const NO_BODY: u32 = 4294967295;
 const SLICE_TYPE: Str = "Slice";
 const OPTION_TYPE: Str = "Option";
 const PATH_SEPARATOR: u8 = 58;
@@ -264,9 +276,10 @@ fn push_adt(inout world: World, name: u32, mode: u8, is_enum: bool, in d: AdtDra
 }
 
 // The pass-1 declarations `types::Generated::append` adds, in its order:
-// the wire structs, enums and handle types by name, then one linear
-// effect per library with an operation per function that has a source
-// shape (slice parameters `$open`).
+// the wire structs, enums and handle types by name, `ForeignInvalid` when
+// a result is validated, then one linear effect per library with an
+// operation per function that has a source shape (slice parameters
+// `$open`).
 pub fn add_foreign_decls(inout cp: CollectedProgram, inout f: Foreign) {
     if f.order.len() == 0 {
         return;
@@ -319,6 +332,15 @@ pub fn add_foreign_decls(inout cp: CollectedProgram, inout f: Foreign) {
         draft_variant(inout d, name);
         draft_field(inout d, handle_field, word);
         push_adt(inout cp.world, name, mode, false, in d);
+    }
+    // `ForeignInvalid { raw: u64 }`, when a result is validated.
+    if f.st.invalid {
+        let name = cp.names.intern(in INVALID_TYPE.as_bytes());
+        let raw = cp.names.intern(in INVALID_FIELD.as_bytes());
+        let mut d = draft();
+        draft_variant(inout d, name);
+        draft_field(inout d, raw, word);
+        push_adt(inout cp.world, name, MODE_COPY, false, in d);
     }
     let open = cp.types.named0(cp.names.intern(in OPEN_TYPE.as_bytes()));
     for k in 0..f.order.len() {
@@ -376,6 +398,204 @@ pub fn add_foreign_decls(inout cp: CollectedProgram, inout f: Foreign) {
         let eidx = n32(cp.world.effects.len());
         cp.world.effects.push(EffectRow { name: ename, linear: true });
         set_by_symbol(inout cp.world.effect_by_name, ename, inc32(eidx));
+    }
+    add_const_functions(inout cp, in f);
+}
+
+// The function of each `.vsys` constant, after the effects
+// (`types::Generated::append`): `const$FfiConst$Lib$NAME() -> scalar`, by
+// library then constant name, given its literal body by
+// `define_foreign_consts` once the IR AST exists.
+fn add_const_functions(inout cp: CollectedProgram, in f: Foreign) {
+    for k in 0..f.order.len() {
+        let lib = f.st.lib(u64_at(in f.order, k));
+        let rows = sorted_consts(in f.st, lib.const_start, lib.const_count);
+        for i in 0..rows.len() {
+            let c = f.st.const_row(u64_at(in rows, i));
+            let name = const_function_sym(in f.st, lib.name, c.name, inout cp.names);
+            let result = cp.types
+                .named0(intern_sym(in f.st, wrapping_u32(widen_u64(c.scalar)), inout cp.names));
+            let es = ChunkSeq::new[EffNode]();
+            let args = ChunkSeq::new[u32]();
+            let effects = cp.types.mk_row(in es, in args, 0);
+            cp.fns.push(FnInfo {
+                name: name,
+                fip: false,
+                ga: 0,
+                gn: 0,
+                pa: n32(cp.params.len()),
+                pn: 0,
+                result: result,
+                effects: effects,
+                mod_idx: 0,
+                body: NO_BODY,
+                inst: 0,
+                thunk: 0
+            });
+        }
+    }
+}
+
+// The constant rows `start..start+count` sorted by name (Rust keeps them
+// in a BTreeMap).
+fn sorted_consts(in st: S, start: u64, count: u64) -> ChunkSeq[u64] {
+    let mut rows = ChunkSeq::new[u64]();
+    for i in 0..count {
+        let row = wrapping_add(start, i);
+        let mut j = rows.len();
+        rows.push(row);
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev = u64_at(in rows, wrapping_sub(j, 1));
+            if st.name_cmp(st.const_row(prev).name, st.const_row(row).name) <= 0 {
+                break;
+            }
+            rows.try_set(j, prev);
+            j = wrapping_sub(j, 1);
+        }
+        rows.try_set(j, row);
+    }
+    rows
+}
+
+fn const_function_sym(in st: S, lib_name: u32, const_name: u32, inout names: Names) -> u32 {
+    let mut b = ChunkSeq::new[u8]();
+    b.extend(in CONST_FUNCTION_PREFIX.as_bytes());
+    let lib = sym_bytes(in st, lib_name);
+    b.extend(in lib.as_slice());
+    b.push(CONST_FUNCTION_SEPARATOR);
+    let c = sym_bytes(in st, const_name);
+    b.extend(in c.as_slice());
+    names.intern(in b.as_slice())
+}
+
+// The constant row of library `li` named `name`, or NONE64.
+fn const_named(in f: Foreign, in names: Names, li: u64, name: u32) -> u64 {
+    let lib = f.st.lib(li);
+    for i in 0..lib.const_count {
+        let ci = wrapping_add(lib.const_start, i);
+        let b = sym_bytes(in f.st, f.st.const_row(ci).name);
+        if names_eq(in names, name, in b.as_slice()) {
+            return ci;
+        }
+    }
+    NONE64
+}
+
+// The library a path's left side names: `Lib`, or `Ffi$Lib` (the IR
+// AST's spelling of the std libraries' paths), or NONE64.
+fn path_lib(in f: Foreign, inout names: Names, left: u32) -> u64 {
+    let li = lib_named(in f, in names, left);
+    if li != NONE64 {
+        return li;
+    }
+    let prefix = EFFECT_PREFIX.as_bytes();
+    if !names.has_prefix(left, in prefix) {
+        return NONE64;
+    }
+    let mut rest = ChunkSeq::new[u8]();
+    for i in prefix.len()..names.size(left) {
+        rest.push(names.byte(left, i));
+    }
+    let bare = names.intern(in rest.as_slice());
+    lib_named(in f, in names, bare)
+}
+
+// The rewriter's constants (src/ffi_lowering.rs `Rewriter::expr`): each
+// constant's function gets its literal body, at a span past every source
+// span (Rust's `next_span`), and a name `Lib::NAME` becomes the call
+// `const$FfiConst$Lib$NAME()`, its callee spanning the name's start.
+pub fn define_foreign_consts(inout a: Ast, inout names: Names, in f: Foreign) {
+    if f.order.len() == 0 {
+        return;
+    }
+    let mut next_span: u64 = 1;
+    for i in 0..a.exs.len() {
+        let e = a.ex(i);
+        if e.s1 >= next_span {
+            next_span = wrapping_add(e.s1, 1);
+        }
+    }
+    let count = a.exs.len();
+    for i in 0..count {
+        let e = a.ex(i);
+        if e.kind != X_NAME {
+            continue;
+        }
+        let (lib_sym, const_sym) = match split_path(inout names, n32(e.a)) {
+            Option::Some(p) => p,
+            Option::None => continue,
+        };
+        let li = path_lib(in f, inout names, lib_sym);
+        if li == NONE64 {
+            continue;
+        }
+        let ci = const_named(in f, in names, li, const_sym);
+        if ci == NONE64 {
+            continue;
+        }
+        let fname = const_function_sym(
+            in f.st,
+            f.st.lib(li).name,
+            f.st.const_row(ci).name,
+            inout names
+        );
+        let callee = a.exs.len();
+        a.exs.push(Ex {
+            kind: X_NAME,
+            s0: e.s0,
+            s1: e.s0,
+            a: w(fname),
+            b: 0,
+            c: 0,
+            n: 0,
+            m: 0,
+            x: 0
+        });
+        a.exs.try_set(
+            i,
+            Ex { kind: X_CALL, s0: e.s0, s1: e.s1, a: callee, b: 0, c: 0, n: 0, m: 0, x: 0 }
+        );
+    }
+    for k in 0..f.order.len() {
+        let lib = f.st.lib(u64_at(in f.order, k));
+        let rows = sorted_consts(in f.st, lib.const_start, lib.const_count);
+        for i in 0..rows.len() {
+            let c = f.st.const_row(u64_at(in rows, i));
+            let name = const_function_sym(in f.st, lib.name, c.name, inout names);
+            for fi in 0..a.fns.len() {
+                let mut fr = a.function(fi);
+                if fr.name != name || fr.has_body {
+                    continue;
+                }
+                // A negative value is its 128-bit two's complement.
+                let negative = c.neg && c.value != 0;
+                let lo = if negative {
+                    wrapping_sub(0, c.value)
+                } else {
+                    c.value
+                };
+                let hi = if negative { NONE64 } else { 0 };
+                let body = a.exs.len();
+                a.exs.push(Ex {
+                    kind: X_LITERAL,
+                    s0: next_span,
+                    s1: next_span,
+                    a: Lit::Int,
+                    b: lo,
+                    c: hi,
+                    n: 0,
+                    m: 0,
+                    x: 0
+                });
+                next_span = wrapping_add(next_span, 1);
+                fr.has_body = true;
+                fr.body = body;
+                a.fns.try_set(fi, fr);
+            }
+        }
     }
 }
 

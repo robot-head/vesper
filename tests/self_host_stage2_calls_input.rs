@@ -84,8 +84,9 @@ const DECLINES: &[&str] = &[
 const MIN_SAME_FUNCTIONS: usize = 40;
 
 /// The port functions Stage 2 must lower as Rust does today (main's 18872
-/// plus the trait frontend's instances).
-const MIN_SAME_PORT_FUNCTIONS: usize = 20201;
+/// plus the trait frontend's instances, then stddriver once Stage 2
+/// declared the `.vsys` constants, #2741).
+const MIN_SAME_PORT_FUNCTIONS: usize = 20544;
 
 /// Set to print the Rust and Stage 2 bodies of each function that differs.
 const SHOW_DIFFS: &str = "VESPER_STAGE2_CALLS_DIFFS";

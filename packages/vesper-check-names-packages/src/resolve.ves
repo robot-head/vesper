@@ -8,9 +8,10 @@
 
 use @vesper-std/intern::{symbol_from_id};
 use self::state::{
-    St, at32, at64, const_of, const_prefix, join_path, kind_both, kind_has, kind_sugar, kind_value,
-    emit, err, find_module, hi, inc, lo, mod_path_into, mod_path_len, mod_seg, n32, none, pair,
-    push_decimal, push_sym, sym_byte, sym_len, sym_less, sym_path_split, sym_slice, sym_starts, w
+    St, at32, at64, const_of, const_prefix, intern_buf, intern_str, join_path, kind_both, kind_has,
+    kind_sugar, kind_value, emit, err, find_module, hi, inc, lo, mod_path_into, mod_path_len,
+    mod_seg, n32, none, pair, push_decimal, push_sym, sym_byte, sym_len, sym_less, sym_path_split,
+    sym_slice, sym_starts, w
 };
 
 pub fn no_key() -> u64 {
@@ -106,7 +107,7 @@ fn mangle(inout loader: St, module: u32, item: u32) -> u32 {
     }
     loader.buf.push_str(in "__");
     push_escaped(inout loader, item, 0, sym_len(in loader, item));
-    loader.interner.intern(in loader.buf).id()
+    intern_buf(inout loader)
 }
 
 // Source items shadow foreign types of the same name.
@@ -173,7 +174,7 @@ pub fn push_shown(in loader: St, key: u64, inout out: String) {
 pub fn shown(inout loader: St, key: u64) -> u32 {
     let mut text = String::new();
     push_shown(in loader, key, inout text);
-    loader.interner.intern(in text).id()
+    intern_str(inout loader, in text)
 }
 
 // ---------------------------------------------------------------- paths
@@ -840,7 +841,7 @@ pub fn qualified(inout loader: St, cur_module: u32, path: u32, start: u32, end: 
         out.push_str(in "::");
         push_sym(in loader, at32(in segs, wrapping_add(first, k)), inout out);
     }
-    loader.interner.intern(in out).id()
+    intern_str(inout loader, in out)
 }
 
 // `Resolver::sugar_name`: a free template name looked up at the module
