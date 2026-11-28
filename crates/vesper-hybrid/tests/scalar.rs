@@ -7,7 +7,8 @@
 //! too.
 //!
 //! tests/differential.rs compares the whole corpus's objects; this test
-//! checks that the scalar hook is the one answering. The full per-request
+//! checks that the scalar hook is the one answering, for a generic
+//! function the body hook leaves to the walk. The full per-request
 //! comparison is crates/vesper-codegen-swap-test's
 //! `self_host_codegen_scalar_emit`.
 use std::path::{Path, PathBuf};
@@ -86,9 +87,14 @@ fn sum(n: i64) -> i64 eff [Fail[ArithOverflow]] {
     }
     t
 }
+// A generic function is not a plain frame (#2657 handlers made `main`
+// one), so the scalar hook answers its operators.
+fn scaled[T](in tag: T, a: i64, b: i64) -> i64 eff [Fail[ArithOverflow]] {
+    a * b - (a ^ b)
+}
 fn main() -> i64 {
     handle Fail[ArithOverflow] in {
-        mix(12, 5, 40) + sum(30)
+        mix(12, 5, 40) + sum(30) + scaled(true, 6, 7)
     } with {
         return v => v,
         raise(_, _) => -1,
@@ -106,10 +112,15 @@ fn dv(x: i64, y: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] { x /
 fn all() -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     widen_i64(n8(100)) + widen_i64(nu(7)) + widen_i64(sl(1, 4)) + widen_i64(ng(9)) + dv(17, 5)
 }
+// A generic function is not a plain frame (#2657 handlers made `main`
+// one), so the scalar hook answers its operators.
+fn scaled[T](in tag: T, a: i64, b: i64) -> i64 eff [Fail[ArithOverflow]] {
+    a * b - (a ^ b)
+}
 fn main() -> i64 {
     handle Fail[RuntimeError] in {
         handle Fail[ArithOverflow] in {
-            all()
+            all() + scaled(1, 9, 4)
         } with {
             return v => v,
             raise(_, _) => -1,

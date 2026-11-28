@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 #[path = "../../port/codegen_scalar.rs"]
 mod codegen_scalar_binding;
 
-use super::{Registry, Swap, env_off, ir_words, on, open};
+use super::{Registry, Swap, env_off, handler_facts, ir_words, on, open};
 
 /// `scalar` requests (scalars, locals, control flow) the Vesper module
 /// emitted, and left to Rust (unplanned, or declined by the hook).
@@ -199,7 +199,9 @@ fn body_plan(
     optimize: bool,
 ) -> Result<BodyPlan, String> {
     let mut bodies = std::collections::HashMap::new();
-    if let Some((input, _)) = ir_words::program_input(world, program) {
+    if let Some((mut input, _)) = ir_words::program_input(world, program) {
+        // What each handler's expression holds (#2657).
+        input.extend(handler_facts::facts(world, program));
         let names: Vec<&String> = program.functions.keys().collect();
         let words = codegen_scalar_binding::body_plan(&input);
         let mut rest = &words[..];
