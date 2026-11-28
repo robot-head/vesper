@@ -470,7 +470,12 @@ impl Gen {
         if n.kind == TyKind::Named && n.n == 1 && n.name == k.slice {
             return self.body_product_lane(d);
         }
-        if n.kind != TyKind::Named || n.n != 0 {
+        // An instance of a generic struct or enum, such as `Secret[u64]`
+        // or `Option[i64]` (#2654), kept in memory when its layout is one.
+        if n.kind == TyKind::Named && n.n != 0 {
+            return self.body_product_lane(d);
+        }
+        if n.kind != TyKind::Named {
             return 0;
         }
         if n.name == k.f32_ {
@@ -1763,6 +1768,31 @@ impl Gen {
         true
     }
 
+    // Whether the function being planned has a struct or enum it knows
+    // nothing of the words of (#2654): a call's result, or one joined at a
+    // block parameter. The walk coerces a narrow field read from such
+    // storage once more where it is used, which the plan does not model.
+    fn body_opaque_products(inout self, in h: Header) -> bool {
+        let f = self.program.function(self.fi);
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            let pa = self.body_params_at(row.ha);
+            for k in 0..self.program.op(pa) {
+                let v = self.body_value(in h, self.program.op(add(inc(pa), k)));
+                if v != NONE64 && self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT {
+                    return true;
+                }
+            }
+            for ii in 0..row.ic {
+                let x = self.program.inst(add(row.i0, ii));
+                if x.op == Op::Call && self.body_lane(x.ty) == LANE_PRODUCT {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     // The function named `name` (place-ir row index), or NONE64.
     fn body_function(in self, name: u32) -> u64 {
         for k in 0..self.program.fn_count() {
@@ -2539,6 +2569,9 @@ impl Gen {
                 if !ok {
                     return false;
                 }
+                if self.body_kind(i.ty) != 0 && self.body_opaque_products(in h) {
+                    return false;
+                }
                 kind = INST_READ_FIELD;
                 extra.push(k);
                 extra.push(res_lane);
@@ -2615,6 +2648,9 @@ impl Gen {
             }
             self.layouts.reset(mark);
             if !found {
+                return false;
+            }
+            if self.body_kind(i.ty) != 0 && self.body_opaque_products(in h) {
                 return false;
             }
             kind = INST_PROJECT;
@@ -2706,6 +2742,17 @@ impl Gen {
                 {
                     return false;
                 }
+                // A struct or enum result (#2654): its size, which the
+                // caller's storage for it takes (0 for a scalar result).
+                if kind == INST_CALL {
+                    extra.push(
+                        if self.body_lane(i.ty) == LANE_PRODUCT {
+                            self.body_product_size(i.ty)
+                        } else {
+                            0
+                        }
+                    );
+                }
                 // The result's words (`Codegen::scalar_call_words`): each
                 // word value and the kind it is coerced to.
                 if kind == INST_WORDS_CALL {
@@ -2738,7 +2785,11 @@ impl Gen {
         // A sequence operation reads its view and may make one
         // (`body_seq`).
         if kind != INST_DATA && kind != INST_WORDS_CALL && kind != INST_SEQ {
-            if self.body_lane(i.ty) == LANE_PRODUCT && kind != INST_READ && kind != INST_READ_COPY {
+            if self.body_lane(i.ty) == LANE_PRODUCT
+                && kind != INST_READ
+                && kind != INST_READ_COPY
+                && kind != INST_CALL
+            {
                 return false;
             }
             if kind != INST_PROJECT
@@ -3066,15 +3117,17 @@ impl Gen {
             for k in 0..n {
                 let v = self.body_value(in h, self.program.op(add(add(ta, 2), k)));
                 let param = self.body_block_param(in h, trow.ha, k);
-                if v == NONE64
-                    || param == NONE64
-                    || self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT
-                    || self.body_words(in h, v) != 0
-                {
+                if v == NONE64 || param == NONE64 || self.body_words(in h, v) != 0 {
+                    return false;
+                }
+                // A product joined at a block parameter passes its pointer
+                // (#2654); a `Never` one would need fresh storage.
+                let d = self.body_default(n32(u64_at(in h.vty, v)), n32(u64_at(in h.vty, param)));
+                if d == LANE_PRODUCT {
                     return false;
                 }
                 o.push(v);
-                o.push(self.body_default(n32(u64_at(in h.vty, v)), n32(u64_at(in h.vty, param))));
+                o.push(d);
             }
             return true;
         }
@@ -3344,12 +3397,10 @@ impl Gen {
             graph_words.push(np);
             for k in 0..np {
                 let v = self.body_value(in h, self.program.op(add(inc(pa), k)));
-                // A product joined at a block parameter has a home of its
-                // own (`aggregates::plan`), left to the walk.
-                if v == NONE64
-                    || self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT
-                    || self.body_words(in h, v) != 0
-                {
+                // A product joined at a block parameter is its pointer
+                // (#2654); on the optimize path it has a home of its own
+                // (`aggregates::plan`), which the walk's request declines.
+                if v == NONE64 || self.body_words(in h, v) != 0 {
                     return false;
                 }
                 graph_words.push(v);

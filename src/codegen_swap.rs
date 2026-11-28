@@ -1304,6 +1304,12 @@ pub mod body {
     /// as words in registers (#2581, `FnAbi::result_words`).
     pub const WORDS_CALL: u64 = 1 << 34;
 
+    /// A callee word's flag for a callee that writes its struct or enum
+    /// result through a result pointer (#2654): the call passes fresh
+    /// storage (or the caller's own result pointer) before the arguments,
+    /// and the call's value is that storage.
+    pub const SRET_CALL: u64 = 1 << 35;
+
     /// [`FUNCTION`]'s leading flags, `status` and `locations`: the words
     /// before the parameter count.
     pub const FLAGS: usize = 2;

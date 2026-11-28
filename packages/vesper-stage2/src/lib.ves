@@ -29,6 +29,10 @@ use self::ast_lower::{build_ir_ast, build_ir_ast_for_entry};
 use self::collect::{collect_program};
 use self::facts::{record_failure_ops};
 use self::tables::{lower_table_reads};
+pub use self::ffi::{ForeignSource, foreign_source};
+use self::ffi::{
+    add_foreign_decls, close_foreign_ops, foreign_none, foreign_read, rename_foreign_calls
+};
 use self::loader::{load_package_graph_bytes_for};
 use self::sugar_policy::{
     PolicyFailure, PolicyFailureKind, PolicyInputs, copy_inputs, explicit_access_valid, has_failure,
@@ -360,8 +364,21 @@ pub struct Lowered {
 pub fn stage2_lower_dir(
     in root_dir: Slice[u8],
     in os: Slice[u8],
+    in foreign_sources: ChunkSeq[ForeignSource],
     inout err: ChunkSeq[u8]
 ) -> Option[Lowered] eff [Ffi[StdFs]] {
+    // The `.vsys` imports (ffi.ves), as `ffi_lowering::check_module` reads them.
+    let mut foreign = if foreign_sources.len() == 0 {
+        foreign_none()
+    } else {
+        match foreign_read(in foreign_sources) {
+            Option::Some(f) => f,
+            Option::None => {
+                err.extend(in "foreign imports".as_bytes());
+                return Option::None;
+            },
+        }
+    };
     let encoded = match load_graph_compact(in root_dir, in os) {
         Option::Some(b) => b,
         Option::None => {
@@ -390,13 +407,16 @@ pub fn stage2_lower_dir(
             return Option::None;
         },
     };
-    let collected = collect_program(in mods);
-    let (ir_ast, names_seed, types_seed, world0) = build_ir_ast_for_entry(
+    let mut collected = collect_program(in mods);
+    add_foreign_decls(inout collected, inout foreign);
+    let (ir_ast0, names_seed, types_seed, world0) = build_ir_ast_for_entry(
         sink collected,
         in mods,
         in ""
     );
     let mut names0 = names_seed;
+    let mut ir_ast = ir_ast0;
+    rename_foreign_calls(inout ir_ast, inout names0, in foreign);
     let mut types0 = types_seed;
     if !resolve_rows(inout sugar, inout a, inout names0, inout types0) {
         err.extend(in INVALID_SUGAR_POLICY.as_bytes());
@@ -423,9 +443,11 @@ pub fn stage2_lower_dir(
     }
     // Native lowering reads the operations that may fail.
     let (names, types, world) = record_failure_ops(in ir_ast, sink names, sink types, sink world);
-    // Native code reads constant aggregates as tables.
-    let mut ir_ast = ir_ast;
+    // Pass 2 of the foreign check: one operation per slice-length vector.
     let mut names = names;
+    let mut types = types;
+    close_foreign_ops(inout ir_ast, inout names, inout types, in world, in foreign);
+    // Native code reads constant aggregates as tables.
     lower_table_reads(inout ir_ast, inout names, in types, in world);
     let c = Ctx {
         names: names,
