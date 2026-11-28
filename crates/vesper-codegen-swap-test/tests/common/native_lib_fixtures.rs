@@ -7,6 +7,15 @@
 /// `fail_only` functions with their failure records (#2425).
 pub const LIBRARIES: &[(&str, &str)] = &[
     (
+        "generics",
+        "fn grow(k: i64) -> i64 { if k > 100 { k } else { grow(wrapping_mul(k, 3)) } }
+fn tagged[T: mod copy](x: T, k: i64) -> i64 { let y: T = x; grow(k) }
+fn pick[T: mod copy](a: T, b: T, right: bool) -> T { if right { b } else { a } }
+pub fn tag_u8(x: u8, k: i64) -> i64 { tagged(x, k) }
+pub fn tag_f64(x: f64, k: i64) -> i64 { tagged(x, k) }
+pub fn pick_u16(a: u16, b: u16, r: bool) -> u16 { pick(a, b, r) }",
+    ),
+    (
         "arith",
         "pub fn add3(a: i64, b: i64, c: i64) -> i64 { wrapping_add(wrapping_add(a, b), c) }
 pub fn mix(a: u32, b: u32) -> u32 { (a ^ b) | (a & 7) }",
