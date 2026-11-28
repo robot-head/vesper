@@ -18,7 +18,7 @@ vesper_crate(
         "//crates/vesper-ebpf:files",
         # @vesper/driver-commands formats through @vesper/fmt (#1996).
         "//crates/vesper-fmt:files",
-        # @vesper/stage2 emits standalone x86-64 ELF through
+        # @vesper/stage2-native emits standalone x86-64 ELF through
         # @vesper/hybrid-native-backend (SH7, #2209).
         "//crates/vesper-hybrid:native_backend_package",
         "//crates/vesper-lean-syntax:files",

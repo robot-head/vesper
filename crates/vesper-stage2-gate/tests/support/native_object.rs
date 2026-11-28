@@ -1,11 +1,19 @@
-//! Standalone Stage 2 x86-64 ELF objects (SH7, #2209): today's Stage 2
-//! compiles scalar, aggregate and enum entries with
-//! `VESPER_STAGE2_X86_64_ELF=1`, and a C caller links them and checks every
+//! Standalone Stage 2 x86-64 ELF objects (SH7, #2209): Stage 2 builds
+//! @vesper/stage2-native, which compiles scalar, aggregate and enum entries
+//! to System V x86-64 objects, and a C caller links them and checks every
 //! result.
 use super::support::*;
 use std::path::Path;
 
-pub fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
+/// The package Stage 2 builds into the native object compiler.
+const STAGE2_NATIVE_PACKAGE: &str = "packages/vesper-stage2-native";
+
+pub fn check_stage2_native_object(stage2: &Compiler, dir: &Path) {
+    let native_out = dir.join("stage2_native.wasm");
+    let native_bytes = stage2
+        .build(dir, &[STAGE2_NATIVE_PACKAGE, "/out/stage2_native.wasm"], &native_out)
+        .unwrap_or_else(|e| panic!("{} building @vesper/stage2-native:\n{e}", stage2.label));
+    let native = Compiler::new("stage2-native", native_bytes, None);
     use object::{Object, ObjectSection, ObjectSymbol};
 
     let package = dir.join("native-scalar");
@@ -451,10 +459,10 @@ pub fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
     .unwrap();
     let object = dir.join("native-scalar.o");
     let compile = |entry| {
-        stage2
+        native
+            .prepared
             .run(&Ctx {
-                args: vec!["stage2", "native-scalar", "/out/native-scalar.o", entry],
-                env: vec![("VESPER_STAGE2_X86_64_ELF", "1")],
+                args: vec!["stage2-native", "native-scalar", "/out/native-scalar.o", entry],
                 dirs: vec![(dir.into(), ".".into()), (dir.into(), "/out".into())],
                 fuel: Some(u64::MAX),
                 diag_base: Some(object.clone()),

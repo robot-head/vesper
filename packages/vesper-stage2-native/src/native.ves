@@ -32,7 +32,7 @@ use @vesper/hybrid-native-backend::scalar::{
 use @vesper/hybrid-native-backend::scalar::{
     COMPARE_BYTE_IMMEDIATE, COMPARE_DWORD_IMMEDIATE, COMPARE_WORD_IMMEDIATE
 };
-use self::float_math::{
+use @vesper/stage2::float_math::{
     BINARY_FLOAT_ARGUMENTS, FUSED_FLOAT_ARGUMENTS, FloatMath, NEAREST_PREFIX, SATURATING_PREFIX,
     UNARY_FLOAT_ARGUMENTS, math_arity, math_op
 };

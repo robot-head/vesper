@@ -1,0 +1,121 @@
+//! Standalone Stage 2 x86-64 ELF (SH7, #2209): Stage 2's front end lowers
+//! the entry, and the Vesper machine backend writes a System V x86-64
+//! relocatable object for it, with no Rust and no Cranelift. It is its own
+//! program so @vesper/stage2, which other compiler packages build on, does
+//! not carry the backend.
+use @vesper/wasm-backend::ir::{CallRow, Pair};
+use @vesper/place-ir-lower::lower::{L};
+use @vesper-std/env::{arg, arg_count};
+use @vesper-std/fs::{IoError, write_path};
+use @vesper/stage2::{stage2_lower_entry, write_err_header, write_stage};
+use self::native::{compile_x86_64_elf};
+
+/// Exit codes, as `main` reports them (`code * EXIT_SCALE + value`, as
+/// Stage 2's own `main` does).
+const MISSING_ARGUMENTS: u64 = 10;
+const MISSING_PACKAGE: u64 = 11;
+const MISSING_OUTPUT: u64 = 12;
+const OUTPUT_WRITE_FAILED: u64 = 4;
+const NATIVE_UNSUPPORTED: u64 = 7;
+const EXIT_SCALE: u64 = 1000000;
+/// `stage2-native <package> <object> [entry]`.
+const MIN_ARGUMENTS: u64 = 3;
+const PACKAGE_ARGUMENT: u64 = 1;
+const OUTPUT_ARGUMENT: u64 = 2;
+const ENTRY_ARGUMENT: u64 = 3;
+const DEFAULT_ENTRY: Str = "main";
+
+fn write_native_object(
+    in low: L,
+    entry: u32,
+    in entry_name: Str,
+    in output: Str
+) -> (u64, u64) eff [Ffi[StdFs]] {
+    let bytes = compile_x86_64_elf(in low, entry, in entry_name.as_bytes());
+    if bytes.len() == 0 {
+        write_err_header(
+            in output,
+            in "native_backend",
+            in "unsupported x86-64 ELF entry".as_bytes()
+        );
+        return (NATIVE_UNSUPPORTED, 0);
+    }
+    let wrote = handle Fail[IoError] in {
+        write_path(in output.as_bytes(), in bytes.as_slice());
+        true
+    } with {
+        return v => v,
+        raise(_e, _k) => false,
+    };
+    if !wrote {
+        write_err_header(in output, in "write_object", in output.as_bytes());
+        return (OUTPUT_WRITE_FAILED, 0);
+    }
+    (0, bytes.len())
+}
+
+fn compile_entry(
+    in root_dir: Str,
+    in output: Str,
+    in entry_name: Str
+) -> (u64, u64) eff [Ffi[StdFs]] {
+    let mut stage_log = ChunkSeq::new[u8]();
+    let mut front_perm_buf = ChunkSeq::new[u8]();
+    let mut entry: u32 = 0;
+    let mut calls = ChunkSeq::new[CallRow]();
+    let mut pairs = ChunkSeq::new[Pair]();
+    let mut fault: (u64, u64) = (0, 0);
+    let low = match stage2_lower_entry(
+        in root_dir,
+        in output,
+        in entry_name,
+        false,
+        inout stage_log,
+        inout front_perm_buf,
+        inout entry,
+        inout calls,
+        inout pairs,
+        inout fault
+    ) {
+        Option::Some(low) => low,
+        Option::None => return fault,
+    };
+    write_stage(false, in output, in "native_backend", inout stage_log);
+    write_native_object(in low, entry, in entry_name, in output)
+}
+
+/// `stage2-native <package> <object> [entry]` (the entry defaults to `main`).
+pub fn main() -> u64 eff [Ffi[StdEnv], Ffi[StdFs]] {
+    if arg_count() < MIN_ARGUMENTS {
+        return MISSING_ARGUMENTS;
+    }
+    let root_dir = match arg(PACKAGE_ARGUMENT) {
+        Option::Some(s) => s,
+        Option::None => return MISSING_PACKAGE,
+    };
+    let output = match arg(OUTPUT_ARGUMENT) {
+        Option::Some(s) => s,
+        Option::None => return MISSING_OUTPUT,
+    };
+    let (code, value) = if arg_count() > ENTRY_ARGUMENT {
+        match arg(ENTRY_ARGUMENT) {
+            Option::Some(entry) => compile_entry(
+                in root_dir.as_str(),
+                in output.as_str(),
+                in entry.as_str()
+            ),
+            Option::None => compile_entry(
+                in root_dir.as_str(),
+                in output.as_str(),
+                in DEFAULT_ENTRY
+            ),
+        }
+    } else {
+        compile_entry(in root_dir.as_str(), in output.as_str(), in DEFAULT_ENTRY)
+    };
+    if code == 0 {
+        0
+    } else {
+        wrapping_add(wrapping_mul(code, EXIT_SCALE), value)
+    }
+}

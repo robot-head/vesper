@@ -465,7 +465,6 @@ vesper_crate(
             "//crates/vesper-ebpf:files",
             # @vesper/driver-commands formats through @vesper/fmt (#1996).
             "//crates/vesper-fmt:files",
-            "//crates/vesper-hybrid:native_backend_package",
             "//crates/vesper-lean-syntax:files",
             # ... and graphs Loom.lock through @vesper/loom-calculus (#1996).
             "//crates/vesper-loom-calculus:files",
@@ -2569,7 +2568,6 @@ stage2_port_builder(
     ]) + [
         "//packages/vesper-codegen-numeric:files",
         "//packages/vesper-cranelift:files",
-        "//crates/vesper-hybrid:native_backend_package",
         "//packages/vesper-crypto:files",
     ],
     seed = "//bootstrap/stage2-seed:seed",

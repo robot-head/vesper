@@ -25,10 +25,6 @@ _BUILDER_PACKAGE = "packages/vesper-port-builder"
 # text, which `expand_template` copies byte for byte).
 _READ = [".ves", ".toml", ".vsys"]
 
-# Where package files may live: packages/, and the hybrid module
-# @vesper/stage2 emits native objects through (SH7, #2209).
-_ROOTS = ["packages/", "crates/vesper-hybrid/modules/native_backend/"]
-
 def _copy_tree(ctx, root):
     """Each package file as a regular file under `root`, by its repository path."""
     copies = []
@@ -36,8 +32,8 @@ def _copy_tree(ctx, root):
         if not any([f.basename.endswith(e) for e in _READ]):
             continue
         path = f.short_path
-        if not any([path.startswith(r) for r in _ROOTS]):
-            fail("%s is not under %s" % (path, " or ".join(_ROOTS)))
+        if not path.startswith("packages/"):
+            fail("%s is not under packages/" % path)
         copy = ctx.actions.declare_file(root + path)
         ctx.actions.expand_template(template = f, output = copy, substitutions = {})
         copies.append(copy)
@@ -103,7 +99,7 @@ stage2_port_builder = rule(
         "packages": attr.label_list(
             allow_files = True,
             mandatory = True,
-            doc = "Every package file Stage 2 and the port builder read (under `_ROOTS`).",
+            doc = "Every package file Stage 2 and the port builder read (under packages/).",
         ),
         "seed": attr.label(
             allow_single_file = [".wasm"],

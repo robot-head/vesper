@@ -52,7 +52,7 @@ fn stage2_self_compilation_fixed_point() {
             }
         }
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        native_object::check_stage2_native_object(&last.prepared, &dir);
+        native_object::check_stage2_native_object(last, &dir);
         check_compiler_packages_fixed_point(
             &dir,
             &chain,

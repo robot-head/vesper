@@ -1428,6 +1428,13 @@ fn constrain_literals(inout tc: Tc, in a: Ast, eid: u64, target: u32) {
 // block tail) records the annotation as the join's type once every branch
 // settled to it (`refine_annotation`), so lowering sees one type at the
 // join (#2209). Returns whether `eid` now has `target`.
+fn is_join(in a: Ast, eid: u64) -> bool {
+    match a.exs.try_get(eid) {
+        Option::Some(e) => e.kind == X_IF || e.kind == X_MATCH || e.kind == X_BLOCK,
+        Option::None => false,
+    }
+}
+
 fn settle_join(inout tc: Tc, in a: Ast, eid: u64, target: u32) -> bool {
     let e = match a.exs.try_get(eid) {
         Option::Some(v) => v,
@@ -2086,7 +2093,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             }
             let vt = check_owned_expr(inout tc, in a, val, exp);
             if is_let != 0 {
-                if tc.types.kind(exp) != TyKind::Infer && vt != exp {
+                if tc.types.kind(exp) != TyKind::Infer && vt != exp && is_join(in a, val) {
                     constrain_literals(inout tc, in a, val, exp);
                     let _ = settle_join(inout tc, in a, val, exp);
                 }
