@@ -22,7 +22,7 @@ use std::{
 pub const COMPILER_ENV: &str = "VESPER_COMPILER";
 
 /// The hidden compiler command that answers the tools.
-const FACTS_COMMAND: &str = "tool-facts";
+pub const FACTS_COMMAND: &str = "tool-facts";
 
 /// The schema of the answer (`SCHEMA` in `src/tool_facts.rs`).
 const FACTS_SCHEMA: &str = "vesper.tool-facts/1";
@@ -55,9 +55,14 @@ pub fn locate() -> Result<PathBuf, String> {
             dirs.push(dir);
         }
         for dir in dirs {
-            // Cargo puts the tools beside `vesper`. Bazel puts them in
+            // Cargo puts the tools beside `vesper`, and test executables in
+            // `deps/` below it. Bazel puts the tools in
             // `<bin>/crates/vesper-tools/bin/`, and `vesper` in `<bin>/bin/`.
-            for candidate in [dir.join(&name), dir.join("../../../bin").join(&name)] {
+            for candidate in [
+                dir.join(&name),
+                dir.join("..").join(&name),
+                dir.join("../../../bin").join(&name),
+            ] {
                 if candidate.is_file() {
                     return Ok(candidate);
                 }
@@ -147,4 +152,33 @@ pub fn rejected(facts: &Value) -> Option<Rejected> {
     count("syntax_errors")
         .map(Rejected::Syntax)
         .or_else(|| count("semantic_errors").map(Rejected::Semantic))
+}
+
+/// A private source file for one question, removed when dropped.
+struct Question(PathBuf);
+
+impl Question {
+    fn new(text: &str) -> Result<Self, String> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = env::temp_dir().join(format!(
+            "vesper-tool-facts-{}-{}.ves",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Question(path))
+    }
+}
+
+impl Drop for Question {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// [`facts`] about source text the tool holds rather than a file (a
+/// baseline read from git, or a source it already read and checked).
+pub fn facts_about(kind: &str, text: &str, options: &[&str]) -> Result<Value, String> {
+    let question = Question::new(text)?;
+    facts(kind, &question.0, options)
 }

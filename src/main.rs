@@ -8,6 +8,8 @@ mod lint_commands;
 mod package_graph;
 mod tool_commands;
 mod tool_facts;
+mod tool_facts_bench;
+mod tool_facts_fuzz;
 mod verify_commands;
 mod vsys_commands;
 use std::{
