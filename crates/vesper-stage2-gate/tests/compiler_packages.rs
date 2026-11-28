@@ -70,6 +70,72 @@ pub fn main() -> u64 {
 ";
 const LHS_LITERAL_SMOKE_ANSWER: u64 = 38;
 
+/// `for` over array literals (of integers, narrowed by their use, and of
+/// text), a fixed array, `ChunkSeq` places and temporaries and a `Slice`,
+/// with `continue` and `break` (#2703: these loops ran zero times).
+const FOR_SEQUENCES_SMOKE: &str = "\
+fn digits(in xs: Slice[u64]) -> u64 {
+    let mut s: u64 = 0;
+    for x in xs {
+        if x == 3 {
+            continue;
+        }
+        if x == 9 {
+            break;
+        }
+        s = s * 10 + x;
+    }
+    s
+}
+
+fn pair() -> ChunkSeq[u64] {
+    let mut xs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    xs.push(2);
+    xs.push(4);
+    xs
+}
+
+pub fn main() -> u64 {
+    let mut s: u64 = 0;
+    for w in [1, 2, 3] {
+        s = s * 10 + w;
+    }
+    let mut narrow: u32 = 0;
+    for w in [4, 5] {
+        narrow = narrow * 10 + w;
+    }
+    let fixed: [u64; 3] = [6, 7, 8];
+    let mut seq: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for x in fixed {
+        seq.push(x);
+    }
+    let mut from_seq: u64 = 0;
+    for x in seq {
+        from_seq = from_seq * 10 + x;
+    }
+    let mut cut: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for x in [1, 3, 2, 9, 5] {
+        cut.push(x);
+    }
+    let mut nested: u64 = 0;
+    for x in pair() {
+        for y in [1, 2] {
+            nested = nested * 10 + x * y;
+        }
+    }
+    let mut text: u64 = 0;
+    for t in [\"ab\", \"cde\"] {
+        text = text * 10 + t.len();
+    }
+    let mut out = s * 100 + widen_u64(narrow);
+    out = out * 1000 + from_seq;
+    out = out * 100 + digits(in cut.as_slice());
+    out = out * 10000 + nested;
+    out * 100 + text
+}
+";
+const FOR_SEQUENCES_SMOKE_ANSWER: u64 = 1_234_567_812_244_823;
+
 /// What the evaluator answers for [`STAGE2_FLOAT_SMOKE`] (checked against
 /// it while the Rust evaluator existed, tests/wasm_seed_package_io.rs).
 const FLOAT_SMOKE_ANSWER: u64 = 3_732_379_685_888_365_023;
@@ -125,6 +191,11 @@ fn stage2_compiles_compiler_packages() {
                 LHS_LITERAL_SMOKE_ANSWER,
             ),
             ("stage2-floats", STAGE2_FLOAT_SMOKE, FLOAT_SMOKE_ANSWER),
+            (
+                "stage2-for-sequences",
+                FOR_SEQUENCES_SMOKE,
+                FOR_SEQUENCES_SMOKE_ANSWER,
+            ),
         ] {
             let bytes = build(&a, &dir, &smoke_manifest(stem), src)
                 .unwrap_or_else(|e| panic!("Stage 2 on {stem}: {e}"));
