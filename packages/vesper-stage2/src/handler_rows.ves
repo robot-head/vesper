@@ -7,18 +7,24 @@
 
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
-    EffNode, TyKind, Types, Vars, push_wide_decimal, substitute, vars_new
+    EffNode, TyKind, Types, Vars, default_type, push_wide_decimal, substitute, vars_new
 };
 use @vesper/check-data::util::{n32, u32_at, u64_at, w};
 use @vesper/check-data::world::{World};
-use @vesper/place-ir-lower::ast::{Ast, Cl, Ex, FnR, Hd};
+use @vesper/place-ir::codes::{Lit, Pat};
+use @vesper/place-ir-lower::ast::{Ast, Cl, Ef, Eop, Ex, FnR, Hd};
 use @vesper/wasm-backend::ir::{CallRow, Pair};
 use self::facts::{children};
+use self::typecheck::{find_eop};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
 
+const X_LITERAL: u8 = 1;
 const X_NAME: u8 = 2;
+const X_TUPLE: u8 = 3;
+const X_UNARY: u8 = 7;
+const X_BLOCK: u8 = 10;
 const X_FIELD: u8 = 5;
 const X_CALL: u8 = 11;
 const X_TRY: u8 = 12;
@@ -31,6 +37,7 @@ const CALL_ARG_STRIDE: u64 = 2;
 const CAP_PREFIX: Str = "$cap";
 const FNCAP_PREFIX: Str = "$fncap:";
 const FAIL: Str = "Fail";
+const MINUS: Str = "-";
 const RUNTIME_ERROR: Str = "RuntimeError";
 const ARITH_OVERFLOW: Str = "ArithOverflow";
 const RESULT: Str = "Result";
@@ -61,9 +68,13 @@ copy struct Alias {
     cap: u32,
 }
 
+// A handler's outgoing row and its body's and own literal types (or
+// NONE32).
 copy struct HdRow {
     hd: u64,
     row: u32,
+    body_ty: u32,
+    out_ty: u32,
 }
 
 struct Hw {
@@ -490,6 +501,13 @@ fn call_effects(
             },
             Option::None => {},
         }
+        match find_eop(in a, inout hw.names, n32(ce.a)) {
+            Option::Some((ef, op)) => {
+                op_effect(inout hw, in a, in world, ef, op, e);
+                return;
+            },
+            Option::None => {},
+        }
     }
     // A value call: the callee's function type's row.
     let t = world.expr_type(ce.s0, ce.s1);
@@ -498,6 +516,52 @@ fn call_effects(
         let vars = vars_new();
         require_row(inout hw, row, in vars);
     }
+}
+
+// An effect operation call (`Fail::raise(e)`) requires its effect, with
+// the explicit type arguments, else those its arguments' types bind (a
+// parameter typed by the generic itself), else none.
+fn op_effect(inout hw: Hw, in a: Ast, in world: World, ef: Ef, op: Eop, e: Ex) {
+    let mut tys = ChunkSeq::new[u32]();
+    let mut open = false;
+    for i in 0..ef.generic_count {
+        let mut ty = NONE32;
+        if i < e.m {
+            ty = n32(u64_at(in a.xs, wrapping_add(e.c, i)));
+        } else {
+            let generic = a.egen(wrapping_add(ef.generic_start, i));
+            for j in 0..e.n {
+                if j >= op.param_count {
+                    break;
+                }
+                let p = a.param(wrapping_add(op.param_start, j)).ty;
+                if hw.types.kind(p) == TyKind::Named
+                    && hw.types.arity(p) == 0
+                    && hw.types.name(p) == generic
+                {
+                    match ex(in a, call_arg(in a, e, j)) {
+                        Option::Some(arg) => {
+                            let t = world.expr_type(arg.s0, arg.s1);
+                            if t != NONE32 {
+                                ty = default_type(inout hw.types, t);
+                            }
+                        },
+                        Option::None => {},
+                    }
+                    break;
+                }
+            }
+        }
+        if ty == NONE32 {
+            open = true;
+        }
+        tys.push(ty);
+    }
+    let req = new_inst(inout hw, 0, ef.name, in tys);
+    if open && active_cap(in hw, req) == NONE64 {
+        return;
+    }
+    require(inout hw, req);
 }
 
 fn label_of(inout hw: Hw, in prefix: Str, in key: ChunkSeq[u8], index: u64) -> u32 {
@@ -610,7 +674,9 @@ fn handler(
     // `Hd.outgoing` is the row's type, as the lowering reads it.
     let row = hw.types.mk_row(in effs, in eargs, 0);
     let row_ty = hw.types.row_type(row);
-    hw.rows.push(HdRow { hd: e.a, row: row_ty });
+    let body_ty = literal_type(inout hw, in a, in world, h.body);
+    let out_ty = return_literal_type(inout hw, in a, in world, h, body_ty);
+    hw.rows.push(HdRow { hd: e.a, row: row_ty, body_ty: body_ty, out_ty: out_ty });
     // A nested handler's row is observed where it stands.
     for i in 0..out.len() {
         match out.try_get(i) {
@@ -618,6 +684,99 @@ fn handler(
             Option::None => {},
         }
     }
+}
+
+// The type Rust's checker gives expression `eid` where it keeps an integer
+// literal's type (`IntLiteral`), which Stage 2's checker defaults: a
+// literal, a negated one, a block ending in one, a tuple holding one (its
+// other elements as checked). NONE32 for any other.
+fn literal_type(inout hw: Hw, in a: Ast, in world: World, eid: u64) -> u32 {
+    let e = match ex(in a, eid) {
+        Option::Some(e) => e,
+        Option::None => return NONE32,
+    };
+    if e.kind == X_LITERAL && e.a == Lit::Int {
+        return hw.types.wide_literal(false, e.b, e.c);
+    }
+    if e.kind == X_UNARY && hw.names.spells(n32(e.a), in MINUS.as_bytes()) {
+        match ex(in a, e.b) {
+            Option::Some(v) => {
+                if v.kind == X_LITERAL && v.a == Lit::Int {
+                    return hw.types.wide_literal(true, v.b, v.c);
+                }
+            },
+            Option::None => {},
+        }
+        return NONE32;
+    }
+    if e.kind == X_BLOCK {
+        return literal_type(inout hw, in a, in world, e.b);
+    }
+    if e.kind == X_TUPLE {
+        let mut items = ChunkSeq::new[u32]();
+        let mut any = false;
+        for i in 0..e.n {
+            let item = u64_at(in a.xs, wrapping_add(e.a, i));
+            let t = literal_type(inout hw, in a, in world, item);
+            if t != NONE32 {
+                any = true;
+                items.push(t);
+            } else {
+                let at = match ex(in a, item) {
+                    Option::Some(x) => world.expr_type(x.s0, x.s1),
+                    Option::None => NONE32,
+                };
+                if at == NONE32 {
+                    return NONE32;
+                }
+                items.push(at);
+            }
+        }
+        if any {
+            return hw.types.tuple(in items);
+        }
+    }
+    NONE32
+}
+
+// The handler's own type where Rust's keeps a literal: its return
+// clause's body is a literal, or names the binding its pattern makes of
+// a literal body (`return x => x`).
+fn return_literal_type(inout hw: Hw, in a: Ast, in world: World, h: Hd, body_ty: u32) -> u32 {
+    let cl = match a.cls.try_get(h.return_clause) {
+        Option::Some(c) => c,
+        Option::None => return NONE32,
+    };
+    let own = literal_type(inout hw, in a, in world, cl.body);
+    if own != NONE32 || body_ty == NONE32 || h.has_state || cl.pattern_count == 0 {
+        return own;
+    }
+    let pat = match a.pts.try_get(u64_at(in a.xs, cl.pattern_start)) {
+        Option::Some(p) => p,
+        Option::None => return NONE32,
+    };
+    let mut tail = cl.body;
+    loop {
+        match ex(in a, tail) {
+            Option::Some(b) => {
+                if b.kind == X_BLOCK && b.n == 0 {
+                    tail = b.b;
+                } else {
+                    break;
+                }
+            },
+            Option::None => return NONE32,
+        }
+    }
+    match ex(in a, tail) {
+        Option::Some(b) => {
+            if pat.kind == Pat::Bind && b.kind == X_NAME && b.a == pat.a {
+                return body_ty;
+            }
+        },
+        Option::None => {},
+    }
+    NONE32
 }
 
 // (name, label) text order, no label before any label; stable.
@@ -789,6 +948,8 @@ pub fn infer_handler_rows(
                     Option::Some(h) => {
                         let mut h2 = h;
                         h2.outgoing = r.row;
+                        h2.body_ty = r.body_ty;
+                        h2.out_ty = r.out_ty;
                         let _ = a.hds.try_set(r.hd, h2);
                     },
                     Option::None => {},

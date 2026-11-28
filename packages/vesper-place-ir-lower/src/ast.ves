@@ -157,7 +157,9 @@ pub copy struct Cl {
 // and argument types xs[arg_ty_start..arg_ty_start+arg_ty_count]; state pattern and
 // expression (NONE without state); the return clause cls[return_clause] and
 // operation clauses cls[return_clause+1..return_clause+1+op_count]; outgoing
-// effects (a Row type); moves xs[move_start..move_start+2*move_count].
+// effects (a Row type); the handled body's and the handler's types where
+// they keep an integer literal's type (else NONE32: their spans' types);
+// moves xs[move_start..move_start+2*move_count].
 pub copy struct Hd {
     pool: u64,
     label: u32,
@@ -171,6 +173,8 @@ pub copy struct Hd {
     return_clause: u64,
     op_count: u64,
     outgoing: u32,
+    body_ty: u32,
+    out_ty: u32,
     move_start: u64,
     move_count: u64,
 }
@@ -501,6 +505,8 @@ impl Ast {
                     return_clause: src.return_clause,
                     op_count: src.op_count,
                     outgoing: src.outgoing,
+                    body_ty: src.body_ty,
+                    out_ty: src.out_ty,
                     move_start: src.move_start,
                     move_count: src.move_count,
                 }),
@@ -693,6 +699,8 @@ impl Ast {
                 return_clause: 0,
                 op_count: 0,
                 outgoing: 0,
+                body_ty: NONE32,
+                out_ty: NONE32,
                 move_start: 0,
                 move_count: 0
             },
@@ -1019,6 +1027,8 @@ fn read_handler(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx, inout as
         return_clause: return_clause,
         op_count: op_count,
         outgoing: outgoing,
+        body_ty: NONE32,
+        out_ty: NONE32,
         move_start: move_start,
         move_count: move_count
     });

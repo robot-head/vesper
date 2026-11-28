@@ -2290,8 +2290,16 @@ fn nest_clause(
 fn prepare_handler(inout l: L, ex: Ex) {
     let handler_row = l.ast.handler(ex.a);
     let body_ex = l.ast.ex(handler_row.body);
-    let body_type = span_type(in l, body_ex.s0, body_ex.s1);
-    let output = span_type(in l, ex.s0, ex.s1);
+    let body_type = if handler_row.body_ty == NONE32 {
+        span_type(in l, body_ex.s0, body_ex.s1)
+    } else {
+        handler_row.body_ty
+    };
+    let output = if handler_row.out_ty == NONE32 {
+        span_type(in l, ex.s0, ex.s1)
+    } else {
+        handler_row.out_ty
+    };
     let outgoing = handler_row.outgoing;
     let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let known = free_names_of(inout l, handler_row.body, inout names);

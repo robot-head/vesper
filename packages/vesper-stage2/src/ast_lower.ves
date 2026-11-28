@@ -877,6 +877,8 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
             return_clause: ret,
             op_count: on,
             outgoing: empty_row,
+            body_ty: NONE32,
+            out_ty: NONE32,
             move_start: 0,
             move_count: 0
         });

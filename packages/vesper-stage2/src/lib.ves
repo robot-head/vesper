@@ -761,8 +761,10 @@ fn stage2_compile_dir_impl(
     facts.calls = call_rows;
     facts.pairs = call_pairs;
     write_stage(want_syms, in out_wasm, in "lower_all", inout stage_log);
+    let top_fns = ir_ast.fns.len();
     let mut low = l_new(sink c, sink ir_ast);
     lower_all(inout low);
+    rows_of_nested(inout low, top_fns);
     mark_mut_element_views(inout low);
     for fi in 0..low.ast.fns.len() {
         match low.ast.fns.try_get(fi) {

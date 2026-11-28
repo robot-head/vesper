@@ -341,7 +341,7 @@ fn find_fn(in a: Ast, name: u32) -> Option[FnR] {
     Option::None
 }
 
-fn find_eop(in a: Ast, inout names: Names, cname: u32) -> Option[(Ef, Eop)] {
+pub fn find_eop(in a: Ast, inout names: Names, cname: u32) -> Option[(Ef, Eop)] {
     let (ename, opname) = split_last_colon(inout names, cname);
     find_effect_method(in a, ename, opname)
 }
@@ -2415,7 +2415,9 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                 }
                 let outer_handler_row = tc.sugar_handler_row;
                 tc.sugar_handler_row = policy_handler_row(inout tc, in a, h);
-                let bt = check_owned_expr(inout tc, in a, h.body, expected);
+                // Rust's `handle` checks the handled body with no expected
+                // type: only the return clause sees the context's.
+                let bt = check_owned_expr(inout tc, in a, h.body, tc.infer_ty);
                 tc.sugar_handler_row = outer_handler_row;
                 let mut rt = expected;
                 match a.cls.try_get(h.return_clause) {

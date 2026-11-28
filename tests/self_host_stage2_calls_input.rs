@@ -84,7 +84,7 @@ const DECLINES: &[&str] = &[
 const MIN_SAME_FUNCTIONS: usize = 71;
 
 /// The port functions Stage 2 must lower as Rust does today.
-const MIN_SAME_PORT_FUNCTIONS: usize = 20301;
+const MIN_SAME_PORT_FUNCTIONS: usize = 20349;
 
 /// Set to print the Rust and Stage 2 bodies of each function that differs.
 const SHOW_DIFFS: &str = "VESPER_STAGE2_CALLS_DIFFS";
@@ -219,6 +219,7 @@ fn same_body(a: &[String], b: &[String]) -> bool {
         (Ok(m), Ok(n)) => m == n || m.max(n) >= MODULE_SPAN,
         _ => x == y,
     };
+    let (a, b) = (&caps_by_order(a), &caps_by_order(b));
     let (ra, rb) = (span_range(a), span_range(b));
     // Bodies in the same range compare their spans as they are.
     let (ra, rb) = if ra.map(|r| r.0) == rb.map(|r| r.0) {
@@ -231,6 +232,43 @@ fn same_body(a: &[String], b: &[String]) -> bool {
             let (x, y) = (strip(x, ra), strip(y, rb));
             x.len() == y.len() && x.iter().zip(&y).all(|(m, n)| same_word(m, n))
         })
+}
+
+/// A handler's capability label (`$cap<start>`, src/check.rs `handle`).
+const HANDLER_CAP: &str = "$cap";
+
+/// `body` with each handler capability label `$cap<start>` replaced by its
+/// place in order of first use: the start is a span, which Stage 2 counts
+/// from its module and Rust from the package's first module.
+fn caps_by_order(body: &[String]) -> Vec<String> {
+    let mut seen: Vec<String> = vec![];
+    body.iter()
+        .map(|line| {
+            let mut out = String::with_capacity(line.len());
+            let mut rest = line.as_str();
+            while let Some(i) = rest.find(HANDLER_CAP) {
+                let digits = rest[i + HANDLER_CAP.len()..]
+                    .bytes()
+                    .take_while(u8::is_ascii_digit)
+                    .count();
+                let end = i + HANDLER_CAP.len() + digits;
+                out.push_str(&rest[..i]);
+                if digits == 0 {
+                    out.push_str(HANDLER_CAP);
+                } else {
+                    let label = &rest[i..end];
+                    let place = seen.iter().position(|s| s == label).unwrap_or_else(|| {
+                        seen.push(label.to_string());
+                        seen.len() - 1
+                    });
+                    out.push_str(&format!("{HANDLER_CAP}#{place}"));
+                }
+                rest = &rest[end..];
+            }
+            out.push_str(rest);
+            out
+        })
+        .collect()
 }
 
 /// The calls task flags (packages/vesper-codegen-calls/src/data.ves).
