@@ -60,8 +60,10 @@ pub fn facts(world: &World, program: &Program, target: &str) -> Vec<u8> {
     let rows: Vec<_> = rows
         .iter()
         .filter(|(_, symbol, words)| {
-            words.first() == Some(&plan_probe::BODY_CALL_DIRECT)
-                && rows.iter().all(|(_, s, w)| s != symbol || w == words)
+            matches!(
+                words.first(),
+                Some(&plan_probe::BODY_CALL_DIRECT | &plan_probe::BODY_CALL_INDIRECT)
+            ) && rows.iter().all(|(_, s, w)| s != symbol || w == words)
         })
         .collect();
     let mut out = vec![];

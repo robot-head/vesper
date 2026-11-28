@@ -1981,13 +1981,16 @@ pub mod plan_probe {
     /// The native walk body hook's view of foreign operation `op` of
     /// `effect` (#2751), read from the plan the compile in progress
     /// installed (`ForeignChecked::with_lowering`): the C symbol a direct
-    /// call imports, then [`BODY_CALL_DIRECT`] and the call's words when it
-    /// is a plain direct call, else [`BODY_CALL_OTHER`] alone. `None` when
+    /// call imports (a callback type's name for a call through a
+    /// pointer), then [`BODY_CALL_DIRECT`] (or [`BODY_CALL_INDIRECT`]) and
+    /// the call's words when it is a plain call, else [`BODY_CALL_OTHER`]
+    /// alone. `None` when
     /// no plan is installed or `effect` is no imported library's.
     ///
-    /// A plain direct call has the `direct` handler and no callback
-    /// pointer, `errno`, variadic tail, mapping, `@vesper-std/cpu` code or
-    /// runtime-shared symbol, its parameters are scalars, `bool`s, handles
+    /// A plain call has the `direct` handler and no `errno`, variadic tail
+    /// or mapping, a direct one no `@vesper-std/cpu` code or runtime-shared
+    /// symbol (an indirect one's first parameter is the pointer's handle),
+    /// its parameters are scalars, `bool`s, handles
     /// or slices and its result is `Unit`, a scalar or a nullable handle
     /// (an `Option` of its struct). Its words are the
     /// parameter count, then two words per parameter, its form
@@ -2007,7 +2010,14 @@ pub mod plan_probe {
         let symbol = function.link_symbol().to_owned();
         let architecture = target.parse::<target_lexicon::Triple>().ok()?.architecture;
         let scalar = |s: sys::Scalar| u64::from(s.bits()) | u64::from(s.signed()) << SIGNED_SHIFT;
-        let mut words = vec![BODY_CALL_DIRECT, function.parameters().len() as u64];
+        // A callback type's call goes through the pointer its first
+        // (handle) argument holds.
+        let call = if function.is_indirect() {
+            BODY_CALL_INDIRECT
+        } else {
+            BODY_CALL_DIRECT
+        };
+        let mut words = vec![call, function.parameters().len() as u64];
         for p in function.parameters() {
             match p.ty() {
                 ParameterType::Value(sys::ValueType::Scalar(s)) => {
@@ -2032,17 +2042,18 @@ pub mod plan_probe {
             _ => return Some((symbol, vec![BODY_CALL_OTHER])),
         }
         let plain = plan.handler == Handler::Direct
-            && !function.is_indirect()
             && !function.reads_errno()
             && function.variadic_from().is_none()
             && function.mapping_length().is_none()
-            && crate::native::ffi::runtime_import(&symbol).is_none()
-            && cpu::code_for(&symbol, architecture).is_ok_and(|c| c.is_none());
+            && (function.is_indirect()
+                || crate::native::ffi::runtime_import(&symbol).is_none()
+                    && cpu::code_for(&symbol, architecture).is_ok_and(|c| c.is_none()));
         Some((symbol, if plain { words } else { vec![BODY_CALL_OTHER] }))
     }
     /// [`body_call`]'s forms.
     pub const BODY_CALL_OTHER: u64 = 0;
     pub const BODY_CALL_DIRECT: u64 = 1;
+    pub const BODY_CALL_INDIRECT: u64 = 2;
     pub const BODY_PARAM_SCALAR: u64 = 0;
     pub const BODY_PARAM_BOOL: u64 = 1;
     pub const BODY_PARAM_HANDLE: u64 = 2;

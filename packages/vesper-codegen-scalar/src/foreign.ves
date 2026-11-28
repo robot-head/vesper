@@ -37,6 +37,9 @@ const OPTION_NONE: Str = "None";
 
 // `plan_probe::body_call`'s forms.
 const CALL_DIRECT: u64 = 1;
+// A callback type's call, through the pointer its first (handle)
+// argument holds (`Callee::Indirect`).
+const CALL_INDIRECT: u64 = 2;
 pub const PARAM_SCALAR: u64 = 0;
 pub const PARAM_BOOL: u64 = 1;
 pub const PARAM_HANDLE: u64 = 2;
@@ -156,7 +159,8 @@ impl ForeignFacts {
 
 impl Gen {
     // `foreign_perform` of the call `i` (`INST_FOREIGN`): its temporaries
-    // go in `ops`, and in `extra` the C symbol's bytes, then per argument
+    // go in `ops`, and in `extra` the C symbol's bytes, the call's kind
+    // (`CALL_DIRECT` or `CALL_INDIRECT`) and argument count, then per argument
     // its source (`SOURCE_TEMP`, or `SOURCE_LOCAL` and the local), the
     // kind its read coerces to and its form with its scalar word, then the
     // result's form and scalar word. False for a call the plan does not
@@ -172,7 +176,8 @@ impl Gen {
         if row == NONE64 || u64_at(in self.foreign.n, row) == 0 {
             return false;
         }
-        if self.foreign.word(row, 0) != CALL_DIRECT {
+        let call = self.foreign.word(row, 0);
+        if call != CALL_DIRECT && call != CALL_INDIRECT {
             return false;
         }
         let nparams = self.foreign.word(row, 1);
@@ -180,7 +185,11 @@ impl Gen {
         if nargs != nparams {
             return false;
         }
+        if call == CALL_INDIRECT && (nargs == 0 || self.foreign.word(row, 2) != PARAM_HANDLE) {
+            return false;
+        }
         self.body_symbol(u32_at(in self.foreign.symbol, row), inout extra);
+        extra.push(call);
         extra.push(nargs);
         for k in 0..nargs {
             let form = self.foreign.word(row, add(2, wrapping_mul(k, FORM_WORDS)));

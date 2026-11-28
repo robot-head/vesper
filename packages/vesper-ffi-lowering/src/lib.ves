@@ -2953,6 +2953,8 @@ pub fn op_plan(inout state: S, target: u32, eff_name: u32, op: u32) {
 // of a foreign call (@vesper/codegen-scalar foreign.ves).
 pub const BODY_CALL_OTHER: u64 = 0;
 pub const BODY_CALL_DIRECT: u64 = 1;
+// A callback type's call, through the pointer its first argument holds.
+pub const BODY_CALL_INDIRECT: u64 = 2;
 pub const BODY_PARAM_SCALAR: u64 = 0;
 pub const BODY_PARAM_BOOL: u64 = 1;
 pub const BODY_PARAM_HANDLE: u64 = 2;
@@ -3036,7 +3038,8 @@ fn effect_lib(in state: S, eff_name: u32) -> u64 {
 
 // `plan_probe::body_call` of operation `op` of `eff_name`: the C symbol a
 // direct call imports (NONE when the plan has no such operation), with
-// its words in `words`: BODY_CALL_DIRECT, the parameter count, a form and
+// its words in `words`: BODY_CALL_DIRECT (BODY_CALL_INDIRECT for a
+// callback type's call), the parameter count, a form and
 // a scalar word per parameter and for the result; or BODY_CALL_OTHER for
 // a call the body plans leave to the walk.
 pub fn body_call(inout state: S, eff_name: u32, op: u32, inout words: ChunkSeq[u64]) -> u32 {
@@ -3072,10 +3075,15 @@ pub fn body_call(inout state: S, eff_name: u32, op: u32, inout words: ChunkSeq[u
     } else {
         func.link
     };
-    words.push(BODY_CALL_DIRECT);
+    words.push(
+        if func.indirect {
+            BODY_CALL_INDIRECT
+        } else {
+            BODY_CALL_DIRECT
+        }
+    );
     words.push(func.param_count);
     let mut plain = lib_row.handler == H_DIRECT
-        && !func.indirect
         && !func.errno
         && !func.has_variadic
         && !func.mapped;
@@ -3109,7 +3117,7 @@ pub fn body_call(inout state: S, eff_name: u32, op: u32, inout words: ChunkSeq[u
     } else {
         plain = false;
     }
-    if !body_symbol_plain(in state.text[state.start(link).. state.end(link)]) {
+    if !func.indirect && !body_symbol_plain(in state.text[state.start(link).. state.end(link)]) {
         plain = false;
     }
     if !plain {
