@@ -7,9 +7,8 @@
 //! `export_plans` hook sees), and returns the program as `put_program`
 //! words. At every stage, the program read back must be `Debug`-equal to
 //! Rust's after `library_program` through that stage, and a Rust error must
-//! be a refusal; only programs with `@fip` functions (`@fip` reuse) and
-//! closure bodies whose `sink` parameters hold a `Box` (lent captures the
-//! input does not name) are not ported yet. For an optimized build, the inliner
+//! be a refusal; only closure bodies whose `sink` parameters hold a `Box`
+//! (lent captures the input does not name) are not ported yet. For an optimized build, the inliner
 //! input the package writes for the optimized program must also be
 //! tests/common/inline_words.rs `inline_input`'s bytes for Rust's.
 //!
@@ -67,6 +66,9 @@ const MIN_CHANGED: usize = 8;
 /// The compared fixture programs with elaborated `Box` drops (the `Box`
 /// fixtures and the pilot libraries, optimized and not).
 const MIN_DROPPED: usize = 8;
+/// The compared fixture programs with `@fip` reuse (box_fip, optimized and
+/// not).
+const MIN_REUSED: usize = 2;
 
 /// The port pilot's libraries whose worlds have the `Box` prelude (a boxed
 /// tree, boxed trait objects), as the port builder builds them.
@@ -81,6 +83,53 @@ const PILOT_LIBRARIES: &[(&str, &str)] = &[
 /// `Box` prelude: unpacked, overwritten, projected, returned early, moved
 /// on one branch and allocated in a loop).
 const PIPELINE_LIBRARIES: &[(&str, &str)] = &[
+    (
+        "box_fip",
+        "pub enum Tree {
+    Leaf(u64),
+    Node(Box[Tree], Box[Tree]),
+}
+@fip fn bump(sink b: Box[u64]) -> Box[u64] eff [] {
+    let Box(v) = b;
+    Box::new(wrapping_add(v, 1))
+}
+@fip fn swap(sink t: Tree) -> Tree eff [] {
+    match t {
+        Tree::Leaf(x) => Tree::Leaf(x),
+        Tree::Node(l, r) => match l {
+            Box(a) => match r {
+                Box(b) => Tree::Node(Box::new(b), Box::new(a)),
+            },
+        },
+    }
+}
+@fip fn fresh(v: u64) -> Box[u64] eff [] {
+    Box::new_in_caller(wrapping_add(v, 2))
+}
+@fip fn forward(v: u64) -> Box[u64] eff [] {
+    fresh(v)
+}
+fn take(sink b: Box[u64]) -> u64 {
+    match b {
+        Box(x) => x,
+    }
+}
+fn leaf(sink t: Tree) -> u64 {
+    match t {
+        Tree::Leaf(x) => x,
+        Tree::Node(l, r) => 0,
+    }
+}
+pub fn bumped(n: u64) -> u64 {
+    take(bump(Box::new(n)))
+}
+pub fn swapped(n: u64) -> u64 {
+    leaf(swap(Tree::Node(Box::new(Tree::Leaf(n)), Box::new(Tree::Leaf(1)))))
+}
+pub fn fresh_value(n: u64) -> u64 {
+    take(forward(n))
+}",
+    ),
     (
         "box_tree",
         "pub enum Tree {
@@ -331,7 +380,7 @@ struct Tally {
     same: usize,
     /// Stages the package refused where Rust failed too.
     both_failed: usize,
-    /// Stages the package does not run yet (`@fip` worlds).
+    /// Stages the package does not run yet (lent `Box` closure captures).
     not_ported: usize,
     /// Optimized programs whose inliner input is Rust's byte for byte.
     same_inputs: usize,
@@ -341,6 +390,8 @@ struct Tally {
     hoisted: usize,
     /// Identical `Drops` stages with `Box` drops elaborated.
     dropped: usize,
+    /// Identical `Optimize` stages where `@fip` reuse paired an allocation.
+    reused: usize,
     /// Functions in the compared programs.
     functions: usize,
     /// Identical stages whose program differs from the first lowering.
@@ -357,6 +408,7 @@ impl Tally {
         self.inlined += other.inlined;
         self.hoisted += other.hoisted;
         self.dropped += other.dropped;
+        self.reused += other.reused;
         self.functions += other.functions;
         self.changed += other.changed;
         self.failures.extend(other.failures);
@@ -419,6 +471,7 @@ fn compare(
                     match stage {
                         LibraryStage::Inline => t.inlined += stepped,
                         LibraryStage::Hoist => t.hoisted += stepped,
+                        LibraryStage::Optimize => t.reused += usize::from(has_reuse(&rust)),
                         LibraryStage::Drops => t.dropped += usize::from(has_box_drops(&rust)),
                         _ => {}
                     }
@@ -447,6 +500,23 @@ fn has_box_drops(p: &Program) -> bool {
         !f.box_drops_before_inst.is_empty()
             || !f.box_drops_after_inst.is_empty()
             || !f.box_drops_before_term.is_empty()
+    })
+}
+
+/// Whether `@fip` reuse paired an allocation of `p` with a slot: a
+/// `BoxReuse`, or a call slot.
+fn has_reuse(p: &Program) -> bool {
+    p.functions.values().any(|f| {
+        !f.fip_call_slots.is_empty()
+            || f.blocks.iter().flat_map(|b| &b.instructions).any(|i| {
+                matches!(
+                    &i.op,
+                    vesper::ir::Op::Fip {
+                        op: vesper::fip::FipOp::BoxReuse { .. },
+                        ..
+                    }
+                )
+            })
     })
 }
 
@@ -567,7 +637,7 @@ fn library_programs_match_rust() {
         }
     }
     eprintln!(
-        "library-ir: {} stages identical ({} functions, {} changed by the pipeline), {} inliner inputs identical, {} inlined, {} hoisted, {} with Box drops, {} refused by both, {} not ported, {} failures",
+        "library-ir: {} stages identical ({} functions, {} changed by the pipeline), {} inliner inputs identical, {} inlined, {} hoisted, {} with Box drops, {} with @fip reuse, {} refused by both, {} not ported, {} failures",
         total.same,
         total.functions,
         total.changed,
@@ -575,6 +645,7 @@ fn library_programs_match_rust() {
         total.inlined,
         total.hoisted,
         total.dropped,
+        total.reused,
         total.both_failed,
         total.not_ported,
         total.failures.len()
@@ -584,6 +655,11 @@ fn library_programs_match_rust() {
         total.changed >= MIN_CHANGED,
         "the pipeline changed only {} compared programs",
         total.changed
+    );
+    assert!(
+        total.reused >= MIN_REUSED,
+        "only {} compared programs have @fip reuse",
+        total.reused
     );
     assert!(
         total.dropped >= MIN_DROPPED,
