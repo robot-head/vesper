@@ -171,15 +171,14 @@ fn words_hash(bytes: &[u8]) -> u64 {
         })
 }
 
+/// The fixture built by Stage 2 and run with the Cranelift component
+/// (tests/support/stage2.rs).
 #[test]
 fn vesper_reaches_the_seam() {
-    let Some(target) = host_target() else {
-        eprintln!("no .vsys target for this host");
+    let Some(stage2) = stage2::stage2() else {
         return;
     };
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let before = live_handles();
-    let checked = checked_with(&fixture("seam.ves"), target);
     // SAFETY: handles from `build`, freed once.
     let want = unsafe {
         let (m, _, b) = build();
@@ -188,26 +187,23 @@ fn vesper_reaches_the_seam() {
         vcl_module_free(m);
         clif_words::encode_with(&f, true, Some(ir::types::I64))
     };
-    assert_eq!(
-        jit(&checked, "seam_words"),
-        words_hash(&want),
-        "function words"
-    );
-    let id = jit(&checked, "seam");
+    let seam = fixture("seam.ves");
+    let answer = |entry| stage2.answer(&seam, entry);
+    assert_eq!(answer("seam_words"), words_hash(&want), "function words");
+    let id = answer("seam");
     assert_ne!(id, 0, "the fixture failed");
-    let outlined = jit(&checked, "seam_outline");
+    let outlined = answer("seam_outline");
     assert_ne!(outlined, 0, "the outlining fixture failed");
-    let together = jit(&checked, "seam_outline_together");
+    let together = answer("seam_outline_together");
     assert_ne!(together, 0, "the one-call outlining fixture failed");
-    let outlined = take_published(outlined).expect("published");
+    let outlined = stage2.published(outlined).expect("published");
     assert!(!outlined.is_empty());
     assert_eq!(
-        take_published(together),
+        stage2.published(together),
         Some(outlined),
         "one call, same object"
     );
-    assert_eq!(live_handles(), before, "the fixture leaked a handle");
-    assert!(take_published(id).is_some_and(|o| !o.is_empty()));
+    assert!(stage2.published(id).is_some_and(|o| !o.is_empty()));
 }
 
 /// The cold outliner's answer for `build`'s function: block 2 (the `else`

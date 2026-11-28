@@ -36,6 +36,11 @@ pub const TOOLS: &[&str] = &[
     "traceparent",
 ];
 
+/// The variable that tells a tool which `vesper` started it, so a tool that
+/// asks the compiler (`vesper tool-facts`) asks the same one (#2670).
+/// crates/vesper-tools/src/compiler.rs reads it.
+pub const COMPILER_ENV: &str = "VESPER_COMPILER";
+
 /// The tool binary `vesper build --tee` runs to measure an executable.
 pub const TEE_TOOL: &str = "tee";
 
@@ -111,11 +116,16 @@ pub fn missing(tool: &str) -> String {
     )
 }
 
-/// Run `vesper-<tool>` with `args`, inheriting the standard streams.
+/// Run `vesper-<tool>` with `args`, inheriting the standard streams, and
+/// with [`COMPILER_ENV`] naming this executable.
 pub fn run(tool: &str, args: &[OsString]) -> Result<ExitStatus, String> {
     let binary = locate(tool).ok_or_else(|| missing(tool))?;
-    Command::new(&binary)
-        .args(args)
+    let mut command = Command::new(&binary);
+    command.args(args);
+    if let Ok(exe) = env::current_exe() {
+        command.env(COMPILER_ENV, exe);
+    }
+    command
         .status()
         .map_err(|e| format!("{}: {e}", binary.display()))
 }

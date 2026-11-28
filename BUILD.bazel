@@ -1,5 +1,6 @@
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:stage2_port_builder.bzl", "stage2_port_builder")
 load("//tools/bazel:vesper_port.bzl", "vesper_package")
 load("//tools/bazel/tests:ci_analysis_test.bzl", "compile_inputs_test", "environment_test", "runfiles_test")
 
@@ -2509,4 +2510,27 @@ compile_inputs_test(
     ],
     required = ["examples/native-pulse/ticket_tally.ves"],
     target_under_test = "//:example/native-pulse",
+)
+
+# The Stage 2 port builder (#2666): @vesper/port-builder built by the
+# committed Stage 2 seed's rebuild of today's @vesper/stage2 and composed with
+# the Cranelift component. `--config=stage2-ports` builds every
+# vesper_port_object with it, and the Rust compiler where it declines;
+# crates/vesper-port-harness/tests/stage2_builder.rs counts the identical
+# outputs per port.
+stage2_port_builder(
+    name = "port_builder",
+    out = "vesper-port-builder.wasm",
+    cranelift = "//crates/vesper-cranelift-component:component",
+    packages = glob([
+        "packages/**/*.ves",
+        "packages/**/Loom.toml",
+        "packages/**/*.vsys",
+    ]) + [
+        "//packages/vesper-codegen-numeric:files",
+        "//packages/vesper-cranelift:files",
+        "//packages/vesper-crypto:files",
+    ],
+    seed = "//bootstrap/stage2-seed:seed",
+    visibility = ["//visibility:public"],
 )
