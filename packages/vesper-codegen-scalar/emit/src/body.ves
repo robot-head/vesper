@@ -123,6 +123,14 @@ const INST_WORDS_CALL: u64 = 56;
 const INST_SEQ: u64 = 80;
 // An arm's `Bind` of a fused `try_get` (`seq_fused_bind`).
 const INST_BIND_FUSED: u64 = 81;
+// A constant table read and an array element (#2789, tables.ves): a table
+// every use only reads is its read-only data itself; a bounds check that
+// does not raise traps with `index_check`'s code.
+const INST_TABLE: u64 = 96;
+const INST_INDEX: u64 = 97;
+const TABLE_READ_ONLY: u64 = 1;
+const INDEX_RAISES: u64 = 1;
+const INDEX_TRAP: u32 = 2;
 const SEQ_WORD: u64 = 1;
 const SEQ_SAME: u64 = 2;
 const SEQ_AS_BYTES: u64 = 3;
@@ -1560,6 +1568,109 @@ impl Body {
         true
     }
 
+    // `Codegen::constant_table` (#2789): the table's words as anonymous
+    // read-only data, a pointer to it, and that pointer itself when every
+    // use only reads it, else a fresh copy (`alloc_uninit`, `copy_bytes`).
+    // Invalid for a table that is the result's home, or data the module
+    // refuses.
+    fn table(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words,
+        dest: u64
+    ) -> Value eff [Ffi[Cranelift]] {
+        let read_only = w.next() == TABLE_READ_ONLY;
+        let size = w.next();
+        let mut bytes = ChunkSeq::with_capacity[u8](size);
+        let mut off: u64 = 0;
+        loop {
+            if off >= size {
+                break;
+            }
+            let mut word = w.next();
+            for _ in 0..WORD_BYTES {
+                bytes.push(wrapping_u8(word & BYTE_MASK));
+                word = word >> BYTE_BITS;
+            }
+            off = wrapping_add(off, widen_u64(WORD_BYTES));
+        }
+        if self.sret != invalid() && has_call(in self.homes, dest) {
+            return Value { id: invalid() };
+        }
+        let id = declare_anonymous_data(inout m, false, false);
+        let mut d = match data_new() {
+            Some(d) => d,
+            None => return Value { id: invalid() },
+        };
+        data_define(inout d, in bytes.as_slice());
+        data_align(inout d, LITERAL_ALIGN);
+        if !define_data(inout m, id, d) {
+            return Value { id: invalid() };
+        }
+        let gv = import_data(inout b, in m, id);
+        let table = ins_symbol_value(inout b, module_pointer_type(in m), gv);
+        if read_only {
+            return table;
+        }
+        let bytes_size = if size < widen_u64(WORD_BYTES) {
+            WORD_BYTES
+        } else {
+            wrapping_u32(size)
+        };
+        let slot = create_stack_slot(inout b, bytes_size, SLOT_ALIGN_SHIFT);
+        let copy = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+        let mut at: u64 = 0;
+        loop {
+            if at >= size {
+                break;
+            }
+            let word = ins_load(inout b, ty_i64(), PLAIN, table, wrapping_i32(at));
+            ins_store(inout b, PLAIN, word, copy, wrapping_i32(at));
+            at = wrapping_add(at, widen_u64(WORD_BYTES));
+        }
+        copy
+    }
+
+    // `ExprKind::Index` of array `x` at index `y` (#2789): the operands as
+    // temporaries (`ir_temp`), `index_check`'s unsigned compare and its
+    // raise or trap, then the element loaded at `x + y * WORD_BYTES`.
+    fn index(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words,
+        x: Value,
+        y: Value
+    ) -> Value eff [Ffi[Cranelift]] {
+        let len = w.next();
+        let lane = w.next();
+        let raises = w.next() == INDEX_RAISES;
+        let base_var = temp(inout b, x);
+        let base = use_var(inout b, base_var);
+        let index_var = temp(inout b, y);
+        let index = use_var(inout b, index_var);
+        let valid = ins_icmp_imm(inout b, cc_ult(), index, wrapping_i64(len));
+        if raises {
+            let raise = w.next();
+            let size = w.next();
+            let tag = w.next();
+            if !self.raising(inout b, inout m, inout w, valid, false, raise, size, tag) {
+                return Value { id: invalid() };
+            }
+        } else {
+            let good = create_block(inout b);
+            let bad = create_block(inout b);
+            ins_brif0(inout b, valid, good, bad);
+            switch_to_block(inout b, bad);
+            ins_trap(inout b, trap_user(INDEX_TRAP));
+            switch_to_block(inout b, good);
+        }
+        let offset = ins_imul_imm(inout b, index, widen_i64(WORD_BYTES));
+        let address = ins_iadd(inout b, base, offset);
+        ins_load(inout b, lane_type(lane), PLAIN, address, 0)
+    }
+
     // `Codegen::string_literal`: `{n, 0, &static_bytes}` in fresh zeroed
     // storage, `{0, 0, null}` when empty. Invalid when the module refuses
     // the data.
@@ -2835,6 +2946,18 @@ impl Body {
                 }
                 to
             }
+        } else if kind == INST_TABLE {
+            let v = self.table(inout b, inout m, inout w, dest);
+            if is_invalid(v) {
+                return false;
+            }
+            v
+        } else if kind == INST_INDEX {
+            let v = self.index(inout b, inout m, inout w, x, y);
+            if is_invalid(v) {
+                return false;
+            }
+            v
         } else if kind == INST_HANDLE {
             let out = self.handle(inout b, inout m, inout w);
             if is_invalid(out) {
