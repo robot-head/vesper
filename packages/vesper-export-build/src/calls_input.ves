@@ -251,15 +251,17 @@ fn put_expr(in a: Ast, id: u64, inout rows: ChunkSeq[u64]) -> bool {
     true
 }
 
-// The calls input of the package at `root_dir`: its library task over
-// `roots` (symbols named one per line), optimized when `optimize`.
+// The calls input of the package at `root_dir` for native target OS `os`:
+// its library task over `roots` (symbols named one per line), optimized
+// when `optimize`.
 pub fn stage2_calls_input(
     in root_dir: Slice[u8],
+    in os: Slice[u8],
     in roots: Slice[u8],
     optimize: bool
 ) -> CallsInput eff [Ffi[StdFs]] {
     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut lw = match stage2_lower_dir(in root_dir, inout err) {
+    let mut lw = match stage2_lower_dir(in root_dir, in os, inout err) {
         Option::Some(lw) => lw,
         Option::None => {
             return CallsInput { declined: CALLS_FRONT_END, err: err, bytes: ChunkSeq::new[u8]() };

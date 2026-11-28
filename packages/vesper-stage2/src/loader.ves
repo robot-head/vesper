@@ -1104,7 +1104,20 @@ fn collect_mod_files(
     }
 }
 
-fn pkg_src_dir(in pkg_dir: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+// A package's source directory for target OS `os` (src/packages.rs): for
+// wasm32-wasip2 (`os` empty) `src-wasip2` when it has a root module, for a
+// native OS `src-<os>` when it exists, else `src`.
+fn pkg_src_dir(in pkg_dir: Slice[u8], in os: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    if os.len() != 0 {
+        let mut name = ChunkSeq::new[u8]();
+        name.extend(in "src-".as_bytes());
+        name.extend(in os);
+        let os_dir = join_path(in pkg_dir, in name.as_slice());
+        return match try_list_dir(in os_dir.as_slice()) {
+            Option::Some(_) => os_dir,
+            Option::None => join_path(in pkg_dir, in "src".as_bytes()),
+        };
+    }
     let wasi_dir = join_path(in pkg_dir, in "src-wasip2".as_bytes());
     let wasi_lib = join_path(in wasi_dir.as_slice(), in "lib.ves".as_bytes());
     match try_read_file(in wasi_lib.as_slice()) {
@@ -1132,7 +1145,8 @@ fn scan_pkg_submods(
     in pkgs: ChunkSeq[PkgNode],
     inout base_off: u64,
     inout files: ChunkSeq[FileEntry],
-    inout mods: ChunkSeq[ModEntry]
+    inout mods: ChunkSeq[ModEntry],
+    in os: Slice[u8]
 ) eff [Ffi[StdFs]] {
     let mut pos: u64 = 0;
     loop {
@@ -1189,7 +1203,7 @@ fn scan_pkg_submods(
                                 },
                                 Option::None => ChunkSeq::new[u8](),
                             };
-                            let sdir = pkg_src_dir(in pdir.as_slice());
+                            let sdir = pkg_src_dir(in pdir.as_slice(), in os);
                             let mut rel = ChunkSeq::new[u8]();
                             rel.extend(in src[m0..m1]);
                             rel.extend(in ".ves".as_bytes());
@@ -2255,6 +2269,15 @@ pub fn package_graph_vsys_paths(
 }
 
 pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    load_package_graph_bytes_for(in root_dir, in "".as_bytes())
+}
+
+// The package graph of `root_dir` for target OS `os` (`linux`, `macos`,
+// `windows`), or for wasm32-wasip2 when `os` is empty.
+pub fn load_package_graph_bytes_for(
+    in root_dir: Slice[u8],
+    in os: Slice[u8]
+) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
     let mut pkgs = ChunkSeq::new[PkgNode]();
     match load_pkg_graph(in root_dir, inout pkgs) {
         Option::Some(_) => {},
@@ -2274,7 +2297,7 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
             },
             Option::None => ChunkSeq::new[u8](),
         };
-        let src_dir = pkg_src_dir(in dir.as_slice());
+        let src_dir = pkg_src_dir(in dir.as_slice(), in os);
         let lib_p = join_path(in src_dir.as_slice(), in "lib.ves".as_bytes());
         let main_p = join_path(in src_dir.as_slice(), in "main.ves".as_bytes());
         let root_segs = ChunkSeq::new[ChunkSeq[u8]]();
@@ -2334,7 +2357,14 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
             },
             Option::None => ChunkSeq::new[u8](),
         };
-        scan_pkg_submods(in mtext.as_slice(), in pkgs, inout base_off, inout files, inout mods);
+        scan_pkg_submods(
+            in mtext.as_slice(),
+            in pkgs,
+            inout base_off,
+            inout files,
+            inout mods,
+            in os
+        );
         scan_idx = wrapping_add(scan_idx, 1);
     }
     let mut sp_segs = ChunkSeq::new[ChunkSeq[u8]]();
