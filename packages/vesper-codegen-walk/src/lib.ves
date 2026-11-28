@@ -28,6 +28,7 @@ use @vesper/codegen-calls::data::{ParamInfo};
 use @vesper/codegen-calls::instances::{Conc, Syms, specialized, syms_new};
 use @vesper/place-ir::{FnRow, InstRow, Program, read_program};
 use self::blocks::{block_plan_bytes};
+use self::calls::{call_words_bytes};
 use self::frame::{frames_bytes, frames_text};
 use @vesper/place-ir::codes::{Op, Pat, Tag};
 
@@ -894,4 +895,15 @@ pub fn native_walk_block_plan_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
 // word entries.
 pub fn native_walk_block_plan(in input: Str) -> ChunkSeq[u64] {
     block_plan_bytes(in input.as_bytes())
+}
+
+// Stage 2 slice 3b (#2660): per task, each instance's direct callee words
+// (calls.ves, `Codegen::plain_call`).
+pub fn native_walk_call_words(in input: Str) -> ChunkSeq[u64] {
+    call_words_bytes(in input.as_bytes())
+}
+
+// `native_walk_call_words` over the input's bytes.
+pub fn native_walk_call_words_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
+    call_words_bytes(in b)
 }

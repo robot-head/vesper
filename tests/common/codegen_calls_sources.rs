@@ -158,10 +158,16 @@ fn rust_string_literals(text: &str) -> Vec<String> {
 /// Every distinct source string of [`SOURCE_TESTS`] that parses and checks
 /// clean, with its world.
 pub fn source_worlds() -> Vec<(String, World)> {
+    worlds_in(SOURCE_TESTS)
+}
+
+/// The checked worlds of the Vesper sources embedded in `files` (paths from
+/// the repository root), named `<file>#<literal index>`.
+pub fn worlds_in(files: &[&str]) -> Vec<(String, World)> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = vec![];
     let quiet = quiet_panics();
-    for file in SOURCE_TESTS.iter().copied() {
+    for file in files.iter().copied() {
         let Ok(text) = std::fs::read_to_string(repo().join(file)) else {
             continue;
         };

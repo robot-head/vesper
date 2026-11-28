@@ -125,7 +125,7 @@ fn word_type(in t: Types, in wd: World, ty: u32) -> bool {
 
 // The word count of `native_aggregates::enum_shape(ty)`: the tag word plus
 // one per field of every variant, or NONE64 when `ty` has no shape.
-fn enum_words(
+pub fn enum_words(
     inout ls: Layouts,
     inout t: Types,
     inout names: Names,

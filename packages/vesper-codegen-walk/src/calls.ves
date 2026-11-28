@@ -1,0 +1,467 @@
+// The direct callee words of each instance's body: `Codegen::plain_call`
+// of src/native.rs (Stage 2 bootstrap switch slice 3b, #2660, part of
+// #2659).
+//
+// When the walk hands a body to the `body` hook it names, for each
+// `Op::Call` of the body in instruction order, the callee's function id
+// when the walk would emit the call as a plain direct call, else
+// `codegen_swap::body::NO_CALLEE`. The id carries the call's flags above
+// its low 32 bits: `WORDS_CALL` for a small enum result returned as words,
+// `FAIL_CALL` for a `fail_only` callee and `STATUS_CALL` when that callee
+// returns its failure status in a register. This module makes the same
+// decisions over @vesper/codegen-calls' discovery and conventions, so
+// @vesper/native-lib can name the callees itself.
+//
+// `call_words_bytes` (lib.ves: `native_walk_call_words`) reads the calls
+// input (check-data's names, types and world, the place-ir program
+// section, the calls section) and answers, per task that is not another
+// library root: the instance count, then per instance its index, its call
+// count and the call words (an instance without a lowered graph has no
+// calls); or `REFUSED` where the Rust compile stops before the walk.
+
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, Types};
+use @vesper/check-data::world::{World};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/check-layout::{Layouts, layouts_new};
+use @vesper/place-ir::{Program, read_program};
+use @vesper/place-ir::codes::{Op};
+use @vesper/codegen-calls::data::{Calls, read_calls};
+use @vesper/codegen-calls::instances::{
+    Conc, Found, Syms, concrete, contains_function, discover_roots, fail_only,
+    function_value_instance, is_root, ivars_new, program_facts, specialized, syms_new
+};
+use @vesper/codegen-calls::abi::{
+    Errs, FnAbi, default_abi, internal, layout_facts, scalar, trace_entry_ok, uses_caller_slot
+};
+use self::frame::{enum_words};
+
+const NONE32: u32 = 4294967295;
+// `codegen_swap::body::NO_CALLEE`: a call the walk does not make directly.
+pub const NO_CALLEE: u64 = 18446744073709551615;
+// `codegen_swap::body::FAIL_CALL`, `STATUS_CALL` and `WORDS_CALL`.
+pub const FAIL_CALL: u64 = 4294967296;
+pub const STATUS_CALL: u64 = 8589934592;
+pub const WORDS_CALL: u64 = 17179869184;
+// A task the Rust compile refuses before the walk (discovery or a
+// convention failed): no instances.
+pub const REFUSED: u64 = 18446744073709551615;
+// `scalar` refused.
+const V_NONE: u8 = 255;
+// `Pass::In`'s word in the program section (`pass_word`).
+const PASS_IN: u64 = 0;
+// An `Op::Call`'s operands: the callee, the argument count, then per
+// argument its pass, value, place root and place path.
+const CALL_ARGS_AT: u64 = 2;
+const ARG_WORDS: u64 = 4;
+// The callee names of other lowerings (src/ffi_lowering/types.rs,
+// src/integer_widths.rs, src/atomics.rs, src/arrays.rs) and the slice type
+// (src/seq.rs).
+const PINNED_ADDRESS: Str = "Pinned::address";
+const MUL_WIDE: Str = "mul_wide";
+const PARALLEL_FOR: Str = "parallel_for";
+const TABLE_PREFIX: Str = "$table$";
+const SLICE_TYPE: Str = "Slice";
+const LEADING_ZEROS: Str = "leading_zeros_";
+const TRAILING_ZEROS: Str = "trailing_zeros_";
+const COUNT_ONES: Str = "count_ones_";
+const WRAPPING_SHL: Str = "wrapping_shl_";
+const WRAPPING_SHR: Str = "wrapping_shr_";
+const WRAPPING_NEG: Str = "wrapping_neg_";
+
+// The callee names `plain_call` leaves to their own lowerings, interned
+// once.
+copy struct Builtins {
+    // `ffi_lowering::types::PINNED_ADDRESS`
+    pinned_address: u32,
+    // `integer_widths::MUL_WIDE`
+    mul_wide: u32,
+    // `atomics::PARALLEL_FOR`
+    parallel_for: u32,
+    // `seq::SLICE_TYPE`
+    slice: u32,
+}
+
+fn builtins_new(inout names: Names) -> Builtins {
+    Builtins {
+        pinned_address: names.intern(in PINNED_ADDRESS.as_bytes()),
+        mul_wide: names.intern(in MUL_WIDE.as_bytes()),
+        parallel_for: names.intern(in PARALLEL_FOR.as_bytes()),
+        slice: names.intern(in SLICE_TYPE.as_bytes()),
+    }
+}
+
+// `integer_widths::BIT_BUILTINS`' prefixes, the length of the one `sym`
+// starts with, or 0.
+fn bit_prefix_len(in names: Names, sym: u32) -> u64 {
+    let mut at = prefix_len(in names, sym, LEADING_ZEROS);
+    at = at | prefix_len(in names, sym, TRAILING_ZEROS);
+    at = at | prefix_len(in names, sym, COUNT_ONES);
+    at = at | prefix_len(in names, sym, WRAPPING_SHL);
+    at = at | prefix_len(in names, sym, WRAPPING_SHR);
+    at | prefix_len(in names, sym, WRAPPING_NEG)
+}
+
+// The length of `prefix` when `sym` starts with it, else 0.
+fn prefix_len(in names: Names, sym: u32, prefix: Str) -> u64 {
+    if names.has_prefix(sym, in prefix.as_bytes()) {
+        prefix.as_bytes().len()
+    } else {
+        0
+    }
+}
+
+// `integer_widths::bit_builtin(name).is_some()`: a bit builtin's prefix
+// followed by an integer kind's name.
+fn bit_builtin(in names: Names, k: Syms, sym: u32) -> bool {
+    let at = bit_prefix_len(in names, sym);
+    if at == 0 {
+        return false;
+    }
+    let mut kind: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in at..names.size(sym) {
+        kind.push(names.byte(sym, i));
+    }
+    let found = names.lookup(in kind.as_slice());
+    found != NONE32 && k.is_integer(found)
+}
+
+// The callee names whose calls other lowerings intercept: the pinned
+// address, `mul_wide`, `parallel_for`, the bit builtins and the constant
+// tables (`arrays::table_function`). `atomics::intercepted` names
+// `Atomic::<op>` methods of the atomic prelude, which are generic, so the
+// generics check refuses them.
+fn intercepted(in names: Names, k: Syms, b: Builtins, sym: u32) -> bool {
+    sym == b.pinned_address
+        || sym == b.mul_wide
+        || sym == b.parallel_for
+        || bit_builtin(in names, k, sym)
+        || names.has_prefix(sym, in TABLE_PREFIX.as_bytes())
+}
+
+// The state of one task: its instances, their conventions and ids.
+struct Task {
+    found: Found,
+    roots: ChunkSeq[u32],
+    abis: ChunkSeq[FnAbi],
+    // instance key symbol -> instance index + 1
+    by_key: ChunkSeq[u64],
+    // the trace host's entry instance index, or NONE32
+    trace_entry: u32,
+}
+
+impl Task {
+    fn instance(in self, key: u32) -> u64 {
+        let stored = u64_at(in self.by_key, w(key));
+        if stored == 0 {
+            NO_CALLEE
+        } else {
+            wrapping_sub(stored, 1)
+        }
+    }
+
+    fn abi(in self, i: u64) -> FnAbi {
+        self.abis.try_get(i).unwrap_or(default_abi())
+    }
+
+    // The module's function id of instance `i`: the instances are declared
+    // in order, and a trace host's entry also declares its internal twin
+    // right after it (`declare_instances_with_trace`).
+    fn id(in self, i: u64) -> u64 {
+        if self.trace_entry != NONE32 && i > w(self.trace_entry) {
+            inc(i)
+        } else {
+            i
+        }
+    }
+}
+
+// `scalar_type` of `plain_call`: a type the call passes or returns as one
+// value.
+fn scalar_type(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in d: Calls,
+    k: Syms,
+    b: Builtins,
+    in f: Conc,
+    ty: u32
+) -> bool {
+    let node = t.node(ty);
+    if node.kind == TyKind::Named
+        && node.n == 1
+        && (node.name == k.chunk_seq || node.name == b.slice)
+    {
+        return false;
+    }
+    if node.kind == TyKind::Fn || contains_function(inout t, in wd, ty) {
+        return false;
+    }
+    let mut err = Errs { text: ChunkSeq::new[u8]() };
+    let l = layout_facts(inout ls, inout t, inout names, in wd, ty, inout err);
+    if !l.ok || l.aggregate {
+        return false;
+    }
+    scalar(in t, in names, in d, k, d.fn_info(f.func_index), ty, inout err) != V_NONE
+}
+
+// `plain_call` of the call at instruction operands `a`: the callee's word,
+// or NO_CALLEE.
+fn plain_call(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in d: Calls,
+    k: Syms,
+    b: Builtins,
+    in p: Program,
+    in task: Task,
+    a: u64
+) -> u64 {
+    let callee = n32(p.op(a));
+    let source = d.function(callee);
+    if source == NONE32 {
+        return NO_CALLEE;
+    }
+    let info = d.fn_info(source);
+    let nargs = p.op(inc(a));
+    let types_at = add(add(a, CALL_ARGS_AT), wrapping_mul(nargs, ARG_WORDS));
+    let ntypes = p.op(types_at);
+    let capability = p.op(add(inc(types_at), ntypes));
+    let f = concrete(inout t, inout names, in d, callee, in ivars_new());
+    let fails = fail_only(inout t, in names, in wd, k, in f);
+    let row = t.row(info.row);
+    if capability != 0
+        || ntypes != 0
+        || info.generic_count != 0
+        || (row.n != 0 && !fails)
+        || row.tail != 0
+        || intercepted(in names, k, b, callee)
+        || d.is_stub(callee)
+        || nargs != w(info.param_count)
+    {
+        return NO_CALLEE;
+    }
+    for j in 0..nargs {
+        if p.op(add(add(a, CALL_ARGS_AT), wrapping_mul(j, ARG_WORDS))) != PASS_IN {
+            return NO_CALLEE;
+        }
+    }
+    let i = task.instance(callee);
+    if i == NO_CALLEE {
+        return NO_CALLEE;
+    }
+    let abi = task.abi(i);
+    // A small enum result the callee returns as words in registers (#2581).
+    let words_result = abi.result_words != 0
+        && enum_words(inout ls, inout t, inout names, in wd, f.result) == w(abi.result_words);
+    if specialized(inout t, in names, in wd, k, in f)
+        || uses_caller_slot(in d, info)
+        || function_value_instance(inout t, in names, in wd, in d, k, info)
+    {
+        return NO_CALLEE;
+    }
+    if !words_result
+        && !scalar_type(inout ls, inout t, inout names, in wd, in d, k, b, in f, f.result)
+    {
+        return NO_CALLEE;
+    }
+    for j in 0..f.params.len() {
+        if !scalar_type(inout ls, inout t, inout names, in wd, in d, k, b, in f, f.param(j).ty) {
+            return NO_CALLEE;
+        }
+    }
+    // The trace host's entry is called through its internal twin, which
+    // the walk does not name directly; a plain body never passes the trace
+    // flag (`uses_trace_fail` without it).
+    if task.trace_entry != NONE32 && i == w(task.trace_entry) {
+        return NO_CALLEE;
+    }
+    if (abi.result_words != 0 && !words_result) || (abi.status && !fails) {
+        return NO_CALLEE;
+    }
+    let id = task.id(i);
+    if words_result {
+        id | WORDS_CALL
+    } else if !fails {
+        id
+    } else if abi.status {
+        id | FAIL_CALL | STATUS_CALL
+    } else {
+        id | FAIL_CALL
+    }
+}
+
+// The call words of program function `fi`'s graph, appended to `o` after
+// their count.
+fn graph_calls(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in d: Calls,
+    k: Syms,
+    b: Builtins,
+    in p: Program,
+    in task: Task,
+    fi: u64,
+    inout o: ChunkSeq[u64]
+) {
+    let f = p.function(fi);
+    let at = o.len();
+    o.push(0);
+    let mut n: u64 = 0;
+    for bi in f.b0..add(f.b0, f.bc) {
+        let block = p.block(bi);
+        for ii in block.i0..add(block.i0, block.ic) {
+            let inst = p.inst(ii);
+            if inst.op != Op::Call {
+                continue;
+            }
+            o.push(plain_call(
+                inout ls,
+                inout t,
+                inout names,
+                in wd,
+                in d,
+                k,
+                b,
+                in p,
+                in task,
+                inst.a
+            ));
+            n = inc(n);
+        }
+    }
+    let ok = o.try_set(at, n);
+}
+
+// The answer: see the header.
+pub fn call_words_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader { pos: 0 };
+    let mut c = read_ctx(inout r, in bytes);
+    let p = read_program(inout r, in bytes, in c);
+    let d = read_calls(inout r, in bytes, in c);
+    let k = syms_new(inout c.names);
+    let b = builtins_new(inout c.names);
+    let facts = program_facts(in c.names, in d, in p);
+    let mut ls = layouts_new();
+    // program function name symbol -> function index + 1
+    let mut graph_of: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for fi in 0..p.fn_count() {
+        let name = w(p.function(fi).name);
+        if name >= graph_of.len() {
+            graph_of.resize(inc(name), 0);
+        }
+        let ok = graph_of.try_set(name, inc(fi));
+    }
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for ti in 0..d.tasks.len() {
+        let spec = d.task(ti);
+        if spec.more_roots {
+            continue;
+        }
+        let mut roots: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        roots.push(spec.entry);
+        if spec.library {
+            let mut tj = inc(ti);
+            loop {
+                if tj >= d.tasks.len() || !d.task(tj).more_roots {
+                    break;
+                }
+                roots.push(d.task(tj).entry);
+                tj = inc(tj);
+            }
+        }
+        let trace_ok = !spec.library
+            && spec.trace_host
+            && trace_entry_ok(in c.types, in c.names, in d, k, spec.entry);
+        let found = discover_roots(
+            inout c.types,
+            inout c.names,
+            in c.world,
+            in d,
+            in facts,
+            k,
+            in roots,
+            trace_ok
+        );
+        if found.err.len() != 0 {
+            o.push(REFUSED);
+            continue;
+        }
+        let mut task = Task {
+            found: found,
+            roots: roots,
+            abis: ChunkSeq::new[FnAbi](),
+            by_key: ChunkSeq::new[u64](),
+            trace_entry: NONE32,
+        };
+        // `NativeAbi::plan`: an optimized build gives every non-boundary
+        // instance its internal convention.
+        let mut errs = Errs { text: ChunkSeq::new[u8]() };
+        let mut ok = true;
+        for i in 0..task.found.insts.len() {
+            let x = task.found.inst(i);
+            let vars = task.found.vars_of(x);
+            let f = concrete(inout c.types, inout c.names, in d, x.name, in vars);
+            let mut abi = default_abi();
+            if spec.optimize && !is_root(in task.roots, x.key) {
+                if !internal(
+                    inout ls,
+                    inout c.types,
+                    inout c.names,
+                    in c.world,
+                    in d,
+                    k,
+                    in f,
+                    inout abi,
+                    inout errs
+                ) {
+                    ok = false;
+                    break;
+                }
+            }
+            task.abis.push(abi);
+            if w(x.key) >= task.by_key.len() {
+                task.by_key.resize(inc(w(x.key)), 0);
+            }
+            let set = task.by_key.try_set(w(x.key), inc(i));
+            if trace_ok && x.key == spec.entry {
+                task.trace_entry = n32(i);
+            }
+        }
+        if !ok {
+            o.push(REFUSED);
+            continue;
+        }
+        o.push(task.found.insts.len());
+        for i in 0..task.found.insts.len() {
+            let x = task.found.inst(i);
+            o.push(i);
+            let g = u64_at(in graph_of, w(x.name));
+            if g == 0 {
+                o.push(0);
+                continue;
+            }
+            graph_calls(
+                inout ls,
+                inout c.types,
+                inout c.names,
+                in c.world,
+                in d,
+                k,
+                b,
+                in p,
+                in task,
+                wrapping_sub(g, 1),
+                inout o
+            );
+        }
+    }
+    o
+}
