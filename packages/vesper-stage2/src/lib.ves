@@ -478,8 +478,8 @@ fn front_with_traits(
     let mut names0 = names_new();
     let types0 = types_new(inout names0);
     let mut first = collect_program_traits(in mods, sink names0, sink types0, sink mono_plan_new());
-    add_foreign_decls(inout first, inout foreign);
     if first.tr.traits.len() == 0 && first.tr.confs.len() == 0 {
+        add_foreign_decls(inout first, inout foreign);
         let (ir, n, t, wd) = build_ir_ast_for_entry(sink first, in mods, in "");
         return (ir, n, t, wd, dyn_out_new());
     }

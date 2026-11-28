@@ -35,6 +35,8 @@ use @vesper/wasm-backend::ir::{Pair};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
+// The low word of a span: its position in the module.
+const LOW32: u64 = 4294967295;
 // The byte `Mono::instance` joins instance key segments with.
 const KEY_JOIN: u8 = 46;
 // `$`, which joins the parts of generated names.
@@ -58,11 +60,25 @@ pub copy struct TraitRow {
 // are generated as `cf_fn[f0..f0+fnn]`.
 pub copy struct ConfRow {
     trait_name: u32,
+    // A named model's name (`model Name: Trait for T`), or NONE32 for the
+    // canonical conformance.
+    model: u32,
     self_ty: u32,
     g0: u32,
     gn: u32,
     f0: u32,
     fnn: u32,
+}
+
+// A `use model` (`ModelUse`) in module `mod_idx`: model `model` selected
+// from the end of the statement `end` within scope `s0..s1`.
+pub copy struct ModelUseRow {
+    mod_idx: u32,
+    model: u32,
+    start: u64,
+    end: u64,
+    s0: u64,
+    s1: u64,
 }
 
 // One trait bound `param: trait_name` of function `owner`.
@@ -86,6 +102,7 @@ pub struct TraitInfo {
     bounded: ChunkSeq[u32],
     // By function symbol: 1 for a stub.
     is_stub: ChunkSeq[u32],
+    muses: ChunkSeq[ModelUseRow],
 }
 
 pub fn trait_info_new(active: bool) -> TraitInfo {
@@ -100,7 +117,8 @@ pub fn trait_info_new(active: bool) -> TraitInfo {
         cf_fn: ChunkSeq::new[u32](),
         bounds: ChunkSeq::new[BoundRow](),
         bounded: ChunkSeq::new[u32](),
-        is_stub: ChunkSeq::new[u32]()
+        is_stub: ChunkSeq::new[u32](),
+        muses: ChunkSeq::new[ModelUseRow]()
     }
 }
 
@@ -132,6 +150,7 @@ fn conf_at(in tr: TraitInfo, i: u64) -> ConfRow {
         Option::Some(c) => c,
         Option::None => ConfRow {
             trait_name: NONE32,
+            model: NONE32,
             self_ty: NONE32,
             g0: 0,
             gn: 0,
@@ -251,9 +270,47 @@ pub fn ty_bind(
     true
 }
 
+// The generated function of conformance `ci` for `method`, or NONE32.
+pub fn conf_fn(in tr: TraitInfo, ci: u64, method: u32) -> u32 {
+    let c = conf_at(in tr, ci);
+    for k in 0..w(c.fnn) {
+        let fi = wrapping_add(w(c.f0), k);
+        if u32_at(in tr.cf_method, fi) == method {
+            return u32_at(in tr.cf_fn, fi);
+        }
+    }
+    NONE32
+}
+
+// Whether conformance `ci` is of trait `trait_name` (any when NONE32),
+// implements `method` (any when NONE32) and covers `recv`.
+fn conf_covers(
+    in tr: TraitInfo,
+    inout types: Types,
+    ci: u64,
+    trait_name: u32,
+    method: u32,
+    recv: u32
+) -> bool {
+    let c = conf_at(in tr, ci);
+    if trait_name != NONE32 && c.trait_name != trait_name {
+        return false;
+    }
+    if method != NONE32 && conf_fn(in tr, ci, method) == NONE32 {
+        return false;
+    }
+    if c.gn == 0 {
+        return c.self_ty == recv;
+    }
+    let mut vars = vars_new();
+    ty_bind(inout types, c.self_ty, recv, in tr.conf_gens, w(c.g0), w(c.gn), inout vars)
+}
+
 // The conformance whose generated function implements `method` for
 // receiver type `recv` (of trait `trait_name`, or of any trait when it is
 // NONE32): (the function, the conformance index), or (NONE32, NONE64).
+// The canonical conformance wins; a named model counts only for typing
+// (`select_conf` picks one where a `use model` is in scope).
 pub fn resolve_conf(
     in tr: TraitInfo,
     inout types: Types,
@@ -261,33 +318,73 @@ pub fn resolve_conf(
     method: u32,
     recv: u32
 ) -> (u32, u64) {
-    for ci in 0..tr.confs.len() {
-        let c = conf_at(in tr, ci);
-        if trait_name != NONE32 && c.trait_name != trait_name {
-            continue;
-        }
-        let mut target = NONE32;
-        for k in 0..w(c.fnn) {
-            let fi = wrapping_add(w(c.f0), k);
-            if u32_at(in tr.cf_method, fi) == method {
-                target = u32_at(in tr.cf_fn, fi);
+    for pass in 0..2 {
+        for ci in 0..tr.confs.len() {
+            let canonical = conf_at(in tr, ci).model == NONE32;
+            if canonical != (pass == 0) {
+                continue;
             }
-        }
-        if target == NONE32 {
-            continue;
-        }
-        if c.gn == 0 {
-            if c.self_ty == recv {
-                return (target, ci);
+            if conf_covers(in tr, inout types, ci, trait_name, method, recv) {
+                return (conf_fn(in tr, ci, method), ci);
             }
-            continue;
-        }
-        let mut vars = vars_new();
-        if ty_bind(inout types, c.self_ty, recv, in tr.conf_gens, w(c.g0), w(c.gn), inout vars) {
-            return (target, ci);
         }
     }
     (NONE32, NONE64)
+}
+
+// The conformance for `recv: trait_name` (implementing `method` unless
+// NONE32) at span `span`: a named model a `use model` in scope there
+// selects (the innermost first, as `scopes_at` orders them), else the
+// canonical one; NONE64 when none covers it.
+pub fn select_conf(
+    in tr: TraitInfo,
+    inout types: Types,
+    trait_name: u32,
+    method: u32,
+    recv: u32,
+    span: u64
+) -> u64 {
+    let mod_idx = n32(span >> 32);
+    let pos = span & LOW32;
+    let mut best = NONE64;
+    let mut best_use = NONE64;
+    for ui in 0..tr.muses.len() {
+        let u = match tr.muses.try_get(ui) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        if u.mod_idx != mod_idx || pos < u.s0 || pos >= u.s1 || u.end > pos {
+            continue;
+        }
+        for ci in 0..tr.confs.len() {
+            if conf_at(in tr, ci).model != u.model {
+                continue;
+            }
+            if !conf_covers(in tr, inout types, ci, trait_name, method, recv) {
+                continue;
+            }
+            let inner = match tr.muses.try_get(best_use) {
+                Option::Some(b) => u.s0 > b.s0
+                    || (u.s0 == b.s0 && (u.s1 < b.s1 || (u.s1 == b.s1 && u.start > b.start))),
+                Option::None => true,
+            };
+            if inner {
+                best = ci;
+                best_use = ui;
+            }
+        }
+    }
+    if best != NONE64 {
+        return best;
+    }
+    for ci in 0..tr.confs.len() {
+        if conf_at(in tr, ci).model == NONE32
+            && conf_covers(in tr, inout types, ci, trait_name, method, recv)
+        {
+            return ci;
+        }
+    }
+    NONE64
 }
 
 // `key_segment`: the injective encoding of a type in generated names.
@@ -471,6 +568,10 @@ pub copy struct Inst {
     name: u32,
     v0: u64,
     vn: u64,
+    // The conformance discharging each bound of `origin` (in `bounds`
+    // order): `evs[e0..e0+en]`.
+    e0: u64,
+    en: u64,
 }
 
 // In the body of instance `ctx` (0: an original function), the call at
@@ -510,6 +611,7 @@ pub struct MonoPlan {
     insts: ChunkSeq[Inst],
     pairs: ChunkSeq[Pair],
     renames: ChunkSeq[Rename],
+    evs: ChunkSeq[u64],
     // By function symbol: 1 for the bounded originals and the stubs the
     // second pass leaves out.
     dropped: ChunkSeq[u32],
@@ -526,6 +628,7 @@ pub fn mono_plan_new() -> MonoPlan {
         insts: ChunkSeq::new[Inst](),
         pairs: ChunkSeq::new[Pair](),
         renames: ChunkSeq::new[Rename](),
+        evs: ChunkSeq::new[u64](),
         dropped: ChunkSeq::new[u32](),
         boxed: ChunkSeq::new[u32](),
         thunks: ChunkSeq::new[Thunk](),
@@ -600,7 +703,7 @@ pub fn is_dropped(in plan: MonoPlan, sym: u32) -> bool {
 pub fn inst_at(in plan: MonoPlan, i: u64) -> Inst {
     match plan.insts.try_get(i) {
         Option::Some(v) => v,
-        Option::None => Inst { origin: NONE32, name: NONE32, v0: 0, vn: 0 },
+        Option::None => Inst { origin: NONE32, name: NONE32, v0: 0, vn: 0, e0: 0, en: 0 },
     }
 }
 
@@ -736,10 +839,12 @@ fn push_rename(inout p: Planner, ctx: u32, s0: u64, s1: u64, target: u32, pass0:
 fn instance(
     inout p: Planner,
     in a: IrAst,
+    in tr: TraitInfo,
     inout names: Names,
     in types: Types,
     origin: u32,
-    in vars: Vars
+    in vars: Vars,
+    in evs: ChunkSeq[u64]
 ) -> u32 {
     let f = match fn_of(in a, origin) {
         Option::Some(v) => v,
@@ -759,10 +864,15 @@ fn instance(
     }
     for ii in 0..p.plan.insts.len() {
         let inst = inst_at(in p.plan, ii);
-        if inst.origin != origin || inst.vn != args.len() {
+        if inst.origin != origin || inst.vn != args.len() || inst.en != evs.len() {
             continue;
         }
         let mut same = true;
+        for k in 0..evs.len() {
+            if u64_at(in evs, k) != u64_at(in p.plan.evs, wrapping_add(inst.e0, k)) {
+                same = false;
+            }
+        }
         for k in 0..args.len() {
             let x = match args.try_get(k) {
                 Option::Some(v) => v.ty,
@@ -792,6 +902,14 @@ fn instance(
             Option::None => {},
         }
     }
+    // A named model in the evidence names the instance apart.
+    for k in 0..evs.len() {
+        let model = conf_at(in tr, u64_at(in evs, k)).model;
+        if model != NONE32 {
+            buf.push(DOLLAR);
+            names.write(model, inout buf);
+        }
+    }
     let mut name = names.intern(in buf.as_slice());
     for ii in 0..p.plan.insts.len() {
         if inst_at(in p.plan, ii).name == name {
@@ -808,7 +926,13 @@ fn instance(
             Option::None => {},
         }
     }
-    p.plan.insts.push(Inst { origin: origin, name: name, v0: v0, vn: args.len() });
+    let e0 = p.plan.evs.len();
+    for k in 0..evs.len() {
+        p.plan.evs.push(u64_at(in evs, k));
+    }
+    p.plan
+        .insts
+        .push(Inst { origin: origin, name: name, v0: v0, vn: args.len(), e0: e0, en: evs.len() });
     p.work.push(n32(p.plan.insts.len()));
     name
 }
@@ -830,6 +954,69 @@ fn push_dec(inout out: ChunkSeq[u8], v: u64) {
             Option::None => {},
         }
     }
+}
+
+// `Mono::evidence`: the conformance discharging `ty: trait_name` in
+// instance context `ctx`: the evidence of the matching bound of the
+// instance's origin, else the one selected at `span` (under its `use
+// model` scopes); NONE64 when none does.
+fn evidence(
+    in p: Planner,
+    in tr: TraitInfo,
+    inout types: Types,
+    ctx: u32,
+    trait_name: u32,
+    ty: u32,
+    span: u64
+) -> u64 {
+    if ctx != 0 {
+        let inst = inst_at(in p.plan, wrapping_sub(w(ctx), 1));
+        let vars = inst_vars(in p.plan, ctx);
+        let mut bi: u64 = 0;
+        for i in 0..tr.bounds.len() {
+            let b = match tr.bounds.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => continue,
+            };
+            if b.owner != inst.origin {
+                continue;
+            }
+            if b.trait_name == trait_name && vars.get(b.param) == ty && bi < inst.en {
+                return u64_at(in p.plan.evs, wrapping_add(inst.e0, bi));
+            }
+            bi = wrapping_add(bi, 1);
+        }
+    }
+    select_conf(in tr, inout types, trait_name, NONE32, ty, span)
+}
+
+// `Mono::callee_evidence`: the evidence of each bound of `callee` (in
+// `bounds` order) at `cvars`, stopping at the first undischarged one.
+fn callee_evidence(
+    in p: Planner,
+    in tr: TraitInfo,
+    inout types: Types,
+    ctx: u32,
+    callee: u32,
+    in cvars: Vars,
+    span: u64
+) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    for i in 0..tr.bounds.len() {
+        let b = match tr.bounds.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        if b.owner != callee {
+            continue;
+        }
+        let ev = evidence(in p, in tr, inout types, ctx, b.trait_name, cvars.get(b.param), span);
+        if ev == NONE64 {
+            break;
+        }
+        out.push(ev);
+    }
+    out
 }
 
 // Visits the calls of function `fsym` in instance context `ctx` under
@@ -869,7 +1056,8 @@ fn visit(
             if mentions_generic(in a, in types, in f, recv) {
                 continue;
             }
-            let (target, conf) = resolve_conf(in tr, inout types, c.trait_name, c.method, recv);
+            let conf = evidence(in p, in tr, inout types, ctx, c.trait_name, recv, c.s0);
+            let target = conf_fn(in tr, conf, c.method);
             if target == NONE32 {
                 continue;
             }
@@ -885,7 +1073,17 @@ fn visit(
                     w(cr.gn),
                     inout hv
                 );
-                let name = instance(inout p, in a, inout names, in types, target, in hv);
+                let evs = callee_evidence(in p, in tr, inout types, ctx, target, in hv, c.s0);
+                let name = instance(
+                    inout p,
+                    in a,
+                    in tr,
+                    inout names,
+                    in types,
+                    target,
+                    in hv,
+                    in evs
+                );
                 push_rename(inout p, ctx, c.s0, c.s1, name, first_pass(in a, target), true);
             } else {
                 push_rename(inout p, ctx, c.s0, c.s1, target, first_pass(in a, target), false);
@@ -908,13 +1106,21 @@ fn visit(
         if !is_bounded(in tr, g.callee) || is_stub(in tr, g.callee) {
             continue;
         }
+        let callee = match fn_of(in a, g.callee) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
         let mut args = vars_new();
         let mut closed = true;
         for k in 0..g.vn {
             match out.pairs.try_get(wrapping_add(g.v0, k)) {
                 Option::Some(pr) => {
                     let t = substitute(inout types, pr.ty, in vars);
-                    if mentions_generic(in a, in types, in f, t) {
+                    // A type argument the first check left open (the
+                    // callee's own parameter) names no instance.
+                    if mentions_generic(in a, in types, in f, t)
+                        || mentions_generic(in a, in types, in callee, t)
+                    {
                         closed = false;
                     }
                     args.set(pr.name, t);
@@ -925,7 +1131,8 @@ fn visit(
         if !closed {
             continue;
         }
-        let name = instance(inout p, in a, inout names, in types, g.callee, in args);
+        let evs = callee_evidence(in p, in tr, inout types, ctx, g.callee, in args, g.s0);
+        let name = instance(inout p, in a, in tr, inout names, in types, g.callee, in args, in evs);
         push_rename(inout p, ctx, g.s0, g.s1, name, first_pass(in a, g.callee), true);
     }
     for ci in 0..out.cos.len() {
@@ -996,7 +1203,8 @@ fn dyn_vtable(
                 w(cr.gn),
                 inout hv
             );
-            instance(inout p, in a, inout names, in types, generated, in hv)
+            let evs = callee_evidence(in p, in tr, inout types, 0, generated, in hv, 0);
+            instance(inout p, in a, in tr, inout names, in types, generated, in hv, in evs)
         } else {
             generated
         };

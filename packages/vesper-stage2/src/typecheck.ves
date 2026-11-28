@@ -21,7 +21,8 @@ use self::ffi::{OPEN_TYPE};
 use self::facts::{loop_breaks, loop_never_breaks, loop_plain_breaks};
 use self::traits::{
     BoxCo, GenCall, TraitCall, TraitCalls, TraitInfo, boxed_object, boxed_trait, bound_stub,
-    is_object, resolve_conf, stub_of, stub_trait, trait_calls_new, trait_index, trait_info_new
+    conf_fn, is_object, select_conf, stub_of, stub_trait, trait_calls_new, trait_index,
+    trait_info_new
 };
 use self::sugar_policy::{
     POLICY_BAD_METADATA, POLICY_OK, PolicyFailure, PolicyInputs, PolicySpan, caller_supplied,
@@ -2601,6 +2602,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 let sl_nm = tc.names.intern(in "Slice".as_bytes());
                                 named1(inout tc, sl_nm, u8t)
                             } else if (is_op(in tc, mname, in "as_slice")
+                                || is_op(in tc, mname, in "as_slice_mut")
                                 || is_op(in tc, mname, in "sub_slice"))
                                 && tc.types.arity(bt) > 0
                             {
@@ -3360,8 +3362,9 @@ fn trait_call(
             tname = stub_trait(in tc.tr, target);
         }
     } else {
-        let (t, _conf) = resolve_conf(in tc.tr, inout tc.types, trait_name, method, recv);
-        target = t;
+        // A `use model` in scope at the call selects its model (§7.2).
+        let conf = select_conf(in tc.tr, inout tc.types, trait_name, method, recv, e.s0);
+        target = conf_fn(in tc.tr, conf, method);
     }
     if target == NONE32 {
         return Option::None;

@@ -4,8 +4,8 @@
 
 use @vesper/ast::{
     AdtNode, Ast, BoundNode, ConfNode, EffectDeclNode, EffectNode, EffectsNode, FieldNode, FnNode,
-    GenericNode, ImplNode, ItemNode, ParamNode, TraitNode, TraitRefNode, TypeNode as AstTypeNode,
-    VariantNode, WhereNode, list_at, list_len, none as ast_none
+    GenericNode, ImplNode, ItemNode, ModelUseNode, ParamNode, TraitNode, TraitRefNode,
+    TypeNode as AstTypeNode, VariantNode, WhereNode, list_at, list_len, none as ast_none
 };
 use @vesper/check-data::names::{Names, names_new};
 use @vesper/check-data::types::{
@@ -14,6 +14,13 @@ use @vesper/check-data::types::{
 use @vesper/check-data::util::{inc32, n32, u32_at, u64_at, u8_at, w};
 
 const NONE32: u32 = 4294967295;
+// A named model's generated functions are `model$<Name>$<method>`.
+const MODEL_FN: Str = "model$";
+const DOLLAR_BYTE: u8 = 36;
+// The builtin traits an empty impl derives (`builtin_traits::TRAITS`).
+const DERIVE_EQ: Str = "Eq";
+const DERIVE_ORD: Str = "Ord";
+const DERIVE_HASH: Str = "Hash";
 // A `vcl_decls.ves` row: words split by a space; a parameter word starts
 // with its pass letter.
 const ROW_SEPARATOR: u8 = 32;
@@ -42,9 +49,9 @@ use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};
 use self::vcl_decls::{vcl_decl, vcl_decl_count};
 use self::traits::{
-    BoundRow, ConfRow, MonoPlan, TraitInfo, TraitRow, generated_name, inst_at, inst_vars,
-    is_dropped, key_segment, mark_bounded, mark_stub, mono_plan_new, stub_name, stub_of, thunk_at,
-    trait_index, trait_info_new, vtable_stub_name
+    BoundRow, ConfRow, ModelUseRow, MonoPlan, TraitInfo, TraitRow, generated_name, inst_at,
+    inst_vars, is_dropped, key_segment, mark_bounded, mark_stub, mono_plan_new, stub_name, stub_of,
+    thunk_at, trait_index, trait_info_new, vtable_stub_name
 };
 
 pub copy struct FnInfo {
@@ -1065,6 +1072,14 @@ fn collect_program_with(
                 }
                 if traits {
                     collect_bounds(in m.ast, inout names, inout cache, inout tmp, inout tr);
+                    collect_model_uses(
+                        in m.ast,
+                        n32(mi),
+                        inout names,
+                        inout cache,
+                        inout tmp,
+                        inout tr
+                    );
                 }
             },
             Option::None => {},
@@ -1771,9 +1786,11 @@ fn collect_conformance(
         Option::Some(v) => v,
         Option::None => return,
     };
-    if c.model != ast_none() {
-        return;
-    }
+    let model = if c.model == ast_none() {
+        NONE32
+    } else {
+        translate_sym(in ast, c.model, inout names, inout cache, inout tmp)
+    };
     let tref = match ast.trait_refs.get(idx_from_raw[TraitRefNode](c.trait_ref)) {
         Option::Some(v) => v,
         Option::None => return,
@@ -1782,6 +1799,16 @@ fn collect_conformance(
         return;
     }
     let tname0 = translate_sym(in ast, tref.name, inout names, inout cache, inout tmp);
+    // An empty canonical impl of a builtin trait only asks for the derived
+    // conformance the loader appended (`builtin_traits::prelude` strips it).
+    if model == NONE32
+        && list_len(in ast, c.methods) == 0
+        && list_len(in ast, c.assoc) == 0
+        && list_len(in ast, tref.args) == 0
+        && is_derivable_trait(in names, tname0)
+    {
+        return;
+    }
     // A trait with arguments keys as the named type `Trait[args]`.
     let tname = if list_len(in ast, tref.args) == 0 {
         tname0
@@ -1825,7 +1852,11 @@ fn collect_conformance(
             Option::None => continue,
         };
         let mname = translate_sym(in ast, fn_node.name, inout names, inout cache, inout tmp);
-        let gname = generated_name(inout names, in types, tname, self_ty, mname);
+        let gname = if model == NONE32 {
+            generated_name(inout names, in types, tname, self_ty, mname)
+        } else {
+            model_fn_name(inout names, model, mname)
+        };
         tr.cf_method.push(mname);
         tr.cf_fn.push(gname);
         collect_fn_into(
@@ -1869,12 +1900,59 @@ fn collect_conformance(
     }
     tr.confs.push(ConfRow {
         trait_name: tname0,
+        model: model,
         self_ty: self_ty,
         g0: g0,
         gn: n32(gn),
         f0: f0,
         fnn: wrapping_sub(n32(tr.cf_fn.len()), f0)
     });
+}
+
+// Whether `name` is one of the builtin traits a derive request names.
+fn is_derivable_trait(in names: Names, name: u32) -> bool {
+    names.spells(name, in DERIVE_EQ.as_bytes())
+        || names.spells(name, in DERIVE_ORD.as_bytes())
+        || names.spells(name, in DERIVE_HASH.as_bytes())
+}
+
+// A named model's generated function, `model$<Name>$<method>`
+// (`pact_frontend::generated_name`).
+fn model_fn_name(inout names: Names, model: u32, method: u32) -> u32 {
+    let mut buf = ChunkSeq::new[u8]();
+    buf.extend(in MODEL_FN.as_bytes());
+    names.write(model, inout buf);
+    buf.push(DOLLAR_BYTE);
+    names.write(method, inout buf);
+    names.intern(in buf.as_slice())
+}
+
+// The module's `use model` statements (`Module::model_uses`), with their
+// positions in the module's span space.
+fn collect_model_uses(
+    in ast: Ast,
+    mod_idx: u32,
+    inout names: Names,
+    inout cache: ChunkSeq[u32],
+    inout tmp: String,
+    inout tr: TraitInfo
+) {
+    for i in 0..ast.m_model_uses.len() {
+        let u = match ast.model_uses
+            .get(idx_from_raw[ModelUseNode](u32_at(in ast.m_model_uses, i)))
+        {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        tr.muses.push(ModelUseRow {
+            mod_idx: mod_idx,
+            model: translate_sym(in ast, u.model, inout names, inout cache, inout tmp),
+            start: widen_u64(u.start),
+            end: widen_u64(u.end),
+            s0: widen_u64(u.scope_start),
+            s1: widen_u64(u.scope_end)
+        });
+    }
 }
 
 // The module's trait bounds (`Module::trait_bounds`): each bounds its
