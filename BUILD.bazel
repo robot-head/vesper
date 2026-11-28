@@ -2396,6 +2396,35 @@ filegroup(
     visibility = ["//crates/vesper-cli-tests:__pkg__"],
 )
 
+# The package sources the CLI tests in //crates/vesper-cli-tests run
+# `vesper test` on (#2743): imported_source_tests and test_runner_cli.
+filegroup(
+    name = "cli_imported_source_data",
+    srcs = glob([
+        "packages/vesper-ast/Loom.toml",
+        "packages/vesper-ast/src/*.ves",
+        "packages/vesper-check-data/Loom.toml",
+        "packages/vesper-check-data/src/*.ves",
+        "packages/vesper-front/Loom.toml",
+        "packages/vesper-front/src/*.ves",
+        "packages/vesper-std/*/Loom.toml",
+        "packages/vesper-std/*/src/*.ves",
+    ]),
+    visibility = ["//crates/vesper-cli-tests:__pkg__"],
+)
+
+filegroup(
+    name = "cli_test_runner_data",
+    srcs = glob(["packages/vesper-std/*/src/*.ves"]) + [
+        "packages/vesper-std/core/Loom.toml",
+        "packages/vesper-std/sort/Loom.toml",
+        "packages/vesper-std/sugar/Loom.toml",
+        "packages/vesper-ast/src/text.ves",
+        "packages/vesper-front/src/util.ves",
+    ],
+    visibility = ["//crates/vesper-cli-tests:__pkg__"],
+)
+
 filegroup(
     name = "website",
     srcs = glob(["website/**"]),
