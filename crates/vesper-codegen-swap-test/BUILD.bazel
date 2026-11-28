@@ -41,6 +41,9 @@ vesper_crate(
         # vesper-resonance and vesper-ebpf, whose BUILD files keep them out
         # of //:files.
         "//crates/vesper-ebpf:files",
+        # The sampled hybrid port libraries include pact, whose module
+        # depends on the @vesper/pact package in crates/vesper-pact/vesper.
+        "//crates/vesper-pact:files",
         "//crates/vesper-resonance:files",
     ],
     test_tags = {test: [_HEAVY_CODEGEN_MEMORY] for test in _HEAVY_CODEGEN_TESTS},

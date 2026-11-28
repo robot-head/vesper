@@ -11,3 +11,5 @@ publish = false
 # before it moved here.
 wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "runtime", "std", "stack-switching", "gc", "gc-null"] }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
+# Reads the standalone Stage 2 x86-64 ELF objects (SH7, #2209).
+object = { version = "=0.37.3", default-features = false, features = ["write_core", "elf", "std", "read_core"] }

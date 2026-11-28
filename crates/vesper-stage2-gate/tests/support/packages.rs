@@ -531,6 +531,10 @@ pub const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
         "Stage 2 itself: stage2.wasm == stage3.wasm",
     ),
     (
+        "vesper-stage2-native",
+        "standalone Stage 2 x86-64 ELF (SH7, #2209): the last Stage 2 of the chain builds it and it compiles the entries of tests/support/native_object.rs, which a C caller links and checks",
+    ),
+    (
         "vesper-std",
         "standard library packages, built as dependencies of the probes",
     ),

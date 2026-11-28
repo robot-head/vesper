@@ -1,0 +1,3073 @@
+// Physical registers and instructions for the x86-64 backend.
+pub const RAX: u8 = 0;
+const RCX: u8 = 1;
+pub const RDX: u8 = 2;
+const RBX: u8 = 3;
+pub const RSP: u8 = 4;
+const RSI: u8 = 6;
+const RDI: u8 = 7;
+const R8: u8 = 8;
+const R9: u8 = 9;
+pub const R10: u8 = 10;
+pub const R11: u8 = 11;
+const R12: u8 = 12;
+const R13: u8 = 13;
+const R14: u8 = 14;
+const R15: u8 = 15;
+
+pub const ARGUMENTS: u64 = 6;
+pub const WIN64_ARGUMENTS: u64 = 4;
+pub const REGISTER_CODES: u64 = 16;
+pub const ALL_REGISTER_CODES: u64 = REGISTER_CODES + REGISTER_CODES;
+pub const XMM0: u8 = 16;
+const FIRST_XMM_HOME: u8 = 24;
+pub const XMM_AUX_SCRATCH: u8 = 29;
+pub const XMM_LEFT_SCRATCH: u8 = 30;
+pub const XMM_RIGHT_SCRATCH: u8 = 31;
+// Win64 reserves XMM4 and XMM5 as temporaries and preserves XMM6 through XMM15.
+pub const WIN64_XMM_LEFT_SCRATCH: u8 = 20;
+pub const WIN64_XMM_RIGHT_SCRATCH: u8 = 21;
+pub const WIN64_NONVOLATILE_XMM_MASK: u32 = 0xffc00000;
+pub const HOME_REGISTERS: u64 = 5;
+pub const UNASSIGNED: u8 = 255;
+pub const BYTE_BITS: u64 = 8;
+pub const WORD_BITS: u64 = 16;
+pub const DWORD_BITS: u64 = 32;
+pub const QWORD_BITS: u64 = 64;
+pub const VECTOR_BITS: u64 = QWORD_BITS * 2;
+
+const REX: u8 = 0x40;
+const REX_W: u8 = 0x48;
+const REX_R: u8 = 0x04;
+const REX_X: u8 = 0x02;
+const REX_B: u8 = 0x01;
+const LOW_REGISTER_MASK: u8 = 0x07;
+const HIGH_REGISTER: u8 = 0x08;
+const MOD_REGISTER: u8 = 0xc0;
+const MOD_DISP8: u8 = 0x40;
+const MOD_DISP32: u8 = 0x80;
+const RM_SIB: u8 = 4;
+const RM_DISP32_WITHOUT_BASE: u8 = 5;
+const SIB_NO_INDEX: u8 = 0x20;
+const SIB_SCALE_DWORD: u8 = 0x80;
+const MOD_FIELD_SHIFT: u32 = 3;
+const MOV_RM_R8: u8 = 0x88;
+const MOV_RM_R64: u8 = 0x89;
+const MOV_R64_RM: u8 = 0x8b;
+const LEA: u8 = 0x8d;
+const MOV_REGISTER_IMMEDIATE: u8 = 0xb8;
+const MOV_RM8_IMM8: u8 = 0xc6;
+const MOV_RM64_IMM32: u8 = 0xc7;
+const ALU_RM8_IMM8: u8 = 0x80;
+const ALU_RM64_IMM8: u8 = 0x83;
+const ALU_RM64_IMM32: u8 = 0x81;
+pub const ALU_ADD_EXTENSION: u8 = 0;
+pub const ALU_OR_EXTENSION: u8 = 1;
+pub const ALU_AND_EXTENSION: u8 = 4;
+pub const ALU_SUB_EXTENSION: u8 = 5;
+pub const ALU_XOR_EXTENSION: u8 = 6;
+const ALU_CMP_EXTENSION: u8 = 7;
+const TWO_BYTE_OPCODE: u8 = 0x0f;
+const THREE_BYTE_38_MAP: u8 = 0x38;
+const THREE_BYTE_3A_MAP: u8 = 0x3a;
+const THREE_BYTE_VEX: u8 = 0xc4;
+const VEX_R_INVERTED: u8 = 0x80;
+const VEX_X_INVERTED: u8 = 0x40;
+const VEX_B_INVERTED: u8 = 0x20;
+const VEX_0F38_MAP: u8 = 0x02;
+const VEX_W: u8 = 0x80;
+const VEX_SOURCE_SHIFT: u32 = 3;
+const VEX_66_PREFIX: u8 = 0x01;
+const VFMADD213_SCALAR: u8 = 0xa9;
+const VFMADD213_PACKED: u8 = 0xa8;
+const UD2_OPCODE: u8 = 0x0b;
+const IMUL_R64_RM64: u8 = 0xaf;
+const IMUL_R64_RM64_IMM8: u8 = 0x6b;
+const IMUL_R64_RM64_IMM32: u8 = 0x69;
+const UNARY_GROUP: u8 = 0xf7;
+const SHIFT_BYTE_GROUP_IMM8: u8 = 0xc0;
+const OPERAND_SIZE_OVERRIDE: u8 = 0x66;
+const SCALAR_SINGLE: u8 = 0xf3;
+const SCALAR_DOUBLE: u8 = 0xf2;
+const MOV_SCALAR_LOAD: u8 = 0x10;
+const MOV_SCALAR_STORE: u8 = 0x11;
+const MOVAPS_LOAD: u8 = 0x28;
+pub const PAND: u8 = 0xdb;
+pub const POR: u8 = 0xeb;
+pub const PXOR: u8 = 0xef;
+const PUNPCKLBW: u8 = 0x60;
+const PUNPCKLWD: u8 = 0x61;
+const PUNPCKLDQ: u8 = 0x62;
+const PUNPCKLQDQ: u8 = 0x6c;
+const PUNPCKHBW: u8 = 0x68;
+const PUNPCKHWD: u8 = 0x69;
+const PUNPCKHDQ: u8 = 0x6a;
+const PMULLW: u8 = 0xd5;
+const PMULUDQ: u8 = 0xf4;
+const PMULLD: u8 = 0x40;
+const PMINUB: u8 = 0xda;
+const PMAXUB: u8 = 0xde;
+const PMINSW: u8 = 0xea;
+const PMAXSW: u8 = 0xee;
+const PMINSB: u8 = 0x38;
+const PMINSD: u8 = 0x39;
+const PMINUW: u8 = 0x3a;
+const PMINUD: u8 = 0x3b;
+const PMAXSB: u8 = 0x3c;
+const PMAXSD: u8 = 0x3d;
+const PMAXUW: u8 = 0x3e;
+const PMAXUD: u8 = 0x3f;
+const PSHUFD: u8 = 0x70;
+const PADDB: u8 = 0xfc;
+const PADDW: u8 = 0xfd;
+const PADDD: u8 = 0xfe;
+const PADDQ: u8 = 0xd4;
+const PSUBB: u8 = 0xf8;
+const PSUBW: u8 = 0xf9;
+const PSUBD: u8 = 0xfa;
+const PSUBQ: u8 = 0xfb;
+const PADDSB: u8 = 0xec;
+const PADDSW: u8 = 0xed;
+const PADDUSB: u8 = 0xdc;
+const PADDUSW: u8 = 0xdd;
+const PSUBSB: u8 = 0xe8;
+const PSUBSW: u8 = 0xe9;
+const PSUBUSB: u8 = 0xd8;
+const PSUBUSW: u8 = 0xd9;
+const PAVGB: u8 = 0xe0;
+const PAVGW: u8 = 0xe3;
+const SSE_CONVERT_PRECISION: u8 = 0x5a;
+const PEXTRW: u8 = 0xc5;
+const PINSRW: u8 = 0xc4;
+const PMOVMSKB: u8 = 0xd7;
+const MOVMSK: u8 = 0x50;
+const PACKSSWB: u8 = 0x63;
+const PACKUSWB: u8 = 0x67;
+const PACKSSDW: u8 = 0x6b;
+const PACKUSDW: u8 = 0x2b;
+const PMOVSXBW: u8 = 0x20;
+const PMOVSXWD: u8 = 0x23;
+const PMOVSXDQ: u8 = 0x25;
+const PMOVZXBW: u8 = 0x30;
+const PMOVZXWD: u8 = 0x33;
+const PMOVZXDQ: u8 = 0x35;
+const PSHUFB: u8 = 0x00;
+const PHADDW: u8 = 0x01;
+const PHADDD: u8 = 0x02;
+const PMADDUBSW: u8 = 0x04;
+const PABSB: u8 = 0x1c;
+const PCMPEQB: u8 = 0x74;
+const PCMPEQW: u8 = 0x75;
+const PCMPEQD: u8 = 0x76;
+const PCMPGTB: u8 = 0x64;
+const PCMPGTW: u8 = 0x65;
+const PCMPGTD: u8 = 0x66;
+const SWAP_ADJACENT_DWORDS: u8 = 0xb1;
+const DUPLICATE_EVEN_DWORDS: u8 = 0xa0;
+const DUPLICATE_ODD_DWORDS: u8 = 0xf5;
+const BYTE_SIGN_BITS: u64 = 0x8080808080808080;
+const WORD_SIGN_BITS: u64 = 0x8000800080008000;
+const DWORD_SIGN_BITS: u64 = 0x8000000080000000;
+const LOW_DWORD_SIGN_BIT: u64 = 0x80000000;
+const HIGH_QWORD_TO_LOW: u8 = 0x0e;
+const GATHER_EVEN_DWORDS: u8 = 0x88;
+const LOW_BYTE_MASK: u32 = 0xff;
+const ALL_BYTE_SIGN_BITS: u32 = 0xffff;
+const BYTE_LANES_PER_WORD: u64 = WORD_BITS / BYTE_BITS;
+const DUPLICATE_LOW_DWORD: u8 = 0x00;
+const DUPLICATE_LOW_QWORD: u8 = 0x44;
+// Saturating byte addition sets the sign bit of every index above 15.
+const SWIZZLE_CLAMP_QWORD: u64 = 0x7070707070707070;
+const GPR_TO_XMM: u8 = 0x6e;
+const XMM_TO_GPR: u8 = 0x7e;
+const UCOMIS: u8 = 0x2e;
+const ANDPS: u8 = 0x54;
+const ANDNPS: u8 = 0x55;
+const ORPS: u8 = 0x56;
+const CMP_PACKED: u8 = 0xc2;
+const CMP_PACKED_EQ: u8 = 0;
+const CMP_PACKED_LT: u8 = 1;
+const CMP_PACKED_LE: u8 = 2;
+const CMP_PACKED_UNORDERED: u8 = 3;
+const CMP_PACKED_NE: u8 = 4;
+const CMP_PACKED_NOT_LT: u8 = 5;
+const CMP_PACKED_NOT_LE: u8 = 6;
+const CMP_PACKED_ORDERED: u8 = 7;
+const XORPS: u8 = 0x57;
+const PACKED_SHIFT_WORD: u8 = 0x71;
+const PACKED_SHIFT_DWORD: u8 = 0x72;
+const PACKED_SHIFT_QWORD: u8 = 0x73;
+const PACKED_LEFT_WORD_REG: u8 = 0xf1;
+const PACKED_LOGICAL_RIGHT_WORD_REG: u8 = 0xd1;
+const PACKED_ARITHMETIC_RIGHT_WORD_REG: u8 = 0xe1;
+const PACKED_DWORD_SHIFT_OPCODE_OFFSET: u8 = 1;
+const PACKED_QWORD_SHIFT_OPCODE_OFFSET: u8 = 2;
+const PACKED_SHIFT_ARITHMETIC_RIGHT: u8 = 4;
+const DUPLICATE_HIGH_DWORDS: u8 = 0xf5;
+const PACKED_SHIFT_RIGHT: u8 = 2;
+const PACKED_SHIFT_LEFT: u8 = 6;
+const F32_SIGN: u64 = 0x80000000;
+const F64_SIGN: u64 = 0x8000000000000000;
+const F32_EXPONENT_BIAS: u64 = 127;
+const F64_EXPONENT_BIAS: u64 = 1023;
+const F32_EXPONENT_SHIFT: u32 = 23;
+const F64_EXPONENT_SHIFT: u32 = 52;
+const F32_NAN_PAYLOAD_MASK_SHIFT: u8 = 10;
+const F64_NAN_PAYLOAD_MASK_SHIFT: u8 = 13;
+pub const ALL_REGISTER_BITS: u64 = 0xffffffffffffffff;
+pub const SSE_ADD: u8 = 0x58;
+pub const SSE_SUB: u8 = 0x5c;
+pub const SSE_MUL: u8 = 0x59;
+pub const SSE_DIV: u8 = 0x5e;
+pub const SSE_SQRT: u8 = 0x51;
+const SSE_FLOAT_TO_INTEGER_TRUNC: u8 = 0x2c;
+const SSE_INTEGER_TO_FLOAT: u8 = 0x2a;
+const SSE_MIN: u8 = 0x5d;
+const SSE_MAX: u8 = 0x5f;
+const ROUNDPS: u8 = 0x08;
+const ROUNDPD: u8 = 0x09;
+const ROUNDSS: u8 = 0x0a;
+const ROUNDSD: u8 = 0x0b;
+const ROUND_NEAREST_EVEN: u8 = 0;
+const ROUND_DOWN: u8 = 1;
+const ROUND_UP: u8 = 2;
+const ROUND_TOWARD_ZERO: u8 = 3;
+const SHIFT_GROUP_IMM8: u8 = 0xc1;
+const SHIFT_GROUP_CL: u8 = 0xd3;
+const SHIFT_BYTE_GROUP_CL: u8 = 0xd2;
+const SHRD_IMMEDIATE: u8 = 0xac;
+const XCHG_RM_R64: u8 = 0x87;
+const XCHG_RM_R8: u8 = 0x86;
+const LOCK_PREFIX: u8 = 0xf0;
+const XADD_RM_R8: u8 = 0xc0;
+const XADD_RM_R64: u8 = 0xc1;
+const CMPXCHG_RM_R8: u8 = 0xb0;
+const CMPXCHG_RM_R64: u8 = 0xb1;
+const ADD_RM_R8: u8 = 0x00;
+const SUB_RM_R8: u8 = 0x28;
+const FENCE_GROUP: u8 = 0xae;
+const MFENCE_MODRM: u8 = 0xf0;
+const BSWAP_REGISTER: u8 = 0xc8;
+const BSF_REGISTER: u8 = 0xbc;
+const BSR_REGISTER: u8 = 0xbd;
+const BSR_ZERO_INDEX: u64 = 0xffffffffffffffff;
+const POPCNT_REGISTER: u8 = 0xb8;
+const SWAR_ODD_BITS: u64 = 0x5555555555555555;
+const SWAR_BIT_PAIRS: u64 = 0x3333333333333333;
+const SWAR_NIBBLES: u64 = 0x0f0f0f0f0f0f0f0f;
+const SWAR_BYTE_SUM: u64 = 0x0101010101010101;
+const PAIR_BITS: u64 = 2;
+const NIBBLE_BITS: u64 = BYTE_BITS / 2;
+pub const ROL_EXTENSION: u8 = 0;
+pub const ROR_EXTENSION: u8 = 1;
+const CMP_RM_R8: u8 = 0x38;
+const CMP_RM_R64: u8 = 0x39;
+const SETCC: u8 = 0x90;
+const CMOVCC: u8 = 0x40;
+const JCC_NEAR: u8 = 0x80;
+const JCC_SHORT: u8 = 0x70;
+const JMP_SHORT: u8 = 0xeb;
+const JMP_REL32: u8 = 0xe9;
+const CALL_JUMP_RM_GROUP: u8 = 0xff;
+const JMP_RM_EXTENSION: u8 = 4;
+const SIGN_EXTEND_DIVIDEND: u8 = 0x99;
+const MUL_EXTENSION: u8 = 4;
+const IMUL_EXTENSION: u8 = 5;
+const DIV_EXTENSION: u8 = 6;
+const IDIV_EXTENSION: u8 = 7;
+const TRAP_BYTES: u8 = 2;
+const SHORT_BRANCH_BYTES: u8 = 2;
+const REGISTER_INSTRUCTION_BYTES: u8 = 2;
+const NEGATIVE_ONE_IMM8: u8 = 0xff;
+const TEST_RM_R64: u8 = 0x85;
+const TEST_RM_R8: u8 = 0x84;
+const MOVZX_R32_RM8: u8 = 0xb6;
+const MOVSX_R64_RM8: u8 = 0xbe;
+const MOVZX_R32_RM16: u8 = 0xb7;
+const MOVSX_R64_RM16: u8 = 0xbf;
+const MOVSXD_R64_RM32: u8 = 0x63;
+const RET_NEAR: u8 = 0xc3;
+const CALL_REL32: u8 = 0xe8;
+const CALL_REGISTER_EXTENSION: u8 = 2;
+const U32_MAX_BITS: u64 = 0xffffffff;
+const I32_MIN_BITS: u64 = 0xffffffff80000000;
+const DISP8_MAX: u32 = 0x7f;
+const DISP8_MIN_AS_DISP32: u32 = 0xffffff80;
+const DISP32_MAX: u64 = 0x7fffffff;
+const IMM32_BYTES: u64 = 4;
+const IMM64_BYTES: u64 = 8;
+
+pub const ADD_RM_R64: u8 = 0x01;
+pub const ADC_RM_R64: u8 = 0x11;
+pub const SBB_RM_R64: u8 = 0x19;
+pub const SUB_RM_R64: u8 = 0x29;
+pub const AND_RM_R64: u8 = 0x21;
+pub const OR_RM_R64: u8 = 0x09;
+pub const XOR_RM_R64: u8 = 0x31;
+pub const NOT_EXTENSION: u8 = 2;
+pub const NEG_EXTENSION: u8 = 3;
+pub const SHL_EXTENSION: u8 = 4;
+pub const SHR_EXTENSION: u8 = 5;
+pub const SAR_EXTENSION: u8 = 7;
+
+pub const CC_O: u8 = 0;
+pub const CC_B: u8 = 2;
+pub const CC_AE: u8 = 3;
+pub const CC_E: u8 = 4;
+pub const CC_NE: u8 = 5;
+pub const CC_BE: u8 = 6;
+pub const CC_A: u8 = 7;
+const CC_P: u8 = 10;
+const CC_NP: u8 = 11;
+const INVERT_CC: u8 = 1;
+pub const FLOAT_ORDERED: u64 = 0;
+pub const FLOAT_UNORDERED: u64 = 1;
+pub const FLOAT_EQUAL: u64 = 2;
+pub const FLOAT_NOT_EQUAL: u64 = 3;
+pub const FLOAT_ORDERED_NOT_EQUAL: u64 = 4;
+pub const FLOAT_UNORDERED_OR_EQUAL: u64 = 5;
+pub const FLOAT_LESS: u64 = 6;
+pub const FLOAT_LESS_EQUAL: u64 = 7;
+pub const FLOAT_GREATER: u64 = 8;
+pub const FLOAT_GREATER_EQUAL: u64 = 9;
+pub const FLOAT_UNORDERED_OR_LESS: u64 = 10;
+pub const FLOAT_UNORDERED_OR_LESS_EQUAL: u64 = 11;
+pub const FLOAT_UNORDERED_OR_GREATER: u64 = 12;
+pub const FLOAT_UNORDERED_OR_GREATER_EQUAL: u64 = 13;
+pub const CC_L: u8 = 12;
+pub const CC_GE: u8 = 13;
+pub const CC_LE: u8 = 14;
+pub const CC_G: u8 = 15;
+
+pub copy enum FixedArithmetic {
+    SignedDivide,
+    UnsignedDivide,
+    SignedRemainder,
+    UnsignedRemainder,
+    SignedMultiplyHigh,
+    UnsignedMultiplyHigh,
+}
+
+pub copy enum AtomicMemory {
+    FetchAdd,
+    CompareExchange,
+    Exchange,
+    Add,
+    Subtract,
+}
+
+pub copy enum AtomicUpdate {
+    Bitwise(u8, bool),
+    MinMax(u8),
+}
+
+pub copy enum PackedRelation {
+    Equal,
+    SignedGreater,
+    UnsignedGreater,
+}
+
+pub copy enum PackedShift {
+    Left,
+    LogicalRight,
+    ArithmeticRight,
+}
+
+pub copy enum Rounding {
+    Nearest,
+    Floor,
+    Ceil,
+    Trunc,
+}
+
+pub copy enum BitOperation {
+    LeadingZeros,
+    TrailingZeros,
+    PopulationCount,
+    HardwarePopulationCount,
+    Reverse,
+    LeadingSignBits,
+    Absolute,
+}
+
+pub copy enum Instruction {
+    Immediate(u8, u64),
+    FloatImmediate(u8, u64, u64),
+    FloatBinary(u8, u8, u8, u64),
+    FloatSign(u8, bool, u64, u8),
+    FloatCopySign(u8, u8, u64, u8),
+    FloatBits(u8, u8, u64),
+    FloatToInteger(u8, u8, u64, u64),
+    FloatToIntegerSat(u8, u8, u64, u64, bool, u8, u8),
+    FloatConvert(u8, u8, u64),
+    FloatMinMax(u8, u8, u8, bool, u64, u8),
+    FloatRound(u8, u8, Rounding, u64, bool),
+    FloatFma(u8, u8, u8, u8, u64, bool, u8),
+    IntegerToFloat(u8, u8, u64, u64, bool),
+    VectorConstant(u8, u64, u64),
+    VectorSplat(u8, u8, u64),
+    VectorBinary(u8, u8, u8),
+    VectorFloat(u8, u8, u8, u64),
+    VectorFloatSign(u8, u8, bool, u64),
+    VectorFloatMinMax(u8, u8, u8, bool, u64),
+    VectorFloatCompare(u8, u8, u8, u64, u64),
+    VectorPairwiseAdd(u8, u8, u8, u64),
+    VectorSwizzle(u8, u8, u8, bool),
+    VectorIntegerCompare(u8, u8, u8, u64, PackedRelation, bool),
+    VectorMultiply(u8, u8, u8, u64, bool),
+    VectorIntegerMinMax(u8, u8, u8, u64, bool, bool),
+    VectorWiden(u8, u8, u64, bool, bool, bool),
+    VectorNarrow(u8, u8, u8, u64, bool),
+    VectorShift(u8, u8, u64, u64, bool, PackedShift),
+    BitOperation(u8, u8, u64, BitOperation),
+    ComplementedBitwise(u8, u8, u8, u64),
+    FunnelRight(u8, u8, u8),
+    VectorConvert(u8, u8, bool),
+    VectorExtract(u8, u8, u64, u64),
+    VectorInsert(u8, u8, u64, u64),
+    VectorHighBits(u8, u8, u64),
+    VectorTruth(u8, u8, bool, u64),
+    FloatCompare(u8, u8, u8, u64, u64),
+    Move(u8, u8),
+    Exchange(u8, u8),
+    Binary(u8, u8, u8, u64),
+    BinaryImmediate(u8, u8, u32, u64),
+    Multiply(u8, u8, u64),
+    MultiplyImmediate(u8, u8, u32, u64),
+    Fixed(FixedArithmetic, u8, u64),
+    PowerDivision(u8, u8, u64, u64, bool, bool, bool),
+    Atomic(AtomicMemory, u8, u8, u64),
+    AtomicUpdate(AtomicUpdate, u8, u64),
+    Fence,
+    ByteSwap(u8, u64),
+    Unary(u8, u8, u64),
+    Shift(u8, u8, u8, u64),
+    ShiftRegister(u8, u8, u8, u64),
+    Load(u8, u8, u32, u64),
+    Store(u8, u8, u32, u64),
+    Compare(u8, u8, u8, u8, u64),
+    CompareImmediate(u8, u8, u32, u8, u64),
+    SetCondition(u8, u8),
+    Select(u8, u8, u8, u8, u8),
+    Truncate(u8, u8, u64),
+    SignExtend(u8, u8, u64, u64),
+    BranchZero(u8),
+    BranchWithFlags(u8),
+    BranchCompare(u8, u8, u8, u64),
+    BranchCompareImmediate(u8, u32, u8, u64),
+    Jump,
+    FrameEnter(u32),
+    FrameLeave(u32),
+    StackAddress(u8, u32),
+    Trap,
+    TrapIf(u8, bool),
+    Return,
+}
+
+pub copy enum PackedInteger {
+    Add,
+    Subtract,
+    SignedSaturatingAdd,
+    UnsignedSaturatingAdd,
+    SignedSaturatingSubtract,
+    UnsignedSaturatingSubtract,
+    RoundedAverage,
+}
+
+pub fn packed_integer_opcode(in op: PackedInteger, width: u64) -> u8 {
+    let byte = width == BYTE_BITS;
+    match op {
+        PackedInteger::Add => match width {
+            BYTE_BITS => PADDB,
+            WORD_BITS => PADDW,
+            DWORD_BITS => PADDD,
+            _ => PADDQ,
+        },
+        PackedInteger::Subtract => match width {
+            BYTE_BITS => PSUBB,
+            WORD_BITS => PSUBW,
+            DWORD_BITS => PSUBD,
+            _ => PSUBQ,
+        },
+        PackedInteger::SignedSaturatingAdd => if byte { PADDSB } else { PADDSW },
+        PackedInteger::UnsignedSaturatingAdd => if byte { PADDUSB } else { PADDUSW },
+        PackedInteger::SignedSaturatingSubtract => if byte { PSUBSB } else { PSUBSW },
+        PackedInteger::UnsignedSaturatingSubtract => if byte { PSUBUSB } else { PSUBUSW },
+        PackedInteger::RoundedAverage => if byte { PAVGB } else { PAVGW },
+    }
+}
+
+pub fn is_xmm(register: u8) -> bool {
+    register >= XMM0 && register <= XMM_RIGHT_SCRATCH
+}
+
+pub fn find_float_register(used: u32) -> u8 {
+    for index in 0..REGISTER_CODES {
+        let reg = wrapping_add(XMM0, wrapping_u8(index));
+        if (used & register_bit(reg)) == 0 {
+            return reg;
+        }
+    }
+    UNASSIGNED
+}
+
+pub fn arg_register(argument: u64) -> u8 {
+    match argument {
+        0 => RDI,
+        1 => RSI,
+        2 => RDX,
+        3 => RCX,
+        4 => R8,
+        5 => R9,
+        _ => UNASSIGNED,
+    }
+}
+
+pub fn win64_arg_register(argument: u64) -> u8 {
+    match argument {
+        0 => RCX,
+        1 => RDX,
+        2 => R8,
+        3 => R9,
+        _ => UNASSIGNED,
+    }
+}
+
+pub fn win64_reserved_registers(callee_saves: bool) -> u32 {
+    let fixed = register_bit(RSI)
+        | register_bit(RDI)
+        | register_bit(WIN64_XMM_LEFT_SCRATCH)
+        | register_bit(WIN64_XMM_RIGHT_SCRATCH);
+    if callee_saves {
+        fixed
+    } else {
+        fixed | WIN64_NONVOLATILE_XMM_MASK
+    }
+}
+
+pub fn home_register(index: u64) -> u8 {
+    match index {
+        0 => RBX,
+        1 => R12,
+        2 => R13,
+        3 => R14,
+        4 => R15,
+        _ => UNASSIGNED,
+    }
+}
+
+pub fn xmm_home_register(index: u64) -> u8 {
+    wrapping_add(FIRST_XMM_HOME, wrapping_u8(index))
+}
+
+pub fn register_bit(reg: u8) -> u32 {
+    if reg == UNASSIGNED {
+        0
+    } else {
+        wrapping_shl_u32(1, widen_u32(reg))
+    }
+}
+
+fn first_register(available: u32) -> u8 {
+    if available == 0 {
+        UNASSIGNED
+    } else {
+        wrapping_u8(trailing_zeros_u64(widen_u64(available)))
+    }
+}
+
+pub fn callee_saved_registers() -> u32 {
+    register_bit(RBX)
+        | register_bit(R12)
+        | register_bit(R13)
+        | register_bit(R14)
+        | register_bit(R15)
+}
+
+pub fn find_callee_saved_register(used: u32) -> u8 {
+    first_register(callee_saved_registers() & ~used)
+}
+
+// Prefer RAX among the caller-saved GPRs.
+pub fn find_register(used: u32) -> u8 {
+    let candidates = register_bit(RAX)
+        | register_bit(RCX)
+        | register_bit(RDX)
+        | register_bit(RSI)
+        | register_bit(RDI)
+        | register_bit(R8)
+        | register_bit(R9)
+        | register_bit(R10)
+        | register_bit(R11);
+    first_register(candidates & ~used)
+}
+
+fn modrm_fields(reg: u8, rm: u8) -> u8 {
+    wrapping_shl_u8(reg & LOW_REGISTER_MASK, MOD_FIELD_SHIFT) | (rm & LOW_REGISTER_MASK)
+}
+
+fn modrm(reg: u8, rm: u8) -> u8 {
+    MOD_REGISTER | modrm_fields(reg, rm)
+}
+
+fn rex(reg: u8, rm: u8, wide: bool) -> u8 {
+    let first = if wide { REX_W } else { REX };
+    let reg_extension = if reg >= HIGH_REGISTER { REX_R } else { 0 };
+    let rm_extension = if rm >= HIGH_REGISTER { REX_B } else { 0 };
+    first | reg_extension | rm_extension
+}
+
+fn emit_rex(inout out: ChunkSeq[u8], reg: u8, rm: u8, wide: bool, low_byte: bool) {
+    let prefix = rex(reg, rm, wide);
+    if prefix != REX || low_byte {
+        out.push(prefix);
+    }
+}
+
+fn byte_register_needs_rex(reg: u8) -> bool {
+    // Without REX, encodings 4–7 refer to AH, CH, DH and BH.
+    reg >= RSP
+}
+
+fn binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8, wide: bool) {
+    let low_byte = opcode == TEST_RM_R8
+        && (byte_register_needs_rex(source) || byte_register_needs_rex(destination));
+    emit_rex(inout out, source, destination, wide, low_byte);
+    out.push(opcode);
+    out.push(modrm(source, destination));
+}
+
+fn trap(inout out: ChunkSeq[u8]) {
+    out.push(TWO_BYTE_OPCODE);
+    out.push(UD2_OPCODE);
+}
+
+fn sign_extend_dividend(inout out: ChunkSeq[u8], wide: bool) {
+    if wide {
+        out.push(REX_W);
+    }
+    out.push(SIGN_EXTEND_DIVIDEND);
+}
+
+fn fixed_arithmetic(inout out: ChunkSeq[u8], in op: FixedArithmetic, rhs: u8, wide: bool) {
+    let prefix = rex(0, rhs, wide);
+    let extension = match op {
+        FixedArithmetic::SignedDivide => {
+            // An explicit zero trap distinguishes divide by zero from overflow.
+            binary(inout out, TEST_RM_R64, rhs, rhs, wide);
+            out.push(JCC_SHORT | CC_NE);
+            out.push(TRAP_BYTES);
+            trap(inout out);
+            sign_extend_dividend(inout out, wide);
+            IDIV_EXTENSION
+        },
+        FixedArithmetic::UnsignedDivide | FixedArithmetic::UnsignedRemainder => {
+            binary(inout out, XOR_RM_R64, RDX, RDX, false);
+            DIV_EXTENSION
+        },
+        FixedArithmetic::SignedRemainder => {
+            sign_extend_dividend(inout out, wide);
+            // The remainder by -1 is zero even when the quotient overflows.
+            if prefix != REX {
+                out.push(prefix);
+            }
+            out.push(ALU_RM64_IMM8);
+            out.push(modrm(ALU_CMP_EXTENSION, rhs));
+            out.push(NEGATIVE_ONE_IMM8);
+            out.push(JCC_SHORT | CC_NE);
+            out.push(REGISTER_INSTRUCTION_BYTES + SHORT_BRANCH_BYTES);
+            binary(inout out, XOR_RM_R64, RDX, RDX, false);
+            out.push(JMP_SHORT);
+            out.push(wrapping_add(REGISTER_INSTRUCTION_BYTES, if prefix != REX { 1 } else { 0 }));
+            IDIV_EXTENSION
+        },
+        FixedArithmetic::SignedMultiplyHigh => IMUL_EXTENSION,
+        FixedArithmetic::UnsignedMultiplyHigh => MUL_EXTENSION,
+    };
+    if prefix != REX {
+        out.push(prefix);
+    }
+    out.push(UNARY_GROUP);
+    out.push(modrm(extension, rhs));
+}
+
+fn immediate(inout out: ChunkSeq[u8], bits: u64, size: u64) {
+    for i in 0..size {
+        let shift = wrapping_mul(wrapping_u32(i), wrapping_u32(BYTE_BITS));
+        out.push(wrapping_u8(wrapping_shr_u64(bits, shift)));
+    }
+}
+
+pub fn fits_signed_byte(bits: u32) -> bool {
+    bits <= DISP8_MAX || bits >= DISP8_MIN_AS_DISP32
+}
+
+fn alu_immediate(inout out: ChunkSeq[u8], extension: u8, reg: u8, bits: u32, width: u64) {
+    let short = width == BYTE_BITS || fits_signed_byte(bits);
+    if width == WORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    emit_rex(
+        inout out,
+        0,
+        reg,
+        width == QWORD_BITS,
+        width == BYTE_BITS && byte_register_needs_rex(reg)
+    );
+    out.push(
+        if width == BYTE_BITS {
+            ALU_RM8_IMM8
+        } else if short {
+            ALU_RM64_IMM8
+        } else {
+            ALU_RM64_IMM32
+        }
+    );
+    out.push(modrm(extension, reg));
+    let bytes = if short {
+        1
+    } else if width == WORD_BITS {
+        WORD_BITS / BYTE_BITS
+    } else {
+        IMM32_BYTES
+    };
+    immediate(inout out, widen_u64(bits), bytes);
+}
+
+pub fn emit_direct_call(inout out: ChunkSeq[u8]) -> u64 {
+    out.push(CALL_REL32);
+    let displacement = out.len();
+    immediate(inout out, 0, IMM32_BYTES);
+    displacement
+}
+
+pub fn emit_direct_jump(inout out: ChunkSeq[u8]) -> u64 {
+    out.push(JMP_REL32);
+    let displacement = out.len();
+    immediate(inout out, 0, IMM32_BYTES);
+    displacement
+}
+
+pub fn emit_indirect_call(inout out: ChunkSeq[u8], register: u8) {
+    emit_rex(inout out, 0, register, false, false);
+    out.push(CALL_JUMP_RM_GROUP);
+    out.push(modrm(CALL_REGISTER_EXTENSION, register));
+}
+
+pub fn emit_reference_call(inout out: ChunkSeq[u8]) -> u64 {
+    // Call the address stored at the RIP-relative COFF reference pointer.
+    out.push(CALL_JUMP_RM_GROUP);
+    out.push(modrm_fields(CALL_REGISTER_EXTENSION, RM_DISP32_WITHOUT_BASE));
+    let displacement = out.len();
+    immediate(inout out, 0, IMM32_BYTES);
+    displacement
+}
+
+pub fn emit_symbol_address(inout out: ChunkSeq[u8], destination: u8, got: bool) -> u64 {
+    out.push(rex(destination, 0, true));
+    out.push(if got { MOV_R64_RM } else { LEA });
+    out.push(modrm_fields(destination, RM_DISP32_WITHOUT_BASE));
+    let displacement = out.len();
+    immediate(inout out, 0, IMM32_BYTES);
+    displacement
+}
+
+// The final table entry is the default. Clamp the unsigned index before the
+// indexed load so even speculative execution stays inside this function.
+pub fn emit_jump_table(inout out: ChunkSeq[u8], index: u8, case_count: u32) -> bool {
+    truncate(inout out, R10, index, DWORD_BITS);
+    load_constant(inout out, R11, widen_u64(case_count));
+    compare_registers(inout out, R10, R11, DWORD_BITS);
+    out.push(rex(R10, R11, false));
+    out.push(TWO_BYTE_OPCODE);
+    out.push(CMOVCC | CC_AE);
+    out.push(modrm(R10, R11));
+
+    let _ = emit_symbol_address(inout out, R11, false);
+    let address_end = out.len();
+    out.push(rex(R10, R11, true) | REX_X);
+    out.push(MOVSXD_R64_RM32);
+    out.push(modrm_fields(R10, RM_SIB));
+    out.push(SIB_SCALE_DWORD | modrm_fields(R10, R11));
+    binary(inout out, ADD_RM_R64, R10, R11, true);
+    out.push(rex(0, R10, false));
+    out.push(CALL_JUMP_RM_GROUP);
+    out.push(modrm(JMP_RM_EXTENSION, R10));
+    patch_forward_branch(inout out, address_end)
+}
+
+pub fn emit_jump_table_entry(inout out: ChunkSeq[u8]) -> u64 {
+    let offset = out.len();
+    immediate(inout out, 0, IMM32_BYTES);
+    offset
+}
+
+fn adjust_stack(inout out: ChunkSeq[u8], extension: u8, size: u32) {
+    if size == 0 {
+        return;
+    }
+    out.push(REX_W);
+    if size <= DISP8_MAX {
+        out.push(ALU_RM64_IMM8);
+        out.push(modrm(extension, RSP));
+        out.push(wrapping_u8(size));
+    } else {
+        out.push(ALU_RM64_IMM32);
+        out.push(modrm(extension, RSP));
+        immediate(inout out, widen_u64(size), IMM32_BYTES);
+    }
+}
+
+// The forward target is the next instruction, at the current end of output.
+pub fn patch_forward_branch(inout out: ChunkSeq[u8], branch_end: u64) -> bool {
+    let target = out.len();
+    patch_relative_branch(inout out, branch_end, target)
+}
+
+pub fn patch_relative_branch(inout out: ChunkSeq[u8], branch_end: u64, target: u64) -> bool {
+    patch_relative_offset(inout out, wrapping_sub(branch_end, IMM32_BYTES), branch_end, target)
+}
+
+pub fn patch_relative_offset(inout out: ChunkSeq[u8], start: u64, base: u64, target: u64) -> bool {
+    if start > out.len() || wrapping_sub(out.len(), start) < IMM32_BYTES {
+        return false;
+    }
+    let distance = wrapping_sub(target, base);
+    if distance > DISP32_MAX && distance < I32_MIN_BITS {
+        return false;
+    }
+    for i in 0..IMM32_BYTES {
+        let shift = wrapping_mul(wrapping_u32(i), wrapping_u32(BYTE_BITS));
+        let byte = wrapping_u8(wrapping_shr_u64(distance, shift));
+        let _ = out.try_set(wrapping_add(start, i), byte);
+    }
+    true
+}
+
+fn load_memory(inout out: ChunkSeq[u8], destination: u8, base: u8, displacement: u32, width: u64) {
+    emit_rex(inout out, destination, base, width == QWORD_BITS, false);
+    if width == BYTE_BITS || width == WORD_BITS {
+        out.push(TWO_BYTE_OPCODE);
+        out.push(
+            if width == BYTE_BITS {
+                MOVZX_R32_RM8
+            } else {
+                MOVZX_R32_RM16
+            }
+        );
+    } else {
+        out.push(MOV_R64_RM);
+    }
+
+    memory_operand(inout out, destination, base, displacement);
+}
+
+fn store_memory(inout out: ChunkSeq[u8], source: u8, base: u8, displacement: u32, width: u64) {
+    if width == WORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    emit_rex(
+        inout out,
+        source,
+        base,
+        width == QWORD_BITS,
+        width == BYTE_BITS && byte_register_needs_rex(source)
+    );
+    out.push(
+        if width == BYTE_BITS {
+            MOV_RM_R8
+        } else {
+            MOV_RM_R64
+        }
+    );
+    memory_operand(inout out, source, base, displacement);
+}
+
+pub fn store_immediate_fits(bits: u64, width: u64) -> bool {
+    width != QWORD_BITS || wrapping_u64(widen_i64(wrapping_i32(bits))) == bits
+}
+
+pub fn store_immediate(
+    inout out: ChunkSeq[u8],
+    base: u8,
+    displacement: u32,
+    bits: u64,
+    width: u64
+) {
+    if width == WORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    emit_rex(inout out, 0, base, width == QWORD_BITS, false);
+    out.push(
+        if width == BYTE_BITS {
+            MOV_RM8_IMM8
+        } else {
+            MOV_RM64_IMM32
+        }
+    );
+    memory_operand(inout out, 0, base, displacement);
+    immediate(
+        inout out,
+        bits,
+        if width == QWORD_BITS {
+            IMM32_BYTES
+        } else {
+            width / BYTE_BITS
+        }
+    );
+}
+
+fn memory_operand(inout out: ChunkSeq[u8], reg: u8, base: u8, displacement: u32) {
+    let low_base = base & LOW_REGISTER_MASK;
+    let mode = if displacement == 0 && low_base != RM_DISP32_WITHOUT_BASE {
+        0
+    } else if fits_signed_byte(displacement) {
+        MOD_DISP8
+    } else {
+        MOD_DISP32
+    };
+    out.push(mode | modrm_fields(reg, base));
+    if low_base == RM_SIB {
+        out.push(SIB_NO_INDEX | low_base);
+    }
+    if mode == MOD_DISP8 {
+        out.push(wrapping_u8(displacement));
+    } else if mode == MOD_DISP32 {
+        immediate(inout out, widen_u64(displacement), IMM32_BYTES);
+    }
+}
+
+fn atomic_memory(inout out: ChunkSeq[u8], in op: AtomicMemory, register: u8, base: u8, width: u64) {
+    match op {
+        AtomicMemory::Exchange => {},
+        _ => out.push(LOCK_PREFIX),
+    };
+    if width == WORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    let byte = width == BYTE_BITS;
+    emit_rex(
+        inout out,
+        register,
+        base,
+        width == QWORD_BITS,
+        byte && byte_register_needs_rex(register)
+    );
+    match op {
+        AtomicMemory::FetchAdd => {
+            out.push(TWO_BYTE_OPCODE);
+            out.push(if byte { XADD_RM_R8 } else { XADD_RM_R64 });
+        },
+        AtomicMemory::CompareExchange => {
+            out.push(TWO_BYTE_OPCODE);
+            out.push(if byte { CMPXCHG_RM_R8 } else { CMPXCHG_RM_R64 });
+        },
+        AtomicMemory::Exchange => out.push(if byte { XCHG_RM_R8 } else { XCHG_RM_R64 }),
+        AtomicMemory::Add => out.push(if byte { ADD_RM_R8 } else { ADD_RM_R64 }),
+        AtomicMemory::Subtract => out.push(if byte { SUB_RM_R8 } else { SUB_RM_R64 }),
+    };
+    memory_operand(inout out, register, base, 0);
+}
+
+fn atomic_update(inout out: ChunkSeq[u8], in op: AtomicUpdate, base: u8, width: u64) {
+    load_memory(inout out, RAX, base, 0, width);
+    let retry = out.len();
+    gp_move(inout out, R10, RAX);
+    match op {
+        AtomicUpdate::Bitwise(opcode, invert) => {
+            binary(inout out, opcode, R10, RDX, width == QWORD_BITS);
+            if invert {
+                let machine_width = if width == QWORD_BITS {
+                    QWORD_BITS
+                } else {
+                    DWORD_BITS
+                };
+                gp_unary(inout out, NOT_EXTENSION, R10, machine_width);
+            }
+        },
+        AtomicUpdate::MinMax(cc) => {
+            compare_registers(inout out, RAX, RDX, width);
+            emit_rex(inout out, R10, RDX, width == QWORD_BITS, false);
+            out.push(TWO_BYTE_OPCODE);
+            out.push(CMOVCC | cc);
+            out.push(modrm(R10, RDX));
+        },
+    };
+    atomic_memory(inout out, in AtomicMemory::CompareExchange, R10, base, width);
+    // Compare-exchange refreshes RAX on failure. The short branch spans only
+    // the fixed instruction sequence above.
+    out.push(JCC_SHORT | CC_NE);
+    let end = wrapping_add(out.len(), 1);
+    out.push(wrapping_u8(wrapping_sub(retry, end)));
+}
+
+fn rotate_word_bytes(inout out: ChunkSeq[u8], register: u8) {
+    out.push(OPERAND_SIZE_OVERRIDE);
+    emit_rex(inout out, 0, register, false, false);
+    out.push(SHIFT_GROUP_IMM8);
+    out.push(modrm(ROR_EXTENSION, register));
+    out.push(wrapping_u8(BYTE_BITS));
+}
+
+fn byte_swap(inout out: ChunkSeq[u8], register: u8, width: u64) {
+    if width == WORD_BITS {
+        rotate_word_bytes(inout out, register);
+    } else {
+        emit_rex(inout out, 0, register, width == QWORD_BITS, false);
+        out.push(TWO_BYTE_OPCODE);
+        out.push(BSWAP_REGISTER | (register & LOW_REGISTER_MASK));
+    }
+}
+
+fn gp_move(inout out: ChunkSeq[u8], destination: u8, source: u8) {
+    if destination != source {
+        binary(inout out, MOV_RM_R64, destination, source, true);
+    }
+}
+
+fn gp_unary(inout out: ChunkSeq[u8], extension: u8, destination: u8, width: u64) {
+    emit_rex(inout out, 0, destination, width == QWORD_BITS, false);
+    out.push(UNARY_GROUP);
+    out.push(modrm(extension, destination));
+    normalize_small_result(inout out, destination, width);
+}
+
+fn shift_immediate(
+    inout out: ChunkSeq[u8],
+    extension: u8,
+    destination: u8,
+    count: u64,
+    width: u64
+) {
+    if width == WORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    emit_rex(
+        inout out,
+        0,
+        destination,
+        width == QWORD_BITS,
+        width == BYTE_BITS && byte_register_needs_rex(destination)
+    );
+    out.push(
+        if width == BYTE_BITS {
+            SHIFT_BYTE_GROUP_IMM8
+        } else {
+            SHIFT_GROUP_IMM8
+        }
+    );
+    out.push(modrm(extension, destination));
+    out.push(wrapping_u8(count));
+    normalize_small_result(inout out, destination, width);
+}
+
+fn power_division(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    source: u8,
+    width: u64,
+    shift: u64,
+    signed: bool,
+    negative: bool,
+    remainder: bool
+) {
+    let wide = width == QWORD_BITS;
+    let discard = wrapping_sub(width, shift);
+    gp_move(inout out, dest, source);
+    if signed {
+        // Add 2^shift - 1 only for a negative dividend to round toward zero.
+        gp_move(inout out, R11, source);
+        if shift != 1 {
+            shift_immediate(inout out, SAR_EXTENSION, R11, wrapping_sub(width, 1), width);
+        }
+        shift_immediate(inout out, SHR_EXTENSION, R11, discard, width);
+        binary(inout out, ADD_RM_R64, dest, R11, wide);
+    }
+    if remainder {
+        if shift < DWORD_BITS {
+            let mask = wrapping_sub(wrapping_shl_u64(1, wrapping_u32(shift)), 1);
+            alu_immediate(inout out, ALU_AND_EXTENSION, dest, wrapping_u32(mask), width);
+        } else {
+            shift_immediate(inout out, SHL_EXTENSION, dest, discard, width);
+            shift_immediate(inout out, SHR_EXTENSION, dest, discard, width);
+        }
+        if signed {
+            binary(inout out, SUB_RM_R64, dest, R11, wide);
+        }
+    } else {
+        let extension = if signed { SAR_EXTENSION } else { SHR_EXTENSION };
+        shift_immediate(inout out, extension, dest, shift, width);
+        if negative {
+            gp_unary(inout out, NEG_EXTENSION, dest, width);
+        }
+    }
+}
+
+fn bit_scan(inout out: ChunkSeq[u8], dest: u8, source: u8, width: u64, leading: bool) {
+    let wide = width == QWORD_BITS;
+    emit_rex(inout out, dest, source, wide, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(if leading { BSR_REGISTER } else { BSF_REGISTER });
+    out.push(modrm(dest, source));
+    // The scan leaves ZF set on zero. MOV preserves it for the conditional move.
+    move_constant(inout out, R11, if leading { BSR_ZERO_INDEX } else { width });
+    emit_rex(inout out, dest, R11, wide, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(CMOVCC | CC_E);
+    out.push(modrm(dest, R11));
+    if leading {
+        let machine_width = if wide { QWORD_BITS } else { DWORD_BITS };
+        gp_unary(inout out, NEG_EXTENSION, dest, machine_width);
+        alu_immediate(
+            inout out,
+            ALU_ADD_EXTENSION,
+            dest,
+            wrapping_u32(wrapping_sub(width, 1)),
+            machine_width
+        );
+    }
+}
+
+fn swap_bit_groups(inout out: ChunkSeq[u8], dest: u8, mask: u64, shift: u64) {
+    gp_move(inout out, R10, dest);
+    move_constant(inout out, R11, mask);
+    shift_immediate(inout out, SHR_EXTENSION, R10, shift, QWORD_BITS);
+    binary(inout out, AND_RM_R64, R10, R11, true);
+    binary(inout out, AND_RM_R64, dest, R11, true);
+    shift_immediate(inout out, SHL_EXTENSION, dest, shift, QWORD_BITS);
+    binary(inout out, OR_RM_R64, dest, R10, true);
+}
+
+fn population_count(inout out: ChunkSeq[u8], dest: u8, source: u8) {
+    gp_move(inout out, dest, source);
+    gp_move(inout out, R10, dest);
+    move_constant(inout out, R11, SWAR_ODD_BITS);
+    shift_immediate(inout out, SHR_EXTENSION, R10, 1, QWORD_BITS);
+    binary(inout out, AND_RM_R64, R10, R11, true);
+    binary(inout out, SUB_RM_R64, dest, R10, true);
+
+    gp_move(inout out, R10, dest);
+    move_constant(inout out, R11, SWAR_BIT_PAIRS);
+    shift_immediate(inout out, SHR_EXTENSION, R10, PAIR_BITS, QWORD_BITS);
+    binary(inout out, AND_RM_R64, R10, R11, true);
+    binary(inout out, AND_RM_R64, dest, R11, true);
+    binary(inout out, ADD_RM_R64, dest, R10, true);
+
+    gp_move(inout out, R10, dest);
+    move_constant(inout out, R11, SWAR_NIBBLES);
+    shift_immediate(inout out, SHR_EXTENSION, R10, NIBBLE_BITS, QWORD_BITS);
+    binary(inout out, ADD_RM_R64, dest, R10, true);
+    binary(inout out, AND_RM_R64, dest, R11, true);
+    move_constant(inout out, R11, SWAR_BYTE_SUM);
+    emit_rex(inout out, dest, R11, true, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(IMUL_R64_RM64);
+    out.push(modrm(dest, R11));
+    shift_immediate(inout out, SHR_EXTENSION, dest, QWORD_BITS - BYTE_BITS, QWORD_BITS);
+}
+
+fn gp_sign_mask(inout out: ChunkSeq[u8], source: u8, width: u64) {
+    if width == QWORD_BITS {
+        gp_move(inout out, R11, source);
+    } else {
+        sign_extend(inout out, R11, source, width, QWORD_BITS);
+    }
+    shift_immediate(inout out, SAR_EXTENSION, R11, QWORD_BITS - 1, QWORD_BITS);
+}
+
+fn bit_operation(inout out: ChunkSeq[u8], dest: u8, source: u8, width: u64, in op: BitOperation) {
+    match op {
+        BitOperation::LeadingZeros => bit_scan(inout out, dest, source, width, true),
+        BitOperation::TrailingZeros => bit_scan(inout out, dest, source, width, false),
+        BitOperation::PopulationCount => population_count(inout out, dest, source),
+        BitOperation::HardwarePopulationCount => {
+            out.push(SCALAR_SINGLE);
+            emit_rex(inout out, dest, source, width == QWORD_BITS, false);
+            out.push(TWO_BYTE_OPCODE);
+            out.push(POPCNT_REGISTER);
+            out.push(modrm(dest, source));
+        },
+        BitOperation::Reverse => {
+            gp_move(inout out, dest, source);
+            swap_bit_groups(inout out, dest, SWAR_ODD_BITS, 1);
+            swap_bit_groups(inout out, dest, SWAR_BIT_PAIRS, PAIR_BITS);
+            swap_bit_groups(inout out, dest, SWAR_NIBBLES, NIBBLE_BITS);
+            if width != BYTE_BITS {
+                byte_swap(inout out, dest, width);
+            }
+        },
+        BitOperation::LeadingSignBits => {
+            gp_sign_mask(inout out, source, width);
+            gp_move(inout out, dest, source);
+            binary(inout out, XOR_RM_R64, dest, R11, width == QWORD_BITS);
+            normalize_small_result(inout out, dest, width);
+            bit_scan(inout out, dest, dest, width, true);
+            alu_immediate(inout out, ALU_SUB_EXTENSION, dest, 1, DWORD_BITS);
+        },
+        BitOperation::Absolute => {
+            gp_sign_mask(inout out, source, width);
+            gp_move(inout out, dest, source);
+            binary(inout out, XOR_RM_R64, dest, R11, width == QWORD_BITS);
+            binary(inout out, SUB_RM_R64, dest, R11, width == QWORD_BITS);
+            normalize_small_result(inout out, dest, width);
+        },
+    };
+}
+
+fn load_constant(inout out: ChunkSeq[u8], destination: u8, bits: u64) {
+    if bits == 0 {
+        emit_rex(inout out, destination, destination, false, false);
+        out.push(XOR_RM_R64);
+        out.push(modrm(destination, destination));
+    } else {
+        move_constant(inout out, destination, bits);
+    }
+}
+
+pub fn cheap_immediate(bits: u64) -> bool {
+    bits <= U32_MAX_BITS || bits >= I32_MIN_BITS
+}
+
+pub fn move_constant(inout out: ChunkSeq[u8], destination: u8, bits: u64) {
+    if bits <= U32_MAX_BITS {
+        emit_rex(inout out, 0, destination, false, false);
+        out.push(MOV_REGISTER_IMMEDIATE | (destination & LOW_REGISTER_MASK));
+        immediate(inout out, bits, IMM32_BYTES);
+    } else if bits >= I32_MIN_BITS {
+        out.push(rex(0, destination, true));
+        out.push(MOV_RM64_IMM32);
+        out.push(modrm(0, destination));
+        immediate(inout out, bits, IMM32_BYTES);
+    } else {
+        out.push(rex(0, destination, true));
+        out.push(MOV_REGISTER_IMMEDIATE | (destination & LOW_REGISTER_MASK));
+        immediate(inout out, bits, IMM64_BYTES);
+    }
+}
+
+fn truncate(inout out: ChunkSeq[u8], destination: u8, source: u8, width: u64) {
+    if width == DWORD_BITS {
+        // A 32-bit write zeroes the high half, even for a self-move.
+        binary(inout out, MOV_RM_R64, destination, source, false);
+    } else {
+        emit_rex(
+            inout out,
+            destination,
+            source,
+            false,
+            width == BYTE_BITS && byte_register_needs_rex(source)
+        );
+        out.push(TWO_BYTE_OPCODE);
+        out.push(
+            if width == BYTE_BITS {
+                MOVZX_R32_RM8
+            } else {
+                MOVZX_R32_RM16
+            }
+        );
+        out.push(modrm(destination, source));
+    }
+}
+
+fn sign_extend(inout out: ChunkSeq[u8], destination: u8, source: u8, from: u64, width: u64) {
+    emit_rex(
+        inout out,
+        destination,
+        source,
+        width == QWORD_BITS,
+        from == BYTE_BITS && byte_register_needs_rex(source)
+    );
+    if from == DWORD_BITS {
+        out.push(MOVSXD_R64_RM32);
+    } else {
+        out.push(TWO_BYTE_OPCODE);
+        out.push(
+            if from == BYTE_BITS {
+                MOVSX_R64_RM8
+            } else {
+                MOVSX_R64_RM16
+            }
+        );
+    }
+    out.push(modrm(destination, source));
+    if width == WORD_BITS {
+        truncate(inout out, destination, destination, width);
+    }
+}
+
+fn normalize_small_result(inout out: ChunkSeq[u8], destination: u8, width: u64) {
+    if width < DWORD_BITS {
+        truncate(inout out, destination, destination, width);
+    }
+}
+
+fn set_condition(inout out: ChunkSeq[u8], destination: u8, cc: u8) {
+    emit_rex(inout out, 0, destination, false, byte_register_needs_rex(destination));
+    out.push(TWO_BYTE_OPCODE);
+    out.push(SETCC | cc);
+    out.push(modrm(0, destination));
+    truncate(inout out, destination, destination, BYTE_BITS);
+}
+
+fn compare_registers(inout out: ChunkSeq[u8], left: u8, right: u8, width: u64) {
+    if width == WORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    let low_byte = width == BYTE_BITS
+        && (byte_register_needs_rex(left) || byte_register_needs_rex(right));
+    emit_rex(inout out, right, left, width == QWORD_BITS, low_byte);
+    out.push(
+        if width == BYTE_BITS {
+            CMP_RM_R8
+        } else {
+            CMP_RM_R64
+        }
+    );
+    out.push(modrm(right, left));
+}
+
+fn compare_immediate(inout out: ChunkSeq[u8], reg: u8, bits: u32, width: u64) {
+    if bits == 0 {
+        if width == WORD_BITS {
+            out.push(OPERAND_SIZE_OVERRIDE);
+        }
+        let opcode = if width == BYTE_BITS {
+            TEST_RM_R8
+        } else {
+            TEST_RM_R64
+        };
+        binary(inout out, opcode, reg, reg, width == QWORD_BITS);
+    } else {
+        alu_immediate(inout out, ALU_CMP_EXTENSION, reg, bits, width);
+    }
+}
+
+fn conditional_jump(inout out: ChunkSeq[u8], cc: u8) {
+    out.push(TWO_BYTE_OPCODE);
+    out.push(JCC_NEAR | cc);
+    immediate(inout out, 0, IMM32_BYTES);
+}
+
+fn float_prefix(width: u64) -> u8 {
+    if width == DWORD_BITS {
+        SCALAR_SINGLE
+    } else {
+        SCALAR_DOUBLE
+    }
+}
+
+fn xmm_code(reg: u8) -> u8 {
+    wrapping_sub(reg, XMM0)
+}
+
+fn xmm_binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8) {
+    let dst = xmm_code(destination);
+    let src = xmm_code(source);
+    emit_rex(inout out, dst, src, false, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(opcode);
+    out.push(modrm(dst, src));
+}
+
+fn compare_float_registers(inout out: ChunkSeq[u8], left: u8, right: u8, width: u64) {
+    if width == QWORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    xmm_binary(inout out, UCOMIS, left, right);
+}
+
+fn packed_float_binary(inout out: ChunkSeq[u8], op: u8, dest: u8, source: u8, width: u64) {
+    if width == QWORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    xmm_binary(inout out, op, dest, source);
+}
+
+fn compare_packed(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    left: u8,
+    right: u8,
+    width: u64,
+    predicate: u8
+) {
+    let result = if dest != left && dest == right {
+        if right == XMM_LEFT_SCRATCH {
+            XMM_RIGHT_SCRATCH
+        } else {
+            XMM_LEFT_SCRATCH
+        }
+    } else {
+        dest
+    };
+    float_move(inout out, result, left);
+    packed_float_binary(inout out, CMP_PACKED, result, right, width);
+    out.push(predicate);
+    float_move(inout out, dest, result);
+}
+
+fn vector_float_min_max(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    left: u8,
+    right: u8,
+    min: bool,
+    width: u64
+) {
+    let first = XMM_AUX_SCRATCH;
+    let second = XMM_RIGHT_SCRATCH;
+    let op = if min { SSE_MIN } else { SSE_MAX };
+    // Legacy min/max selects its second operand on a tie or a NaN. Compute both orders.
+    float_move(inout out, first, left);
+    packed_float_binary(inout out, op, first, right, width);
+    float_move(inout out, second, right);
+    packed_float_binary(inout out, op, second, left, width);
+    if min {
+        // OR preserves a negative zero and the exponent and fraction of either NaN.
+        xmm_binary(inout out, ORPS, first, second);
+        compare_packed(inout out, dest, first, second, width, CMP_PACKED_UNORDERED);
+        xmm_binary(inout out, ORPS, first, dest);
+    } else {
+        // Subtracting the differing sign converts a mixed-sign zero pair to +0.
+        xmm_binary(inout out, XORPS, second, first);
+        xmm_binary(inout out, ORPS, first, second);
+        compare_packed(inout out, dest, first, first, width, CMP_PACKED_UNORDERED);
+        packed_float_binary(inout out, SSE_SUB, first, second, width);
+    }
+    let shift = if width == DWORD_BITS {
+        F32_NAN_PAYLOAD_MASK_SHIFT
+    } else {
+        F64_NAN_PAYLOAD_MASK_SHIFT
+    };
+    packed_shift(inout out, dest, PACKED_SHIFT_RIGHT, width, shift);
+    xmm_binary(inout out, ANDNPS, dest, first);
+}
+
+fn vector_float_compare(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    left: u8,
+    right: u8,
+    width: u64,
+    predicate: u64
+) {
+    if predicate == FLOAT_ORDERED_NOT_EQUAL {
+        compare_packed(inout out, XMM_AUX_SCRATCH, left, right, width, CMP_PACKED_NE);
+        compare_packed(inout out, dest, left, right, width, CMP_PACKED_ORDERED);
+        xmm_binary(inout out, ANDPS, dest, XMM_AUX_SCRATCH);
+        return;
+    }
+    if predicate == FLOAT_UNORDERED_OR_EQUAL {
+        compare_packed(inout out, XMM_AUX_SCRATCH, left, right, width, CMP_PACKED_EQ);
+        compare_packed(inout out, dest, left, right, width, CMP_PACKED_UNORDERED);
+        xmm_binary(inout out, ORPS, dest, XMM_AUX_SCRATCH);
+        return;
+    }
+    let (condition, reverse) = match predicate {
+        FLOAT_ORDERED => (CMP_PACKED_ORDERED, false),
+        FLOAT_UNORDERED => (CMP_PACKED_UNORDERED, false),
+        FLOAT_EQUAL => (CMP_PACKED_EQ, false),
+        FLOAT_NOT_EQUAL => (CMP_PACKED_NE, false),
+        FLOAT_LESS => (CMP_PACKED_LT, false),
+        FLOAT_LESS_EQUAL => (CMP_PACKED_LE, false),
+        FLOAT_GREATER => (CMP_PACKED_LT, true),
+        FLOAT_GREATER_EQUAL => (CMP_PACKED_LE, true),
+        FLOAT_UNORDERED_OR_LESS => (CMP_PACKED_NOT_LE, true),
+        FLOAT_UNORDERED_OR_LESS_EQUAL => (CMP_PACKED_NOT_LT, true),
+        FLOAT_UNORDERED_OR_GREATER => (CMP_PACKED_NOT_LE, false),
+        _ => (CMP_PACKED_NOT_LT, false),
+    };
+    let (lhs, rhs) = if reverse {
+        (right, left)
+    } else {
+        (left, right)
+    };
+    compare_packed(inout out, dest, lhs, rhs, width, condition);
+}
+
+fn float_fma(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    left: u8,
+    right: u8,
+    addend: u8,
+    width: u64,
+    packed: bool,
+    scratch: u8
+) {
+    // Keep the CLIF source order for NaN payload selection.
+    let result = if dest != left && (dest == right || dest == addend) {
+        scratch
+    } else {
+        dest
+    };
+    float_move(inout out, result, left);
+    let reg = xmm_code(result);
+    let source = xmm_code(right);
+    let rm = xmm_code(addend);
+    let r = if reg < HIGH_REGISTER {
+        VEX_R_INVERTED
+    } else {
+        0
+    };
+    let b = if rm < HIGH_REGISTER {
+        VEX_B_INVERTED
+    } else {
+        0
+    };
+    let w = if width == QWORD_BITS { VEX_W } else { 0 };
+    let inverted_source = wrapping_sub(wrapping_u8(REGISTER_CODES - 1), source);
+    out.push(THREE_BYTE_VEX);
+    out.push(r | VEX_X_INVERTED | b | VEX_0F38_MAP);
+    out.push(w | wrapping_shl_u8(inverted_source, VEX_SOURCE_SHIFT) | VEX_66_PREFIX);
+    out.push(
+        if packed {
+            VFMADD213_PACKED
+        } else {
+            VFMADD213_SCALAR
+        }
+    );
+    out.push(modrm(reg, rm));
+    float_move(inout out, dest, result);
+}
+
+fn emit_short_branch(inout out: ChunkSeq[u8], opcode: u8) -> u64 {
+    out.push(opcode);
+    let displacement = out.len();
+    out.push(0);
+    displacement
+}
+
+fn patch_short_forward(inout out: ChunkSeq[u8], displacement: u64) {
+    // The caller keeps each forward target within its fixed instruction sequence.
+    let distance = wrapping_sub(out.len(), wrapping_add(displacement, 1));
+    let _ = out.try_set(displacement, wrapping_u8(distance));
+}
+
+fn float_min_max(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    left: u8,
+    right: u8,
+    min: bool,
+    width: u64,
+    scratch: u8
+) {
+    let result = if dest == left && left != right {
+        scratch
+    } else {
+        dest
+    };
+    float_move(inout out, result, right);
+    compare_float_registers(inout out, result, left, width);
+    let unequal = emit_short_branch(inout out, JCC_SHORT | CC_NE);
+    let unordered = emit_short_branch(inout out, JCC_SHORT | CC_P);
+
+    // Equal operands can differ in the sign of zero.
+    xmm_binary(inout out, if min { ORPS } else { ANDPS }, result, left);
+    let equal_done = emit_short_branch(inout out, JMP_SHORT);
+
+    // Addition quiets a signaling NaN and propagates its payload.
+    patch_short_forward(inout out, unordered);
+    out.push(float_prefix(width));
+    xmm_binary(inout out, SSE_ADD, result, left);
+    let unordered_done = emit_short_branch(inout out, JMP_SHORT);
+
+    patch_short_forward(inout out, unequal);
+    out.push(float_prefix(width));
+    xmm_binary(inout out, if min { SSE_MIN } else { SSE_MAX }, result, left);
+    patch_short_forward(inout out, equal_done);
+    patch_short_forward(inout out, unordered_done);
+    float_move(inout out, dest, result);
+}
+
+fn float_round(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    source: u8,
+    in mode: Rounding,
+    width: u64,
+    packed: bool
+) {
+    let dest = xmm_code(dest);
+    let source = xmm_code(source);
+    out.push(OPERAND_SIZE_OVERRIDE);
+    emit_rex(inout out, dest, source, false, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(THREE_BYTE_3A_MAP);
+    let opcode = match (packed, width == DWORD_BITS) {
+        (true, true) => ROUNDPS,
+        (true, false) => ROUNDPD,
+        (false, true) => ROUNDSS,
+        (false, false) => ROUNDSD,
+    };
+    out.push(opcode);
+    out.push(modrm(dest, source));
+    out.push(match mode {
+        Rounding::Nearest => ROUND_NEAREST_EVEN,
+        Rounding::Floor => ROUND_DOWN,
+        Rounding::Ceil => ROUND_UP,
+        Rounding::Trunc => ROUND_TOWARD_ZERO,
+    });
+}
+
+fn float_immediate(inout out: ChunkSeq[u8], destination: u8, bits: u64, width: u64) {
+    if bits == 0 {
+        xmm_binary(inout out, XORPS, destination, destination);
+    } else {
+        load_constant(inout out, R11, bits);
+        float_bits(inout out, destination, R11, width);
+    }
+}
+
+fn float_to_integer(inout out: ChunkSeq[u8], destination: u8, source: u8, from: u64, width: u64) {
+    let source = xmm_code(source);
+    out.push(float_prefix(from));
+    emit_rex(inout out, destination, source, width == QWORD_BITS, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(SSE_FLOAT_TO_INTEGER_TRUNC);
+    out.push(modrm(destination, source));
+}
+
+fn float_power_of_two(exponent: u64, width: u64) -> u64 {
+    if width == DWORD_BITS {
+        wrapping_shl_u64(wrapping_add(exponent, F32_EXPONENT_BIAS), F32_EXPONENT_SHIFT)
+    } else {
+        wrapping_shl_u64(wrapping_add(exponent, F64_EXPONENT_BIAS), F64_EXPONENT_SHIFT)
+    }
+}
+
+fn float_to_unsigned_qword(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    source: u8,
+    from: u64,
+    reduced: u8,
+    cutoff: u8
+) {
+    float_immediate(inout out, cutoff, float_power_of_two(QWORD_BITS - 1, from), from);
+    compare_float_registers(inout out, source, cutoff, from);
+    let direct = emit_short_branch(inout out, JCC_SHORT | CC_B);
+
+    // Values in the upper half fit a signed conversion after subtracting 2^63.
+    float_move(inout out, reduced, source);
+    out.push(float_prefix(from));
+    xmm_binary(inout out, SSE_SUB, reduced, cutoff);
+    float_to_integer(inout out, dest, reduced, from, QWORD_BITS);
+    move_constant(inout out, R11, wrapping_shl_u64(1, wrapping_u32(QWORD_BITS - 1)));
+    binary(inout out, OR_RM_R64, dest, R11, true);
+    let done = emit_short_branch(inout out, JMP_SHORT);
+
+    patch_short_forward(inout out, direct);
+    float_to_integer(inout out, dest, source, from, QWORD_BITS);
+    patch_short_forward(inout out, done);
+}
+
+fn float_to_integer_saturating(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    source: u8,
+    from: u64,
+    width: u64,
+    signed: bool,
+    reduced: u8,
+    cutoff: u8
+) {
+    let limit = if signed {
+        wrapping_sub(width, 1)
+    } else {
+        width
+    };
+    compare_float_registers(inout out, source, source, from);
+    conditional_jump(inout out, CC_P);
+    let unordered = out.len();
+
+    let upper = float_power_of_two(limit, from);
+    let sign = if from == DWORD_BITS {
+        F32_SIGN
+    } else {
+        F64_SIGN
+    };
+    float_immediate(inout out, cutoff, if signed { upper | sign } else { 0 }, from);
+    compare_float_registers(inout out, source, cutoff, from);
+    conditional_jump(inout out, CC_BE);
+    let below = out.len();
+    float_immediate(inout out, cutoff, upper, from);
+    compare_float_registers(inout out, source, cutoff, from);
+    conditional_jump(inout out, CC_AE);
+    let above = out.len();
+
+    if !signed && width == QWORD_BITS {
+        float_to_unsigned_qword(inout out, dest, source, from, reduced, cutoff);
+    } else {
+        let conversion = if width == QWORD_BITS || (!signed && width == DWORD_BITS) {
+            QWORD_BITS
+        } else {
+            DWORD_BITS
+        };
+        float_to_integer(inout out, dest, source, from, conversion);
+        normalize_small_result(inout out, dest, width);
+    }
+    let in_range_done = emit_short_branch(inout out, JMP_SHORT);
+
+    let _ = patch_forward_branch(inout out, below);
+    let minimum = if signed {
+        wrapping_shl_u64(1, wrapping_u32(limit))
+    } else {
+        0
+    };
+    load_constant(inout out, dest, minimum);
+    let below_done = emit_short_branch(inout out, JMP_SHORT);
+
+    let _ = patch_forward_branch(inout out, above);
+    load_constant(
+        inout out,
+        dest,
+        wrapping_shr_u64(ALL_REGISTER_BITS, wrapping_u32(wrapping_sub(QWORD_BITS, limit)))
+    );
+    let above_done = emit_short_branch(inout out, JMP_SHORT);
+
+    let _ = patch_forward_branch(inout out, unordered);
+    load_constant(inout out, dest, 0);
+    patch_short_forward(inout out, in_range_done);
+    patch_short_forward(inout out, below_done);
+    patch_short_forward(inout out, above_done);
+}
+
+fn cvtsi(inout out: ChunkSeq[u8], destination: u8, source: u8, wide: bool, width: u64) {
+    let dest = xmm_code(destination);
+    out.push(float_prefix(width));
+    emit_rex(inout out, dest, source, wide, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(SSE_INTEGER_TO_FLOAT);
+    out.push(modrm(dest, source));
+}
+
+fn integer_to_float(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    source: u8,
+    from: u64,
+    width: u64,
+    signed: bool
+) {
+    if signed && from < DWORD_BITS {
+        sign_extend(inout out, R11, source, from, DWORD_BITS);
+        cvtsi(inout out, dest, R11, false, width);
+    } else if !signed && from == QWORD_BITS {
+        binary(inout out, TEST_RM_R64, source, source, true);
+        conditional_jump(inout out, CC_GE);
+        let direct = out.len();
+
+        // Fold the low bit into the shifted value before rounding, then
+        // double the float. This avoids double rounding above i64::MAX.
+        gp_move(inout out, R11, source);
+        shift_immediate(inout out, SHR_EXTENSION, R11, 1, QWORD_BITS);
+        conditional_jump(inout out, CC_AE);
+        let even = out.len();
+        alu_immediate(inout out, ALU_OR_EXTENSION, R11, 1, QWORD_BITS);
+        let _ = patch_forward_branch(inout out, even);
+        cvtsi(inout out, dest, R11, true, width);
+        out.push(float_prefix(width));
+        xmm_binary(inout out, SSE_ADD, dest, dest);
+
+        let _ = emit_direct_jump(inout out);
+        let done = out.len();
+        let _ = patch_forward_branch(inout out, direct);
+        cvtsi(inout out, dest, source, true, width);
+        let _ = patch_forward_branch(inout out, done);
+    } else {
+        let wide = from == QWORD_BITS || (!signed && from == DWORD_BITS);
+        cvtsi(inout out, dest, source, wide, width);
+    }
+}
+
+fn packed_38(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8) {
+    let dst = xmm_code(destination);
+    let src = xmm_code(source);
+    out.push(OPERAND_SIZE_OVERRIDE);
+    emit_rex(inout out, dst, src, false, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(THREE_BYTE_38_MAP);
+    out.push(opcode);
+    out.push(modrm(dst, src));
+}
+
+fn packed_binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8) {
+    out.push(OPERAND_SIZE_OVERRIDE);
+    xmm_binary(inout out, opcode, destination, source);
+}
+
+fn packed_word_shift_right(inout out: ChunkSeq[u8], destination: u8, count: u8) {
+    packed_shift(inout out, destination, PACKED_SHIFT_RIGHT, WORD_BITS, count);
+}
+
+fn packed_shift(inout out: ChunkSeq[u8], destination: u8, extension: u8, width: u64, count: u8) {
+    let destination = xmm_code(destination);
+    out.push(OPERAND_SIZE_OVERRIDE);
+    emit_rex(inout out, 0, destination, false, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(match width {
+        WORD_BITS => PACKED_SHIFT_WORD,
+        DWORD_BITS => PACKED_SHIFT_DWORD,
+        _ => PACKED_SHIFT_QWORD,
+    });
+    out.push(modrm(extension, destination));
+    out.push(count);
+}
+
+fn gp_multiply(inout out: ChunkSeq[u8], dest: u8, source: u8, width: u64) {
+    emit_rex(inout out, dest, source, width == QWORD_BITS, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(IMUL_R64_RM64);
+    out.push(modrm(dest, source));
+    normalize_small_result(inout out, dest, width);
+}
+
+fn scalarized_multiply_qwords(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8) {
+    let high = XMM_AUX_SCRATCH;
+    packed_shuffle(inout out, high, left, HIGH_QWORD_TO_LOW);
+    float_bits(inout out, R10, high, QWORD_BITS);
+    packed_shuffle(inout out, high, right, HIGH_QWORD_TO_LOW);
+    float_bits(inout out, R11, high, QWORD_BITS);
+    gp_multiply(inout out, R10, R11, QWORD_BITS);
+    float_bits(inout out, high, R10, QWORD_BITS);
+
+    float_bits(inout out, R10, left, QWORD_BITS);
+    float_bits(inout out, R11, right, QWORD_BITS);
+    gp_multiply(inout out, R10, R11, QWORD_BITS);
+    float_bits(inout out, dest, R10, QWORD_BITS);
+    packed_binary(inout out, PUNPCKLQDQ, dest, high);
+}
+
+fn vector_integer_min_max(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    left: u8,
+    right: u8,
+    width: u64,
+    signed: bool,
+    min: bool
+) {
+    let (first, second) = if dest == right {
+        (right, left)
+    } else {
+        (left, right)
+    };
+    float_move(inout out, dest, first);
+    match (width, signed) {
+        (BYTE_BITS, false) => packed_binary(
+            inout out,
+            if min { PMINUB } else { PMAXUB },
+            dest,
+            second
+        ),
+        (WORD_BITS, true) => packed_binary(
+            inout out,
+            if min { PMINSW } else { PMAXSW },
+            dest,
+            second
+        ),
+        _ => {
+            let op = match (width, signed, min) {
+                (BYTE_BITS, true, true) => PMINSB,
+                (BYTE_BITS, true, false) => PMAXSB,
+                (WORD_BITS, false, true) => PMINUW,
+                (WORD_BITS, false, false) => PMAXUW,
+                (DWORD_BITS, true, true) => PMINSD,
+                (DWORD_BITS, true, false) => PMAXSD,
+                (_, false, true) => PMINUD,
+                _ => PMAXUD,
+            };
+            packed_38(inout out, op, dest, second);
+        },
+    };
+}
+
+fn vector_widen(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    source: u8,
+    width: u64,
+    signed: bool,
+    high: bool,
+    sse41: bool
+) {
+    if sse41 {
+        let opcode = match (width, signed) {
+            (BYTE_BITS, true) => PMOVSXBW,
+            (WORD_BITS, true) => PMOVSXWD,
+            (DWORD_BITS, true) => PMOVSXDQ,
+            (BYTE_BITS, false) => PMOVZXBW,
+            (WORD_BITS, false) => PMOVZXWD,
+            _ => PMOVZXDQ,
+        };
+        let input = if high {
+            packed_shuffle(inout out, dest, source, HIGH_QWORD_TO_LOW);
+            dest
+        } else {
+            source
+        };
+        packed_38(inout out, opcode, dest, input);
+        return;
+    }
+    let unpack = match (width, high) {
+        (BYTE_BITS, false) => PUNPCKLBW,
+        (BYTE_BITS, true) => PUNPCKHBW,
+        (WORD_BITS, false) => PUNPCKLWD,
+        (WORD_BITS, true) => PUNPCKHWD,
+        (DWORD_BITS, false) => PUNPCKLDQ,
+        _ => PUNPCKHDQ,
+    };
+    float_move(inout out, dest, source);
+    if signed && width != DWORD_BITS {
+        packed_binary(inout out, unpack, dest, dest);
+        packed_shift(
+            inout out,
+            dest,
+            PACKED_SHIFT_ARITHMETIC_RIGHT,
+            wrapping_add(width, width),
+            wrapping_u8(width)
+        );
+    } else {
+        let upper = XMM_AUX_SCRATCH;
+        if signed {
+            float_move(inout out, upper, source);
+            packed_shift(
+                inout out,
+                upper,
+                PACKED_SHIFT_ARITHMETIC_RIGHT,
+                DWORD_BITS,
+                wrapping_u8(DWORD_BITS - 1)
+            );
+        } else {
+            packed_binary(inout out, PXOR, upper, upper);
+        }
+        packed_binary(inout out, unpack, dest, upper);
+    }
+}
+
+fn vector_narrow(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8, width: u64, signed: bool) {
+    if width == QWORD_BITS {
+        // The selector has already clamped each 64-bit lane.
+        packed_shuffle(inout out, XMM_RIGHT_SCRATCH, right, GATHER_EVEN_DWORDS);
+        packed_shuffle(inout out, dest, left, GATHER_EVEN_DWORDS);
+        packed_binary(inout out, PUNPCKLQDQ, dest, XMM_RIGHT_SCRATCH);
+        return;
+    }
+    let rhs = if dest == right && left != right {
+        float_move(inout out, XMM_RIGHT_SCRATCH, right);
+        XMM_RIGHT_SCRATCH
+    } else {
+        right
+    };
+    float_move(inout out, dest, left);
+    match (width, signed) {
+        (WORD_BITS, true) => packed_binary(inout out, PACKSSWB, dest, rhs),
+        (WORD_BITS, false) => packed_binary(inout out, PACKUSWB, dest, rhs),
+        (DWORD_BITS, true) => packed_binary(inout out, PACKSSDW, dest, rhs),
+        _ => packed_38(inout out, PACKUSDW, dest, rhs),
+    };
+}
+
+fn vector_multiply(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    left: u8,
+    right: u8,
+    width: u64,
+    sse41: bool
+) {
+    if width == WORD_BITS || (width == DWORD_BITS && sse41) {
+        let (a, b) = if dest == right {
+            (right, left)
+        } else {
+            (left, right)
+        };
+        float_move(inout out, dest, a);
+        if width == WORD_BITS {
+            packed_binary(inout out, PMULLW, dest, b);
+        } else {
+            packed_38(inout out, PMULLD, dest, b);
+        }
+        return;
+    }
+    if width == QWORD_BITS && !sse41 {
+        scalarized_multiply_qwords(inout out, dest, left, right);
+        return;
+    }
+
+    let even = XMM_AUX_SCRATCH;
+    let rhs = XMM_RIGHT_SCRATCH;
+    let op = if width == BYTE_BITS { PMULLW } else { PMULUDQ };
+    float_move(inout out, even, left);
+    packed_binary(inout out, op, even, right);
+    if width == QWORD_BITS {
+        // Multiply crossed dwords, add each pair, and accumulate above the low product.
+        packed_shuffle(inout out, rhs, right, SWAP_ADJACENT_DWORDS);
+        float_move(inout out, dest, left);
+        packed_38(inout out, PMULLD, dest, rhs);
+        packed_shuffle(inout out, rhs, dest, SWAP_ADJACENT_DWORDS);
+        packed_binary(inout out, PADDD, dest, rhs);
+        packed_shift(inout out, dest, PACKED_SHIFT_LEFT, QWORD_BITS, wrapping_u8(DWORD_BITS));
+        packed_binary(inout out, PADDQ, dest, even);
+        return;
+    }
+
+    // Bring the odd bytes or dwords into the low halves used by the multiply.
+    float_move(inout out, rhs, right);
+    float_move(inout out, dest, left);
+    let group = wrapping_mul(width, 2);
+    let shift = wrapping_u8(width);
+    packed_shift(inout out, rhs, PACKED_SHIFT_RIGHT, group, shift);
+    packed_shift(inout out, dest, PACKED_SHIFT_RIGHT, group, shift);
+    packed_binary(inout out, op, dest, rhs);
+    if width == BYTE_BITS {
+        packed_shift(inout out, dest, PACKED_SHIFT_LEFT, WORD_BITS, shift);
+        packed_binary(inout out, PCMPEQD, rhs, rhs);
+        packed_shift(inout out, rhs, PACKED_SHIFT_RIGHT, WORD_BITS, shift);
+        packed_binary(inout out, PAND, even, rhs);
+        packed_binary(inout out, POR, dest, even);
+    } else {
+        packed_shuffle(inout out, even, even, GATHER_EVEN_DWORDS);
+        packed_shuffle(inout out, dest, dest, GATHER_EVEN_DWORDS);
+        packed_binary(inout out, PUNPCKLDQ, even, dest);
+        float_move(inout out, dest, even);
+    }
+}
+
+fn apply_vector_shift(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    count: u8,
+    width: u64,
+    immediate: bool,
+    in mode: PackedShift
+) {
+    if immediate {
+        let extension = match mode {
+            PackedShift::Left => PACKED_SHIFT_LEFT,
+            PackedShift::LogicalRight => PACKED_SHIFT_RIGHT,
+            PackedShift::ArithmeticRight => PACKED_SHIFT_ARITHMETIC_RIGHT,
+        };
+        packed_shift(inout out, dest, extension, width, count);
+    } else {
+        let word = match mode {
+            PackedShift::Left => PACKED_LEFT_WORD_REG,
+            PackedShift::LogicalRight => PACKED_LOGICAL_RIGHT_WORD_REG,
+            PackedShift::ArithmeticRight => PACKED_ARITHMETIC_RIGHT_WORD_REG,
+        };
+        let offset = match width {
+            DWORD_BITS => PACKED_DWORD_SHIFT_OPCODE_OFFSET,
+            QWORD_BITS => PACKED_QWORD_SHIFT_OPCODE_OFFSET,
+            _ => 0,
+        };
+        packed_binary(inout out, wrapping_add(word, offset), dest, count);
+    }
+}
+
+fn vector_shift_bytes(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    count: u8,
+    immediate: bool,
+    in mode: PackedShift
+) {
+    let temp = XMM_RIGHT_SCRATCH;
+    let byte = wrapping_u8(BYTE_BITS);
+    match mode {
+        PackedShift::ArithmeticRight => {
+            // Duplicate each byte into a word. A shift by 8 plus the count sign-extends
+            // the byte and leaves a result that fits the final signed pack.
+            float_move(inout out, temp, dest);
+            packed_binary(inout out, PUNPCKLBW, dest, dest);
+            packed_binary(inout out, PUNPCKHBW, temp, temp);
+            apply_vector_shift(inout out, dest, count, WORD_BITS, immediate, in mode);
+            apply_vector_shift(inout out, temp, count, WORD_BITS, immediate, in mode);
+            packed_binary(inout out, PACKSSWB, dest, temp);
+            return;
+        },
+        _ => (),
+    };
+    // Mask away the bits that a word shift carries across byte lanes.
+    apply_vector_shift(inout out, dest, count, WORD_BITS, immediate, in mode);
+    packed_binary(inout out, PCMPEQD, temp, temp);
+    match mode {
+        PackedShift::Left => {
+            apply_vector_shift(inout out, temp, count, WORD_BITS, immediate, in mode);
+            packed_shift(inout out, temp, PACKED_SHIFT_LEFT, WORD_BITS, byte);
+            packed_shift(inout out, temp, PACKED_SHIFT_RIGHT, WORD_BITS, byte);
+        },
+        _ => {
+            packed_shift(inout out, temp, PACKED_SHIFT_RIGHT, WORD_BITS, byte);
+            apply_vector_shift(inout out, temp, count, WORD_BITS, immediate, in mode);
+        },
+    };
+    packed_binary(inout out, PACKUSWB, temp, temp);
+    packed_binary(inout out, PAND, dest, temp);
+}
+
+fn vector_shift(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    source: u8,
+    amount: u64,
+    width: u64,
+    immediate: bool,
+    in mode: PackedShift
+) {
+    float_move(inout out, dest, source);
+    if immediate && amount == 0 {
+        return;
+    }
+    let offset = match mode {
+        PackedShift::ArithmeticRight => if width == BYTE_BITS { BYTE_BITS } else { 0 },
+        _ => 0,
+    };
+    let count = if immediate {
+        wrapping_u8(wrapping_add(amount, offset))
+    } else {
+        gp_move(inout out, R11, wrapping_u8(amount));
+        alu_immediate(
+            inout out,
+            ALU_AND_EXTENSION,
+            R11,
+            wrapping_u32(wrapping_sub(width, 1)),
+            DWORD_BITS
+        );
+        if offset != 0 {
+            alu_immediate(inout out, ALU_ADD_EXTENSION, R11, wrapping_u32(offset), DWORD_BITS);
+        }
+        float_bits(inout out, XMM_AUX_SCRATCH, R11, DWORD_BITS);
+        XMM_AUX_SCRATCH
+    };
+    if width == BYTE_BITS {
+        vector_shift_bytes(inout out, dest, count, immediate, in mode);
+        return;
+    }
+    match mode {
+        PackedShift::ArithmeticRight => if width == QWORD_BITS {
+            // XOR with the sign mask before and after a logical shift to preserve the sign.
+            let sign = XMM_RIGHT_SCRATCH;
+            packed_shuffle(inout out, sign, dest, DUPLICATE_HIGH_DWORDS);
+            packed_shift(
+                inout out,
+                sign,
+                PACKED_SHIFT_ARITHMETIC_RIGHT,
+                DWORD_BITS,
+                wrapping_u8(DWORD_BITS - 1)
+            );
+            packed_binary(inout out, PXOR, dest, sign);
+            apply_vector_shift(
+                inout out,
+                dest,
+                count,
+                width,
+                immediate,
+                in PackedShift::LogicalRight
+            );
+            packed_binary(inout out, PXOR, dest, sign);
+            return;
+        },
+        _ => (),
+    };
+    apply_vector_shift(inout out, dest, count, width, immediate, in mode);
+}
+
+fn vector_float_sign(inout out: ChunkSeq[u8], dest: u8, source: u8, absolute: bool, width: u64) {
+    let mask = XMM_RIGHT_SCRATCH;
+    float_move(inout out, dest, source);
+    packed_binary(inout out, PCMPEQD, mask, mask);
+    if absolute {
+        packed_shift(inout out, mask, PACKED_SHIFT_RIGHT, width, 1);
+    } else {
+        packed_shift(
+            inout out,
+            mask,
+            PACKED_SHIFT_LEFT,
+            width,
+            wrapping_u8(wrapping_sub(width, 1))
+        );
+    }
+    xmm_binary(inout out, if absolute { ANDPS } else { XORPS }, dest, mask);
+}
+
+fn float_move(inout out: ChunkSeq[u8], destination: u8, source: u8) {
+    if destination != source {
+        xmm_binary(inout out, MOVAPS_LOAD, destination, source);
+    }
+}
+
+fn float_bits(inout out: ChunkSeq[u8], destination: u8, source: u8, width: u64) {
+    let to_xmm = is_xmm(destination);
+    let xmm = xmm_code(if to_xmm { destination } else { source });
+    let gp = if to_xmm { source } else { destination };
+    out.push(OPERAND_SIZE_OVERRIDE);
+    emit_rex(inout out, xmm, gp, width == QWORD_BITS, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(if to_xmm { GPR_TO_XMM } else { XMM_TO_GPR });
+    out.push(modrm(xmm, gp));
+}
+
+fn packed_shuffle(inout out: ChunkSeq[u8], destination: u8, source: u8, lanes: u8) {
+    out.push(OPERAND_SIZE_OVERRIDE);
+    xmm_binary(inout out, PSHUFD, destination, source);
+    out.push(lanes);
+}
+
+fn vector_constant(inout out: ChunkSeq[u8], destination: u8, low: u64, high: u64) {
+    if low == 0 && high == 0 {
+        out.push(OPERAND_SIZE_OVERRIDE);
+        xmm_binary(inout out, PXOR, destination, destination);
+        return;
+    }
+    move_constant(inout out, R11, low);
+    float_bits(inout out, destination, R11, QWORD_BITS);
+    if high == 0 {
+        return;
+    }
+    if high == low {
+        packed_shuffle(inout out, destination, destination, DUPLICATE_LOW_QWORD);
+    } else {
+        move_constant(inout out, R11, high);
+        float_bits(inout out, XMM_RIGHT_SCRATCH, R11, QWORD_BITS);
+        out.push(OPERAND_SIZE_OVERRIDE);
+        xmm_binary(inout out, PUNPCKLQDQ, destination, XMM_RIGHT_SCRATCH);
+    }
+}
+
+fn vector_pairwise_add(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8, width: u64) {
+    if width == BYTE_BITS {
+        let mask = XMM_AUX_SCRATCH;
+        float_move(inout out, XMM_RIGHT_SCRATCH, right);
+        float_move(inout out, dest, left);
+        packed_binary(inout out, PCMPEQB, mask, mask);
+        packed_38(inout out, PABSB, mask, mask);
+        // Multiplication by one sums adjacent unsigned bytes into each word.
+        packed_38(inout out, PMADDUBSW, dest, mask);
+        packed_38(inout out, PMADDUBSW, XMM_RIGHT_SCRATCH, mask);
+        packed_binary(inout out, PCMPEQB, mask, mask);
+        packed_word_shift_right(inout out, mask, wrapping_u8(BYTE_BITS));
+        packed_binary(inout out, PAND, dest, mask);
+        packed_binary(inout out, PAND, XMM_RIGHT_SCRATCH, mask);
+        packed_binary(inout out, PACKUSWB, dest, XMM_RIGHT_SCRATCH);
+    } else {
+        float_move(inout out, dest, left);
+        packed_38(inout out, if width == WORD_BITS { PHADDW } else { PHADDD }, dest, right);
+    }
+}
+
+fn vector_swizzle(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8, zero_high: bool) {
+    let mask = if zero_high {
+        right
+    } else {
+        vector_constant(inout out, XMM_AUX_SCRATCH, SWIZZLE_CLAMP_QWORD, SWIZZLE_CLAMP_QWORD);
+        float_move(inout out, XMM_RIGHT_SCRATCH, right);
+        packed_binary(inout out, PADDUSB, XMM_RIGHT_SCRATCH, XMM_AUX_SCRATCH);
+        XMM_RIGHT_SCRATCH
+    };
+    float_move(inout out, dest, left);
+    packed_38(inout out, PSHUFB, dest, mask);
+}
+
+fn vector_splat(inout out: ChunkSeq[u8], destination: u8, source: u8, lane: u64) {
+    let lane_move = if lane == QWORD_BITS {
+        QWORD_BITS
+    } else {
+        DWORD_BITS
+    };
+    float_bits(inout out, destination, source, lane_move);
+    if lane == BYTE_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+        xmm_binary(inout out, PUNPCKLBW, destination, destination);
+    }
+    if lane <= WORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+        xmm_binary(inout out, PUNPCKLWD, destination, destination);
+    }
+    let lanes = if lane == QWORD_BITS {
+        DUPLICATE_LOW_QWORD
+    } else {
+        DUPLICATE_LOW_DWORD
+    };
+    packed_shuffle(inout out, destination, destination, lanes);
+}
+
+fn vector_compare_inputs(inout out: ChunkSeq[u8], a: u8, b: u8) {
+    let left = XMM_LEFT_SCRATCH;
+    let right = XMM_RIGHT_SCRATCH;
+    if a == right && b == left {
+        float_move(inout out, XMM_AUX_SCRATCH, left);
+        float_move(inout out, left, right);
+        float_move(inout out, right, XMM_AUX_SCRATCH);
+    } else if a == right {
+        float_move(inout out, left, a);
+        float_move(inout out, right, b);
+    } else {
+        float_move(inout out, right, b);
+        float_move(inout out, left, a);
+    }
+}
+
+fn vector_bias(inout out: ChunkSeq[u8], pattern: u64) {
+    let mask = XMM_AUX_SCRATCH;
+    vector_constant(inout out, mask, pattern, pattern);
+    packed_binary(inout out, PXOR, XMM_LEFT_SCRATCH, mask);
+    packed_binary(inout out, PXOR, XMM_RIGHT_SCRATCH, mask);
+}
+
+fn vector_greater_qword(inout out: ChunkSeq[u8], unsigned: bool) {
+    let gt = XMM_LEFT_SCRATCH;
+    let low = XMM_RIGHT_SCRATCH;
+    let eq = XMM_AUX_SCRATCH;
+    // With equal high halves the low half determines the comparison, unsigned.
+    vector_bias(
+        inout out,
+        if unsigned {
+            DWORD_SIGN_BITS
+        } else {
+            LOW_DWORD_SIGN_BIT
+        }
+    );
+    float_move(inout out, eq, gt);
+    packed_binary(inout out, PCMPEQD, eq, low);
+    packed_binary(inout out, PCMPGTD, gt, low);
+    packed_shuffle(inout out, low, gt, DUPLICATE_EVEN_DWORDS);
+    packed_shuffle(inout out, gt, gt, DUPLICATE_ODD_DWORDS);
+    packed_shuffle(inout out, eq, eq, DUPLICATE_ODD_DWORDS);
+    packed_binary(inout out, PAND, low, eq);
+    packed_binary(inout out, POR, gt, low);
+}
+
+fn vector_integer_compare(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    a: u8,
+    b: u8,
+    width: u64,
+    in relation: PackedRelation,
+    invert: bool
+) {
+    let aux = XMM_AUX_SCRATCH;
+    let (equal, unsigned) = match relation {
+        PackedRelation::Equal => (true, false),
+        PackedRelation::SignedGreater => (false, false),
+        PackedRelation::UnsignedGreater => (false, true),
+    };
+    if unsigned || (!equal && width == QWORD_BITS) {
+        vector_compare_inputs(inout out, a, b);
+        if width == QWORD_BITS {
+            vector_greater_qword(inout out, unsigned);
+        } else {
+            let (mask, opcode) = match width {
+                BYTE_BITS => (BYTE_SIGN_BITS, PCMPGTB),
+                WORD_BITS => (WORD_SIGN_BITS, PCMPGTW),
+                _ => (DWORD_SIGN_BITS, PCMPGTD),
+            };
+            vector_bias(inout out, mask);
+            packed_binary(inout out, opcode, XMM_LEFT_SCRATCH, XMM_RIGHT_SCRATCH);
+        }
+        float_move(inout out, dest, XMM_LEFT_SCRATCH);
+    } else {
+        let rhs = if dest == b && a != b {
+            float_move(inout out, aux, b);
+            aux
+        } else {
+            b
+        };
+        float_move(inout out, dest, a);
+        let opcode = match width {
+            BYTE_BITS => if equal { PCMPEQB } else { PCMPGTB },
+            WORD_BITS => if equal { PCMPEQW } else { PCMPGTW },
+            _ => if equal { PCMPEQD } else { PCMPGTD },
+        };
+        packed_binary(inout out, opcode, dest, rhs);
+        if width == QWORD_BITS {
+            packed_shuffle(inout out, aux, dest, SWAP_ADJACENT_DWORDS);
+            packed_binary(inout out, PAND, dest, aux);
+        }
+    }
+    if invert {
+        packed_binary(inout out, PCMPEQB, aux, aux);
+        packed_binary(inout out, PXOR, dest, aux);
+    }
+}
+
+fn shift_right_lane(inout out: ChunkSeq[u8], destination: u8, shift: u64, wide: bool) {
+    emit_rex(inout out, 0, destination, wide, false);
+    out.push(SHIFT_GROUP_IMM8);
+    out.push(modrm(SHR_EXTENSION, destination));
+    out.push(wrapping_u8(shift));
+}
+
+fn extract_word(inout out: ChunkSeq[u8], destination: u8, source: u8, lane: u64) {
+    let source = xmm_code(source);
+    out.push(OPERAND_SIZE_OVERRIDE);
+    emit_rex(inout out, destination, source, false, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(PEXTRW);
+    out.push(modrm(destination, source));
+    out.push(wrapping_u8(lane));
+}
+
+fn insert_word(inout out: ChunkSeq[u8], destination: u8, source: u8, lane: u64) {
+    let destination = xmm_code(destination);
+    out.push(OPERAND_SIZE_OVERRIDE);
+    emit_rex(inout out, destination, source, false, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(PINSRW);
+    out.push(modrm(destination, source));
+    out.push(wrapping_u8(lane));
+}
+
+fn vector_extract(inout out: ChunkSeq[u8], dest: u8, source: u8, lane: u64, width: u64) {
+    if width <= WORD_BITS {
+        let word = if width == BYTE_BITS {
+            lane / BYTE_LANES_PER_WORD
+        } else {
+            lane
+        };
+        extract_word(inout out, dest, source, word);
+        if width == BYTE_BITS {
+            if lane % BYTE_LANES_PER_WORD == 0 {
+                truncate(inout out, dest, dest, BYTE_BITS);
+            } else {
+                shift_right_lane(inout out, dest, BYTE_BITS, false);
+            }
+        }
+    } else {
+        let mut source = source;
+        if lane != 0 {
+            let shuffle = if width == QWORD_BITS {
+                HIGH_QWORD_TO_LOW
+            } else {
+                wrapping_u8(lane)
+            };
+            packed_shuffle(inout out, XMM_RIGHT_SCRATCH, source, shuffle);
+            source = XMM_RIGHT_SCRATCH;
+        }
+        float_bits(inout out, dest, source, width);
+    }
+}
+
+fn vector_insert(inout out: ChunkSeq[u8], dest: u8, source: u8, lane: u64, width: u64) {
+    if width == BYTE_BITS {
+        let word = lane / BYTE_LANES_PER_WORD;
+        let odd = lane % BYTE_LANES_PER_WORD != 0;
+        extract_word(inout out, R11, dest, word);
+        if odd {
+            rotate_word_bytes(inout out, R11);
+        }
+        emit_rex(inout out, source, R11, false, true);
+        out.push(MOV_RM_R8);
+        out.push(modrm(source, R11));
+        if odd {
+            rotate_word_bytes(inout out, R11);
+        }
+        insert_word(inout out, dest, R11, word);
+        return;
+    }
+    let words = width / WORD_BITS;
+    let first = wrapping_mul(lane, words);
+    insert_word(inout out, dest, source, first);
+    if words > 1 {
+        binary(inout out, MOV_RM_R64, R11, source, width == QWORD_BITS);
+        for word in 1..words {
+            shift_right_lane(inout out, R11, WORD_BITS, width == QWORD_BITS);
+            insert_word(inout out, dest, R11, wrapping_add(first, word));
+        }
+    }
+}
+
+fn vector_mask(inout out: ChunkSeq[u8], dest: u8, source: u8, width: u64) {
+    if width == BYTE_BITS || width == QWORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    let source = xmm_code(source);
+    emit_rex(inout out, dest, source, false, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(if width == BYTE_BITS { PMOVMSKB } else { MOVMSK });
+    out.push(modrm(dest, source));
+}
+
+fn vector_high_bits(inout out: ChunkSeq[u8], dest: u8, source: u8, width: u64) {
+    if width == WORD_BITS {
+        // Signed saturation preserves each word's sign in the corresponding byte.
+        float_move(inout out, XMM_LEFT_SCRATCH, source);
+        out.push(OPERAND_SIZE_OVERRIDE);
+        xmm_binary(inout out, PACKSSWB, XMM_LEFT_SCRATCH, XMM_LEFT_SCRATCH);
+        vector_mask(inout out, dest, XMM_LEFT_SCRATCH, BYTE_BITS);
+        alu_immediate(inout out, ALU_AND_EXTENSION, dest, LOW_BYTE_MASK, DWORD_BITS);
+    } else {
+        vector_mask(inout out, dest, source, width);
+    }
+}
+
+fn vector_truth(inout out: ChunkSeq[u8], dest: u8, source: u8, all: bool, width: u64) {
+    float_move(inout out, XMM_LEFT_SCRATCH, source);
+    if all && width == QWORD_BITS {
+        // SSE2 compares dwords. OR each qword's two halves into both dwords.
+        packed_shuffle(inout out, XMM_RIGHT_SCRATCH, XMM_LEFT_SCRATCH, SWAP_ADJACENT_DWORDS);
+        out.push(OPERAND_SIZE_OVERRIDE);
+        xmm_binary(inout out, POR, XMM_LEFT_SCRATCH, XMM_RIGHT_SCRATCH);
+    }
+    out.push(OPERAND_SIZE_OVERRIDE);
+    xmm_binary(inout out, PXOR, XMM_RIGHT_SCRATCH, XMM_RIGHT_SCRATCH);
+    let compare = if !all || width == BYTE_BITS {
+        PCMPEQB
+    } else if width == WORD_BITS {
+        PCMPEQW
+    } else {
+        PCMPEQD
+    };
+    out.push(OPERAND_SIZE_OVERRIDE);
+    xmm_binary(inout out, compare, XMM_LEFT_SCRATCH, XMM_RIGHT_SCRATCH);
+    vector_mask(inout out, dest, XMM_LEFT_SCRATCH, BYTE_BITS);
+    compare_immediate(inout out, dest, if all { 0 } else { ALL_BYTE_SIGN_BITS }, DWORD_BITS);
+    set_condition(inout out, dest, if all { CC_E } else { CC_NE });
+}
+
+fn float_memory(
+    inout out: ChunkSeq[u8],
+    register: u8,
+    base: u8,
+    displacement: u32,
+    width: u64,
+    load: bool
+) {
+    let register = xmm_code(register);
+    if width != VECTOR_BITS {
+        out.push(float_prefix(width));
+    }
+    emit_rex(inout out, register, base, false, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(
+        if load {
+            MOV_SCALAR_LOAD
+        } else {
+            MOV_SCALAR_STORE
+        }
+    );
+    memory_operand(inout out, register, base, displacement);
+}
+
+fn float_compare(
+    inout out: ChunkSeq[u8],
+    destination: u8,
+    left: u8,
+    right: u8,
+    predicate: u64,
+    width: u64
+) {
+    // UCOMIS reports an unordered pair with ZF, PF and CF all set.
+    let swap = predicate == FLOAT_LESS
+        || predicate == FLOAT_LESS_EQUAL
+        || predicate == FLOAT_UNORDERED_OR_GREATER
+        || predicate == FLOAT_UNORDERED_OR_GREATER_EQUAL;
+    if swap {
+        compare_float_registers(inout out, right, left, width);
+    } else {
+        compare_float_registers(inout out, left, right, width);
+    }
+    let cc = match predicate {
+        FLOAT_ORDERED => CC_NP,
+        FLOAT_UNORDERED => CC_P,
+        FLOAT_EQUAL | FLOAT_UNORDERED_OR_EQUAL => CC_E,
+        FLOAT_NOT_EQUAL | FLOAT_ORDERED_NOT_EQUAL => CC_NE,
+        FLOAT_LESS | FLOAT_GREATER => CC_A,
+        FLOAT_LESS_EQUAL | FLOAT_GREATER_EQUAL => CC_AE,
+        FLOAT_UNORDERED_OR_LESS | FLOAT_UNORDERED_OR_GREATER => CC_B,
+        FLOAT_UNORDERED_OR_LESS_EQUAL | FLOAT_UNORDERED_OR_GREATER_EQUAL => CC_BE,
+        _ => CC_NP,
+    };
+    set_condition(inout out, destination, cc);
+    if predicate == FLOAT_EQUAL {
+        set_condition(inout out, R11, CC_NP);
+        binary(inout out, AND_RM_R64, destination, R11, false);
+    } else if predicate == FLOAT_NOT_EQUAL {
+        set_condition(inout out, R11, CC_P);
+        binary(inout out, OR_RM_R64, destination, R11, false);
+    }
+}
+
+pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
+    match instruction {
+        Instruction::Atomic(op, register, base, width) => atomic_memory(
+            inout out,
+            in op,
+            register,
+            base,
+            width
+        ),
+        Instruction::AtomicUpdate(op, base, width) => atomic_update(inout out, in op, base, width),
+        Instruction::Fence => {
+            out.push(TWO_BYTE_OPCODE);
+            out.push(FENCE_GROUP);
+            out.push(MFENCE_MODRM);
+        },
+        Instruction::ByteSwap(register, width) => byte_swap(inout out, register, width),
+        Instruction::Fixed(op, rhs, width) => fixed_arithmetic(
+            inout out,
+            in op,
+            rhs,
+            width == QWORD_BITS
+        ),
+        Instruction::PowerDivision(
+            destination,
+            source,
+            width,
+            shift,
+            signed,
+            negative,
+            remainder
+        ) => {
+            power_division(
+                inout out,
+                destination,
+                source,
+                width,
+                shift,
+                signed,
+                negative,
+                remainder
+            );
+        },
+        Instruction::Immediate(destination, bits) => load_constant(inout out, destination, bits),
+        Instruction::FloatImmediate(destination, bits, width) => float_immediate(
+            inout out,
+            destination,
+            bits,
+            width
+        ),
+        Instruction::FloatBinary(op, destination, source, width) => {
+            out.push(float_prefix(width));
+            xmm_binary(inout out, op, destination, source);
+        },
+        Instruction::FloatSign(destination, absolute, width, scratch) => {
+            let sign = if width == DWORD_BITS {
+                F32_SIGN
+            } else {
+                F64_SIGN
+            };
+            load_constant(
+                inout out,
+                R11,
+                if absolute {
+                    wrapping_sub(sign, 1)
+                } else {
+                    sign
+                }
+            );
+            float_bits(inout out, scratch, R11, width);
+            xmm_binary(inout out, if absolute { ANDPS } else { XORPS }, destination, scratch);
+        },
+        Instruction::FloatCopySign(destination, sign, width, scratch) => {
+            // Isolate the differing sign bit, then toggle it in the magnitude.
+            float_move(inout out, scratch, sign);
+            xmm_binary(inout out, XORPS, scratch, destination);
+            let sign_shift = wrapping_u8(wrapping_sub(width, 1));
+            packed_shift(inout out, scratch, PACKED_SHIFT_RIGHT, width, sign_shift);
+            packed_shift(inout out, scratch, PACKED_SHIFT_LEFT, width, sign_shift);
+            xmm_binary(inout out, XORPS, destination, scratch);
+        },
+        Instruction::FloatToInteger(destination, source, source_width, width) => float_to_integer(
+            inout out,
+            destination,
+            source,
+            source_width,
+            width
+        ),
+        Instruction::FloatToIntegerSat(
+            destination,
+            source,
+            source_width,
+            width,
+            signed,
+            reduced,
+            cutoff
+        ) => float_to_integer_saturating(
+            inout out,
+            destination,
+            source,
+            source_width,
+            width,
+            signed,
+            reduced,
+            cutoff
+        ),
+        Instruction::FloatFma(
+            destination,
+            left,
+            right,
+            addend,
+            width,
+            packed,
+            scratch
+        ) => float_fma(inout out, destination, left, right, addend, width, packed, scratch),
+        Instruction::VectorConstant(destination, low, high) => vector_constant(
+            inout out,
+            destination,
+            low,
+            high
+        ),
+        Instruction::VectorSplat(destination, source, lane) => vector_splat(
+            inout out,
+            destination,
+            source,
+            lane
+        ),
+        Instruction::VectorBinary(opcode, destination, source) => packed_binary(
+            inout out,
+            opcode,
+            destination,
+            source
+        ),
+        Instruction::VectorFloat(opcode, destination, source, width) => packed_float_binary(
+            inout out,
+            opcode,
+            destination,
+            source,
+            width
+        ),
+        Instruction::VectorFloatMinMax(
+            destination,
+            left,
+            right,
+            min,
+            width
+        ) => vector_float_min_max(inout out, destination, left, right, min, width),
+        Instruction::VectorFloatSign(destination, source, absolute, width) => vector_float_sign(
+            inout out,
+            destination,
+            source,
+            absolute,
+            width
+        ),
+        Instruction::VectorFloatCompare(
+            destination,
+            left,
+            right,
+            width,
+            predicate
+        ) => vector_float_compare(inout out, destination, left, right, width, predicate),
+        Instruction::VectorPairwiseAdd(destination, left, right, width) => vector_pairwise_add(
+            inout out,
+            destination,
+            left,
+            right,
+            width
+        ),
+        Instruction::VectorSwizzle(destination, left, right, zero_high) => vector_swizzle(
+            inout out,
+            destination,
+            left,
+            right,
+            zero_high
+        ),
+        Instruction::VectorIntegerCompare(destination, left, right, width, relation, invert) => {
+            vector_integer_compare(inout out, destination, left, right, width, in relation, invert);
+        },
+        Instruction::VectorMultiply(destination, left, right, width, sse41) => vector_multiply(
+            inout out,
+            destination,
+            left,
+            right,
+            width,
+            sse41
+        ),
+        Instruction::VectorShift(
+            destination,
+            source,
+            count,
+            width,
+            immediate,
+            mode
+        ) => vector_shift(inout out, destination, source, count, width, immediate, in mode),
+        Instruction::VectorIntegerMinMax(
+            destination,
+            left,
+            right,
+            width,
+            signed,
+            min
+        ) => vector_integer_min_max(inout out, destination, left, right, width, signed, min),
+        Instruction::VectorWiden(destination, source, width, signed, high, sse41) => vector_widen(
+            inout out,
+            destination,
+            source,
+            width,
+            signed,
+            high,
+            sse41
+        ),
+        Instruction::VectorNarrow(destination, left, right, width, signed) => vector_narrow(
+            inout out,
+            destination,
+            left,
+            right,
+            width,
+            signed
+        ),
+        Instruction::VectorConvert(destination, source, demote) => {
+            if demote {
+                out.push(OPERAND_SIZE_OVERRIDE);
+            }
+            xmm_binary(inout out, SSE_CONVERT_PRECISION, destination, source);
+        },
+        Instruction::FloatConvert(destination, source, source_width) => {
+            out.push(float_prefix(source_width));
+            xmm_binary(inout out, SSE_CONVERT_PRECISION, destination, source);
+        },
+        Instruction::FloatMinMax(destination, left, right, min, width, scratch) => {
+            float_min_max(inout out, destination, left, right, min, width, scratch);
+        },
+        Instruction::FloatRound(destination, source, mode, width, packed) => {
+            float_round(inout out, destination, source, in mode, width, packed);
+        },
+        Instruction::IntegerToFloat(destination, source, from, width, signed) => {
+            integer_to_float(inout out, destination, source, from, width, signed);
+        },
+        Instruction::VectorExtract(destination, source, lane, width) => vector_extract(
+            inout out,
+            destination,
+            source,
+            lane,
+            width
+        ),
+        Instruction::VectorInsert(destination, source, lane, width) => vector_insert(
+            inout out,
+            destination,
+            source,
+            lane,
+            width
+        ),
+        Instruction::VectorHighBits(destination, source, width) => vector_high_bits(
+            inout out,
+            destination,
+            source,
+            width
+        ),
+        Instruction::VectorTruth(destination, source, all, width) => vector_truth(
+            inout out,
+            destination,
+            source,
+            all,
+            width
+        ),
+        Instruction::BitOperation(destination, source, width, op) => bit_operation(
+            inout out,
+            destination,
+            source,
+            width,
+            in op
+        ),
+        Instruction::ComplementedBitwise(opcode, destination, source, width) => {
+            gp_move(inout out, R11, source);
+            gp_unary(inout out, NOT_EXTENSION, R11, QWORD_BITS);
+            binary(inout out, opcode, destination, R11, width == QWORD_BITS);
+            if opcode != AND_RM_R64 {
+                normalize_small_result(inout out, destination, width);
+            }
+        },
+        Instruction::FunnelRight(destination, source, amount) => {
+            emit_rex(inout out, source, destination, true, false);
+            out.push(TWO_BYTE_OPCODE);
+            out.push(SHRD_IMMEDIATE);
+            out.push(modrm(source, destination));
+            out.push(amount);
+        },
+        Instruction::FloatBits(destination, source, width) => float_bits(
+            inout out,
+            destination,
+            source,
+            width
+        ),
+        Instruction::FloatCompare(destination, left, right, predicate, width) => float_compare(
+            inout out,
+            destination,
+            left,
+            right,
+            predicate,
+            width
+        ),
+        Instruction::Move(destination, source) => {
+            if is_xmm(destination) {
+                float_move(inout out, destination, source);
+            } else {
+                gp_move(inout out, destination, source);
+            }
+        },
+        Instruction::Exchange(left, right) => binary(inout out, XCHG_RM_R64, left, right, true),
+        Instruction::Binary(opcode, destination, source, width) => {
+            binary(inout out, opcode, destination, source, width == QWORD_BITS);
+            // Low-width bitwise operations preserve the zeroed upper bits.
+            if opcode == ADD_RM_R64 || opcode == SUB_RM_R64 {
+                normalize_small_result(inout out, destination, width);
+            }
+        },
+        Instruction::BinaryImmediate(extension, destination, bits, width) => {
+            // The input is already zero-extended. A byte or word operation
+            // preserves those zero upper bits.
+            alu_immediate(inout out, extension, destination, bits, width);
+        },
+        Instruction::Multiply(destination, source, width) => gp_multiply(
+            inout out,
+            destination,
+            source,
+            width
+        ),
+        Instruction::MultiplyImmediate(destination, source, bits, width) => {
+            let short = fits_signed_byte(bits);
+            emit_rex(inout out, destination, source, width == QWORD_BITS, false);
+            out.push(
+                if short {
+                    IMUL_R64_RM64_IMM8
+                } else {
+                    IMUL_R64_RM64_IMM32
+                }
+            );
+            out.push(modrm(destination, source));
+            immediate(inout out, widen_u64(bits), if short { 1 } else { IMM32_BYTES });
+            normalize_small_result(inout out, destination, width);
+        },
+        Instruction::Unary(extension, destination, width) => gp_unary(
+            inout out,
+            extension,
+            destination,
+            width
+        ),
+        Instruction::Shift(extension, destination, count, width) => shift_immediate(
+            inout out,
+            extension,
+            destination,
+            widen_u64(count),
+            width
+        ),
+        Instruction::ShiftRegister(extension, destination, count, width) => {
+            // Legacy shifts read CL. Exchange full registers to preserve a
+            // live RCX and restore the count when the operation is finished.
+            let shifted = if count == RCX {
+                destination
+            } else {
+                binary(inout out, XCHG_RM_R64, RCX, count, true);
+                if destination == RCX {
+                    count
+                } else if destination == count {
+                    RCX
+                } else {
+                    destination
+                }
+            };
+            if width == WORD_BITS {
+                out.push(OPERAND_SIZE_OVERRIDE);
+            }
+            emit_rex(
+                inout out,
+                0,
+                shifted,
+                width == QWORD_BITS,
+                width == BYTE_BITS && byte_register_needs_rex(shifted)
+            );
+            out.push(
+                if width == BYTE_BITS {
+                    SHIFT_BYTE_GROUP_CL
+                } else {
+                    SHIFT_GROUP_CL
+                }
+            );
+            out.push(modrm(extension, shifted));
+            if count != RCX {
+                binary(inout out, XCHG_RM_R64, RCX, count, true);
+            }
+        },
+        Instruction::Load(destination, base, displacement, width) => {
+            if is_xmm(destination) {
+                float_memory(inout out, destination, base, displacement, width, true);
+            } else {
+                load_memory(inout out, destination, base, displacement, width);
+            }
+        },
+        Instruction::Store(source, base, displacement, width) => {
+            if is_xmm(source) {
+                float_memory(inout out, source, base, displacement, width, false);
+            } else {
+                store_memory(inout out, source, base, displacement, width);
+            }
+        },
+        Instruction::Compare(destination, left, right, cc, width) => {
+            compare_registers(inout out, left, right, width);
+            set_condition(inout out, destination, cc);
+        },
+        Instruction::CompareImmediate(destination, source, bits, cc, width) => {
+            compare_immediate(inout out, source, bits, width);
+            set_condition(inout out, destination, cc);
+        },
+        Instruction::SetCondition(destination, cc) => set_condition(inout out, destination, cc),
+        Instruction::Select(destination, condition, first, alternative, cc) => {
+            if is_xmm(destination) {
+                float_move(inout out, destination, first);
+                if destination != alternative {
+                    binary(inout out, TEST_RM_R64, condition, condition, true);
+                    conditional_jump(inout out, cc ^ INVERT_CC);
+                    let end = out.len();
+                    float_move(inout out, destination, alternative);
+                    let _ = patch_forward_branch(inout out, end);
+                }
+                return;
+            }
+            // Test before copying. The destination may share the condition register.
+            binary(inout out, TEST_RM_R64, condition, condition, true);
+            if destination != first {
+                binary(inout out, MOV_RM_R64, destination, first, true);
+            }
+            out.push(rex(destination, alternative, true));
+            out.push(TWO_BYTE_OPCODE);
+            out.push(CMOVCC | cc);
+            out.push(modrm(destination, alternative));
+        },
+        Instruction::Truncate(destination, source, width) => truncate(
+            inout out,
+            destination,
+            source,
+            width
+        ),
+        Instruction::SignExtend(destination, source, from, width) => sign_extend(
+            inout out,
+            destination,
+            source,
+            from,
+            width
+        ),
+        Instruction::BranchZero(condition) => {
+            binary(inout out, TEST_RM_R64, condition, condition, true);
+            conditional_jump(inout out, CC_E);
+        },
+        Instruction::BranchWithFlags(cc) => conditional_jump(inout out, cc),
+        Instruction::BranchCompare(left, right, cc, width) => {
+            compare_registers(inout out, left, right, width);
+            conditional_jump(inout out, cc);
+        },
+        Instruction::BranchCompareImmediate(left, bits, cc, width) => {
+            compare_immediate(inout out, left, bits, width);
+            conditional_jump(inout out, cc);
+        },
+        Instruction::Jump => {
+            let _ = emit_direct_jump(inout out);
+        },
+        Instruction::FrameEnter(size) => adjust_stack(inout out, ALU_SUB_EXTENSION, size),
+        Instruction::FrameLeave(size) => adjust_stack(inout out, ALU_ADD_EXTENSION, size),
+        Instruction::StackAddress(destination, displacement) => {
+            out.push(rex(destination, RSP, true));
+            out.push(LEA);
+            memory_operand(inout out, destination, RSP, displacement);
+        },
+        Instruction::Trap => trap(inout out),
+        Instruction::TrapIf(source, when_zero) => {
+            binary(inout out, TEST_RM_R64, source, source, true);
+            out.push(JCC_SHORT | (if when_zero { CC_NE } else { CC_E }));
+            out.push(TRAP_BYTES);
+            trap(inout out);
+        },
+        Instruction::Return => out.push(RET_NEAR),
+    };
+}

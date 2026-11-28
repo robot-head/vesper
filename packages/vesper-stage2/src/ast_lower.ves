@@ -14,6 +14,9 @@ use @vesper/place-ir::codes::{Lit, Pat};
 use @vesper/place-ir-lower::ast::{Ast as IrAst, Cl, Ef, Eop, Ex, FnR, Gn, Hd, PathR, Pm, Pt};
 use @vesper-std/arena::{idx_from_raw};
 use self::collect::{CollectedProgram, ParamInfo, lower_effects, lower_ty, translate_sym};
+use self::float_math::{
+    FloatMath, NEAREST_PREFIX, SATURATING_PREFIX, UNARY_FLOAT_ARGUMENTS, math_arity, math_op
+};
 use self::traits::{MonoPlan, Rename, TraitInfo, find_rename, inst_vars, thunk_at};
 
 const NONE64: u64 = 18446744073709551615;
@@ -287,16 +290,18 @@ fn intrinsic_class(in names: Names, sym: u32) -> u64 {
     {
         return I_BIT;
     }
-    if name_eq(in names, sym, in "min")
-        || name_eq(in names, sym, in "max")
-        || name_eq(in names, sym, in "fma")
-    {
-        return I_FLOAT | I_FLOAT_NOT_UNARY;
+    let math = math_op(in names, sym);
+    if math != FloatMath::None {
+        return if math_arity(math) == UNARY_FLOAT_ARGUMENTS {
+            I_FLOAT
+        } else {
+            I_FLOAT | I_FLOAT_NOT_UNARY
+        };
     }
     let float_kind = name_ends(in names, sym, in "_f32") || name_ends(in names, sym, in "_f64");
     let float_conversion = float_kind
         && (name_starts(in names, sym, in "widen_")
-            || name_starts(in names, sym, in "nearest_")
+            || name_starts(in names, sym, in NEAREST_PREFIX)
             || name_starts(in names, sym, in "to_bits_")
             || name_starts(in names, sym, in "from_bits_"));
     if float_conversion {
@@ -304,14 +309,7 @@ fn intrinsic_class(in names: Names, sym: u32) -> u64 {
         // either way.
         return I_FLOAT;
     }
-    if name_eq(in names, sym, in "sqrt")
-        || name_eq(in names, sym, in "abs")
-        || name_eq(in names, sym, in "floor")
-        || name_eq(in names, sym, in "ceil")
-        || name_eq(in names, sym, in "round")
-        || name_eq(in names, sym, in "trunc")
-        || name_starts(in names, sym, in "saturating_")
-    {
+    if name_starts(in names, sym, in SATURATING_PREFIX) {
         return I_FLOAT;
     }
     if name_starts(in names, sym, in "widen_")

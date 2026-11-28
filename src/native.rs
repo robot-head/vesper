@@ -33,6 +33,9 @@ mod native_arrays;
 
 #[path = "dyn_trait/native.rs"]
 mod dyn_native;
+/// Experimental ELF serialization downstream of machine-code emission.
+#[path = "native_elf.rs"]
+pub mod elf;
 #[path = "native_export.rs"]
 pub mod export;
 /// Foreign calls of imported `.vsys` libraries (§13, `crate::ffi_lowering`).
@@ -44,6 +47,9 @@ mod float_math;
 /// Lane 27: bare-metal RISC-V and AArch64 images with no runtime.
 #[path = "native_freestanding.rs"]
 pub mod freestanding;
+/// Experimental machine-code swap downstream of CLIF construction.
+#[path = "native_machine.rs"]
+pub mod machine;
 /// Cranelift SIMD lowering of `Op::Vector` (lane 28).
 #[path = "native_vector.rs"]
 mod native_vector;
@@ -1779,6 +1785,8 @@ fn define_instances_observed_with_trace<M: Module>(
     );
     let mut clif = String::new();
     let denorm = crate::capability_effects::const_denorm_spans(world);
+    let try_machine =
+        matches!(linkage, DefinitionLinkage::Object) && observer.is_none() && instrument.is_none();
     let mut deferred_defs = Vec::new();
     for (key, (name, generic_vars)) in instances {
         let f = concrete(world, name, generic_vars)?;
@@ -2029,7 +2037,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 body_gate: Some(body_gate),
             });
         }
-        m.define_function(define_id, &mut ctx)
+        machine::define(m, define_id, &mut ctx, try_machine)
             .map_err(|e| format!("native codegen '{name}': {e}"))?;
         m.clear_context(&mut ctx);
     }
@@ -2107,13 +2115,13 @@ fn define_instances_observed_with_trace<M: Module>(
                 });
             }
         }
-        m.define_function(define_id, &mut ctx)
+        machine::define(m, define_id, &mut ctx, try_machine)
             .map_err(|e| format!("native codegen '{name}': {e}"))?;
         m.clear_context(&mut ctx);
         for (cold_id, cold_key, cold_func) in cold_helpers {
             let mut cold_ctx = m.make_context();
             cold_ctx.func = cold_func;
-            m.define_function(cold_id, &mut cold_ctx)
+            machine::define(m, cold_id, &mut cold_ctx, try_machine)
                 .map_err(|e| format!("native codegen '{cold_key}': {e}"))?;
             m.clear_context(&mut cold_ctx);
         }
@@ -2796,13 +2804,12 @@ pub fn object_with_codegen_options(
     if windows::is_windows(isa.triple()) {
         return windows::object(world, entry, isa, optimize, observer, instrument, options);
     }
-    let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
-        .map_err(|e| e.to_string())?;
-    let mut m = ObjectModule::new(builder);
+    let capture_elf = observer.is_none() && instrument.is_none() && elf::enabled(isa.triple());
+    let mut m = elf::ObjectModule::new(isa, capture_elf)?;
     let (_, clif) = compile(
         &mut m, world, entry, optimize, observer, instrument, options,
     )?;
-    let bytes = m.finish().emit().map_err(|e| e.to_string())?;
+    let bytes = m.emit().map_err(|e| e.to_string())?;
     Ok((bytes, clif))
 }
 /// A JIT module compiled once with the lane-23 [`Instrument`] hook, whose

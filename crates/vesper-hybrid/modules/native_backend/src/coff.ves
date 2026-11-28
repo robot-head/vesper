@@ -1,0 +1,333 @@
+use @vesper/codegen-freestanding::util::{grow, push16, push32, put32};
+use self::object_bytes::{fits, pad_to, valid_name};
+use self::scalar::{align_up, word_at};
+
+// Header: (section count, symbol count, relocation count, characteristics).
+// Sections: (name offset, name length, data offset, size, characteristics).
+// Symbols: (name offset, name length, value, COFF section number, type,
+//           storage class, auxiliary data offset, auxiliary count).
+// Relocations: (zero-based source section, offset, logical symbol index, type).
+// Relocations are grouped by source section. Section payloads contain in-place
+// addends. Auxiliary records retain their original COFF symbol-table indices.
+const SECTION_COUNT: u64 = 0;
+const SYMBOL_COUNT: u64 = 1;
+const RELOC_COUNT: u64 = 2;
+const FILE_FLAGS: u64 = 3;
+const REQUEST_HEADER: u64 = 4;
+const SECTION_WORDS: u64 = 5;
+const SYMBOL_WORDS: u64 = 8;
+const RELOC_WORDS: u64 = 4;
+const NAME: u64 = 0;
+const NAME_LEN: u64 = 1;
+const SECTION_DATA: u64 = 2;
+const SECTION_SIZE: u64 = 3;
+const SECTION_FLAGS: u64 = 4;
+const SYMBOL_VALUE: u64 = 2;
+const SYMBOL_SECTION: u64 = 3;
+const SYMBOL_TYPE: u64 = 4;
+const SYMBOL_CLASS: u64 = 5;
+const SYMBOL_AUX: u64 = 6;
+const SYMBOL_AUX_COUNT: u64 = 7;
+const RELOC_SECTION: u64 = 0;
+const RELOC_OFFSET: u64 = 1;
+const RELOC_TARGET: u64 = 2;
+const RELOC_TYPE: u64 = 3;
+
+const AMD64: u16 = 0x8664;
+const FILE_HEADER_BYTES: u64 = 20;
+const SECTION_HEADER_BYTES: u64 = 40;
+const SYMBOL_BYTES: u64 = 18;
+const RELOC_BYTES: u64 = 10;
+const INLINE_NAME_BYTES: u64 = 8;
+const STRING_HEADER_BYTES: u64 = 4;
+const FILE_ALIGNMENT: u64 = 4;
+const MAX_OFFSET: u64 = 0xffffffff;
+const MAX_U16: u64 = 0xffff;
+const MAX_U8: u64 = 0xff;
+const MAX_SECTIONS: u64 = 0x7fff;
+const MAX_DECIMAL_OFFSET: u64 = 9999999;
+const ABSOLUTE_SECTION: u64 = 0xffff;
+const DEBUG_SECTION: u64 = 0xfffe;
+const SCN_UNINITIALIZED: u64 = 0x80;
+const SCN_RELOC_OVERFLOW: u64 = 0x01000000;
+const SCN_ALIGN_MASK: u64 = 0x00f00000;
+const SCN_ALIGN_RESERVED: u64 = 0x00f00000;
+const STRING_REFERENCE: u8 = 47;
+const ASCII_ZERO: u8 = 48;
+const DECIMAL_BASE: u64 = 10;
+const ADDR64: u64 = 1;
+const ADDR32: u64 = 2;
+const ADDR32NB: u64 = 3;
+const REL32: u64 = 4;
+const REL32_1: u64 = 5;
+const REL32_2: u64 = 6;
+const REL32_3: u64 = 7;
+const REL32_4: u64 = 8;
+const REL32_5: u64 = 9;
+const SECTION: u64 = 10;
+const SECREL: u64 = 11;
+const U16_BYTES: u64 = 2;
+const U32_BYTES: u64 = 4;
+const U64_BYTES: u64 = 8;
+
+fn field(in words: Slice[u64], record: u64, index: u64) -> u64 {
+    word_at(in words, wrapping_add(record, index))
+}
+
+fn append_inline(inout out: ChunkSeq[u8], in name: Slice[u8]) {
+    let end = wrapping_add(out.len(), INLINE_NAME_BYTES);
+    out.extend(in name);
+    pad_to(inout out, end);
+}
+
+fn append_string(inout strings: ChunkSeq[u8], in name: Slice[u8]) -> u64 {
+    let offset = strings.len();
+    strings.extend(in name);
+    strings.push(0);
+    offset
+}
+
+fn section_name(
+    inout headers: ChunkSeq[u8],
+    inout strings: ChunkSeq[u8],
+    in name: Slice[u8]
+) -> bool {
+    if name.len() <= INLINE_NAME_BYTES && name.try_get(0).unwrap_or(0) != STRING_REFERENCE {
+        append_inline(inout headers, in name);
+        return true;
+    }
+    if strings.len() > MAX_DECIMAL_OFFSET
+        || !fits(strings.len(), wrapping_add(name.len(), 1), MAX_OFFSET)
+    {
+        return false;
+    }
+    let mut offset = append_string(inout strings, in name);
+    let mut digits = ChunkSeq::new[u8]();
+    loop {
+        digits.push(wrapping_add(ASCII_ZERO, wrapping_u8(offset % DECIMAL_BASE)));
+        offset = offset / DECIMAL_BASE;
+        if offset == 0 {
+            break;
+        }
+    }
+    let end = wrapping_add(headers.len(), INLINE_NAME_BYTES);
+    headers.push(STRING_REFERENCE);
+    for index in 0..digits.len() {
+        let reverse = wrapping_sub(wrapping_sub(digits.len(), 1), index);
+        headers.push(digits.try_get(reverse).unwrap_or(ASCII_ZERO));
+    }
+    pad_to(inout headers, end);
+    true
+}
+
+fn relocation_width(ty: u64) -> u64 {
+    match ty {
+        ADDR64 => U64_BYTES,
+        ADDR32
+            | ADDR32NB
+            | REL32
+            | REL32_1
+            | REL32_2
+            | REL32_3
+            | REL32_4
+            | REL32_5
+            | SECREL => U32_BYTES,
+        SECTION => U16_BYTES,
+        _ => 0,
+    }
+}
+
+pub fn write_coff(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
+    let empty = ChunkSeq::new[u8]();
+    if words.len() < REQUEST_HEADER {
+        return empty;
+    }
+    let section_count = word_at(in words, SECTION_COUNT);
+    let symbol_count = word_at(in words, SYMBOL_COUNT);
+    let reloc_count = word_at(in words, RELOC_COUNT);
+    let file_flags = word_at(in words, FILE_FLAGS);
+    if section_count == 0
+        || section_count > MAX_SECTIONS
+        || file_flags > MAX_U16
+        || symbol_count > MAX_OFFSET / SYMBOL_BYTES
+        || reloc_count > MAX_OFFSET / RELOC_BYTES
+    {
+        return empty;
+    }
+    let symbols_at = wrapping_add(REQUEST_HEADER, wrapping_mul(section_count, SECTION_WORDS));
+    let relocs_at = wrapping_add(symbols_at, wrapping_mul(symbol_count, SYMBOL_WORDS));
+    if wrapping_add(relocs_at, wrapping_mul(reloc_count, RELOC_WORDS)) != words.len() {
+        return empty;
+    }
+    let mut strings = ChunkSeq::new[u8]();
+    let _ = grow(inout strings, STRING_HEADER_BYTES);
+    let mut symbols = ChunkSeq::new[u8]();
+    let mut indices = ChunkSeq::with_capacity[u64](symbol_count);
+    let mut record_index: u64 = 0;
+    for index in 0..symbol_count {
+        let record = wrapping_add(symbols_at, wrapping_mul(index, SYMBOL_WORDS));
+        let name_offset = field(in words, record, NAME);
+        let name_len = field(in words, record, NAME_LEN);
+        let value = field(in words, record, SYMBOL_VALUE);
+        let section = field(in words, record, SYMBOL_SECTION);
+        let ty = field(in words, record, SYMBOL_TYPE);
+        let storage = field(in words, record, SYMBOL_CLASS);
+        let aux_offset = field(in words, record, SYMBOL_AUX);
+        let aux_count = field(in words, record, SYMBOL_AUX_COUNT);
+        if !valid_name(in bytes, name_offset, name_len)
+            || value > MAX_OFFSET
+            || (section > section_count && section != ABSOLUTE_SECTION && section != DEBUG_SECTION)
+            || ty > MAX_U16
+            || storage > MAX_U8
+            || aux_count > MAX_U8
+        {
+            return empty;
+        }
+        let aux_bytes = wrapping_mul(aux_count, SYMBOL_BYTES);
+        let count_with_aux = wrapping_add(aux_count, 1);
+        let raw_bytes = wrapping_mul(count_with_aux, SYMBOL_BYTES);
+        if !fits(aux_offset, aux_bytes, bytes.len())
+            || !fits(symbols.len(), raw_bytes, MAX_OFFSET)
+        {
+            return empty;
+        }
+        let name = bytes[name_offset..wrapping_add(name_offset, name_len)];
+        if name_len <= INLINE_NAME_BYTES {
+            append_inline(inout symbols, in name);
+        } else {
+            if !fits(strings.len(), wrapping_add(name_len, 1), MAX_OFFSET) {
+                return empty;
+            }
+            let offset = append_string(inout strings, in name);
+            push32(inout symbols, 0);
+            push32(inout symbols, wrapping_u32(offset));
+        }
+        push32(inout symbols, wrapping_u32(value));
+        push16(inout symbols, wrapping_u16(section));
+        push16(inout symbols, wrapping_u16(ty));
+        symbols.push(wrapping_u8(storage));
+        symbols.push(wrapping_u8(aux_count));
+        let aux = bytes[aux_offset..wrapping_add(aux_offset, aux_bytes)];
+        symbols.extend(in aux);
+        indices.push(record_index);
+        record_index = wrapping_add(record_index, count_with_aux);
+    }
+
+    let payload_start = wrapping_add(
+        FILE_HEADER_BYTES,
+        wrapping_mul(section_count, SECTION_HEADER_BYTES)
+    );
+    let mut headers = ChunkSeq::new[u8]();
+    let mut payload = ChunkSeq::new[u8]();
+    let mut next_reloc: u64 = 0;
+    for index in 0..section_count {
+        let record = wrapping_add(REQUEST_HEADER, wrapping_mul(index, SECTION_WORDS));
+        let name_offset = field(in words, record, NAME);
+        let name_len = field(in words, record, NAME_LEN);
+        let data_offset = field(in words, record, SECTION_DATA);
+        let size = field(in words, record, SECTION_SIZE);
+        let flags = field(in words, record, SECTION_FLAGS);
+        let zero_fill = (flags & SCN_UNINITIALIZED) != 0;
+        if !valid_name(in bytes, name_offset, name_len)
+            || size > MAX_OFFSET
+            || flags > MAX_OFFSET
+            || (flags & SCN_RELOC_OVERFLOW) != 0
+            || (flags & SCN_ALIGN_MASK) == SCN_ALIGN_RESERVED
+            || (!zero_fill && !fits(data_offset, size, bytes.len()))
+        {
+            return empty;
+        }
+        let name = bytes[name_offset..wrapping_add(name_offset, name_len)];
+        if !section_name(inout headers, inout strings, in name) {
+            return empty;
+        }
+        let mut file_offset: u64 = 0;
+        if !zero_fill && size != 0 {
+            let aligned = align_up(payload.len(), FILE_ALIGNMENT);
+            file_offset = wrapping_add(payload_start, aligned);
+            if !fits(file_offset, size, MAX_OFFSET) {
+                return empty;
+            }
+            pad_to(inout payload, aligned);
+            let data = bytes[data_offset..wrapping_add(data_offset, size)];
+            payload.extend(in data);
+        }
+        let reloc_aligned = align_up(payload.len(), FILE_ALIGNMENT);
+        let reloc_offset = wrapping_add(payload_start, reloc_aligned);
+        let first = next_reloc;
+        for ordinal in first..reloc_count {
+            let record = wrapping_add(relocs_at, wrapping_mul(ordinal, RELOC_WORDS));
+            if field(in words, record, RELOC_SECTION) != index {
+                break;
+            }
+            let offset = field(in words, record, RELOC_OFFSET);
+            let target = field(in words, record, RELOC_TARGET);
+            let ty = field(in words, record, RELOC_TYPE);
+            let width = relocation_width(ty);
+            if zero_fill
+                || width == 0
+                || !fits(offset, width, size)
+                || wrapping_sub(ordinal, first) == MAX_U16
+                || !fits(
+                    wrapping_add(payload_start, payload.len()),
+                    RELOC_BYTES + FILE_ALIGNMENT,
+                    MAX_OFFSET
+                )
+            {
+                return empty;
+            }
+            let symbol = match indices.try_get(target) {
+                Option::Some(symbol) => symbol,
+                Option::None => return empty,
+            };
+            if ordinal == first {
+                pad_to(inout payload, reloc_aligned);
+            }
+            push32(inout payload, wrapping_u32(offset));
+            push32(inout payload, wrapping_u32(symbol));
+            push16(inout payload, wrapping_u16(ty));
+            next_reloc = wrapping_add(next_reloc, 1);
+        }
+        let count = wrapping_sub(next_reloc, first);
+        push32(inout headers, 0);
+        push32(inout headers, 0);
+        push32(inout headers, wrapping_u32(size));
+        push32(inout headers, wrapping_u32(file_offset));
+        push32(
+            inout headers,
+            if count == 0 {
+                0
+            } else {
+                wrapping_u32(reloc_offset)
+            }
+        );
+        push32(inout headers, 0);
+        push16(inout headers, wrapping_u16(count));
+        push16(inout headers, 0);
+        push32(inout headers, wrapping_u32(flags));
+    }
+    if next_reloc != reloc_count {
+        return empty;
+    }
+    let symtab_start = wrapping_add(payload_start, payload.len());
+    let strings_start = wrapping_add(symtab_start, symbols.len());
+    if !fits(strings_start, strings.len(), MAX_OFFSET) {
+        return empty;
+    }
+    let string_bytes = wrapping_u32(strings.len());
+    put32(inout strings, 0, string_bytes);
+
+    let mut out = ChunkSeq::new[u8]();
+    push16(inout out, AMD64);
+    push16(inout out, wrapping_u16(section_count));
+    push32(inout out, 0);
+    push32(inout out, wrapping_u32(symtab_start));
+    push32(inout out, wrapping_u32(record_index));
+    push16(inout out, 0);
+    push16(inout out, wrapping_u16(file_flags));
+    out.extend(in headers.as_slice());
+    out.extend(in payload.as_slice());
+    out.extend(in symbols.as_slice());
+    out.extend(in strings.as_slice());
+    out
+}

@@ -384,7 +384,7 @@ impl PreparedComponent {
         })
     }
 
-    fn run(&self, ctx: &Ctx) -> Result<u64, String> {
+    pub fn run(&self, ctx: &Ctx) -> Result<u64, String> {
         use wasmtime::component::Val;
         let mut b = wasmtime_wasi::WasiCtxBuilder::new();
         b.args(&ctx.args);

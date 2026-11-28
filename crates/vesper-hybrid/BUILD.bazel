@@ -1,5 +1,11 @@
 load("//tools/bazel:vesper_hybrid.bzl", "vesper_hybrid")
 
+filegroup(
+    name = "native_backend_package",
+    srcs = glob(["modules/native_backend/**"]),
+    visibility = ["//crates/vesper-stage2-gate:__pkg__"],
+)
+
 # The hybrid Stage 2 compiler (self-hosting SH0 lane 1, #1123): the default
 # CLI with swapped modules linked from Vesper objects that //:bin/vesper
 # builds. It is never the default compiler. Every directory of modules/
@@ -294,6 +300,9 @@ vesper_hybrid(
             "//:lean_extract_package",
             "//:place_ir_package",
             "//crates/vesper-lean-syntax:port_package",
+        ],
+        "hybrid_native_backend": [
+            "//:codegen_freestanding_package",
         ],
         # The verified code generator (#1886) builds on
         # @vesper/verified-codegen.

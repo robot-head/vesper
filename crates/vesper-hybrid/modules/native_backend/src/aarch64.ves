@@ -1,0 +1,4428 @@
+// AAPCS64 functions with scalar signatures. The input is the shared scalar
+// machine tape. Unsupported operations or oversized frames decline before a
+// function is defined.
+use @vesper/codegen-freestanding::util::{push16, push32};
+use self::scalar::{
+    Record, FrameSlot, Label, align_up, word_at, read_record, valid_block_layout, CONSTANT, ADD,
+    SUB, MUL, AND, OR, XOR, NEG, NOT, SHL, SHR, SAR, COMPARE, COMPARE_BYTE, COMPARE_WORD,
+    COMPARE_DWORD, SELECT, TRUNCATE, ZERO_EXTEND, SIGN_EXTEND, SHL_REGISTER, SHR_REGISTER,
+    SAR_REGISTER, LOAD, STORE_BYTE, STORE_WORD, STORE_DWORD, STORE_QWORD, BRANCH_ZERO, EARLY_RETURN,
+    STACK_SLOT, STACK_ADDRESS, STACK_LOAD, STACK_STORE_BYTE, STACK_STORE_WORD, STACK_STORE_DWORD,
+    STACK_STORE_QWORD, SIGNED_MUL_HIGH, UNSIGNED_MUL_HIGH, ADD_IMMEDIATE, SUB_IMMEDIATE,
+    MUL_IMMEDIATE, AND_IMMEDIATE, OR_IMMEDIATE, XOR_IMMEDIATE, COMPARE_IMMEDIATE,
+    COMPARE_BYTE_IMMEDIATE, COMPARE_WORD_IMMEDIATE, COMPARE_DWORD_IMMEDIATE, EQUAL, NOT_EQUAL,
+    SIGNED_LESS, SIGNED_GREATER_EQUAL, SIGNED_GREATER, SIGNED_LESS_EQUAL, UNSIGNED_LESS,
+    UNSIGNED_GREATER_EQUAL, UNSIGNED_GREATER, UNSIGNED_LESS_EQUAL, BLOCK_LABEL, EDGE_LABEL,
+    JUMP_LABEL, BRANCH_LABEL, BLOCK_RETURN, BRANCH_BLOCK, BRANCH_TABLE, BRANCH_TABLE_TARGET,
+    TableFixup, ARGUMENT_COUNT, RETURN_VALUE, HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE,
+    DISP32_MASK, RETURN_PAIR, CALL, CALL_ARGUMENT, CALL_VOID, CALL_PAIR, CALL_HIGH,
+    LIBCALL_TARGET_BASE, MEMCPY_LIBCALL, SIGNED_DIV, UNSIGNED_DIV, SIGNED_REM, UNSIGNED_REM,
+    is_integer_division, TRAP, TRAP_VALUE, is_symbol, UNSIGNED_ADD_OVERFLOW, SIGNED_ADD_OVERFLOW,
+    UNSIGNED_SUB_OVERFLOW, SIGNED_SUB_OVERFLOW, SIGNED_MUL_OVERFLOW, OVERFLOW_FLAG, ADD_CARRY,
+    CHECKED_ARITHMETIC_RECORDS, is_checked_arithmetic, live_overflow_flag, consumes_carry,
+    BYTE_SWAP, ATOMIC_ADD, ATOMIC_EXCHANGE, FENCE, is_atomic_update, FLOAT_CONSTANT, FLOAT_ADD,
+    FLOAT_SUB, FLOAT_MUL, FLOAT_DIV, FLOAT_SQRT, FLOAT_NEG, FLOAT_ABS, FLOAT_COMPARE64, FLOAT_LOAD,
+    FLOAT_STORE32, FLOAT_STORE64, BITS_TO_FLOAT, FLOAT_TO_BITS, FLOAT_SELECT, FLOAT_STACK_LOAD,
+    FLOAT_STACK_STORE32, FLOAT_STACK_STORE64, FLOAT_COPY_SIGN, is_float_binary, is_float_compare,
+    float_value, valid_float_operands, LEADING_ZEROS, TRAILING_ZEROS, POPULATION_COUNT,
+    REVERSE_BITS, LEADING_SIGN_BITS, ROTATE_RIGHT, ROTATE_RIGHT_REGISTER, ROTATE_LEFT_REGISTER,
+    FUNNEL_RIGHT, AND_NOT, OR_NOT, XOR_NOT, ABS, ATOMIC_LOAD, ATOMIC_STORE, ATOMIC_CAS_BYTE,
+    ATOMIC_CAS_WORD, ATOMIC_CAS_DWORD, is_atomic_cas, ATOMIC_SUB, ATOMIC_AND, ATOMIC_NAND,
+    ATOMIC_OR, ATOMIC_XOR, ATOMIC_UNSIGNED_MIN, ATOMIC_UNSIGNED_MAX, ATOMIC_SIGNED_MIN,
+    ATOMIC_SIGNED_MAX, FLOAT_ARGUMENT, FLOAT_RETURN, FLOAT_RETURN_LAYOUT, CALL_FLOAT, CALL_FLOAT32,
+    FLOAT_PROMOTE, FLOAT_DEMOTE, SIGNED_TO_FLOAT, UNSIGNED_TO_FLOAT, is_float_conversion,
+    FLOAT_TO_SIGNED_SAT, is_float_to_integer, FLOAT_CEIL, FLOAT_FLOOR, FLOAT_TRUNC, FLOAT_NEAREST,
+    FLOAT_MIN, FLOAT_MAX, FLOAT_FMA64, is_float_fma, STACK_ARGUMENT, FLOAT_STACK_ARGUMENT,
+    CALL_STACK_ARGUMENT, FUNCTION_GOT, INDIRECT_CALL, indirect_call, is_call, TRAP_IF_ZERO,
+    STACK_POINTER, SPECTRE_BARRIER, is_conditional_trap, VECTOR_CONSTANT, VECTOR_SPLAT, VECTOR_LOAD,
+    VECTOR_STORE, VECTOR_AND, VECTOR_OR, VECTOR_XOR, VECTOR_ADD, VECTOR_SUB, VECTOR_SIGNED_SAT_ADD,
+    VECTOR_UNSIGNED_SAT_ADD, VECTOR_SIGNED_SAT_SUB, VECTOR_UNSIGNED_SAT_SUB, VECTOR_ROUNDED_AVERAGE,
+    VECTOR_PROMOTE_LOW, VECTOR_DEMOTE, VECTOR_PAIRWISE_ADD, VECTOR_SWIZZLE, VECTOR_INSERT,
+    VECTOR_EXTRACT, VECTOR_ANY_TRUE, VECTOR_ALL_TRUE, VECTOR_HIGH_BITS, VECTOR_LANE_INDEX_SHIFT,
+    VECTOR_LANE_WIDTH_MASK, is_vector_binary, uses_vector_left, vector_value, TAIL_CALL,
+    AARCH64_TAIL_RESERVED_GP, valid_vector_lane, VECTOR_INTEGER_COMPARE, VECTOR_CONDITION_SHIFT,
+    is_vector_operation, is_vector_result, VECTOR_FLOAT_ADD, VECTOR_FLOAT_SUB, VECTOR_FLOAT_MUL,
+    VECTOR_FLOAT_DIV, VECTOR_FLOAT_SQRT, VECTOR_FLOAT_COMPARE, VECTOR_FLOAT_NEG, VECTOR_FLOAT_ABS,
+    VECTOR_FLOAT_COPY_SIGN, VECTOR_FLOAT_FMA32, VECTOR_FLOAT_FMA64, vector_float_width,
+    is_vector_float_unary, is_vector_float_fma, valid_vector_float_condition, VECTOR_FLOAT_CEIL,
+    VECTOR_FLOAT_FLOOR, VECTOR_FLOAT_TRUNC, VECTOR_FLOAT_NEAREST, VECTOR_FLOAT_MIN,
+    VECTOR_FLOAT_MAX, VECTOR_MUL, VECTOR_SHL, VECTOR_SHR, VECTOR_SAR, VECTOR_SHIFT_IMMEDIATE,
+    valid_vector_shift, VECTOR_INTEGER_MIN_MAX, VECTOR_MINMAX_SIGNED, VECTOR_MINMAX_MINIMUM,
+    VECTOR_WIDEN, VECTOR_NARROW, VECTOR_CONVERSION_SIGNED, VECTOR_WIDEN_HIGH,
+    VECTOR_NARROW_UNSIGNED_INPUT, valid_vector_widen, valid_vector_narrow, valid_vector_min_max
+};
+use self::x86_64::{
+    BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
+    FLOAT_NOT_EQUAL, FLOAT_ORDERED_NOT_EQUAL, FLOAT_UNORDERED_OR_EQUAL, FLOAT_LESS,
+    FLOAT_LESS_EQUAL, FLOAT_GREATER, FLOAT_GREATER_EQUAL, FLOAT_UNORDERED_OR_LESS,
+    FLOAT_UNORDERED_OR_LESS_EQUAL, FLOAT_UNORDERED_OR_GREATER, FLOAT_UNORDERED_OR_GREATER_EQUAL,
+    VECTOR_BITS
+};
+
+const ARGUMENT_REGISTERS: u64 = 8;
+const FP_ARGUMENT_REGISTERS: u64 = 8;
+const CALL_FLOAT_BITS: u32 = 4;
+const CALL_FLOAT_MASK: u64 = 0xf;
+// Keep x16 and x17 out of allocation for architectural scratch uses.
+const CALLER_REGISTER_MASK: u32 = 0xffff;
+const UNASSIGNED: u32 = 32;
+const SPILL_BASE: u32 = UNASSIGNED + 1;
+const REMATERIALIZED_ZERO: u32 = 0xffffffff;
+const SPILL_REGISTER_MASK: u32 = 0x0fff;
+const SPILL_RESULT: u32 = 12;
+const SPILL_LEFT: u32 = 13;
+const SPILL_RIGHT: u32 = 14;
+const SPILL_THIRD: u32 = 15;
+const ENCODING_ATTEMPTS: u64 = 5;
+const SCRATCH: u32 = 16;
+const SECOND_SCRATCH: u32 = 17;
+const FP_LEFT: u32 = 16;
+const FP_RIGHT: u32 = 17;
+const FP_ADDEND: u32 = 18;
+// v0-v7 hold incoming scalar arguments only until the entry records read them.
+// v8-v15 preserve only 64 bits in AAPCS64, and v16-v18 serve scalar operations.
+const VECTOR_REGISTER_MASK: u32 = 0x3ff800ff;
+const VECTOR_LEFT: u32 = 30;
+const VECTOR_RIGHT: u32 = 31;
+const VECTOR_SPILL_CELLS: u64 = 2;
+// x18 is reserved on Darwin. Keep x29 available for a frame pointer.
+const FIRST_CALLEE_REGISTER: u32 = 19;
+const CALLEE_REGISTERS: u64 = 10;
+const CALLS_FOR_CALLEE_REGISTERS: u64 = 2;
+const FIRST_RESULT: u32 = 0;
+const SECOND_RESULT: u32 = 1;
+const FP_RESULT: u32 = 0;
+const PAIRED_RESULTS: u64 = 2;
+const ZERO: u32 = 31;
+const SP: u32 = 31;
+const LINK_REGISTER: u32 = 30;
+const STACK_ALIGNMENT: u64 = 16;
+const HOME_WORD_BYTES: u64 = QWORD_BITS / BYTE_BITS;
+const HOME_REGISTERS: u64 = 8;
+const CALL_SAVE_REGISTERS: u64 = 16;
+const ARM64_CALL: u64 = 4;
+const ARM64_LIBCALL: u64 = 5;
+const ARM64_GOT_PAGE: u64 = 6;
+const ARM64_GOT_LOAD: u64 = 7;
+const ARM64_FUNCTION_GOT_PAGE: u64 = 8;
+const ARM64_FUNCTION_GOT_LOAD: u64 = 9;
+// Larger frames need to probe the stack at least once per base page.
+const MAX_FRAME_BYTES: u64 = 4096;
+const RETURN: u32 = 0xd65f03c0;
+const JUMP: u32 = 0x14000000;
+const BRANCH_AND_LINK: u32 = 0x94000000;
+const BRANCH_AND_LINK_REGISTER: u32 = 0xd63f0000;
+const BRANCH_IF_ZERO: u32 = 0xb4000000;
+const BRANCH_IF_NOT_ZERO: u32 = 0xb5000000;
+const BRANCH_IF_CONDITION: u32 = 0x54000000;
+const BRANCH_REGISTER: u32 = 0xd61f0000;
+// Use the same undefined instruction as Cranelift for hosted traps.
+const TRAP_INSTRUCTION: u32 = 0xc11f;
+const SKIP_TRAP_DISPLACEMENT: u32 = 2;
+const SIGNED_DIV_TRAP_DISPLACEMENT: u32 = 4;
+const CSDB: u32 = 0xd503229f;
+const VECTOR_ZERO: u32 = 0x4f00e400;
+const VECTOR_DUP: u32 = 0x4e000c00;
+const VECTOR_INSERT_GP: u32 = 0x4e001c00;
+const VECTOR_EXTRACT_GP: u32 = 0x0e003c00;
+const VECTOR_Q: u32 = 0x40000000;
+const VECTOR_LANE_IMM5_SHIFT: u32 = 16;
+const VECTOR_SIZE_SHIFT: u32 = 22;
+const VECTOR_DWORD_SIZE: u32 = 2 << VECTOR_SIZE_SHIFT;
+const VECTOR_MEMORY_FLAGS: u32 = 0x04800000;
+const VECTOR_AND_REG: u32 = 0x4e201c00;
+const VECTOR_OR_REG: u32 = 0x4ea01c00;
+const VECTOR_XOR_REG: u32 = 0x6e201c00;
+const VECTOR_ADD_REG: u32 = 0x4e208400;
+const VECTOR_SUB_REG: u32 = 0x6e208400;
+const VECTOR_SMIN_REG: u32 = 0x4e206c00;
+const VECTOR_SMAX_REG: u32 = 0x4e206400;
+const VECTOR_UMIN_REG: u32 = 0x6e206c00;
+const VECTOR_UMAX_REG: u32 = 0x6e206400;
+const VECTOR_MUL_REG: u32 = 0x4e209c00;
+const VECTOR_REVERSE_DWORDS: u32 = 0x4ea00800;
+const VECTOR_NARROW_QWORDS: u32 = 0x0ea12800;
+const VECTOR_SQXTN: u32 = 0x0e214800;
+const VECTOR_SQXTUN: u32 = 0x2e212800;
+const VECTOR_UQXTN: u32 = 0x2e214800;
+const VECTOR_SSHLL: u32 = 0x0f00a400;
+const VECTOR_USHLL: u32 = 0x2f00a400;
+const VECTOR_SHIFT_LONG_DWORDS: u32 = 0x2ea13800;
+const VECTOR_UMLAL_DWORDS: u32 = 0x2ea08000;
+const VECTOR_SIGNED_SAT_ADD_REG: u32 = 0x4e200c00;
+const VECTOR_UNSIGNED_SAT_ADD_REG: u32 = 0x6e200c00;
+const VECTOR_SIGNED_SAT_SUB_REG: u32 = 0x4e202c00;
+const VECTOR_UNSIGNED_SAT_SUB_REG: u32 = 0x6e202c00;
+const VECTOR_ROUNDED_AVERAGE_REG: u32 = 0x6e201400;
+const VECTOR_FLOAT_NARROW: u32 = 0x0e616800;
+const VECTOR_FLOAT_WIDEN: u32 = 0x0e617800;
+const VECTOR_FADD: u32 = 0x4e20d400;
+const VECTOR_FSUB: u32 = 0x4ea0d400;
+const VECTOR_FMUL: u32 = 0x6e20dc00;
+const VECTOR_FDIV: u32 = 0x6e20fc00;
+const VECTOR_FMIN: u32 = 0x4ea0f400;
+const VECTOR_FMAX: u32 = 0x4e20f400;
+const VECTOR_FSQRT: u32 = 0x6ea1f800;
+const VECTOR_FRINTP: u32 = 0x4ea18800;
+const VECTOR_FRINTM: u32 = 0x4e219800;
+const VECTOR_FRINTZ: u32 = 0x4ea19800;
+const VECTOR_FRINTN: u32 = 0x4e218800;
+const VECTOR_FMLA: u32 = 0x4e20cc00;
+const VECTOR_FNEG: u32 = 0x6ea0f800;
+const VECTOR_FABS: u32 = 0x4ea0f800;
+const VECTOR_BIT_SELECT: u32 = 0x6e601c00;
+const VECTOR_BIT_INSERT: u32 = 0x6ea01c00;
+const VECTOR_FCMEQ: u32 = 0x4e20e400;
+const VECTOR_FCMGE: u32 = 0x6e20e400;
+const VECTOR_FCMGT: u32 = 0x6ea0e400;
+const VECTOR_PAIRWISE_ADD_REG: u32 = 0x4e20bc00;
+const VECTOR_COMPARE_EQUAL: u32 = 0x6e208c00;
+const VECTOR_COMPARE_SIGNED_GREATER: u32 = 0x4e203400;
+const VECTOR_COMPARE_SIGNED_GREATER_EQUAL: u32 = 0x4e203c00;
+const VECTOR_COMPARE_UNSIGNED_GREATER: u32 = 0x6e203400;
+const VECTOR_COMPARE_UNSIGNED_GREATER_EQUAL: u32 = 0x6e203c00;
+const VECTOR_NOT: u32 = 0x6e205800;
+const VECTOR_TABLE: u32 = 0x4e000000;
+const VECTOR_UNSIGNED_MAX: u32 = 0x6e30a800;
+const VECTOR_UNSIGNED_MIN: u32 = 0x6e31a800;
+const VECTOR_QWORDS_EQUAL_ZERO: u32 = 0x4ee09800;
+const VECTOR_SSHR_IMM: u32 = 0x4f000400;
+const VECTOR_USHR_IMM: u32 = 0x6f000400;
+const VECTOR_SHL_IMM: u32 = 0x4f005400;
+const VECTOR_SSHL_REG: u32 = 0x4e204400;
+const VECTOR_USHL_REG: u32 = 0x6e204400;
+const VECTOR_SHIFT_IMM_OFFSET: u32 = 16;
+const VECTOR_EXTRACT_BYTES: u32 = 0x6e000000;
+const VECTOR_EXTRACT_BYTE_SHIFT: u32 = 11;
+const VECTOR_INTERLEAVE_LOW_BYTES: u32 = 0x4e003800;
+const VECTOR_SUM_LANES: u32 = 0x4e31b800;
+const SHIFTED_REGISTER_AMOUNT: u32 = 10;
+const BYTE_SIGN_WEIGHTS: u64 = 0x8040201008040201;
+const WORD_SIGN_WEIGHTS_LOW: u64 = 0x0008000400020001;
+const WORD_SIGN_WEIGHTS_HIGH: u64 = 0x0080004000200010;
+const DWORD_SIGN_WEIGHTS_LOW: u64 = 0x0000000200000001;
+const DWORD_SIGN_WEIGHTS_HIGH: u64 = 0x0000000800000004;
+// ADR points past itself and the three remaining dispatch instructions.
+const ADR_TABLE: u32 = 0x10000080;
+const ADRP: u32 = 0x90000000;
+const LDRSH_UXTW_SCALED: u32 = 0x78a05800;
+const LDRSW_UXTW_SCALED: u32 = 0xb8a05800;
+const ADD_INSTRUCTION_SCALE: u32 = 0x800;
+const SHORT_TABLE_REACH: i64 = 0x8000;
+const LONG_TABLE_REACH: i64 = 0x80000000;
+const SHORT_ENTRIES_PER_INSTRUCTION: u64 = 2;
+const BRANCH_IMM19_SHIFT: u32 = 5;
+const BRANCH_IMM19_REACH: i64 = 0x40000;
+const BRANCH_IMM19_MASK: u32 = 0x7ffff;
+const BRANCH_IMM26_REACH: i64 = 0x2000000;
+const INSTRUCTION_BYTES: u64 = 4;
+const INSTRUCTION_SHIFT: u32 = 2;
+const ADD_REG: u32 = 0x8b000000;
+const SUB_REG: u32 = 0xcb000000;
+const ADDS_REG: u32 = 0xab000000;
+const ADC_REG: u32 = 0x9a000000;
+const SBC_REG: u32 = 0xda000000;
+const MUL_REG: u32 = 0x9b007c00;
+const MSUB_REG: u32 = 0x9b008000;
+const SDIV_REG: u32 = 0x9ac00c00;
+const UDIV_REG: u32 = 0x9ac00800;
+const SMULH_REG: u32 = 0x9b407c00;
+const UMULH_REG: u32 = 0x9bc07c00;
+const SMULL_REG: u32 = 0x9b207c00;
+const UMULL_REG: u32 = 0x9ba07c00;
+const AND_REG: u32 = 0x8a000000;
+const BIC_REG: u32 = 0x8a200000;
+const ORR_REG: u32 = 0xaa000000;
+const EOR_REG: u32 = 0xca000000;
+const EON_REG: u32 = 0xca200000;
+const ORN_REG: u32 = 0xaa200000;
+const LSL_REG: u32 = 0x9ac02000;
+const LSR_REG: u32 = 0x9ac02400;
+const ASR_REG: u32 = 0x9ac02800;
+const ROR_REG: u32 = 0x9ac02c00;
+const EXTR: u32 = 0x93c00000;
+const REV16_W: u32 = 0x5ac00400;
+const REV_W: u32 = 0x5ac00800;
+const REV_X: u32 = 0xdac00c00;
+const CLZ_REG: u32 = 0xdac01000;
+const CLS_REG: u32 = 0xdac01400;
+const RBIT_REG: u32 = 0xdac00000;
+const CNT_8B: u32 = 0x0e205800;
+const ADDV_8B: u32 = 0x0e31b800;
+const UMOV_LOW_BYTE: u32 = 0x0e013c00;
+const ADD_IMM: u32 = 0x91000000;
+const SUB_IMM: u32 = 0xd1000000;
+const AND_IMM: u32 = 0x92000000;
+const ORR_IMM: u32 = 0xb2000000;
+const EOR_IMM: u32 = 0xd2000000;
+const TST_IMM: u32 = 0xf200001f;
+const CMP_IMM: u32 = 0xf100001f;
+const CMN_IMM: u32 = 0xb100001f;
+const CCMP_IMM: u32 = 0xfa400800;
+const CCMN_IMM_W: u32 = 0x3a400800;
+const SUBS_REG: u32 = 0xeb000000;
+const SUBS_UXTB_W: u32 = 0x6b200000;
+const SUBS_UXTH_W: u32 = 0x6b202000;
+const SUBS_SXTB_W: u32 = 0x6b208000;
+const SUBS_SXTH_W: u32 = 0x6b20a000;
+const SUBS_UXTW: u32 = 0xeb204000;
+const SUBS_SXTW: u32 = 0xeb20c000;
+const SUBS_ASR_SIGN: u32 = 0xeb80fc00;
+const UBFM: u32 = 0xd3400000;
+const SBFM: u32 = 0x93400000;
+const BFM: u32 = 0xb3400000;
+const REG64: u32 = 0x80000000;
+const BITFIELD64: u32 = 0x80400000;
+const CSET: u32 = 0x9a9f07e0;
+const CSEL: u32 = 0x9a800000;
+const CSINC: u32 = 0x9a800400;
+const CSNEG: u32 = 0xda800400;
+const FMOV_FROM_GP: u32 = 0x1e270000;
+const FMOV_TO_GP: u32 = 0x1e260000;
+const FP_DOUBLE: u32 = 0x00400000;
+const FADD: u32 = 0x1e202800;
+const FSUB: u32 = 0x1e203800;
+const FMUL: u32 = 0x1e200800;
+const FDIV: u32 = 0x1e201800;
+const FSQRT: u32 = 0x1e21c000;
+const FCMP: u32 = 0x1e202000;
+const FMIN: u32 = 0x1e205800;
+const FMAX: u32 = 0x1e204800;
+const FMADD: u32 = 0x1f000000;
+const FCVT_TO_DOUBLE: u32 = 0x1e22c000;
+const FCVT_TO_SINGLE: u32 = 0x1e624000;
+const SCVTF: u32 = 0x1e220000;
+const UCVTF: u32 = 0x1e230000;
+const FCVTZS: u32 = 0x1e380000;
+const FCVTZU: u32 = 0x1e390000;
+const FRINTP: u32 = 0x1e24c000;
+const FRINTM: u32 = 0x1e254000;
+const FRINTZ: u32 = 0x1e25c000;
+const FRINTN: u32 = 0x1e244000;
+const EOR_F32_SIGN: u32 = 0x52010000;
+const EOR_F64_SIGN: u32 = 0xd2410000;
+const MOVN: u32 = 0x92800000;
+const MOVZ: u32 = 0xd2800000;
+const MOVK: u32 = 0xf2800000;
+const MEMORY_SCALED: u32 = 0x39000000;
+const MEMORY_PAIR: u32 = 0xa9000000;
+const MEMORY_UNSCALED: u32 = 0x38000000;
+const MEMORY_REGISTER: u32 = 0x38206800;
+const LOAD_ACQUIRE_EXCLUSIVE: u32 = 0x085ffc00;
+const STORE_RELEASE_EXCLUSIVE: u32 = 0x0800fc00;
+const LOAD_ACQUIRE: u32 = 0x08dffc00;
+const STORE_RELEASE: u32 = 0x089ffc00;
+const CLEAR_EXCLUSIVE: u32 = 0xd5033f5f;
+const DMB_ISH: u32 = 0xd5033bbf;
+const CAS_RETRY_DISTANCE: u32 = 4;
+const CAS_MISMATCH_DISTANCE: u32 = 4;
+const CAS_SKIP_CLEAR_DISTANCE: u32 = 2;
+const MEMORY_LOAD: u32 = 0x00400000;
+const MEMORY_SIZE_SHIFT: u32 = 30;
+const MEMORY_IMM9_SHIFT: u32 = 12;
+const MEMORY_IMM9_MASK: u32 = 0x1ff;
+const MEMORY_IMM9_MIN: i64 = -256;
+const MEMORY_IMM9_MAX: i64 = 255;
+const PAIR_IMM7_SHIFT: u32 = 15;
+const PAIR_IMM7_MAX: u64 = 63;
+const PAIR_SECOND_REGISTER_SHIFT: u32 = 10;
+const RM_SHIFT: u32 = 16;
+const RN_SHIFT: u32 = 5;
+const ACCUMULATOR_SHIFT: u32 = 10;
+const EXTR_AMOUNT_SHIFT: u32 = 10;
+const LOGICAL_AMOUNT_SHIFT: u32 = 10;
+const CONDITION_SHIFT: u32 = 12;
+const IMM12_SHIFT: u32 = 10;
+const IMM12_MASK: u64 = 0xfff;
+const IMM12_SCALE: u32 = 12;
+const IMM12_SCALED: u32 = 0x00400000;
+const BITMASK_N: u32 = 0x00400000;
+const IMMR_SHIFT: u32 = 16;
+const IMMS_SHIFT: u32 = 10;
+const SHIFT_MASK: u64 = QWORD_BITS - 1;
+const BYTE_SHIFT_BITS: u64 = 3;
+const WORD_SHIFT_BITS: u64 = 4;
+const BITMASK_ELEMENT_HALVINGS: u64 = 5;
+const HALFWORDS: u64 = 4;
+const HALFWORD_BITS: u64 = 16;
+const HALFWORD_MASK: u64 = 0xffff;
+const HALFWORD_SHIFT: u32 = 21;
+const IMM16_SHIFT: u32 = 5;
+
+const EQ: u32 = 0;
+const NE: u32 = 1;
+const HS: u32 = 2;
+const LO: u32 = 3;
+const VS: u32 = 6;
+const VC: u32 = 7;
+const HI: u32 = 8;
+const LS: u32 = 9;
+const GE: u32 = 10;
+const LT: u32 = 11;
+const GT: u32 = 12;
+const LE: u32 = 13;
+
+copy struct BranchArm {
+    start: u64,
+    end: u64,
+}
+
+copy struct Branch {
+    offset: u64,
+    instruction: u32,
+}
+
+copy struct LabelBranch {
+    branch: Branch,
+    target: u64,
+    block: bool,
+}
+
+struct FrameLayout {
+    slots: ChunkSeq[FrameSlot],
+    size: u64,
+}
+
+copy struct SavedRegisters {
+    mask: u32,
+    first: u32,
+    offset: u64,
+}
+
+copy struct HomeCell {
+    width: u64,
+    next_store: u64,
+}
+
+copy struct AddressFold {
+    consumer: u64,
+    base: u64,
+    index: u64,
+    displacement: u64,
+}
+
+copy enum Allocation {
+    RegisterHomes,
+    StackHomes,
+    Spills,
+    SpillsWithRegisterHomes,
+}
+
+copy enum Retry {
+    Allocate(Allocation),
+    LongTables,
+    WithoutCalleeRegisters,
+}
+
+fn sh(value: u32, amount: u32) -> u32 {
+    wrapping_shl_u32(value, amount)
+}
+
+fn rrr(inout out: ChunkSeq[u8], op: u32, dest: u32, lhs: u32, rhs: u32) {
+    push32(inout out, op | sh(rhs, RM_SHIFT) | sh(lhs, RN_SHIFT) | dest);
+}
+
+fn bitfield(inout out: ChunkSeq[u8], op: u32, dest: u32, source: u32, rotate: u64, last: u64) {
+    push32(
+        inout out,
+        op
+            | sh(wrapping_u32(rotate), IMMR_SHIFT)
+            | sh(wrapping_u32(last), IMMS_SHIFT)
+            | sh(source, RN_SHIFT)
+            | dest
+    );
+}
+
+fn scalar_width(width: u64) -> bool {
+    width == BYTE_BITS || width == WORD_BITS || width == DWORD_BITS || width == QWORD_BITS
+}
+
+fn float_width(width: u64) -> bool {
+    width == DWORD_BITS || width == QWORD_BITS
+}
+
+fn scalar_opcode_mask(width: u64) -> u32 {
+    if width == DWORD_BITS { ~REG64 } else { ~0 }
+}
+
+fn low_bits(bits: u64, width: u64) -> u64 {
+    bits & wrapping_shr_u64(~0, wrapping_u32(wrapping_sub(QWORD_BITS, width)))
+}
+
+fn normalize(inout out: ChunkSeq[u8], register: u32, width: u64) {
+    if width != QWORD_BITS {
+        bitfield(inout out, UBFM, register, register, 0, wrapping_sub(width, 1));
+    }
+}
+
+fn halfword(bits: u64, index: u64) -> u64 {
+    wrapping_shr_u64(bits, wrapping_u32(wrapping_mul(index, HALFWORD_BITS))) & HALFWORD_MASK
+}
+
+// A logical immediate is a power-of-two element repeated across the register.
+// The element contains one circular run of ones and at least one zero.
+fn bitmask_immediate(bits: u64) -> Option[u32] {
+    if bits == 0 || bits == ~0 {
+        return Option::None;
+    }
+    let mut width = QWORD_BITS;
+    let mut mask: u64 = ~0;
+    for _ in 0..BITMASK_ELEMENT_HALVINGS {
+        let half = width / 2;
+        let half_mask = wrapping_shr_u64(mask, wrapping_u32(half));
+        if (bits & half_mask) != ((wrapping_shr_u64(bits, wrapping_u32(half))) & half_mask) {
+            break;
+        }
+        width = half;
+        mask = half_mask;
+    }
+    let element = bits & mask;
+    let last = wrapping_u32(wrapping_sub(width, 1));
+    let previous = (wrapping_shl_u64(element, 1) & mask) | wrapping_shr_u64(element, last);
+    let starts = element & ~previous;
+    if (starts & wrapping_sub(starts, 1)) != 0 {
+        return Option::None;
+    }
+    let start = trailing_zeros_u64(starts);
+    let rotation = wrapping_sub(0, start) & last;
+    let run = wrapping_shr_u64(element, start) | (wrapping_shl_u64(element, rotation) & mask);
+    let ones = trailing_zeros_u64(~run);
+    let size = (sh(~last, 1) | wrapping_sub(ones, 1)) & wrapping_u32(SHIFT_MASK);
+    let n = if width == QWORD_BITS { BITMASK_N } else { 0 };
+    Option::Some(n | sh(rotation, IMMR_SHIFT) | sh(size, IMMS_SHIFT))
+}
+
+fn immediate(inout out: ChunkSeq[u8], dest: u32, bits: u64) {
+    let mut zero_parts: u64 = 0;
+    let mut one_parts: u64 = 0;
+    for index in 0..HALFWORDS {
+        let part = halfword(bits, index);
+        if part == 0 {
+            zero_parts = wrapping_add(zero_parts, 1);
+        } else if part == HALFWORD_MASK {
+            one_parts = wrapping_add(one_parts, 1);
+        }
+    }
+    let inverted = one_parts > zero_parts;
+    let filled = if inverted { one_parts } else { zero_parts };
+    if filled < wrapping_sub(HALFWORDS, 1) {
+        match bitmask_immediate(bits) {
+            Option::Some(encoded) => {
+                push32(inout out, ORR_IMM | encoded | sh(ZERO, RN_SHIFT) | dest);
+                return;
+            },
+            Option::None => (),
+        }
+    }
+    let fill = if inverted { HALFWORD_MASK } else { 0 };
+    let first = if inverted { MOVN } else { MOVZ };
+    let mut op = first;
+    for index in 0..HALFWORDS {
+        let part = halfword(bits, index);
+        if part != fill {
+            let encoded = if op == MOVN {
+                part ^ HALFWORD_MASK
+            } else {
+                part
+            };
+            push32(
+                inout out,
+                op
+                    | sh(wrapping_u32(index), HALFWORD_SHIFT)
+                    | sh(wrapping_u32(encoded), IMM16_SHIFT)
+                    | dest
+            );
+            op = MOVK;
+        }
+    }
+    if op == first {
+        push32(inout out, first | dest);
+    }
+}
+
+fn condition(code: u64) -> u32 {
+    match code {
+        EQUAL => EQ,
+        NOT_EQUAL => NE,
+        SIGNED_LESS => LT,
+        SIGNED_GREATER_EQUAL => GE,
+        SIGNED_GREATER => GT,
+        SIGNED_LESS_EQUAL => LE,
+        UNSIGNED_LESS => LO,
+        UNSIGNED_GREATER_EQUAL => HS,
+        UNSIGNED_GREATER => HI,
+        _ => LS,
+    }
+}
+
+fn magnitude(signed: i64) -> u64 {
+    wrapping_u64(
+        if signed < 0 {
+            wrapping_sub(0, signed)
+        } else {
+            signed
+        }
+    )
+}
+
+fn arithmetic_immediate(amount: u64) -> Option[u32] {
+    if amount <= IMM12_MASK {
+        return Option::Some(sh(wrapping_u32(amount), IMM12_SHIFT));
+    }
+    let scaled = wrapping_shr_u64(amount, IMM12_SCALE);
+    if (amount & IMM12_MASK) == 0 && scaled <= IMM12_MASK {
+        return Option::Some(IMM12_SCALED | sh(wrapping_u32(scaled), IMM12_SHIFT));
+    }
+    Option::None
+}
+
+fn comparison_width(op: u64) -> u64 {
+    match op {
+        COMPARE | COMPARE_IMMEDIATE => QWORD_BITS,
+        COMPARE_DWORD | COMPARE_DWORD_IMMEDIATE => DWORD_BITS,
+        COMPARE_WORD | COMPARE_WORD_IMMEDIATE => WORD_BITS,
+        COMPARE_BYTE | COMPARE_BYTE_IMMEDIATE => BYTE_BITS,
+        _ => 0,
+    }
+}
+
+fn comparison_uses_immediate(op: u64) -> bool {
+    op >= COMPARE_IMMEDIATE && op <= COMPARE_DWORD_IMMEDIATE
+}
+
+fn compare(inout out: ChunkSeq[u8], in r: Record, lhs: u32, rhs: u32) {
+    let width = comparison_width(r.op);
+    let reg_mask = scalar_opcode_mask(width);
+    let signed_narrow = width < DWORD_BITS
+        && r.extra >= SIGNED_LESS
+        && r.extra <= SIGNED_LESS_EQUAL;
+    let mut lhs = lhs;
+    if signed_narrow {
+        bitfield(inout out, SBFM, SECOND_SCRATCH, lhs, 0, wrapping_sub(width, 1));
+        lhs = SECOND_SCRATCH;
+    }
+    if comparison_uses_immediate(r.op) {
+        let signed = if width >= DWORD_BITS || signed_narrow {
+            widen_i64(wrapping_i32(r.right))
+        } else {
+            wrapping_i64(low_bits(r.right, width))
+        };
+        match arithmetic_immediate(magnitude(signed)) {
+            Option::Some(encoded) => {
+                let op = if signed < 0 { CMN_IMM } else { CMP_IMM };
+                push32(inout out, (op & reg_mask) | encoded | sh(lhs, RN_SHIFT));
+            },
+            Option::None => {
+                immediate(inout out, SCRATCH, wrapping_u64(signed));
+                rrr(inout out, SUBS_REG & reg_mask, ZERO, lhs, SCRATCH);
+            },
+        }
+    } else {
+        let mut rhs = rhs;
+        if signed_narrow {
+            bitfield(inout out, SBFM, SCRATCH, rhs, 0, wrapping_sub(width, 1));
+            rhs = SCRATCH;
+        }
+        rrr(inout out, SUBS_REG & reg_mask, ZERO, lhs, rhs);
+    }
+}
+
+fn store_width(op: u64) -> u64 {
+    match op {
+        STORE_BYTE | STACK_STORE_BYTE => BYTE_BITS,
+        STORE_WORD | STACK_STORE_WORD => WORD_BITS,
+        STORE_DWORD | STACK_STORE_DWORD | FLOAT_STORE32 | FLOAT_STACK_STORE32 => DWORD_BITS,
+        STORE_QWORD | STACK_STORE_QWORD | FLOAT_STORE64 | FLOAT_STACK_STORE64 => QWORD_BITS,
+        _ => 0,
+    }
+}
+
+fn is_stack_store(op: u64) -> bool {
+    (op >= STACK_STORE_BYTE && op <= STACK_STORE_QWORD)
+        || op == FLOAT_STACK_STORE32
+        || op == FLOAT_STACK_STORE64
+}
+
+fn is_stack_load(op: u64) -> bool {
+    op == STACK_LOAD || op == FLOAT_STACK_LOAD
+}
+
+fn frame_layout(in words: Slice[u64], count: u64) -> Option[FrameLayout] {
+    let mut slots = ChunkSeq::new[FrameSlot]();
+    let mut used: u64 = 0;
+    for index in 0..count {
+        let r = read_record(in words, index);
+        if r.op != STACK_SLOT {
+            break;
+        }
+        let alignment = r.right;
+        if alignment == 0
+            || alignment > STACK_ALIGNMENT
+            || (alignment & wrapping_sub(alignment, 1)) != 0
+            || r.left > MAX_FRAME_BYTES
+            || r.extra != 0
+        {
+            return Option::None;
+        }
+        let offset = align_up(used, alignment);
+        used = wrapping_add(offset, r.left);
+        if used > MAX_FRAME_BYTES {
+            return Option::None;
+        }
+        slots.push(FrameSlot { offset: offset, size: r.left });
+    }
+    Option::Some(FrameLayout { slots: slots, size: align_up(used, STACK_ALIGNMENT) })
+}
+
+fn stack_displacement(in frame: FrameLayout, in r: Record) -> Option[u64] {
+    let store = is_stack_store(r.op);
+    let index = if store { r.right } else { r.left };
+    let offset = if store { r.extra } else { r.right };
+    let width = if store { store_width(r.op) } else { r.extra };
+    match frame.slots.try_get(index) {
+        Option::Some(slot) => {
+            if offset <= slot.size && width / BYTE_BITS <= wrapping_sub(slot.size, offset) {
+                Option::Some(wrapping_add(slot.offset, offset))
+            } else {
+                Option::None
+            }
+        },
+        Option::None => Option::None,
+    }
+}
+
+fn home_register(first: u32, cell: u32, mask: u32) -> u32 {
+    if cell < wrapping_u32(HOME_REGISTERS) && (mask & sh(1, cell)) != 0 {
+        wrapping_add(first, cell)
+    } else {
+        UNASSIGNED
+    }
+}
+
+fn home_cell(in r: Record, home_slot: u64) -> u32 {
+    let (slot, offset) = if is_stack_store(r.op) {
+        (r.right, r.extra)
+    } else {
+        (r.left, r.right)
+    };
+    if slot == home_slot && offset % HOME_WORD_BYTES == 0 {
+        wrapping_u32(offset / HOME_WORD_BYTES)
+    } else {
+        UNASSIGNED
+    }
+}
+
+fn worth_spilling_with_homes(
+    in words: Slice[u64],
+    in aliases: ChunkSeq[u64],
+    homes: u32,
+    returns: u64
+) -> bool {
+    // Conservatively charge a save on entry and a restore on each normal return.
+    let cost = wrapping_mul(widen_u64(count_ones_u64(widen_u64(homes))), wrapping_add(returns, 1));
+    if aliases.len() <= cost {
+        return false;
+    }
+    let mut savings: u64 = 0;
+    for index in 0..aliases.len() {
+        let reload = read_record(in words, aliases.try_get(index).unwrap_or(0));
+        let cell = wrapping_u32(reload.right / HOME_WORD_BYTES);
+        if (homes & sh(1, cell)) != 0 {
+            savings = wrapping_add(savings, 1);
+            if savings > cost {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn write_home(inout out: ChunkSeq[u8], home: u32, source: u32, width: u64) {
+    if width == QWORD_BITS {
+        if home != source {
+            rrr(inout out, ORR_REG, home, ZERO, source);
+        }
+    } else if width == DWORD_BITS {
+        rrr(inout out, ORR_REG & ~REG64, home, ZERO, source);
+    } else {
+        bitfield(inout out, UBFM & ~BITFIELD64, home, source, 0, wrapping_sub(width, 1));
+    }
+}
+
+fn memory(
+    inout out: ChunkSeq[u8],
+    load: bool,
+    width: u64,
+    address: u32,
+    data: u32,
+    displacement: u64
+) {
+    let bytes = width / BYTE_BITS;
+    let scale = trailing_zeros_u64(bytes);
+    let size = if width == VECTOR_BITS {
+        VECTOR_MEMORY_FLAGS
+    } else {
+        sh(scale, MEMORY_SIZE_SHIFT)
+    };
+    let opcode = size | (if load { MEMORY_LOAD } else { 0 });
+    let offset = widen_i64(wrapping_i32(displacement));
+    match memory_immediate(bytes, scale, offset) {
+        Option::Some(addressing) => {
+            push32(inout out, addressing | opcode | sh(address, RN_SHIFT) | data);
+        },
+        Option::None => {
+            immediate(inout out, SCRATCH, wrapping_u64(offset));
+            rrr(inout out, MEMORY_REGISTER | opcode, data, address, SCRATCH);
+        },
+    };
+}
+
+fn memory_immediate(bytes: u64, scale: u32, offset: i64) -> Option[u32] {
+    let unsigned = wrapping_u64(offset);
+    let scaled = wrapping_shr_u64(unsigned, scale);
+    if offset >= 0 && (unsigned & wrapping_sub(bytes, 1)) == 0 && scaled <= IMM12_MASK {
+        Option::Some(MEMORY_SCALED | sh(wrapping_u32(scaled), IMM12_SHIFT))
+    } else if offset >= MEMORY_IMM9_MIN && offset <= MEMORY_IMM9_MAX {
+        let imm = wrapping_u32(offset) & MEMORY_IMM9_MASK;
+        Option::Some(MEMORY_UNSCALED | sh(imm, MEMORY_IMM9_SHIFT))
+    } else {
+        Option::None
+    }
+}
+
+fn vector_splat(inout out: ChunkSeq[u8], destination: u32, source: u32, lane: u64) {
+    let imm = sh(wrapping_u32(lane / BYTE_BITS), VECTOR_LANE_IMM5_SHIFT);
+    push32(inout out, VECTOR_DUP | imm | sh(source, RN_SHIFT) | destination);
+}
+
+fn vector_constant(inout out: ChunkSeq[u8], destination: u32, low: u64, high: u64) {
+    if low == 0 && high == 0 {
+        push32(inout out, VECTOR_ZERO | destination);
+        return;
+    }
+    immediate(inout out, SCRATCH, low);
+    if low == high {
+        vector_splat(inout out, destination, SCRATCH, QWORD_BITS);
+    } else {
+        push32(inout out, FMOV_FROM_GP | FP_DOUBLE | REG64 | sh(SCRATCH, RN_SHIFT) | destination);
+        if high != 0 {
+            immediate(inout out, SCRATCH, high);
+            let lane = vector_lane_immediate(1, QWORD_BITS);
+            push32(inout out, VECTOR_INSERT_GP | lane | sh(SCRATCH, RN_SHIFT) | destination);
+        }
+    }
+}
+
+fn vector_shift(inout out: ChunkSeq[u8], in r: Record, dest: u32, source: u32, count: u32) {
+    let width = r.extra & VECTOR_LANE_WIDTH_MASK;
+    if (r.extra & VECTOR_SHIFT_IMMEDIATE) != 0 {
+        if r.right == 0 {
+            if dest != source {
+                rrr(inout out, VECTOR_OR_REG, dest, source, source);
+            }
+            return;
+        }
+        let (op, shift) = match r.op {
+            VECTOR_SHL => (VECTOR_SHL_IMM, wrapping_add(width, r.right)),
+            VECTOR_SAR => (VECTOR_SSHR_IMM, wrapping_sub(wrapping_add(width, width), r.right)),
+            _ => (VECTOR_USHR_IMM, wrapping_sub(wrapping_add(width, width), r.right)),
+        };
+        push32(
+            inout out,
+            op | sh(wrapping_u32(shift), VECTOR_SHIFT_IMM_OFFSET) | sh(source, RN_SHIFT) | dest
+        );
+        return;
+    }
+    // Every valid lane width leaves a contiguous mask of low bits.
+    let mask = bitmask_immediate(wrapping_sub(width, 1)).unwrap_or(0);
+    push32(inout out, AND_IMM | mask | sh(count, RN_SHIFT) | SCRATCH);
+    if r.op != VECTOR_SHL {
+        // A negative per-lane count shifts right on Advanced SIMD.
+        rrr(inout out, SUB_REG, SCRATCH, ZERO, SCRATCH);
+    }
+    vector_splat(inout out, FP_LEFT, SCRATCH, width);
+    let op = if r.op == VECTOR_SAR {
+        VECTOR_SSHL_REG
+    } else {
+        VECTOR_USHL_REG
+    };
+    let size = sh(trailing_zeros_u64(width / BYTE_BITS), VECTOR_SIZE_SHIFT);
+    rrr(inout out, op | size, dest, source, FP_LEFT);
+}
+
+fn vector_multiply_qwords(inout out: ChunkSeq[u8], dest: u32, left: u32, right: u32) {
+    let cross = FP_LEFT;
+    let left_low = FP_RIGHT;
+    let right_low = FP_ADDEND;
+    // Cross products contribute to the upper dwords. The product of the two high dwords wraps out.
+    push32(inout out, VECTOR_REVERSE_DWORDS | sh(right, RN_SHIFT) | cross);
+    rrr(inout out, VECTOR_MUL_REG | VECTOR_DWORD_SIZE, cross, cross, left);
+    rrr(inout out, VECTOR_PAIRWISE_ADD_REG | VECTOR_DWORD_SIZE, cross, cross, cross);
+    push32(inout out, VECTOR_NARROW_QWORDS | sh(left, RN_SHIFT) | left_low);
+    push32(inout out, VECTOR_NARROW_QWORDS | sh(right, RN_SHIFT) | right_low);
+    push32(inout out, VECTOR_SHIFT_LONG_DWORDS | sh(cross, RN_SHIFT) | dest);
+    rrr(inout out, VECTOR_UMLAL_DWORDS, dest, left_low, right_low);
+}
+
+fn vector_binary(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, right: u32) {
+    if r.op == VECTOR_MUL && r.extra == QWORD_BITS {
+        vector_multiply_qwords(inout out, dest, left, right);
+        return;
+    }
+    let opcode = match r.op {
+        VECTOR_AND => VECTOR_AND_REG,
+        VECTOR_OR => VECTOR_OR_REG,
+        VECTOR_XOR => VECTOR_XOR_REG,
+        VECTOR_ADD => VECTOR_ADD_REG,
+        VECTOR_SUB => VECTOR_SUB_REG,
+        VECTOR_MUL => VECTOR_MUL_REG,
+        VECTOR_SIGNED_SAT_ADD => VECTOR_SIGNED_SAT_ADD_REG,
+        VECTOR_UNSIGNED_SAT_ADD => VECTOR_UNSIGNED_SAT_ADD_REG,
+        VECTOR_SIGNED_SAT_SUB => VECTOR_SIGNED_SAT_SUB_REG,
+        VECTOR_UNSIGNED_SAT_SUB => VECTOR_UNSIGNED_SAT_SUB_REG,
+        VECTOR_PAIRWISE_ADD => VECTOR_PAIRWISE_ADD_REG,
+        VECTOR_SWIZZLE => VECTOR_TABLE,
+        _ => VECTOR_ROUNDED_AVERAGE_REG,
+    };
+    let size = if r.extra != 0 {
+        sh(trailing_zeros_u64(r.extra / BYTE_BITS), VECTOR_SIZE_SHIFT)
+    } else {
+        0
+    };
+    rrr(inout out, opcode | size, dest, left, right);
+}
+
+fn vector_float(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, right: u32) {
+    let size = if r.extra == QWORD_BITS { FP_DOUBLE } else { 0 };
+    let opcode = match r.op {
+        VECTOR_FLOAT_ADD => VECTOR_FADD,
+        VECTOR_FLOAT_SUB => VECTOR_FSUB,
+        VECTOR_FLOAT_MUL => VECTOR_FMUL,
+        VECTOR_FLOAT_DIV => VECTOR_FDIV,
+        VECTOR_FLOAT_MIN => VECTOR_FMIN,
+        VECTOR_FLOAT_MAX => VECTOR_FMAX,
+        VECTOR_FLOAT_NEG => VECTOR_FNEG,
+        VECTOR_FLOAT_ABS => VECTOR_FABS,
+        VECTOR_FLOAT_CEIL => VECTOR_FRINTP,
+        VECTOR_FLOAT_FLOOR => VECTOR_FRINTM,
+        VECTOR_FLOAT_TRUNC => VECTOR_FRINTZ,
+        VECTOR_FLOAT_NEAREST => VECTOR_FRINTN,
+        _ => VECTOR_FSQRT,
+    };
+    if is_vector_float_unary(r.op) {
+        push32(inout out, opcode | size | sh(left, RN_SHIFT) | dest);
+    } else {
+        rrr(inout out, opcode | size, dest, left, right);
+    }
+}
+
+fn vector_float_copy_sign(inout out: ChunkSeq[u8], dest: u32, left: u32, right: u32, width: u64) {
+    let mask = if dest == left || dest == right {
+        FP_LEFT
+    } else {
+        dest
+    };
+    let sign_bit = wrapping_shl_u64(1, wrapping_u32(wrapping_sub(width, 1)));
+    immediate(inout out, SCRATCH, sign_bit);
+    vector_splat(inout out, mask, SCRATCH, width);
+    if dest == left {
+        rrr(inout out, VECTOR_BIT_INSERT, dest, right, mask);
+    } else {
+        rrr(inout out, VECTOR_BIT_SELECT, mask, right, left);
+        if dest != mask {
+            rrr(inout out, VECTOR_OR_REG, dest, mask, mask);
+        }
+    }
+}
+
+fn vector_float_fma(
+    inout out: ChunkSeq[u8],
+    dest: u32,
+    left: u32,
+    right: u32,
+    addend: u32,
+    double: bool
+) {
+    let accumulator = if dest != addend && (dest == left || dest == right) {
+        FP_RIGHT
+    } else {
+        dest
+    };
+    if accumulator != addend {
+        rrr(inout out, VECTOR_OR_REG, accumulator, addend, addend);
+    }
+    let precision = if double { FP_DOUBLE } else { 0 };
+    rrr(inout out, VECTOR_FMLA | precision, accumulator, left, right);
+    if accumulator != dest {
+        rrr(inout out, VECTOR_OR_REG, dest, accumulator, accumulator);
+    }
+}
+
+fn vector_float_compare(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, right: u32) {
+    let predicate = wrapping_shr_u64(r.extra, VECTOR_CONDITION_SHIFT);
+    let size = if (r.extra & VECTOR_LANE_WIDTH_MASK) == QWORD_BITS {
+        FP_DOUBLE
+    } else {
+        0
+    };
+    let invert = match predicate {
+        FLOAT_ORDERED | FLOAT_UNORDERED => {
+            rrr(inout out, VECTOR_FCMEQ | size, FP_LEFT, left, left);
+            rrr(inout out, VECTOR_FCMEQ | size, dest, right, right);
+            rrr(inout out, VECTOR_AND_REG, dest, dest, FP_LEFT);
+            predicate == FLOAT_UNORDERED
+        },
+        FLOAT_ORDERED_NOT_EQUAL | FLOAT_UNORDERED_OR_EQUAL => {
+            rrr(inout out, VECTOR_FCMGT | size, FP_LEFT, left, right);
+            rrr(inout out, VECTOR_FCMGT | size, dest, right, left);
+            rrr(inout out, VECTOR_OR_REG, dest, dest, FP_LEFT);
+            predicate == FLOAT_UNORDERED_OR_EQUAL
+        },
+        _ => {
+            let opcode = match predicate {
+                FLOAT_EQUAL | FLOAT_NOT_EQUAL => VECTOR_FCMEQ,
+                FLOAT_LESS
+                    | FLOAT_GREATER
+                    | FLOAT_UNORDERED_OR_LESS_EQUAL
+                    | FLOAT_UNORDERED_OR_GREATER_EQUAL => VECTOR_FCMGT,
+                _ => VECTOR_FCMGE,
+            };
+            let reverse = predicate == FLOAT_LESS
+                || predicate == FLOAT_LESS_EQUAL
+                || predicate == FLOAT_UNORDERED_OR_GREATER
+                || predicate == FLOAT_UNORDERED_OR_GREATER_EQUAL;
+            let (lhs, rhs) = if reverse {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            rrr(inout out, opcode | size, dest, lhs, rhs);
+            predicate == FLOAT_NOT_EQUAL || predicate >= FLOAT_UNORDERED_OR_LESS
+        },
+    };
+    if invert {
+        push32(inout out, VECTOR_NOT | sh(dest, RN_SHIFT) | dest);
+    }
+}
+
+fn vector_lane_immediate(lane: u64, width: u64) -> u32 {
+    let bytes = wrapping_u32(width / BYTE_BITS);
+    sh(bytes | wrapping_mul(wrapping_mul(wrapping_u32(lane), bytes), 2), VECTOR_LANE_IMM5_SHIFT)
+}
+
+fn vector_widen(inout out: ChunkSeq[u8], mode: u64, dest: u32, source: u32) {
+    let opcode = if (mode & VECTOR_CONVERSION_SIGNED) != 0 {
+        VECTOR_SSHLL
+    } else {
+        VECTOR_USHLL
+    };
+    let half = if (mode & VECTOR_WIDEN_HIGH) != 0 {
+        VECTOR_Q
+    } else {
+        0
+    };
+    let width = wrapping_u32(mode & VECTOR_LANE_WIDTH_MASK);
+    push32(
+        inout out,
+        opcode | half | sh(width, VECTOR_SHIFT_IMM_OFFSET) | sh(source, RN_SHIFT) | dest
+    );
+}
+
+fn vector_narrow(inout out: ChunkSeq[u8], mode: u64, dest: u32, left: u32, right: u32) {
+    let opcode = match mode & ~VECTOR_LANE_WIDTH_MASK {
+        VECTOR_CONVERSION_SIGNED => VECTOR_SQXTN,
+        VECTOR_NARROW_UNSIGNED_INPUT => VECTOR_UQXTN,
+        _ => VECTOR_SQXTUN,
+    };
+    let width = (mode & VECTOR_LANE_WIDTH_MASK) / 2;
+    let size = sh(trailing_zeros_u64(width / BYTE_BITS), VECTOR_SIZE_SHIFT);
+    let rhs = if dest == right {
+        rrr(inout out, VECTOR_OR_REG, FP_LEFT, right, right);
+        FP_LEFT
+    } else {
+        right
+    };
+    push32(inout out, opcode | size | sh(left, RN_SHIFT) | dest);
+    push32(inout out, opcode | VECTOR_Q | size | sh(rhs, RN_SHIFT) | dest);
+}
+
+fn vector_integer_min_max(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, right: u32) {
+    let width = r.extra & VECTOR_LANE_WIDTH_MASK;
+    let signed = (r.extra & VECTOR_MINMAX_SIGNED) != 0;
+    let min = (r.extra & VECTOR_MINMAX_MINIMUM) != 0;
+    let size = sh(trailing_zeros_u64(width / BYTE_BITS), VECTOR_SIZE_SHIFT);
+    if width != QWORD_BITS {
+        let op = match (signed, min) {
+            (true, true) => VECTOR_SMIN_REG,
+            (true, false) => VECTOR_SMAX_REG,
+            (false, true) => VECTOR_UMIN_REG,
+            (false, false) => VECTOR_UMAX_REG,
+        };
+        rrr(inout out, op | size, dest, left, right);
+        return;
+    }
+
+    // Qwords use a greater-than mask. BIT can update an existing operand in place.
+    let (first, second) = if dest == right {
+        (right, left)
+    } else {
+        (left, right)
+    };
+    let mask = if dest == first { FP_LEFT } else { dest };
+    let (a, b) = if min {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let compare = if signed {
+        VECTOR_COMPARE_SIGNED_GREATER
+    } else {
+        VECTOR_COMPARE_UNSIGNED_GREATER
+    };
+    rrr(inout out, compare | size, mask, a, b);
+    if dest == first {
+        rrr(inout out, VECTOR_BIT_INSERT, dest, second, mask);
+    } else {
+        rrr(inout out, VECTOR_BIT_SELECT, dest, second, first);
+    }
+}
+
+fn vector_integer_compare(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, right: u32) {
+    let condition = wrapping_shr_u64(r.extra, VECTOR_CONDITION_SHIFT);
+    let opcode = match condition {
+        EQUAL | NOT_EQUAL => VECTOR_COMPARE_EQUAL,
+        SIGNED_LESS | SIGNED_GREATER => VECTOR_COMPARE_SIGNED_GREATER,
+        SIGNED_GREATER_EQUAL | SIGNED_LESS_EQUAL => VECTOR_COMPARE_SIGNED_GREATER_EQUAL,
+        UNSIGNED_LESS | UNSIGNED_GREATER => VECTOR_COMPARE_UNSIGNED_GREATER,
+        _ => VECTOR_COMPARE_UNSIGNED_GREATER_EQUAL,
+    };
+    let reverse = condition == SIGNED_LESS
+        || condition == SIGNED_LESS_EQUAL
+        || condition == UNSIGNED_LESS
+        || condition == UNSIGNED_LESS_EQUAL;
+    let (first, second) = if reverse {
+        (right, left)
+    } else {
+        (left, right)
+    };
+    let width = r.extra & VECTOR_LANE_WIDTH_MASK;
+    let size = sh(trailing_zeros_u64(width / BYTE_BITS), VECTOR_SIZE_SHIFT);
+    rrr(inout out, opcode | size, dest, first, second);
+    if condition == NOT_EQUAL {
+        push32(inout out, VECTOR_NOT | sh(dest, RN_SHIFT) | dest);
+    }
+}
+
+fn vector_extract(inout out: ChunkSeq[u8], dest: u32, source: u32, lane: u64, width: u64) {
+    let wide = if width == QWORD_BITS { VECTOR_Q } else { 0 };
+    push32(
+        inout out,
+        VECTOR_EXTRACT_GP | wide | vector_lane_immediate(lane, width) | sh(source, RN_SHIFT) | dest
+    );
+}
+
+fn vector_truth(inout out: ChunkSeq[u8], dest: u32, source: u32, all: bool, lane: u64) {
+    let (op, input, width, cc) = if all && lane == QWORD_BITS {
+        push32(inout out, VECTOR_QWORDS_EQUAL_ZERO | sh(source, RN_SHIFT) | VECTOR_LEFT);
+        (VECTOR_UNSIGNED_MAX, VECTOR_LEFT, BYTE_BITS, EQ)
+    } else if all {
+        let size = sh(trailing_zeros_u64(lane / BYTE_BITS), VECTOR_SIZE_SHIFT);
+        (VECTOR_UNSIGNED_MIN | size, source, lane, NE)
+    } else {
+        (VECTOR_UNSIGNED_MAX, source, BYTE_BITS, NE)
+    };
+    push32(inout out, op | sh(input, RN_SHIFT) | VECTOR_LEFT);
+    vector_extract(inout out, dest, VECTOR_LEFT, 0, width);
+    rrr(inout out, SUBS_REG, ZERO, dest, ZERO);
+    push32(inout out, CSET | sh(cc ^ 1, CONDITION_SHIFT) | dest);
+}
+
+fn vector_high_bits(inout out: ChunkSeq[u8], dest: u32, source: u32, width: u64) {
+    if width == QWORD_BITS {
+        vector_extract(inout out, dest, source, 0, width);
+        vector_extract(inout out, SCRATCH, source, 1, width);
+        let sign = wrapping_sub(width, 1);
+        bitfield(inout out, UBFM, dest, dest, sign, sign);
+        bitfield(inout out, UBFM, SCRATCH, SCRATCH, sign, sign);
+        rrr(inout out, ORR_REG | sh(1, SHIFTED_REGISTER_AMOUNT), dest, dest, SCRATCH);
+        return;
+    }
+    let (low, high) = match width {
+        BYTE_BITS => (BYTE_SIGN_WEIGHTS, BYTE_SIGN_WEIGHTS),
+        WORD_BITS => (WORD_SIGN_WEIGHTS_LOW, WORD_SIGN_WEIGHTS_HIGH),
+        _ => (DWORD_SIGN_WEIGHTS_LOW, DWORD_SIGN_WEIGHTS_HIGH),
+    };
+    // The arithmetic shift replicates the sign, and each lane then keeps
+    // its own bit in the final mask.
+    let shift = sh(wrapping_u32(wrapping_add(width, 1)), VECTOR_LANE_IMM5_SHIFT);
+    push32(inout out, VECTOR_SSHR_IMM | shift | sh(source, RN_SHIFT) | VECTOR_LEFT);
+    vector_constant(inout out, VECTOR_RIGHT, low, high);
+    rrr(inout out, VECTOR_AND_REG, VECTOR_LEFT, VECTOR_LEFT, VECTOR_RIGHT);
+    let width = if width == BYTE_BITS {
+        // Interleave the halves so the two byte masks sum into one word.
+        let half = QWORD_BITS / BYTE_BITS;
+        rrr(
+            inout out,
+            VECTOR_EXTRACT_BYTES | sh(wrapping_u32(half), VECTOR_EXTRACT_BYTE_SHIFT),
+            VECTOR_RIGHT,
+            VECTOR_LEFT,
+            VECTOR_LEFT
+        );
+        rrr(inout out, VECTOR_INTERLEAVE_LOW_BYTES, VECTOR_LEFT, VECTOR_LEFT, VECTOR_RIGHT);
+        WORD_BITS
+    } else {
+        width
+    };
+    let size = sh(trailing_zeros_u64(width / BYTE_BITS), VECTOR_SIZE_SHIFT);
+    push32(inout out, VECTOR_SUM_LANES | size | sh(VECTOR_LEFT, RN_SHIFT) | VECTOR_LEFT);
+    vector_extract(inout out, dest, VECTOR_LEFT, 0, width);
+}
+
+fn indexed_memory(
+    inout out: ChunkSeq[u8],
+    load: bool,
+    width: u64,
+    address: u32,
+    data: u32,
+    index: u32
+) {
+    let size = sh(trailing_zeros_u64(width / BYTE_BITS), MEMORY_SIZE_SHIFT);
+    let opcode = MEMORY_REGISTER | size | (if load { MEMORY_LOAD } else { 0 });
+    rrr(inout out, opcode, data, address, index);
+}
+
+fn fold_address(
+    in words: Slice[u64],
+    in ends: ChunkSeq[u64],
+    index: u64,
+    value: u64,
+    in r: Record
+) -> Option[AddressFold] {
+    let address_value = wrapping_sub(value, 1);
+    if index == 0 || r.left != address_value {
+        return Option::None;
+    }
+    let stored = store_width(r.op);
+    let (width, displacement) = if r.op == LOAD || r.op == FLOAT_LOAD {
+        (r.extra, r.right)
+    } else if stored != 0 && !is_stack_store(r.op) && r.right != address_value {
+        (stored, r.extra)
+    } else {
+        return Option::None;
+    };
+    if last_read(in ends, address_value) != NEVER_READ {
+        return Option::None;
+    }
+    let address = read_record(in words, wrapping_sub(index, 1));
+    if address.extra != QWORD_BITS || address.left >= address_value {
+        return Option::None;
+    }
+    if address.op == ADD && displacement == 0 && address.right < address_value {
+        return Option::Some(AddressFold {
+            consumer: index,
+            base: address.left,
+            index: address.right,
+            displacement: 0
+        });
+    }
+    if (address.op != ADD_IMMEDIATE && address.op != SUB_IMMEDIATE) || address.right > DISP32_MASK {
+        return Option::None;
+    }
+    let offset = widen_i64(wrapping_i32(displacement));
+    let immediate = widen_i64(wrapping_i32(address.right));
+    let combined = if address.op == ADD_IMMEDIATE {
+        wrapping_add(offset, immediate)
+    } else {
+        wrapping_sub(offset, immediate)
+    };
+    let bytes = width / BYTE_BITS;
+    if memory_immediate(bytes, trailing_zeros_u64(bytes), combined).is_none() {
+        return Option::None;
+    }
+    Option::Some(AddressFold {
+        consumer: index,
+        base: address.left,
+        index: NO_VALUE,
+        displacement: widen_u64(wrapping_u32(combined))
+    })
+}
+
+fn conditional_branch(op: u64) -> bool {
+    op == BRANCH_ZERO || op == BRANCH_BLOCK || op == BRANCH_LABEL
+}
+
+fn flags_survive_stack_stores(in words: Slice[u64], start: u64, end: u64, value: u64) -> bool {
+    for index in start..end {
+        let store = read_record(in words, index);
+        if !is_stack_store(store.op) || store.left == value {
+            return false;
+        }
+    }
+    true
+}
+
+fn call_stack_count(layout: u64) -> u64 {
+    wrapping_shr_u64(layout & ~INDIRECT_CALL, CALL_FLOAT_BITS)
+}
+
+fn float_call(op: u64) -> bool {
+    op == CALL_FLOAT || op == CALL_FLOAT32
+}
+
+fn float_opcode(op: u64) -> bool {
+    (op >= FLOAT_ARGUMENT && op <= FLOAT_COPY_SIGN)
+        || (op >= CALL_FLOAT32 && op <= FLOAT_FMA64)
+        || op == FLOAT_STACK_ARGUMENT
+}
+
+fn incoming_stack_argument(op: u64) -> bool {
+    op == STACK_ARGUMENT || op == FLOAT_STACK_ARGUMENT
+}
+
+fn call_argument(op: u64) -> bool {
+    op == CALL_ARGUMENT || op == CALL_STACK_ARGUMENT
+}
+
+fn stack_argument_fits(offset: u64, width: u64) -> bool {
+    let bytes = width / BYTE_BITS;
+    scalar_width(width)
+        && offset <= wrapping_sub(MAX_FRAME_BYTES, bytes)
+        && (offset & wrapping_sub(bytes, 1)) == 0
+}
+
+fn float_operands(in r: Record) -> Option[u64] {
+    if is_float_compare(r.op) {
+        return if r.extra <= FLOAT_UNORDERED_OR_GREATER_EQUAL {
+            Option::Some(2)
+        } else {
+            Option::None
+        };
+    }
+    if r.op == FLOAT_SELECT || is_float_fma(r.op) {
+        return Option::Some(3);
+    }
+    if is_stack_store(r.op) {
+        return Option::Some(1);
+    }
+    if r.op == FLOAT_STORE32 || r.op == FLOAT_STORE64 {
+        return if r.extra <= DISP32_MASK {
+            Option::Some(2)
+        } else {
+            Option::None
+        };
+    }
+    if is_float_to_integer(r.op) {
+        return if float_width(r.right) && scalar_width(r.extra) {
+            Option::Some(1)
+        } else {
+            Option::None
+        };
+    }
+    if !float_width(r.extra) {
+        return Option::None;
+    }
+    if is_float_binary(r.op) {
+        return Option::Some(2);
+    }
+    match r.op {
+        FLOAT_CONSTANT => if r.right == 0 {
+            Option::Some(0)
+        } else {
+            Option::None
+        },
+        FLOAT_STACK_LOAD => Option::Some(0),
+        FLOAT_LOAD => if r.right <= DISP32_MASK {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        FLOAT_PROMOTE => if r.right == DWORD_BITS && r.extra == QWORD_BITS {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        FLOAT_DEMOTE => if r.right == QWORD_BITS && r.extra == DWORD_BITS {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        SIGNED_TO_FLOAT | UNSIGNED_TO_FLOAT => if scalar_width(r.right) {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        FLOAT_NEG
+            | FLOAT_ABS
+            | FLOAT_SQRT
+            | BITS_TO_FLOAT
+            | FLOAT_TO_BITS
+            | FLOAT_CEIL
+            | FLOAT_FLOOR
+            | FLOAT_TRUNC
+            | FLOAT_NEAREST => if r.right
+            == 0
+        {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        _ => Option::None,
+    }
+}
+
+fn operands(in r: Record, returns: u64) -> Option[u64] {
+    if r.op == TAIL_CALL {
+        return if r.extra <= FP_ARGUMENT_REGISTERS
+            && r.right >= wrapping_add(r.extra, AARCH64_TAIL_RESERVED_GP)
+            && wrapping_sub(r.right, r.extra) <= ARGUMENT_REGISTERS
+            && r.left <= DISP32_MASK
+        {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
+    if is_vector_operation(r.op) {
+        return match r.op {
+            VECTOR_CONSTANT => if r.extra == 0 {
+                Option::Some(0)
+            } else {
+                Option::None
+            },
+            VECTOR_SPLAT => if r.right == 0 && scalar_width(r.extra) {
+                Option::Some(1)
+            } else {
+                Option::None
+            },
+            VECTOR_LOAD => if r.right <= DISP32_MASK && r.extra == 0 {
+                Option::Some(1)
+            } else {
+                Option::None
+            },
+            VECTOR_STORE => if r.extra <= DISP32_MASK {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_AND | VECTOR_OR | VECTOR_XOR | VECTOR_SWIZZLE => if r.extra == 0 {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_INTEGER_COMPARE => if scalar_width(r.extra & VECTOR_LANE_WIDTH_MASK)
+                && wrapping_shr_u64(r.extra, VECTOR_CONDITION_SHIFT) <= UNSIGNED_LESS_EQUAL
+            {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_INTEGER_MIN_MAX => if valid_vector_min_max(r.extra) {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_WIDEN => if r.right == 0 && valid_vector_widen(r.extra) {
+                Option::Some(1)
+            } else {
+                Option::None
+            },
+            VECTOR_NARROW => if valid_vector_narrow(r.extra) {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_SHL | VECTOR_SHR | VECTOR_SAR => if !valid_vector_shift(in r) {
+                Option::None
+            } else if (r.extra & VECTOR_SHIFT_IMMEDIATE) != 0 {
+                Option::Some(1)
+            } else {
+                Option::Some(2)
+            },
+            VECTOR_FLOAT_ADD
+                | VECTOR_FLOAT_SUB
+                | VECTOR_FLOAT_MUL
+                | VECTOR_FLOAT_DIV
+                | VECTOR_FLOAT_COPY_SIGN
+                | VECTOR_FLOAT_MIN
+                | VECTOR_FLOAT_MAX => if vector_float_width(r.extra)
+            {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_FLOAT_SQRT
+                | VECTOR_FLOAT_NEG
+                | VECTOR_FLOAT_ABS
+                | VECTOR_FLOAT_CEIL
+                | VECTOR_FLOAT_FLOOR
+                | VECTOR_FLOAT_TRUNC
+                | VECTOR_FLOAT_NEAREST => if r.right
+                == 0
+                && vector_float_width(r.extra)
+            {
+                Option::Some(1)
+            } else {
+                Option::None
+            },
+            VECTOR_FLOAT_COMPARE => if valid_vector_float_condition(r.extra) {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_FLOAT_FMA32 | VECTOR_FLOAT_FMA64 => Option::Some(3),
+            VECTOR_PROMOTE_LOW | VECTOR_DEMOTE => if r.right == 0 && r.extra == 0 {
+                Option::Some(1)
+            } else {
+                Option::None
+            },
+            VECTOR_INSERT => if valid_vector_lane(
+                wrapping_shr_u64(r.extra, VECTOR_LANE_INDEX_SHIFT),
+                r.extra & VECTOR_LANE_WIDTH_MASK
+            ) {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_EXTRACT => if valid_vector_lane(r.right, r.extra) {
+                Option::Some(1)
+            } else {
+                Option::None
+            },
+            VECTOR_ANY_TRUE | VECTOR_ALL_TRUE | VECTOR_HIGH_BITS => if r.right == 0
+                && scalar_width(r.extra)
+            {
+                Option::Some(1)
+            } else {
+                Option::None
+            },
+            VECTOR_ROUNDED_AVERAGE => if scalar_width(r.extra) && r.extra < QWORD_BITS {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            _ => if scalar_width(r.extra) {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+        };
+    }
+    if r.op == CONSTANT || r.op == STACK_SLOT || r.op == BLOCK_LABEL {
+        return Option::Some(0);
+    }
+    if r.op == FLOAT_ARGUMENT {
+        return if r.left < FP_ARGUMENT_REGISTERS && r.right == 0 && float_width(r.extra) {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
+    if incoming_stack_argument(r.op) {
+        return if r.right == 0
+            && stack_argument_fits(r.left, r.extra)
+            && (r.op != FLOAT_STACK_ARGUMENT || float_width(r.extra))
+        {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
+    if r.op == FLOAT_RETURN {
+        return if r.left == 0 && r.right == 0 && r.extra == 0 {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
+    if float_opcode(r.op) && !float_call(r.op) {
+        return float_operands(in r);
+    }
+    if is_symbol(r.op) {
+        return if r.left <= DISP32_MASK && r.right == 0 && r.extra == 0 {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
+    if r.op == EDGE_LABEL || r.op == JUMP_LABEL {
+        return if r.right == 0 && r.extra == 0 {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
+    if r.op == BRANCH_TABLE {
+        return Option::Some(1);
+    }
+    if r.op == BRANCH_TABLE_TARGET {
+        return if r.right == 0 && r.extra == 0 {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
+    if is_call(r.op) {
+        let indirect = indirect_call(r.extra);
+        let fp = r.extra & CALL_FLOAT_MASK;
+        let stack = call_stack_count(r.extra);
+        let non_gp = wrapping_add(fp, stack);
+        return if fp <= FP_ARGUMENT_REGISTERS
+            && non_gp <= r.right
+            && wrapping_sub(r.right, non_gp) <= ARGUMENT_REGISTERS
+            && (indirect
+                || r.left < LIBCALL_TARGET_BASE
+                || (r.op != CALL_PAIR
+                    && !float_call(r.op)
+                    && r.extra == 0
+                    && wrapping_sub(r.left, LIBCALL_TARGET_BASE) <= MEMCPY_LIBCALL))
+        {
+            Option::Some(if indirect { 1 } else { 0 })
+        } else {
+            Option::None
+        };
+    }
+    if r.op == CALL_STACK_ARGUMENT {
+        return if r.left != NO_VALUE && stack_argument_fits(r.right, r.extra) {
+            Option::Some(1)
+        } else {
+            Option::None
+        };
+    }
+    if r.op == CALL_ARGUMENT {
+        return if r.right == 0 && r.extra == 0 {
+            Option::Some(if r.left == NO_VALUE { 0 } else { 1 })
+        } else {
+            Option::None
+        };
+    }
+    if r.op == CALL_HIGH {
+        return if r.left == 0 && r.right == 0 && r.extra == 0 {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
+    if r.op == RETURN_PAIR || r.op == TRAP {
+        return Option::Some(0);
+    }
+    if r.op == OVERFLOW_FLAG || r.op == FENCE || r.op == STACK_POINTER || r.op == SPECTRE_BARRIER {
+        return if r.left == 0 && r.right == 0 && r.extra == 0 {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
+    if is_conditional_trap(r.op) {
+        return if r.right == 0 && r.extra == 0 {
+            Option::Some(1)
+        } else {
+            Option::None
+        };
+    }
+    if consumes_carry(r.op) {
+        return Option::Some(3);
+    }
+    if is_checked_arithmetic(r.op) {
+        return if r.extra == DWORD_BITS || r.extra == QWORD_BITS {
+            Option::Some(2)
+        } else {
+            Option::None
+        };
+    }
+    if comparison_width(r.op) != 0 {
+        if r.extra > UNSIGNED_LESS_EQUAL {
+            return Option::None;
+        }
+        if !comparison_uses_immediate(r.op) {
+            return Option::Some(2);
+        }
+        if r.right <= DISP32_MASK {
+            return Option::Some(1);
+        }
+        return Option::None;
+    }
+    if r.op == SELECT {
+        return Option::Some(3);
+    }
+    if conditional_branch(r.op) {
+        if r.extra == 0 && (r.right == 0) == (r.op == BRANCH_ZERO) {
+            return Option::Some(1);
+        }
+        return Option::None;
+    }
+    if r.op == EARLY_RETURN || r.op == BLOCK_RETURN {
+        if r.op == BLOCK_RETURN && r.extra != 0 {
+            return Option::None;
+        }
+        if r.left == TRAP_VALUE {
+            return if r.right == 0 {
+                Option::Some(0)
+            } else {
+                Option::None
+            };
+        }
+        if (returns != PAIRED_RESULTS && r.right != 0) || (r.left == NO_VALUE) != (returns == 0) {
+            return Option::None;
+        }
+        return Option::Some(returns);
+    }
+    if r.op == STACK_LOAD || r.op == STACK_ADDRESS {
+        if (r.op == STACK_LOAD && scalar_width(r.extra))
+            || (r.op == STACK_ADDRESS && r.extra == 0)
+        {
+            return Option::Some(0);
+        }
+        return Option::None;
+    }
+    if is_stack_store(r.op) {
+        return Option::Some(1);
+    }
+    if store_width(r.op) != 0 {
+        if r.extra <= DISP32_MASK {
+            return Option::Some(2);
+        }
+        return Option::None;
+    }
+    if r.op == FUNNEL_RIGHT {
+        return if r.extra < QWORD_BITS {
+            Option::Some(2)
+        } else {
+            Option::None
+        };
+    }
+    if is_atomic_cas(r.op) {
+        return Option::Some(3);
+    }
+    if !scalar_width(r.extra) {
+        return Option::None;
+    }
+    if is_atomic_update(r.op) || r.op == ATOMIC_STORE {
+        return Option::Some(2);
+    }
+    match r.op {
+        ATOMIC_LOAD => if r.right == 0 {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        LOAD => if r.right <= DISP32_MASK {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        ADD | SUB | MUL | AND | OR | XOR | AND_NOT | OR_NOT | XOR_NOT => Option::Some(2),
+        ROTATE_RIGHT_REGISTER | ROTATE_LEFT_REGISTER => Option::Some(2),
+        ROTATE_RIGHT => Option::Some(1),
+        SHL_REGISTER | SHR_REGISTER | SAR_REGISTER => Option::Some(2),
+        SIGNED_DIV | UNSIGNED_DIV | SIGNED_REM | UNSIGNED_REM => Option::Some(2),
+        SIGNED_MUL_HIGH | UNSIGNED_MUL_HIGH => if r.extra == QWORD_BITS {
+            Option::Some(2)
+        } else {
+            Option::None
+        },
+        TRUNCATE => if scalar_width(r.right) && r.right > r.extra {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        ZERO_EXTEND | SIGN_EXTEND => if scalar_width(r.right) && r.right < r.extra {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        NEG | NOT | SHL | SHR | SAR => Option::Some(1),
+        ABS => if r.right == 0 {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        BYTE_SWAP => if r.extra >= WORD_BITS {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        LEADING_ZEROS
+            | TRAILING_ZEROS
+            | POPULATION_COUNT
+            | REVERSE_BITS
+            | LEADING_SIGN_BITS => if r.right
+            == 0
+        {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        ADD_IMMEDIATE
+            | SUB_IMMEDIATE
+            | MUL_IMMEDIATE
+            | AND_IMMEDIATE
+            | OR_IMMEDIATE
+            | XOR_IMMEDIATE => if r.right
+            <= DISP32_MASK
+        {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        _ => Option::None,
+    }
+}
+
+fn valid_vector_inputs(in words: Slice[u64], args: u64, count: u64, returns: u64) -> bool {
+    for index in 0..count {
+        let r = read_record(in words, index);
+        // The backward pass has already validated these operand counts.
+        let n = operands(in r, returns).unwrap_or(0);
+        let vector_rhs = is_vector_binary(r.op) || r.op == VECTOR_STORE;
+        if (n >= 1 && vector_value(in words, args, r.left) != uses_vector_left(r.op))
+            || (n >= 2 && vector_value(in words, args, r.right) != vector_rhs)
+            || (n == 3 && vector_value(in words, args, r.extra) != is_vector_float_fma(r.op))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn division_checks(inout out: ChunkSeq[u8], in r: Record, lhs: u32, rhs: u32) {
+    let reg_mask: u32 = if r.extra == QWORD_BITS { ~0 } else { ~REG64 };
+    let skip = sh(SKIP_TRAP_DISPLACEMENT, BRANCH_IMM19_SHIFT);
+    if r.op == SIGNED_DIV {
+        // The zero check branches straight to the same trap as overflow.
+        let trap = sh(SIGNED_DIV_TRAP_DISPLACEMENT, BRANCH_IMM19_SHIFT);
+        push32(inout out, (BRANCH_IF_ZERO & reg_mask) | trap | rhs);
+        if r.extra < DWORD_BITS {
+            // After sign extension, MIN + its magnitude and -1 + 1 both set Z.
+            let magnitude = wrapping_shl_u64(1, wrapping_u32(wrapping_sub(r.extra, 1)));
+            let encoded = arithmetic_immediate(magnitude).unwrap_or(0);
+            push32(inout out, (CMN_IMM & reg_mask) | encoded | sh(lhs, RN_SHIFT));
+            push32(
+                inout out,
+                CCMN_IMM_W | sh(1, RM_SHIFT) | sh(EQ, CONDITION_SHIFT) | sh(rhs, RN_SHIFT)
+            );
+            push32(inout out, BRANCH_IF_CONDITION | skip | NE);
+        } else {
+            // Only a divisor of -1 can overflow. For that divisor, subtracting
+            // one from the dividend sets V precisely when the dividend is MIN.
+            push32(inout out, (CMN_IMM & reg_mask) | sh(1, IMM12_SHIFT) | sh(rhs, RN_SHIFT));
+            push32(
+                inout out,
+                (CCMP_IMM & reg_mask)
+                    | sh(1, RM_SHIFT)
+                    | sh(EQ, CONDITION_SHIFT)
+                    | sh(lhs, RN_SHIFT)
+            );
+            push32(inout out, BRANCH_IF_CONDITION | skip | VC);
+        }
+    } else {
+        push32(inout out, (BRANCH_IF_NOT_ZERO & reg_mask) | skip | rhs);
+    }
+    push32(inout out, TRAP_INSTRUCTION);
+}
+
+fn narrow_division_operands(
+    inout out: ChunkSeq[u8],
+    in r: Record,
+    lhs: u32,
+    rhs: u32
+) -> (u32, u32) {
+    let op = if r.op == SIGNED_DIV || r.op == SIGNED_REM {
+        SBFM
+    } else {
+        UBFM
+    };
+    let top = wrapping_sub(r.extra, 1);
+    bitfield(inout out, op & ~BITFIELD64, SCRATCH, lhs, 0, top);
+    bitfield(inout out, op & ~BITFIELD64, SECOND_SCRATCH, rhs, 0, top);
+    (SCRATCH, SECOND_SCRATCH)
+}
+
+fn overflow_condition(op: u64) -> u32 {
+    match op {
+        UNSIGNED_ADD_OVERFLOW => HS,
+        UNSIGNED_SUB_OVERFLOW => LO,
+        SIGNED_ADD_OVERFLOW | SIGNED_SUB_OVERFLOW => VS,
+        _ => NE,
+    }
+}
+
+fn emit_checked(inout out: ChunkSeq[u8], in r: Record, dest: u32, lhs: u32, rhs: u32, flags: bool) {
+    let reg_mask = scalar_opcode_mask(r.extra);
+    let opcode = match r.op {
+        UNSIGNED_ADD_OVERFLOW | SIGNED_ADD_OVERFLOW => if flags { ADDS_REG } else { ADD_REG },
+        UNSIGNED_SUB_OVERFLOW | SIGNED_SUB_OVERFLOW => if flags { SUBS_REG } else { SUB_REG },
+        _ => MUL_REG,
+    };
+    if opcode != MUL_REG || !flags {
+        rrr(inout out, opcode & reg_mask, dest, lhs, rhs);
+        return;
+    }
+    let signed = r.op == SIGNED_MUL_OVERFLOW;
+    if r.extra == DWORD_BITS {
+        let long = if signed { SMULL_REG } else { UMULL_REG };
+        let narrow = if signed { SUBS_SXTW } else { SUBS_UXTW };
+        rrr(inout out, long, SCRATCH, lhs, rhs);
+        // The full product must equal its narrowed and re-extended value.
+        rrr(inout out, narrow, ZERO, SCRATCH, SCRATCH);
+        if dest != ZERO {
+            rrr(inout out, ORR_REG & ~REG64, dest, ZERO, SCRATCH);
+        }
+    } else if signed {
+        rrr(inout out, SMULH_REG, SCRATCH, lhs, rhs);
+        let low = if dest == ZERO { SECOND_SCRATCH } else { dest };
+        rrr(inout out, MUL_REG, low, lhs, rhs);
+        // The high half must be the sign extension of the low half.
+        rrr(inout out, SUBS_ASR_SIGN, ZERO, SCRATCH, low);
+    } else {
+        rrr(inout out, UMULH_REG, SCRATCH, lhs, rhs);
+        rrr(inout out, SUBS_REG, ZERO, SCRATCH, ZERO);
+        if dest != ZERO {
+            rrr(inout out, MUL_REG, dest, lhs, rhs);
+        }
+    }
+}
+
+fn atomic_address(width: u64, address: u32) -> u32 {
+    let size = sh(trailing_zeros_u64(width / BYTE_BITS), MEMORY_SIZE_SHIFT);
+    sh(address, RN_SHIFT) | size
+}
+
+fn emit_atomic_cas(
+    inout out: ChunkSeq[u8],
+    op: u64,
+    old: u32,
+    address: u32,
+    expected: u32,
+    replacement: u32
+) {
+    let (width, compare) = match op {
+        ATOMIC_CAS_BYTE => (BYTE_BITS, SUBS_UXTB_W),
+        ATOMIC_CAS_WORD => (WORD_BITS, SUBS_UXTH_W),
+        ATOMIC_CAS_DWORD => (DWORD_BITS, SUBS_REG & ~REG64),
+        _ => (QWORD_BITS, SUBS_REG),
+    };
+    let base = atomic_address(width, address);
+    push32(inout out, LOAD_ACQUIRE_EXCLUSIVE | base | old);
+    rrr(inout out, compare, ZERO, old, expected);
+    let mismatch = sh(CAS_MISMATCH_DISTANCE, BRANCH_IMM19_SHIFT);
+    push32(inout out, BRANCH_IF_CONDITION | mismatch | NE);
+    push32(inout out, STORE_RELEASE_EXCLUSIVE | base | sh(SECOND_SCRATCH, RM_SHIFT) | replacement);
+    let retry = sh(wrapping_sub(0, CAS_RETRY_DISTANCE) & BRANCH_IMM19_MASK, BRANCH_IMM19_SHIFT);
+    push32(inout out, (BRANCH_IF_NOT_ZERO & ~REG64) | retry | SECOND_SCRATCH);
+    // A successful exclusive store already cleared the reservation.
+    push32(inout out, JUMP | CAS_SKIP_CLEAR_DISTANCE);
+    push32(inout out, CLEAR_EXCLUSIVE);
+}
+
+fn emit_atomic_minmax(inout out: ChunkSeq[u8], in r: Record, old: u32, operand: u32) {
+    let signed = r.op == ATOMIC_SIGNED_MIN || r.op == ATOMIC_SIGNED_MAX;
+    let cc = match r.op {
+        ATOMIC_UNSIGNED_MIN => LO,
+        ATOMIC_UNSIGNED_MAX => HI,
+        ATOMIC_SIGNED_MIN => LT,
+        _ => GT,
+    };
+    let reg_mask: u32 = if r.extra == QWORD_BITS { ~0 } else { ~REG64 };
+    let mut left = old;
+    if signed && r.extra < DWORD_BITS {
+        bitfield(inout out, SBFM & ~BITFIELD64, SECOND_SCRATCH, old, 0, wrapping_sub(r.extra, 1));
+        left = SECOND_SCRATCH;
+    }
+    let cmp = match r.extra {
+        BYTE_BITS => if signed { SUBS_SXTB_W } else { SUBS_UXTB_W },
+        WORD_BITS => if signed { SUBS_SXTH_W } else { SUBS_UXTH_W },
+        _ => SUBS_REG & reg_mask,
+    };
+    rrr(inout out, cmp, ZERO, left, operand);
+    rrr(inout out, (CSEL & reg_mask) | sh(cc, CONDITION_SHIFT), SCRATCH, old, operand);
+}
+
+fn emit_atomic(
+    inout out: ChunkSeq[u8],
+    in r: Record,
+    old: u32,
+    address: u32,
+    operand: u32,
+    third: u32
+) {
+    if is_atomic_cas(r.op) {
+        emit_atomic_cas(inout out, r.op, old, address, operand, third);
+        return;
+    }
+    let base = atomic_address(r.extra, address);
+    if r.op == ATOMIC_LOAD {
+        push32(inout out, LOAD_ACQUIRE | base | old);
+        return;
+    }
+    let start = out.len();
+    push32(inout out, LOAD_ACQUIRE_EXCLUSIVE | base | old);
+    let source = if r.op == ATOMIC_EXCHANGE {
+        operand
+    } else {
+        if r.op >= ATOMIC_UNSIGNED_MIN && r.op <= ATOMIC_SIGNED_MAX {
+            emit_atomic_minmax(inout out, in r, old, operand);
+        } else {
+            let op = match r.op {
+                ATOMIC_ADD => ADD_REG,
+                ATOMIC_SUB => SUB_REG,
+                ATOMIC_OR => ORR_REG,
+                ATOMIC_XOR => EOR_REG,
+                _ => AND_REG,
+            };
+            let reg_mask: u32 = if r.extra == QWORD_BITS { ~0 } else { ~REG64 };
+            rrr(inout out, op & reg_mask, SCRATCH, old, operand);
+            if r.op == ATOMIC_NAND {
+                rrr(inout out, ORN_REG & reg_mask, SCRATCH, ZERO, SCRATCH);
+            }
+        }
+        SCRATCH
+    };
+    push32(inout out, STORE_RELEASE_EXCLUSIVE | base | sh(SECOND_SCRATCH, RM_SHIFT) | source);
+    let distance = wrapping_u32(wrapping_sub(out.len(), start) / INSTRUCTION_BYTES);
+    let retry = sh(wrapping_sub(0, distance) & BRANCH_IMM19_MASK, BRANCH_IMM19_SHIFT);
+    push32(inout out, (BRANCH_IF_NOT_ZERO & ~REG64) | retry | SECOND_SCRATCH);
+}
+
+fn emit_float_predicate(inout out: ChunkSeq[u8], predicate: u64, dest: u32) {
+    // FCMP sets C for equal, greater and unordered, and V only for unordered.
+    let (first, second) = match predicate {
+        FLOAT_ORDERED => (VC, Option::None),
+        FLOAT_UNORDERED => (VS, Option::None),
+        FLOAT_EQUAL => (EQ, Option::None),
+        FLOAT_NOT_EQUAL => (NE, Option::None),
+        FLOAT_ORDERED_NOT_EQUAL => (LO, Option::Some(GT)),
+        FLOAT_UNORDERED_OR_EQUAL => (EQ, Option::Some(VS)),
+        FLOAT_LESS => (LO, Option::None),
+        FLOAT_LESS_EQUAL => (LS, Option::None),
+        FLOAT_GREATER => (GT, Option::None),
+        FLOAT_GREATER_EQUAL => (GE, Option::None),
+        FLOAT_UNORDERED_OR_LESS => (LT, Option::None),
+        FLOAT_UNORDERED_OR_LESS_EQUAL => (LE, Option::None),
+        FLOAT_UNORDERED_OR_GREATER => (HI, Option::None),
+        _ => (HS, Option::None),
+    };
+    push32(inout out, CSET | sh(first ^ 1, CONDITION_SHIFT) | dest);
+    match second {
+        Option::Some(cc) => {
+            rrr(inout out, CSINC | sh(cc ^ 1, CONDITION_SHIFT), dest, dest, ZERO);
+        },
+        Option::None => (),
+    }
+}
+
+fn emit_float_alu(inout out: ChunkSeq[u8], in r: Record, dest: u32, lhs: u32, rhs: u32) {
+    // Keep the bits in the ordinary allocator. The FP temporaries never live
+    // across an instruction boundary, spill, or call.
+    let compare = is_float_compare(r.op);
+    let double = if compare {
+        r.op == FLOAT_COMPARE64
+    } else {
+        r.extra == QWORD_BITS
+    };
+    let precision = if double { FP_DOUBLE } else { 0 };
+    let move_width = if double { FP_DOUBLE | REG64 } else { 0 };
+    let to_fp = FMOV_FROM_GP | move_width;
+    push32(inout out, to_fp | sh(lhs, RN_SHIFT) | FP_LEFT);
+    let unary = match r.op {
+        FLOAT_SQRT => FSQRT,
+        FLOAT_CEIL => FRINTP,
+        FLOAT_FLOOR => FRINTM,
+        FLOAT_TRUNC => FRINTZ,
+        FLOAT_NEAREST => FRINTN,
+        _ => 0,
+    };
+    if unary != 0 {
+        push32(inout out, unary | precision | sh(FP_LEFT, RN_SHIFT) | FP_LEFT);
+    } else {
+        push32(inout out, to_fp | sh(rhs, RN_SHIFT) | FP_RIGHT);
+        if compare {
+            rrr(inout out, FCMP | precision, 0, FP_LEFT, FP_RIGHT);
+            emit_float_predicate(inout out, r.extra, dest);
+            return;
+        }
+        let op = match r.op {
+            FLOAT_ADD => FADD,
+            FLOAT_SUB => FSUB,
+            FLOAT_MUL => FMUL,
+            FLOAT_MIN => FMIN,
+            FLOAT_MAX => FMAX,
+            _ => FDIV,
+        };
+        rrr(inout out, op | precision, FP_LEFT, FP_LEFT, FP_RIGHT);
+    }
+    push32(inout out, FMOV_TO_GP | move_width | sh(FP_LEFT, RN_SHIFT) | dest);
+}
+
+fn emit_fma(inout out: ChunkSeq[u8], op: u64, dest: u32, lhs: u32, rhs: u32, third: u32) {
+    let precision = if op == FLOAT_FMA64 { FP_DOUBLE } else { 0 };
+    let move_width = if op == FLOAT_FMA64 {
+        FP_DOUBLE | REG64
+    } else {
+        0
+    };
+    let to_fp = FMOV_FROM_GP | move_width;
+    push32(inout out, to_fp | sh(lhs, RN_SHIFT) | FP_LEFT);
+    push32(inout out, to_fp | sh(rhs, RN_SHIFT) | FP_RIGHT);
+    push32(inout out, to_fp | sh(third, RN_SHIFT) | FP_ADDEND);
+    rrr(
+        inout out,
+        FMADD | precision | sh(FP_ADDEND, ACCUMULATOR_SHIFT),
+        FP_LEFT,
+        FP_LEFT,
+        FP_RIGHT
+    );
+    push32(inout out, FMOV_TO_GP | move_width | sh(FP_LEFT, RN_SHIFT) | dest);
+}
+
+fn emit_float_instruction(
+    inout out: ChunkSeq[u8],
+    in r: Record,
+    dest: u32,
+    lhs: u32,
+    rhs: u32,
+    third: u32
+) {
+    if r.op == FLOAT_ARGUMENT {
+        let width = if r.extra == QWORD_BITS {
+            FP_DOUBLE | REG64
+        } else {
+            0
+        };
+        push32(inout out, FMOV_TO_GP | width | sh(wrapping_u32(r.left), RN_SHIFT) | dest);
+    } else if r.op == FLOAT_CONSTANT {
+        immediate(inout out, dest, low_bits(r.left, r.extra));
+    } else if r.op == BITS_TO_FLOAT || r.op == FLOAT_TO_BITS {
+        if dest != lhs || r.extra == DWORD_BITS {
+            rrr(inout out, ORR_REG & scalar_opcode_mask(r.extra), dest, ZERO, lhs);
+        }
+    } else if r.op == FLOAT_NEG {
+        let op = if r.extra == DWORD_BITS {
+            EOR_F32_SIGN
+        } else {
+            EOR_F64_SIGN
+        };
+        push32(inout out, op | sh(lhs, RN_SHIFT) | dest);
+    } else if r.op == FLOAT_ABS {
+        let op = if r.extra == DWORD_BITS {
+            UBFM & ~BITFIELD64
+        } else {
+            UBFM
+        };
+        let sign = wrapping_sub(r.extra, 1);
+        bitfield(inout out, op, dest, lhs, 0, wrapping_sub(sign, 1));
+    } else if r.op == FLOAT_COPY_SIGN {
+        let sign = wrapping_sub(r.extra, 1);
+        bitfield(inout out, UBFM, SCRATCH, rhs, sign, sign);
+        if dest != lhs {
+            rrr(inout out, ORR_REG, dest, ZERO, lhs);
+        }
+        bitfield(inout out, BFM, dest, SCRATCH, wrapping_sub(0, sign) & SHIFT_MASK, 0);
+    } else if r.op == FLOAT_LOAD {
+        memory(inout out, true, r.extra, lhs, dest, r.right);
+    } else if r.op == FLOAT_SELECT {
+        rrr(inout out, SUBS_REG, ZERO, lhs, ZERO);
+        rrr(inout out, CSEL | sh(NE, CONDITION_SHIFT), dest, rhs, third);
+    } else if is_float_conversion(r.op) {
+        emit_float_conversion(inout out, in r, dest, lhs);
+    } else if is_float_to_integer(r.op) {
+        emit_float_to_integer(inout out, in r, dest, lhs);
+    } else if is_float_fma(r.op) {
+        emit_fma(inout out, r.op, dest, lhs, rhs, third);
+    } else {
+        emit_float_alu(inout out, in r, dest, lhs, rhs);
+    }
+}
+
+fn emit_float_conversion(inout out: ChunkSeq[u8], in r: Record, dest: u32, lhs: u32) {
+    let precision = if r.extra == QWORD_BITS { FP_DOUBLE } else { 0 };
+    let result_width = if r.extra == QWORD_BITS { REG64 } else { 0 };
+    if r.op == FLOAT_PROMOTE || r.op == FLOAT_DEMOTE {
+        let source_width = if r.op == FLOAT_DEMOTE {
+            FP_DOUBLE | REG64
+        } else {
+            0
+        };
+        push32(inout out, FMOV_FROM_GP | source_width | sh(lhs, RN_SHIFT) | FP_LEFT);
+        let op = if r.op == FLOAT_PROMOTE {
+            FCVT_TO_DOUBLE
+        } else {
+            FCVT_TO_SINGLE
+        };
+        push32(inout out, op | sh(FP_LEFT, RN_SHIFT) | FP_LEFT);
+    } else {
+        let signed = r.op == SIGNED_TO_FLOAT;
+        let source_width = if r.right == QWORD_BITS { REG64 } else { 0 };
+        let mut source = lhs;
+        if r.right < DWORD_BITS {
+            let extend = if signed { SBFM } else { UBFM };
+            bitfield(inout out, extend & ~BITFIELD64, SCRATCH, lhs, 0, wrapping_sub(r.right, 1));
+            source = SCRATCH;
+        }
+        let op = if signed { SCVTF } else { UCVTF };
+        push32(inout out, op | source_width | precision | sh(source, RN_SHIFT) | FP_LEFT);
+    }
+    push32(inout out, FMOV_TO_GP | result_width | precision | sh(FP_LEFT, RN_SHIFT) | dest);
+}
+
+fn emit_float_to_integer(inout out: ChunkSeq[u8], in r: Record, dest: u32, lhs: u32) {
+    let signed = r.op == FLOAT_TO_SIGNED_SAT;
+    let precision = if r.right == QWORD_BITS { FP_DOUBLE } else { 0 };
+    let move_width = if r.right == QWORD_BITS { REG64 } else { 0 };
+    let result_width = if r.extra == QWORD_BITS { REG64 } else { 0 };
+    push32(inout out, FMOV_FROM_GP | move_width | precision | sh(lhs, RN_SHIFT) | FP_LEFT);
+    let op = if signed { FCVTZS } else { FCVTZU };
+    // The architectural conversion saturates to its register width and maps NaN to zero.
+    push32(inout out, op | result_width | precision | sh(FP_LEFT, RN_SHIFT) | dest);
+    if r.extra < DWORD_BITS {
+        let width = if signed {
+            wrapping_sub(r.extra, 1)
+        } else {
+            r.extra
+        };
+        let max = low_bits(~0, width);
+        let upper = if signed { LE } else { LS };
+        immediate(inout out, SCRATCH, max);
+        rrr(inout out, SUBS_REG & ~REG64, ZERO, dest, SCRATCH);
+        rrr(inout out, (CSEL & ~REG64) | sh(upper, CONDITION_SHIFT), dest, dest, SCRATCH);
+        if signed {
+            immediate(inout out, SCRATCH, ~max);
+            rrr(inout out, SUBS_REG & ~REG64, ZERO, dest, SCRATCH);
+            rrr(inout out, (CSEL & ~REG64) | sh(GE, CONDITION_SHIFT), dest, dest, SCRATCH);
+            normalize(inout out, dest, r.extra);
+        }
+    }
+}
+
+fn emit_bit_operation(inout out: ChunkSeq[u8], in r: Record, dest: u32, source: u32) {
+    let narrow = r.extra < DWORD_BITS;
+    let wide = r.extra == QWORD_BITS;
+    let reg_mask: u32 = if wide { ~0 } else { ~REG64 };
+    let mut source = source;
+    if r.op == TRAILING_ZEROS {
+        if narrow {
+            // Put a sentinel above the input so an all-zero value counts to its width.
+            let rotate = sh(wrapping_u32(wrapping_sub(DWORD_BITS, r.extra)), IMMR_SHIFT);
+            push32(inout out, (ORR_IMM & reg_mask) | rotate | sh(source, RN_SHIFT) | SCRATCH);
+            source = SCRATCH;
+        }
+        push32(inout out, (RBIT_REG & reg_mask) | sh(source, RN_SHIFT) | SCRATCH);
+        push32(inout out, (CLZ_REG & reg_mask) | sh(SCRATCH, RN_SHIFT) | dest);
+    } else if r.op == REVERSE_BITS {
+        push32(inout out, (RBIT_REG & reg_mask) | sh(source, RN_SHIFT) | dest);
+        if narrow {
+            let shift = wrapping_sub(DWORD_BITS, r.extra);
+            bitfield(inout out, UBFM & ~BITFIELD64, dest, dest, shift, DWORD_BITS - 1);
+        }
+    } else {
+        if narrow {
+            let extend = if r.op == LEADING_SIGN_BITS {
+                SBFM
+            } else {
+                UBFM
+            };
+            bitfield(inout out, extend & ~BITFIELD64, SCRATCH, source, 0, wrapping_sub(r.extra, 1));
+            source = SCRATCH;
+        }
+        if r.op == POPULATION_COUNT {
+            let move_width = if wide { FP_DOUBLE | REG64 } else { 0 };
+            push32(inout out, FMOV_FROM_GP | move_width | sh(source, RN_SHIFT) | FP_LEFT);
+            push32(inout out, CNT_8B | sh(FP_LEFT, RN_SHIFT) | FP_LEFT);
+            push32(inout out, ADDV_8B | sh(FP_LEFT, RN_SHIFT) | FP_LEFT);
+            push32(inout out, UMOV_LOW_BYTE | sh(FP_LEFT, RN_SHIFT) | dest);
+        } else {
+            let op = if r.op == LEADING_SIGN_BITS {
+                CLS_REG
+            } else {
+                CLZ_REG
+            };
+            push32(inout out, (op & reg_mask) | sh(source, RN_SHIFT) | dest);
+            if narrow {
+                let excess = sh(wrapping_u32(wrapping_sub(DWORD_BITS, r.extra)), IMM12_SHIFT);
+                push32(inout out, (SUB_IMM & reg_mask) | excess | sh(dest, RN_SHIFT) | dest);
+            }
+        }
+    }
+}
+
+fn emit_rotate(inout out: ChunkSeq[u8], in r: Record, dest: u32, lhs: u32, rhs: u32) {
+    let narrow = r.extra < DWORD_BITS;
+    let immediate = r.op == ROTATE_RIGHT;
+    let count = r.right & wrapping_sub(r.extra, 1);
+    let reg_mask: u32 = if r.extra == QWORD_BITS { ~0 } else { ~REG64 };
+    let mut source = lhs;
+    if narrow {
+        let field = UBFM & ~BITFIELD64;
+        if immediate && count == 0 {
+            bitfield(inout out, field, dest, source, 0, wrapping_sub(r.extra, 1));
+            return;
+        }
+        // Repeating the narrow value makes each window of its width a rotation.
+        bitfield(inout out, field, SCRATCH, lhs, 0, wrapping_sub(r.extra, 1));
+        let shifted_half = sh(wrapping_u32(r.extra), LOGICAL_AMOUNT_SHIFT);
+        rrr(inout out, (ORR_REG & reg_mask) | shifted_half, SCRATCH, SCRATCH, SCRATCH);
+        if immediate {
+            let last = wrapping_sub(wrapping_add(count, r.extra), 1);
+            bitfield(inout out, field, dest, SCRATCH, count, last);
+            return;
+        }
+        if r.extra == BYTE_BITS {
+            let shifted_word = sh(wrapping_u32(WORD_BITS), LOGICAL_AMOUNT_SHIFT);
+            rrr(inout out, (ORR_REG & reg_mask) | shifted_word, SCRATCH, SCRATCH, SCRATCH);
+        }
+        source = SCRATCH;
+    } else if immediate {
+        let op = if r.extra == QWORD_BITS {
+            EXTR
+        } else {
+            EXTR & ~BITFIELD64
+        };
+        rrr(inout out, op | sh(wrapping_u32(count), EXTR_AMOUNT_SHIFT), dest, lhs, lhs);
+        return;
+    }
+    let count_register = if r.op == ROTATE_LEFT_REGISTER {
+        rrr(inout out, SUB_REG & reg_mask, SECOND_SCRATCH, ZERO, rhs);
+        SECOND_SCRATCH
+    } else {
+        rhs
+    };
+    rrr(inout out, ROR_REG & reg_mask, dest, source, count_register);
+    if narrow {
+        normalize(inout out, dest, r.extra);
+    }
+}
+
+fn emit_abs(inout out: ChunkSeq[u8], dest: u32, source: u32, width: u64) {
+    let wide = width == QWORD_BITS;
+    let reg_mask: u32 = if wide { ~0 } else { ~REG64 };
+    let word_bits = if wide { QWORD_BITS } else { DWORD_BITS };
+    // TST tests the declared sign bit even if a caller has dirtied the upper bits.
+    let rotate = sh(wrapping_u32(wrapping_add(wrapping_sub(word_bits, width), 1)), IMMR_SHIFT);
+    let size = if wide { BITMASK_N } else { 0 };
+    push32(inout out, (TST_IMM & reg_mask) | size | rotate | sh(source, RN_SHIFT));
+    rrr(inout out, (CSNEG & reg_mask) | sh(EQ, CONDITION_SHIFT), dest, source, source);
+    if width < DWORD_BITS {
+        normalize(inout out, dest, width);
+    }
+}
+
+fn emit_narrow_shift(
+    inout out: ChunkSeq[u8],
+    in r: Record,
+    op: u32,
+    dest: u32,
+    lhs: u32,
+    rhs: u32
+) {
+    let count_bits = if r.extra == BYTE_BITS {
+        BYTE_SHIFT_BITS
+    } else {
+        WORD_SHIFT_BITS
+    };
+    bitfield(inout out, UBFM & ~BITFIELD64, SCRATCH, rhs, 0, wrapping_sub(count_bits, 1));
+    let mut source = lhs;
+    if r.op != SHL_REGISTER {
+        let extend = if r.op == SAR_REGISTER { SBFM } else { UBFM };
+        bitfield(inout out, extend & ~BITFIELD64, SECOND_SCRATCH, lhs, 0, wrapping_sub(r.extra, 1));
+        source = SECOND_SCRATCH;
+    }
+    rrr(inout out, op & ~REG64, dest, source, SCRATCH);
+    if r.op != SHR_REGISTER {
+        normalize(inout out, dest, r.extra);
+    }
+}
+
+fn value_fits(in words: Slice[u64], arguments: u64, value: u64, width: u64) -> bool {
+    if value < arguments {
+        // A raw argument can have arbitrary high bits.
+        return false;
+    }
+    let definition = read_record(in words, wrapping_sub(value, arguments));
+    match definition.op {
+        CONSTANT => low_bits(definition.left, width) == definition.left,
+        LOAD | STACK_LOAD | ATOMIC_LOAD | TRUNCATE | AND | OR | XOR | AND_NOT => {
+            definition.extra <= width
+        },
+        OVERFLOW_FLAG => true,
+        _ => comparison_width(definition.op) != 0 || is_float_compare(definition.op),
+    }
+}
+
+fn alu_needs_mask(in words: Slice[u64], arguments: u64, in r: Record) -> bool {
+    match r.op {
+        AND => !value_fits(in words, arguments, r.left, r.extra)
+            && !value_fits(in words, arguments, r.right, r.extra),
+        AND_NOT => !value_fits(in words, arguments, r.left, r.extra),
+        OR | XOR => !value_fits(in words, arguments, r.left, r.extra)
+            || !value_fits(in words, arguments, r.right, r.extra),
+        _ => true,
+    }
+}
+
+fn emit_instruction(
+    inout out: ChunkSeq[u8],
+    in words: Slice[u64],
+    arguments: u64,
+    in r: Record,
+    dest: u32,
+    lhs: u32,
+    rhs: u32,
+    third: u32
+) {
+    if r.op == CONSTANT {
+        immediate(inout out, dest, r.left);
+    } else if r.op == VECTOR_EXTRACT {
+        vector_extract(inout out, dest, lhs, r.right, r.extra);
+    } else if r.op == VECTOR_ANY_TRUE || r.op == VECTOR_ALL_TRUE {
+        vector_truth(inout out, dest, lhs, r.op == VECTOR_ALL_TRUE, r.extra);
+    } else if r.op == VECTOR_HIGH_BITS {
+        vector_high_bits(inout out, dest, lhs, r.extra);
+    } else if float_opcode(r.op) {
+        emit_float_instruction(inout out, in r, dest, lhs, rhs, third);
+    } else if r.op >= LEADING_ZEROS && r.op <= LEADING_SIGN_BITS {
+        emit_bit_operation(inout out, in r, dest, lhs);
+    } else if r.op >= ROTATE_RIGHT && r.op <= ROTATE_LEFT_REGISTER {
+        emit_rotate(inout out, in r, dest, lhs, rhs);
+    } else if r.op == FUNNEL_RIGHT {
+        let op = EXTR | sh(wrapping_u32(r.extra), EXTR_AMOUNT_SHIFT);
+        rrr(inout out, op, dest, rhs, lhs);
+    } else if r.op == ABS {
+        emit_abs(inout out, dest, lhs, r.extra);
+    } else if r.op == BYTE_SWAP {
+        let op = match r.extra {
+            WORD_BITS => REV16_W,
+            DWORD_BITS => REV_W,
+            _ => REV_X,
+        };
+        push32(inout out, op | sh(lhs, RN_SHIFT) | dest);
+        if r.extra == WORD_BITS {
+            // REV16 also swaps the high halfword. Keep the result zero-extended.
+            normalize(inout out, dest, WORD_BITS);
+        }
+    } else if consumes_carry(r.op) {
+        let op = if r.op == ADD_CARRY { ADC_REG } else { SBC_REG };
+        rrr(inout out, op, dest, lhs, rhs);
+    } else if is_integer_division(r.op) {
+        let divide = if r.op == SIGNED_DIV || r.op == SIGNED_REM {
+            SDIV_REG
+        } else {
+            UDIV_REG
+        };
+        let remainder = r.op == SIGNED_REM || r.op == UNSIGNED_REM;
+        let narrow = r.extra < DWORD_BITS;
+        let quotient = if remainder && !narrow { SCRATCH } else { dest };
+        let reg_mask: u32 = if r.extra == QWORD_BITS { ~0 } else { ~REG64 };
+        rrr(inout out, divide & reg_mask, quotient, lhs, rhs);
+        if remainder {
+            let multiply_subtract = (MSUB_REG & reg_mask) | sh(lhs, ACCUMULATOR_SHIFT);
+            rrr(inout out, multiply_subtract, dest, quotient, rhs);
+        }
+        if narrow {
+            normalize(inout out, dest, r.extra);
+        }
+    } else if r.op == LOAD {
+        memory(inout out, true, r.extra, lhs, dest, r.right);
+    } else if r.op == TRUNCATE || r.op == ZERO_EXTEND || r.op == SIGN_EXTEND {
+        if r.op == SIGN_EXTEND {
+            let op = if r.extra == DWORD_BITS {
+                SBFM & ~BITFIELD64
+            } else {
+                SBFM
+            };
+            bitfield(inout out, op, dest, lhs, 0, wrapping_sub(r.right, 1));
+            if r.extra < DWORD_BITS {
+                normalize(inout out, dest, r.extra);
+            }
+        } else {
+            if r.op == TRUNCATE && !value_fits(in words, arguments, r.left, r.extra) {
+                bitfield(inout out, UBFM, dest, lhs, 0, wrapping_sub(r.extra, 1));
+            } else if dest != lhs {
+                rrr(inout out, ORR_REG, dest, ZERO, lhs);
+            }
+        }
+    } else if r.op == NEG || r.op == NOT {
+        let op = if r.op == NEG { SUB_REG } else { ORN_REG };
+        let reg_mask = scalar_opcode_mask(r.extra);
+        rrr(inout out, op & reg_mask, dest, ZERO, lhs);
+        if r.extra < DWORD_BITS {
+            normalize(inout out, dest, r.extra);
+        }
+    } else if r.op == SHL || r.op == SHR || r.op == SAR {
+        let width_mask = wrapping_sub(r.extra, 1);
+        let count = r.right & width_mask;
+        if count == 0 {
+            if dest != lhs {
+                rrr(inout out, ORR_REG, dest, ZERO, lhs);
+            }
+            return;
+        }
+        let mut op = if r.op == SAR { SBFM } else { UBFM };
+        let register_mask = if r.extra > DWORD_BITS {
+            SHIFT_MASK
+        } else {
+            DWORD_BITS - 1
+        };
+        let (rotate, last) = if r.op == SHL {
+            (wrapping_sub(0, count) & register_mask, wrapping_sub(width_mask, count))
+        } else {
+            (count, width_mask)
+        };
+        if r.extra <= DWORD_BITS {
+            op = op & ~BITFIELD64;
+        }
+        bitfield(inout out, op, dest, lhs, rotate, last);
+        if r.op == SAR && r.extra < DWORD_BITS {
+            normalize(inout out, dest, r.extra);
+        }
+    } else if r.op == SELECT {
+        rrr(inout out, SUBS_REG, ZERO, lhs, ZERO);
+        rrr(inout out, CSEL | sh(NE, CONDITION_SHIFT), dest, rhs, third);
+    } else if comparison_width(r.op) != 0 {
+        compare(inout out, in r, lhs, rhs);
+        push32(inout out, CSET | sh(condition(r.extra) ^ 1, CONDITION_SHIFT) | dest);
+    } else {
+        let reg_mask = scalar_opcode_mask(r.extra);
+        let mut rhs = rhs;
+        if r.op >= ADD_IMMEDIATE && r.op <= XOR_IMMEDIATE {
+            let signed = widen_i64(wrapping_i32(r.right));
+            if r.op == ADD_IMMEDIATE || r.op == SUB_IMMEDIATE {
+                match arithmetic_immediate(magnitude(signed)) {
+                    Option::Some(encoded) => {
+                        let subtract = (r.op == SUB_IMMEDIATE) != (signed < 0);
+                        let op = if subtract { SUB_IMM } else { ADD_IMM };
+                        push32(inout out, (op & reg_mask) | encoded | sh(lhs, RN_SHIFT) | dest);
+                        if r.extra < DWORD_BITS {
+                            normalize(inout out, dest, r.extra);
+                        }
+                        return;
+                    },
+                    Option::None => (),
+                }
+            } else if r.op != MUL_IMMEDIATE {
+                match bitmask_immediate(low_bits(wrapping_u64(signed), r.extra)) {
+                    Option::Some(encoded) => {
+                        let op = match r.op {
+                            AND_IMMEDIATE => AND_IMM,
+                            OR_IMMEDIATE => ORR_IMM,
+                            _ => EOR_IMM,
+                        };
+                        push32(inout out, op | encoded | sh(lhs, RN_SHIFT) | dest);
+                        return;
+                    },
+                    Option::None => (),
+                }
+            }
+            immediate(inout out, SCRATCH, wrapping_u64(signed));
+            rhs = SCRATCH;
+        }
+        let op = match r.op {
+            SIGNED_MUL_HIGH => SMULH_REG,
+            UNSIGNED_MUL_HIGH => UMULH_REG,
+            ADD | ADD_IMMEDIATE => ADD_REG,
+            SUB | SUB_IMMEDIATE => SUB_REG,
+            MUL | MUL_IMMEDIATE => MUL_REG,
+            AND | AND_IMMEDIATE => AND_REG,
+            AND_NOT => BIC_REG,
+            OR | OR_IMMEDIATE => ORR_REG,
+            OR_NOT => ORN_REG,
+            XOR | XOR_IMMEDIATE => EOR_REG,
+            XOR_NOT => EON_REG,
+            SHL_REGISTER => LSL_REG,
+            SHR_REGISTER => LSR_REG,
+            _ => ASR_REG,
+        };
+        if r.op >= SHL_REGISTER && r.op <= SAR_REGISTER && r.extra < DWORD_BITS {
+            emit_narrow_shift(inout out, in r, op, dest, lhs, rhs);
+            return;
+        }
+        rrr(inout out, op & reg_mask, dest, lhs, rhs);
+        if r.extra < DWORD_BITS && alu_needs_mask(in words, arguments, in r) {
+            normalize(inout out, dest, r.extra);
+        }
+    }
+}
+
+fn last_read(in ends: ChunkSeq[u64], value: u64) -> u64 {
+    ends.try_get(value).unwrap_or(NEVER_READ)
+}
+
+fn location(in locations: ChunkSeq[u32], id: u64) -> u32 {
+    locations.try_get(id).unwrap_or(UNASSIGNED)
+}
+
+fn expire(used: u32, in ends: ChunkSeq[u64], value: u64, current: u64, assigned: u32) -> u32 {
+    if assigned < UNASSIGNED && last_read(in ends, value) == current {
+        used & ~sh(1, assigned)
+    } else {
+        used
+    }
+}
+
+fn spill_offset(frame_bytes: u64, assigned: u32) -> u64 {
+    let slot = widen_u64(wrapping_sub(assigned, SPILL_BASE));
+    wrapping_add(frame_bytes, wrapping_mul(slot, HOME_WORD_BYTES))
+}
+
+fn allocate_spill(
+    inout spills: ChunkSeq[u64],
+    frame_bytes: u64,
+    value: u64,
+    last: u64
+) -> Option[u32] {
+    for slot in 0..spills.len() {
+        if spills.try_get(slot).unwrap_or(NO_VALUE) <= value {
+            let _ = spills.try_set(slot, last);
+            return Option::Some(wrapping_add(SPILL_BASE, wrapping_u32(slot)));
+        }
+    }
+    let assigned = wrapping_add(SPILL_BASE, wrapping_u32(spills.len()));
+    if wrapping_add(spill_offset(frame_bytes, assigned), HOME_WORD_BYTES) > MAX_FRAME_BYTES {
+        return Option::None;
+    }
+    spills.push(last);
+    Option::Some(assigned)
+}
+
+fn allocate_vector_spill(
+    inout spills: ChunkSeq[u64],
+    frame_bytes: u64,
+    value: u64,
+    last: u64
+) -> Option[u32] {
+    for slot in 0..spills.len() {
+        let high = wrapping_add(slot, 1);
+        if spills.try_get(slot).unwrap_or(NO_VALUE) <= value
+            && spills.try_get(high).unwrap_or(NO_VALUE) <= value
+        {
+            let _ = spills.try_set(slot, last);
+            let _ = spills.try_set(high, last);
+            return Option::Some(wrapping_add(SPILL_BASE, wrapping_u32(slot)));
+        }
+    }
+    let assigned = wrapping_add(SPILL_BASE, wrapping_u32(spills.len()));
+    let end = wrapping_add(
+        spill_offset(frame_bytes, assigned),
+        wrapping_mul(VECTOR_SPILL_CELLS, HOME_WORD_BYTES)
+    );
+    if end > MAX_FRAME_BYTES {
+        return Option::None;
+    }
+    spills.push(last);
+    spills.push(last);
+    Option::Some(assigned)
+}
+
+fn materialize_vector(
+    inout out: ChunkSeq[u8],
+    assigned: u32,
+    scratch: u32,
+    frame_bytes: u64
+) -> u32 {
+    if assigned >= SPILL_BASE {
+        memory(inout out, true, VECTOR_BITS, SP, scratch, spill_offset(frame_bytes, assigned));
+        scratch
+    } else {
+        assigned
+    }
+}
+
+fn move_halfword(bits: u64, opcode: u32) -> Option[u32] {
+    if bits == 0 {
+        return Option::Some(opcode);
+    }
+    let index = widen_u64(trailing_zeros_u64(bits)) / HALFWORD_BITS;
+    let part = wrapping_shr_u64(bits, wrapping_u32(wrapping_mul(index, HALFWORD_BITS)));
+    if part <= HALFWORD_MASK {
+        Option::Some(
+            opcode | sh(wrapping_u32(index), HALFWORD_SHIFT) | sh(wrapping_u32(part), IMM16_SHIFT)
+        )
+    } else {
+        Option::None
+    }
+}
+
+fn rematerialized_constant(in r: Record) -> Option[u32] {
+    let bits = match r.op {
+        CONSTANT => r.left,
+        FLOAT_CONSTANT => low_bits(r.left, r.extra),
+        _ => return Option::None,
+    };
+    if bits == 0 {
+        return Option::Some(REMATERIALIZED_ZERO);
+    }
+    match move_halfword(bits, MOVZ) {
+        Option::Some(instruction) => Option::Some(instruction),
+        Option::None => move_halfword(~bits, MOVN),
+    }
+}
+
+fn materialize(inout output: ChunkSeq[u8], assigned: u32, scratch: u32, frame_bytes: u64) -> u32 {
+    if assigned >= SPILL_BASE {
+        if assigned == REMATERIALIZED_ZERO {
+            // Register 31 encodes SP in address and some arithmetic operands.
+            rrr(inout output, ORR_REG, scratch, ZERO, ZERO);
+        } else if assigned >= MOVN {
+            // MOVZ and MOVN encodings lie above every frame spill location.
+            push32(inout output, assigned | scratch);
+        } else {
+            memory(
+                inout output,
+                true,
+                QWORD_BITS,
+                SP,
+                scratch,
+                spill_offset(frame_bytes, assigned)
+            );
+        }
+        scratch
+    } else {
+        assigned
+    }
+}
+
+fn store_source(inout output: ChunkSeq[u8], assigned: u32, scratch: u32, frame_bytes: u64) -> u32 {
+    if assigned == REMATERIALIZED_ZERO {
+        ZERO
+    } else {
+        materialize(inout output, assigned, scratch, frame_bytes)
+    }
+}
+
+fn no_result(op: u64) -> bool {
+    op == BRANCH_ZERO
+        || op == EARLY_RETURN
+        || op == STACK_SLOT
+        || store_width(op) != 0
+        || (op >= BLOCK_LABEL && op <= BRANCH_BLOCK)
+        || op == BRANCH_TABLE
+        || op == BRANCH_TABLE_TARGET
+        || op == CALL_VOID
+        || call_argument(op)
+        || op == RETURN_PAIR
+        || op == FLOAT_RETURN
+        || op == TRAP
+        || is_conditional_trap(op)
+        || op == SPECTRE_BARRIER
+        || op == FENCE
+        || op == ATOMIC_STORE
+        || op == VECTOR_STORE
+        || op == TAIL_CALL
+}
+
+fn stack_adjust(opcode: u32, adjustment: u32) -> u32 {
+    opcode | adjustment | sh(SP, RN_SHIFT) | SP
+}
+
+fn emit_return(
+    inout output: ChunkSeq[u8],
+    low: u32,
+    high: u32,
+    float_return: bool,
+    adjustment: u32,
+    spill_mode: bool,
+    link_slot: u64,
+    in callee: SavedRegisters,
+    inout restores: ChunkSeq[u64]
+) {
+    if float_return {
+        // The low lane holds the result for both scalar float widths.
+        push32(inout output, FMOV_FROM_GP | FP_DOUBLE | REG64 | sh(low, RN_SHIFT) | FP_RESULT);
+    } else if high == FIRST_RESULT && low != FIRST_RESULT {
+        // Moving the first result would overwrite the second result.
+        let source = if low == SECOND_RESULT {
+            rrr(inout output, ORR_REG, SCRATCH, ZERO, low);
+            SCRATCH
+        } else {
+            low
+        };
+        rrr(inout output, ORR_REG, SECOND_RESULT, ZERO, high);
+        rrr(inout output, ORR_REG, FIRST_RESULT, ZERO, source);
+    } else {
+        if low != UNASSIGNED && low != FIRST_RESULT {
+            rrr(inout output, ORR_REG, FIRST_RESULT, ZERO, low);
+        }
+        if high != UNASSIGNED && high != SECOND_RESULT {
+            rrr(inout output, ORR_REG, SECOND_RESULT, ZERO, high);
+        }
+    }
+    emit_epilogue(inout output, adjustment, spill_mode, link_slot, in callee, inout restores);
+    push32(inout output, RETURN);
+}
+
+fn emit_epilogue(
+    inout output: ChunkSeq[u8],
+    adjustment: u32,
+    spill_mode: bool,
+    link_slot: u64,
+    in callee: SavedRegisters,
+    inout restores: ChunkSeq[u64]
+) {
+    if link_slot != NO_VALUE {
+        memory(inout output, true, QWORD_BITS, SP, LINK_REGISTER, link_slot);
+    }
+    frame_registers(inout output, in callee, true);
+    if spill_mode {
+        restores.push(output.len());
+    }
+    if spill_mode || adjustment != 0 {
+        push32(inout output, stack_adjust(ADD_IMM, adjustment));
+    }
+}
+
+fn call_frame_bytes() -> u64 {
+    align_up(wrapping_mul(wrapping_add(CALL_SAVE_REGISTERS, 1), HOME_WORD_BYTES), STACK_ALIGNMENT)
+}
+
+fn call_save_slot(frame_bytes: u64, register: u64) -> u64 {
+    wrapping_add(
+        wrapping_sub(frame_bytes, call_frame_bytes()),
+        wrapping_mul(wrapping_add(register, 1), HOME_WORD_BYTES)
+    )
+}
+
+fn frame_registers(inout out: ChunkSeq[u8], in saved: SavedRegisters, load: bool) {
+    let mut remaining = saved.mask;
+    loop {
+        if remaining == 0 {
+            break;
+        }
+        let first = trailing_zeros_u64(widen_u64(remaining));
+        remaining = remaining & ~sh(1, first);
+        let next = wrapping_add(first, 1);
+        let index = widen_u64(wrapping_sub(first, saved.first));
+        let offset = wrapping_add(saved.offset, wrapping_mul(index, HOME_WORD_BYTES));
+        let scaled = offset / HOME_WORD_BYTES;
+        if (remaining & sh(1, next)) != 0 && scaled <= PAIR_IMM7_MAX {
+            let opcode = if load {
+                MEMORY_PAIR | MEMORY_LOAD
+            } else {
+                MEMORY_PAIR
+            };
+            push32(
+                inout out,
+                opcode
+                    | sh(wrapping_u32(scaled), PAIR_IMM7_SHIFT)
+                    | sh(next, PAIR_SECOND_REGISTER_SHIFT)
+                    | sh(SP, RN_SHIFT)
+                    | first
+            );
+            remaining = remaining & ~sh(1, next);
+        } else {
+            memory(inout out, load, QWORD_BITS, SP, first, offset);
+        }
+    }
+}
+
+fn emit_tail_arguments(
+    inout out: ChunkSeq[u8],
+    in words: Slice[u64],
+    in locations: ChunkSeq[u32],
+    in record: Record,
+    index: u64,
+    frame_bytes: u64
+) -> bool {
+    let start = wrapping_sub(index, record.right);
+    let gp = wrapping_sub(record.right, record.extra);
+    let mut sources = ChunkSeq::with_capacity[u32](gp);
+    for target in 0..gp {
+        let arg = read_record(in words, wrapping_add(start, target)).left;
+        let source = location(in locations, arg);
+        if arg != NO_VALUE && source == UNASSIGNED {
+            return false;
+        }
+        sources.push(
+            if source == wrapping_u32(target) {
+                UNASSIGNED
+            } else {
+                source
+            }
+        );
+    }
+    // Float arguments live in GP cells until they reach the call boundary.
+    for arg in 0..record.extra {
+        let slot = wrapping_add(wrapping_add(start, gp), arg);
+        let source = location(in locations, read_record(in words, slot).left);
+        if source == UNASSIGNED {
+            return false;
+        }
+        let reg = materialize(inout out, source, SCRATCH, frame_bytes);
+        push32(inout out, FMOV_FROM_GP | FP_DOUBLE | REG64 | sh(reg, RN_SHIFT) | wrapping_u32(arg));
+    }
+    loop {
+        let mut pending = NO_VALUE;
+        let mut ready = NO_VALUE;
+        for target in AARCH64_TAIL_RESERVED_GP..gp {
+            if sources.try_get(target).unwrap_or(UNASSIGNED) == UNASSIGNED {
+                continue;
+            }
+            pending = target;
+            let mut needed = false;
+            for other in AARCH64_TAIL_RESERVED_GP..gp {
+                needed = needed
+                    || sources.try_get(other).unwrap_or(UNASSIGNED) == wrapping_u32(target);
+            }
+            if !needed {
+                ready = target;
+                break;
+            }
+        }
+        if pending == NO_VALUE {
+            return true;
+        }
+        if ready != NO_VALUE {
+            let target = wrapping_u32(ready);
+            let source = sources.try_get(ready).unwrap_or(UNASSIGNED);
+            let reg = materialize(inout out, source, target, frame_bytes);
+            if reg != target {
+                rrr(inout out, ORR_REG, target, ZERO, reg);
+            }
+            let _ = sources.try_set(ready, UNASSIGNED);
+        } else {
+            // Preserve one cyclic source in the register reserved for veneers.
+            let source = wrapping_u32(pending);
+            rrr(inout out, ORR_REG, SECOND_SCRATCH, ZERO, source);
+            for target in AARCH64_TAIL_RESERVED_GP..gp {
+                if sources.try_get(target).unwrap_or(UNASSIGNED) == source {
+                    let _ = sources.try_set(target, SECOND_SCRATCH);
+                }
+            }
+        }
+    }
+}
+
+fn emit_call(
+    inout out: ChunkSeq[u8],
+    in words: Slice[u64],
+    in locations: ChunkSeq[u32],
+    in record: Record,
+    index: u64,
+    used: u32,
+    frame_bytes: u64,
+    keep_result: bool,
+    keep_high: bool,
+    inout relocations: ChunkSeq[u64]
+) -> Option[u32] {
+    let start = wrapping_sub(index, record.right);
+    let fp_arguments = record.extra & CALL_FLOAT_MASK;
+    let stack_arguments = call_stack_count(record.extra);
+    let gp_start = wrapping_add(start, stack_arguments);
+    let gp_arguments = wrapping_sub(wrapping_sub(record.right, fp_arguments), stack_arguments);
+    let mut save = used;
+    let mut overwritten: u32 = 0;
+    let mut reload: u32 = 0;
+    for arg in 0..gp_arguments {
+        let value = read_record(in words, wrapping_add(gp_start, arg)).left;
+        if value == NO_VALUE {
+            continue;
+        }
+        let source = location(in locations, value);
+        if source == UNASSIGNED {
+            return Option::None;
+        }
+        let dest = wrapping_u32(arg);
+        if source != dest {
+            let dest_bit = sh(1, dest);
+            // An argument left in its own register still holds the initial
+            // value when a later argument reads from it.
+            if source < dest && (overwritten & sh(1, source)) != 0 {
+                save = save | sh(1, source);
+                reload = reload | dest_bit;
+            }
+            overwritten = overwritten | dest_bit;
+        }
+    }
+    let save_base = call_save_slot(frame_bytes, 0);
+    frame_registers(
+        inout out,
+        in SavedRegisters { mask: save, first: 0, offset: save_base },
+        false
+    );
+    // Copy stack and floating inputs before the GP shuffle changes their sources.
+    for arg in 0..stack_arguments {
+        let slot = read_record(in words, wrapping_add(start, arg));
+        let source = location(in locations, slot.left);
+        if source == UNASSIGNED {
+            return Option::None;
+        }
+        let reg = store_source(inout out, source, SECOND_SCRATCH, frame_bytes);
+        memory(inout out, false, slot.extra, SP, reg, slot.right);
+    }
+    let float_start = wrapping_add(gp_start, gp_arguments);
+    for arg in 0..fp_arguments {
+        let value = read_record(in words, wrapping_add(float_start, arg)).left;
+        let source = location(in locations, value);
+        if source == UNASSIGNED {
+            return Option::None;
+        }
+        let reg = materialize(inout out, source, SCRATCH, frame_bytes);
+        push32(inout out, FMOV_FROM_GP | FP_DOUBLE | REG64 | sh(reg, RN_SHIFT) | wrapping_u32(arg));
+    }
+    let target = if indirect_call(record.extra) {
+        let source = location(in locations, record.left);
+        if source == UNASSIGNED {
+            return Option::None;
+        }
+        if source >= SPILL_BASE {
+            materialize(inout out, source, SECOND_SCRATCH, frame_bytes)
+        } else if (overwritten & sh(1, source)) != 0 {
+            rrr(inout out, ORR_REG, SECOND_SCRATCH, ZERO, source);
+            SECOND_SCRATCH
+        } else {
+            source
+        }
+    } else {
+        UNASSIGNED
+    };
+    for arg in 0..gp_arguments {
+        let value = read_record(in words, wrapping_add(gp_start, arg)).left;
+        if value == NO_VALUE {
+            continue;
+        }
+        let source = location(in locations, value);
+        let dest = wrapping_u32(arg);
+        if source >= SPILL_BASE {
+            let _ = materialize(inout out, source, dest, frame_bytes);
+        } else if (reload & sh(1, dest)) != 0 {
+            memory(
+                inout out,
+                true,
+                QWORD_BITS,
+                SP,
+                dest,
+                call_save_slot(frame_bytes, widen_u64(source))
+            );
+        } else if source != dest {
+            rrr(inout out, ORR_REG, dest, ZERO, source);
+        }
+    }
+    if target != UNASSIGNED {
+        push32(inout out, BRANCH_AND_LINK_REGISTER | sh(target, RN_SHIFT));
+    } else {
+        relocations.push(out.len());
+        if record.left < LIBCALL_TARGET_BASE {
+            relocations.push(ARM64_CALL);
+            relocations.push(record.left);
+        } else {
+            relocations.push(ARM64_LIBCALL);
+            relocations.push(wrapping_sub(record.left, LIBCALL_TARGET_BASE));
+        }
+        push32(inout out, BRANCH_AND_LINK);
+    }
+    let result = if keep_result && float_call(record.op) {
+        let width = if record.op == CALL_FLOAT {
+            FP_DOUBLE | REG64
+        } else {
+            0
+        };
+        push32(inout out, FMOV_TO_GP | width | sh(FP_RESULT, RN_SHIFT) | SCRATCH);
+        SCRATCH
+    } else if keep_result && (used & sh(1, FIRST_RESULT)) != 0 {
+        // The restore below writes x0 when its incoming contents are live.
+        rrr(inout out, ORR_REG, SCRATCH, ZERO, FIRST_RESULT);
+        SCRATCH
+    } else {
+        FIRST_RESULT
+    };
+    if keep_high {
+        // The low result's allocator runs before the high result is placed.
+        rrr(inout out, ORR_REG, SECOND_SCRATCH, ZERO, SECOND_RESULT);
+    }
+    frame_registers(inout out, in SavedRegisters { mask: used, first: 0, offset: save_base }, true);
+    Option::Some(result)
+}
+
+fn write_instruction(inout output: ChunkSeq[u8], offset: u64, instruction: u32) {
+    for index in 0..INSTRUCTION_BYTES {
+        let shift = wrapping_u32(wrapping_mul(index, BYTE_BITS));
+        let byte = wrapping_u8(wrapping_shr_u32(instruction, shift));
+        let _ = output.try_set(wrapping_add(offset, index), byte);
+    }
+}
+
+fn patch_branch(inout output: ChunkSeq[u8], in branch: Branch, target: u64) -> bool {
+    // AArch64 displacements count instructions from the branch itself.
+    let delta = wrapping_i64(wrapping_sub(target, branch.offset));
+    let distance = wrapping_shr_i64(delta, INSTRUCTION_SHIFT);
+    let (reach, shift) = if branch.instruction == JUMP {
+        (BRANCH_IMM26_REACH, 0)
+    } else {
+        (BRANCH_IMM19_REACH, BRANCH_IMM19_SHIFT)
+    };
+    if distance < wrapping_sub(0, reach) || distance >= reach {
+        return false;
+    }
+    let mask = wrapping_sub(sh(wrapping_u32(reach), 1), 1);
+    let instruction = branch.instruction | sh(wrapping_u32(distance) & mask, shift);
+    write_instruction(inout output, branch.offset, instruction);
+    true
+}
+
+fn compare_table_index(inout output: ChunkSeq[u8], index: u32, cases: u64) {
+    // The bounds check and the table address both use the low 32 bits.
+    match arithmetic_immediate(cases) {
+        Option::Some(encoded) => {
+            push32(inout output, (CMP_IMM & ~REG64) | encoded | sh(index, RN_SHIFT));
+        },
+        Option::None => {
+            immediate(inout output, SCRATCH, cases);
+            rrr(inout output, SUBS_REG & ~REG64, ZERO, index, SCRATCH);
+        },
+    };
+}
+
+fn emit_table_lookup(inout output: ChunkSeq[u8], index: u32, long_tables: bool) {
+    // Mask a speculatively out-of-range index before it can reach the load.
+    let select = (CSEL & ~REG64) | sh(HS, CONDITION_SHIFT);
+    rrr(inout output, select, SECOND_SCRATCH, ZERO, index);
+    push32(inout output, CSDB);
+    push32(inout output, ADR_TABLE | SCRATCH);
+    let load = if long_tables {
+        LDRSW_UXTW_SCALED
+    } else {
+        LDRSH_UXTW_SCALED
+    };
+    rrr(inout output, load, SECOND_SCRATCH, SCRATCH, SECOND_SCRATCH);
+    let add = if long_tables {
+        ADD_REG
+    } else {
+        ADD_REG | ADD_INSTRUCTION_SCALE
+    };
+    rrr(inout output, add, SECOND_SCRATCH, SCRATCH, SECOND_SCRATCH);
+    push32(inout output, BRANCH_REGISTER | sh(SECOND_SCRATCH, RN_SHIFT));
+}
+
+fn patch_table_entry(
+    inout output: ChunkSeq[u8],
+    in entry: TableFixup,
+    target: u64,
+    long_tables: bool
+) -> bool {
+    let delta = wrapping_i64(wrapping_sub(target, entry.base));
+    if long_tables {
+        if delta < wrapping_sub(0, LONG_TABLE_REACH) || delta >= LONG_TABLE_REACH {
+            return false;
+        }
+        write_instruction(inout output, entry.offset, wrapping_u32(delta));
+    } else {
+        let distance = wrapping_shr_i64(delta, INSTRUCTION_SHIFT);
+        if distance < wrapping_sub(0, SHORT_TABLE_REACH) || distance >= SHORT_TABLE_REACH {
+            return false;
+        }
+        let distance = wrapping_u32(distance);
+        let _ = output.try_set(entry.offset, wrapping_u8(distance));
+        let high = wrapping_u8(wrapping_shr_u32(distance, wrapping_u32(BYTE_BITS)));
+        let _ = output.try_set(wrapping_add(entry.offset, 1), high);
+    }
+    true
+}
+
+pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
+    let mut relocations = ChunkSeq::new[u64]();
+    encode(in words, false, inout relocations)
+}
+
+pub fn encode(
+    in words: Slice[u64],
+    allow_relocations: bool,
+    inout relocations: ChunkSeq[u64]
+) -> ChunkSeq[u8] {
+    let mut allocation = Allocation::RegisterHomes;
+    let mut long_tables = false;
+    let mut use_callee_registers = true;
+    for attempt in 0..ENCODING_ATTEMPTS {
+        let mut retry: Option[Retry] = Option::None;
+        let mut references = ChunkSeq::new[u64]();
+        let code = encode_pass(
+            in words,
+            allocation,
+            long_tables,
+            use_callee_registers,
+            allow_relocations,
+            inout retry,
+            inout references
+        );
+        match retry {
+            Option::Some(Retry::Allocate(next)) => allocation = next,
+            Option::Some(Retry::LongTables) => long_tables = true,
+            Option::Some(Retry::WithoutCalleeRegisters) => use_callee_registers = false,
+            Option::None => {
+                if code.len() != 0 {
+                    relocations.extend(in references.as_slice());
+                }
+                return code;
+            },
+        };
+    }
+    ChunkSeq::new[u8]()
+}
+
+fn encode_pass(
+    in words: Slice[u64],
+    allocation: Allocation,
+    long_tables: bool,
+    use_callee_registers: bool,
+    allow_relocations: bool,
+    inout retry: Option[Retry],
+    inout relocations: ChunkSeq[u64]
+) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    if words.len() < HEADER_WORDS {
+        return out;
+    }
+    let args = word_at(in words, ARGUMENT_COUNT);
+    let result = word_at(in words, RETURN_VALUE);
+    let body = wrapping_sub(words.len(), HEADER_WORDS);
+    let count = body / RECORD_WORDS;
+    let values = wrapping_add(args, count);
+    if args > ARGUMENT_REGISTERS
+        || body % RECORD_WORDS != 0
+        || (result != NO_VALUE && result >= values)
+    {
+        return out;
+    }
+    let frame = match frame_layout(in words, count) {
+        Option::Some(frame) => frame,
+        Option::None => return out,
+    };
+    let entry = read_record(in words, frame.slots.len());
+    let labeled = frame.slots.len() < count && entry.op == BLOCK_LABEL;
+    let last_index = wrapping_sub(count, 1);
+    let tail = read_record(in words, last_index);
+    let float_return = if labeled {
+        entry.extra == FLOAT_RETURN_LAYOUT
+    } else {
+        count != 0 && tail.op == FLOAT_RETURN
+    };
+    if !labeled && float_return && result == NO_VALUE {
+        return out;
+    }
+    let terminal_trap = !labeled && count != 0 && tail.op == TRAP;
+    let terminal_call = !labeled && count != 0 && tail.op == TAIL_CALL;
+    if terminal_call && (result != NO_VALUE || !allow_relocations) {
+        return out;
+    }
+    if terminal_trap
+        && (result != NO_VALUE || tail.left > PAIRED_RESULTS || tail.right != 0 || tail.extra != 0)
+    {
+        return out;
+    }
+    let mut second = NO_VALUE;
+    if !labeled && count != 0 && tail.op == RETURN_PAIR {
+        if result == NO_VALUE
+            || tail.left >= wrapping_add(args, last_index)
+            || tail.right != 0
+            || tail.extra != 0
+        {
+            return out;
+        }
+        second = tail.left;
+    }
+    if labeled
+        && (result != NO_VALUE
+            || entry.extra > FLOAT_RETURN_LAYOUT
+            || (entry.right != 0 && entry.right != frame.slots.len())
+            || !valid_block_layout(in words, frame.slots.len(), count, entry.extra))
+    {
+        return out;
+    }
+    let returns = if float_return {
+        1
+    } else if labeled {
+        entry.extra
+    } else if terminal_trap {
+        tail.left
+    } else if second != NO_VALUE {
+        PAIRED_RESULTS
+    } else if result != NO_VALUE {
+        1
+    } else {
+        0
+    };
+    let register_home = (
+        match allocation {
+            Allocation::RegisterHomes | Allocation::SpillsWithRegisterHomes => true,
+            _ => false,
+        }
+    )
+        && labeled
+        && entry.right != 0;
+    let home_slot = if register_home {
+        wrapping_sub(entry.right, 1)
+    } else {
+        NO_VALUE
+    };
+    let mut home_candidates: u32 = 0;
+    let mut unpromotable_homes: u32 = 0;
+    let mut home_cells = ChunkSeq::new[HomeCell]();
+    let mut home_aliases = ChunkSeq::new[u64]();
+    let mut normal_returns: u64 = 0;
+    if register_home {
+        for index in 0..HOME_REGISTERS {
+            home_cells.push(HomeCell { width: 0, next_store: values });
+        }
+    }
+    let mut frame_used = false;
+    let mut ends = ChunkSeq::with_capacity[u64](values);
+    for index in 0..values {
+        ends.push(NEVER_READ);
+    }
+    if result != NO_VALUE {
+        let _ = ends.try_set(result, values);
+    }
+    if second != NO_VALUE {
+        let _ = ends.try_set(second, values);
+    }
+    let mut live_values = if result != NO_VALUE { 1 } else { 0 };
+    if second != NO_VALUE && second != result {
+        live_values = wrapping_add(live_values, 1);
+    }
+    let mut arms = ChunkSeq::new[BranchArm]();
+    let mut depth: u64 = 0;
+    let mut block_end = values;
+    let mut entry_end = values;
+    let mut call_end = NEVER_READ;
+    let mut pending_arguments: u64 = 0;
+    let mut pending_float_arguments: u64 = 0;
+    let mut pending_stack_arguments: u64 = 0;
+    let mut stack_limit: u64 = MAX_FRAME_BYTES;
+    let mut outgoing_bytes: u64 = 0;
+    let mut address_folds = ChunkSeq::new[AddressFold]();
+    let mut needs_call_pair = false;
+    let mut needs_checked = false;
+    let mut has_float = float_return;
+    let mut has_vector = false;
+    let arguments_start = wrapping_add(frame.slots.len(), if labeled { 1 } else { 0 });
+    let mut arguments_end = arguments_start;
+    let mut float_arguments: u64 = 0;
+    for index in arguments_start..count {
+        let arg = read_record(in words, index);
+        if arg.op == FLOAT_ARGUMENT {
+            if arg.left != float_arguments {
+                return out;
+            }
+            float_arguments = wrapping_add(float_arguments, 1);
+        } else if !incoming_stack_argument(arg.op) {
+            break;
+        }
+        arguments_end = wrapping_add(index, 1);
+    }
+    let mut call_sites = ChunkSeq::new[u64]();
+    let mut max_live_across_calls: u64 = 0;
+    for reverse in 0..count {
+        let index = wrapping_sub(wrapping_sub(count, 1), reverse);
+        let value = wrapping_add(args, index);
+        let r = read_record(in words, index);
+        has_vector = has_vector || is_vector_operation(r.op);
+        has_float = has_float || float_opcode(r.op);
+        if register_home && r.op == BLOCK_RETURN && r.left != TRAP_VALUE {
+            normal_returns = wrapping_add(normal_returns, 1);
+        }
+        if needs_call_pair != (r.op == CALL_PAIR)
+            || needs_checked != is_checked_arithmetic(r.op)
+            || (r.op == RETURN_PAIR && (labeled || index != last_index))
+            || (r.op == FLOAT_RETURN && (labeled || index != last_index))
+            || ((r.op == FLOAT_ARGUMENT || incoming_stack_argument(r.op))
+                && (index < arguments_start || index >= arguments_end))
+            || (r.op == TRAP && (!terminal_trap || index != last_index))
+            || (r.op == TAIL_CALL && (!terminal_call || index != last_index))
+            || (terminal_call && (r.op == BRANCH_ZERO || r.op == EARLY_RETURN))
+            || (is_symbol(r.op) && !allow_relocations)
+        {
+            return out;
+        }
+        needs_call_pair = r.op == CALL_HIGH;
+        needs_checked = r.op == OVERFLOW_FLAG;
+        if consumes_carry(r.op) {
+            if index < CHECKED_ARITHMETIC_RECORDS
+                || r.extra != wrapping_sub(value, 1)
+                || read_record(in words, wrapping_sub(index, 1)).op != OVERFLOW_FLAG
+            {
+                return out;
+            }
+            let low = read_record(in words, wrapping_sub(index, CHECKED_ARITHMETIC_RECORDS));
+            let expected = if r.op == ADD_CARRY {
+                UNSIGNED_ADD_OVERFLOW
+            } else {
+                UNSIGNED_SUB_OVERFLOW
+            };
+            if low.op != expected || low.extra != QWORD_BITS {
+                return out;
+            }
+        }
+        if call_argument(r.op) {
+            if pending_arguments == 0
+                || (r.op == CALL_STACK_ARGUMENT) != (pending_arguments <= pending_stack_arguments)
+                || (r.left != NO_VALUE && vector_value(in words, args, r.left))
+            {
+                return out;
+            }
+            pending_arguments = wrapping_sub(pending_arguments, 1);
+        } else if pending_arguments != 0 {
+            return out;
+        }
+        let calls = is_call(r.op);
+        let indirect = calls && indirect_call(r.extra);
+        if calls || r.op == TAIL_CALL {
+            if (!indirect && !allow_relocations) || r.right > index {
+                return out;
+            }
+            if r.op == TAIL_CALL {
+                let start = wrapping_sub(index, r.right);
+                for reserved in 0..AARCH64_TAIL_RESERVED_GP {
+                    let argument = read_record(in words, wrapping_add(start, reserved));
+                    if argument.op != CALL_ARGUMENT || argument.left != NO_VALUE {
+                        return out;
+                    }
+                }
+            }
+            if indirect
+                && (r.left >= wrapping_sub(value, r.right) || float_value(in words, args, r.left))
+            {
+                return out;
+            }
+            pending_arguments = r.right;
+            pending_float_arguments = r.extra & CALL_FLOAT_MASK;
+            pending_stack_arguments = call_stack_count(r.extra);
+            stack_limit = MAX_FRAME_BYTES;
+            call_end = value;
+        }
+        let n = match operands(in r, returns) {
+            Option::Some(n) => n,
+            Option::None => return out,
+        };
+        if (n >= 1 && r.left >= value)
+            || (n >= 2 && r.right >= value)
+            || (n == 3 && r.extra >= value)
+        {
+            return out;
+        }
+        if r.op == CALL_ARGUMENT {
+            let float_argument = pending_float_arguments != 0;
+            let is_float = r.left != NO_VALUE && float_value(in words, args, r.left);
+            if float_argument != is_float {
+                return out;
+            }
+            if float_argument {
+                pending_float_arguments = wrapping_sub(pending_float_arguments, 1);
+            }
+        } else if r.op == CALL_STACK_ARGUMENT {
+            let end = wrapping_add(r.right, r.extra / BYTE_BITS);
+            if end > stack_limit {
+                return out;
+            }
+            stack_limit = r.right;
+            if end > outgoing_bytes {
+                outgoing_bytes = end;
+            }
+        }
+        let last = last_read(in ends, value);
+        if last != NEVER_READ {
+            live_values = wrapping_sub(live_values, 1);
+        }
+        if calls {
+            call_sites.push(value);
+            if live_values > max_live_across_calls {
+                max_live_across_calls = live_values;
+            }
+        }
+        if labeled {
+            if r.op == BLOCK_LABEL {
+                entry_end = block_end;
+                block_end = value;
+            } else if last != NEVER_READ && last >= block_end {
+                // Values crossing a block boundary must use stack homes.
+                return out;
+            }
+        } else if (r.op >= BLOCK_LABEL && r.op <= BRANCH_BLOCK)
+            || r.op == BRANCH_TABLE
+            || r.op == BRANCH_TABLE_TARGET
+        {
+            return out;
+        }
+        if r.op == STACK_SLOT && index >= frame.slots.len() {
+            return out;
+        }
+        if r.op == STACK_POINTER && last != NEVER_READ {
+            unpromotable_homes = ~0;
+            frame_used = true;
+        }
+        if is_stack_load(r.op) || r.op == STACK_ADDRESS || is_stack_store(r.op) {
+            if stack_displacement(in frame, in r).is_none() {
+                return out;
+            }
+            if last != NEVER_READ || is_stack_store(r.op) {
+                if register_home {
+                    // An address or an unaligned access prevents independent cell promotion.
+                    let store = is_stack_store(r.op);
+                    let slot = if store { r.right } else { r.left };
+                    let offset = if store { r.extra } else { r.right };
+                    if slot == home_slot
+                        && (r.op == STACK_ADDRESS || offset % HOME_WORD_BYTES != 0)
+                    {
+                        unpromotable_homes = ~0;
+                    }
+                    let cell = widen_u64(home_cell(in r, home_slot));
+                    match home_cells.try_get(cell) {
+                        Option::Some(previous) => {
+                            let width = if store { store_width(r.op) } else { r.extra };
+                            let bit = sh(1, wrapping_u32(cell));
+                            if previous.width != 0 && previous.width != width {
+                                unpromotable_homes = unpromotable_homes | bit;
+                            }
+                            home_candidates = home_candidates | bit;
+                            let next_store = if store { value } else { previous.next_store };
+                            if store || previous.width == 0 {
+                                let _ = home_cells.try_set(
+                                    cell,
+                                    HomeCell { width: width, next_store: next_store }
+                                );
+                            }
+                            if !store && last <= next_store {
+                                // Until the next store, the home itself holds this SSA value.
+                                home_aliases.push(index);
+                            }
+                        },
+                        Option::None => frame_used = true,
+                    };
+                } else {
+                    frame_used = true;
+                }
+            }
+        }
+        let arm = arms.try_get(wrapping_sub(depth, 1))
+            .unwrap_or(BranchArm { start: NO_VALUE, end: values });
+        if r.op == EARLY_RETURN {
+            if r.extra < args || r.extra >= value || (depth != 0 && r.extra <= arm.start) {
+                return out;
+            }
+            let nested = BranchArm { start: r.extra, end: value };
+            if depth == arms.len() {
+                arms.push(nested);
+            } else {
+                let _ = arms.try_set(depth, nested);
+            }
+            depth = wrapping_add(depth, 1);
+        } else if r.op == BRANCH_ZERO {
+            if depth == 0 || arm.start != value {
+                return out;
+            }
+            depth = wrapping_sub(depth, 1);
+        } else if depth != 0 && (value <= arm.start || last > arm.end) {
+            // Values defined in a skipped arm are unavailable at its target.
+            return out;
+        }
+        if no_result(r.op) {
+            if last != NEVER_READ {
+                return out;
+            }
+        } else if last == NEVER_READ
+            && !indirect
+            && !is_integer_division(r.op)
+            && !is_atomic_update(r.op)
+            && !is_atomic_cas(r.op)
+            && r.op != ATOMIC_LOAD
+            && r.op != VECTOR_LOAD
+            && !live_overflow_flag(in ends, value, r.op)
+        {
+            continue;
+        }
+        // The address is defined immediately before this access. A later
+        // read, or a store of the address itself, keeps its normal lifetime.
+        let mut left = r.left;
+        match fold_address(in words, in ends, index, value, in r) {
+            Option::Some(fold) => {
+                left = fold.base;
+                if fold.index != NO_VALUE && last_read(in ends, fold.index) == NEVER_READ {
+                    let _ = ends.try_set(fold.index, value);
+                    live_values = wrapping_add(live_values, 1);
+                }
+                address_folds.push(fold);
+            },
+            Option::None => (),
+        };
+        if n >= 1 && last_read(in ends, left) == NEVER_READ {
+            let end = if call_argument(r.op) { call_end } else { value };
+            let _ = ends.try_set(left, end);
+            live_values = wrapping_add(live_values, 1);
+        }
+        if n >= 2 && last_read(in ends, r.right) == NEVER_READ {
+            let _ = ends.try_set(r.right, value);
+            live_values = wrapping_add(live_values, 1);
+        }
+        if n == 3 && last_read(in ends, r.extra) == NEVER_READ {
+            let _ = ends.try_set(r.extra, value);
+            live_values = wrapping_add(live_values, 1);
+        }
+    }
+    if depth != 0 || pending_arguments != 0 || needs_call_pair || needs_checked {
+        return out;
+    }
+    if (has_float || has_vector)
+        && ((result != NO_VALUE && float_value(in words, args, result) != float_return)
+            || (second != NO_VALUE && float_value(in words, args, second))
+            || !valid_float_operands(
+                in words,
+                args,
+                count,
+                returns == PAIRED_RESULTS,
+                float_return
+            ))
+    {
+        return out;
+    }
+    if has_vector
+        && ((result != NO_VALUE && vector_value(in words, args, result))
+            || !valid_vector_inputs(in words, args, count, returns))
+    {
+        return out;
+    }
+
+    let has_calls = call_sites.len() != 0;
+    let callee_count = if use_callee_registers && call_sites.len() >= CALLS_FOR_CALLEE_REGISTERS {
+        if max_live_across_calls < CALLEE_REGISTERS {
+            max_live_across_calls
+        } else {
+            CALLEE_REGISTERS
+        }
+    } else {
+        0
+    };
+    // Keep the registers used by temporaries live across calls available.
+    let (home_first, home_limit) = if has_calls {
+        let remaining = if use_callee_registers {
+            wrapping_sub(CALLEE_REGISTERS, callee_count)
+        } else {
+            0
+        };
+        (wrapping_add(FIRST_CALLEE_REGISTER, wrapping_u32(callee_count)), remaining)
+    } else {
+        (wrapping_u32(ARGUMENT_REGISTERS), HOME_REGISTERS)
+    };
+    let home_range = wrapping_sub(sh(1, wrapping_u32(home_limit)), 1);
+    let homes = home_candidates & ~unpromotable_homes & home_range;
+    let home_mask = sh(homes, home_first);
+    let spill_mode = match allocation {
+        Allocation::Spills | Allocation::SpillsWithRegisterHomes => true,
+        _ => false,
+    };
+    let outgoing_bytes = align_up(outgoing_bytes, STACK_ALIGNMENT);
+    let local_bytes = if frame_used || homes != home_candidates {
+        wrapping_add(outgoing_bytes, frame.size)
+    } else {
+        outgoing_bytes
+    };
+    let mut callee_mask = sh(
+        wrapping_sub(sh(1, wrapping_u32(callee_count)), 1),
+        FIRST_CALLEE_REGISTER
+    );
+    if has_calls {
+        callee_mask = callee_mask | home_mask;
+    }
+    let callee = SavedRegisters {
+        mask: callee_mask,
+        first: FIRST_CALLEE_REGISTER,
+        offset: local_bytes
+    };
+    let callee_slots = if callee_mask == 0 {
+        0
+    } else {
+        widen_u64(wrapping_sub(
+            wrapping_sub(UNASSIGNED, leading_zeros_u32(callee_mask)),
+            FIRST_CALLEE_REGISTER
+        ))
+    };
+    let callee_bytes = align_up(wrapping_mul(callee_slots, HOME_WORD_BYTES), STACK_ALIGNMENT);
+    let call_base = wrapping_add(local_bytes, callee_bytes);
+    let link_slot = if has_calls { call_base } else { NO_VALUE };
+    let frame_bytes = if has_calls {
+        wrapping_add(call_base, call_frame_bytes())
+    } else {
+        local_bytes
+    };
+    if frame_bytes > MAX_FRAME_BYTES {
+        if callee_mask != 0 {
+            retry = Option::Some(Retry::WithoutCalleeRegisters);
+        }
+        return out;
+    }
+    let adjustment = arithmetic_immediate(frame_bytes).unwrap_or(0);
+    if spill_mode || adjustment != 0 {
+        push32(inout out, stack_adjust(SUB_IMM, adjustment));
+    }
+    if has_calls {
+        memory(inout out, false, QWORD_BITS, SP, LINK_REGISTER, link_slot);
+    }
+    frame_registers(inout out, in callee, false);
+    let register_mask = if spill_mode {
+        SPILL_REGISTER_MASK
+    } else {
+        CALLER_REGISTER_MASK
+    };
+    let mut spills = ChunkSeq::new[u64]();
+    let mut restores = ChunkSeq::new[u64]();
+    let mut incoming_bases = ChunkSeq::new[u64]();
+    let mut locations = ChunkSeq::with_capacity[u32](values);
+    let mut used: u32 = 0;
+    let mut vector_used: u32 = 0;
+    let mut flags_for_next: Option[u32] = Option::None;
+    let mut branches = ChunkSeq::new[Branch]();
+    let mut labels = ChunkSeq::new[Label]();
+    let mut fixups = ChunkSeq::new[LabelBranch]();
+    let mut table_fixups = ChunkSeq::new[TableFixup]();
+    let mut remaining_aliases = home_aliases.len();
+    let mut next_alias = home_aliases.try_get(wrapping_sub(remaining_aliases, 1)).unwrap_or(count);
+    let mut remaining_folds = address_folds.len();
+    let no_fold = AddressFold { consumer: count, base: NO_VALUE, index: NO_VALUE, displacement: 0 };
+    let mut next_fold = address_folds.try_get(wrapping_sub(remaining_folds, 1)).unwrap_or(no_fold);
+    let mut remaining_calls = call_sites.len();
+    let mut next_call = call_sites.try_get(wrapping_sub(remaining_calls, 1)).unwrap_or(values);
+    if labeled {
+        for index in 0..count {
+            labels.push(Label { address: NO_VALUE, block: false });
+        }
+    }
+    for arg in 0..args {
+        let reg = wrapping_u32(arg);
+        let mut assigned = reg;
+        let last = last_read(in ends, arg);
+        if last != NEVER_READ {
+            if labeled && last >= entry_end {
+                return ChunkSeq::new[u8]();
+            }
+            let available = callee_mask & ~used & ~home_mask;
+            if available != 0 && last > next_call {
+                assigned = trailing_zeros_u64(widen_u64(available));
+                rrr(inout out, ORR_REG, assigned, ZERO, reg);
+            }
+            used = used | sh(1, assigned);
+        }
+        locations.push(assigned);
+    }
+    for index in 0..count {
+        let value = wrapping_add(args, index);
+        let mut r = read_record(in words, index);
+        let stored = store_width(r.op);
+        let last = last_read(in ends, value);
+        let live = last != NEVER_READ;
+        let calls = is_call(r.op);
+        let division = is_integer_division(r.op);
+        let cas = is_atomic_cas(r.op);
+        let atomic_rmw = cas || is_atomic_update(r.op);
+        let atomic = atomic_rmw || r.op == ATOMIC_LOAD;
+        let checked = is_checked_arithmetic(r.op);
+        let overflow_live = checked && last_read(in ends, wrapping_add(value, 1)) != NEVER_READ;
+        if r.op == STACK_SLOT
+            || r.op == BRANCH_TABLE_TARGET
+            || call_argument(r.op)
+            || r.op == RETURN_PAIR
+            || r.op == FLOAT_RETURN
+            || r.op == TRAP
+            || (!calls
+                && !division
+                && !atomic
+                && !no_result(r.op)
+                && !live
+                && !overflow_live
+                && r.op != VECTOR_LOAD)
+        {
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        if r.op == FENCE {
+            push32(inout out, DMB_ISH);
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        if r.op == SPECTRE_BARRIER {
+            push32(inout out, CSDB);
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        if r.op == TAIL_CALL {
+            if !emit_tail_arguments(inout out, in words, in locations, in r, index, frame_bytes) {
+                return ChunkSeq::new[u8]();
+            }
+            emit_epilogue(inout out, adjustment, spill_mode, link_slot, in callee, inout restores);
+            relocations.push(out.len());
+            relocations.push(ARM64_CALL);
+            relocations.push(r.left);
+            push32(inout out, JUMP);
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        let call_result = if calls {
+            remaining_calls = wrapping_sub(remaining_calls, 1);
+            next_call = call_sites.try_get(wrapping_sub(remaining_calls, 1)).unwrap_or(values);
+            let start = wrapping_sub(index, r.right);
+            for arg in 0..r.right {
+                let source = read_record(in words, wrapping_add(start, arg)).left;
+                used = expire(used, in ends, source, value, location(in locations, source));
+            }
+            if indirect_call(r.extra) {
+                used = expire(used, in ends, r.left, value, location(in locations, r.left));
+            }
+            let reg = match emit_call(
+                inout out,
+                in words,
+                in locations,
+                in r,
+                index,
+                used & CALLER_REGISTER_MASK,
+                frame_bytes,
+                live,
+                r.op == CALL_PAIR && last_read(in ends, wrapping_add(value, 1)) != NEVER_READ,
+                inout relocations
+            ) {
+                Option::Some(reg) => reg,
+                Option::None => return ChunkSeq::new[u8](),
+            };
+            if !live {
+                locations.push(UNASSIGNED);
+                continue;
+            }
+            reg
+        } else if r.op == CALL_HIGH {
+            SECOND_SCRATCH
+        } else {
+            UNASSIGNED
+        };
+        if r.op == BLOCK_LABEL || r.op == EDGE_LABEL {
+            let old = labels.try_get(r.left).unwrap_or(Label { address: 0, block: false });
+            if old.address != NO_VALUE {
+                return ChunkSeq::new[u8]();
+            }
+            let _ = labels
+                .try_set(r.left, Label { address: out.len(), block: r.op == BLOCK_LABEL });
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        if r.op == JUMP_LABEL {
+            if r.left == 0 || r.left >= count {
+                return ChunkSeq::new[u8]();
+            }
+            let next_index = wrapping_add(index, 1);
+            let next = read_record(in words, next_index);
+            if next_index == count || next.op != BLOCK_LABEL || next.left != r.left {
+                let branch = Branch { offset: out.len(), instruction: JUMP };
+                fixups.push(LabelBranch { branch: branch, target: r.left, block: true });
+                push32(inout out, JUMP);
+            }
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        let mut index_location = UNASSIGNED;
+        if index == next_fold.consumer {
+            r.left = next_fold.base;
+            if next_fold.index == NO_VALUE {
+                if stored == 0 {
+                    r.right = next_fold.displacement;
+                } else {
+                    r.extra = next_fold.displacement;
+                }
+            } else {
+                index_location = location(in locations, next_fold.index);
+                used = expire(used, in ends, next_fold.index, value, index_location);
+            }
+            remaining_folds = wrapping_sub(remaining_folds, 1);
+            next_fold = address_folds.try_get(wrapping_sub(remaining_folds, 1)).unwrap_or(no_fold);
+        }
+        let n = if calls {
+            0
+        } else {
+            operands(in r, returns).unwrap_or(0)
+        };
+        let left = if n >= 1 {
+            location(in locations, r.left)
+        } else {
+            UNASSIGNED
+        };
+        let right = if n >= 2 {
+            location(in locations, r.right)
+        } else {
+            UNASSIGNED
+        };
+        let extra = if n == 3 {
+            location(in locations, r.extra)
+        } else {
+            UNASSIGNED
+        };
+        let vector = has_vector && is_vector_operation(r.op);
+        let vector_left = vector && uses_vector_left(r.op);
+        let vector_right = vector && (is_vector_binary(r.op) || r.op == VECTOR_STORE);
+        if vector_left {
+            vector_used = expire(vector_used, in ends, r.left, value, left);
+        } else if n >= 1 {
+            used = expire(used, in ends, r.left, value, left);
+        }
+        if vector_right {
+            vector_used = expire(vector_used, in ends, r.right, value, right);
+        } else if n >= 2 {
+            used = expire(used, in ends, r.right, value, right);
+        }
+        if is_vector_float_fma(r.op) {
+            vector_used = expire(vector_used, in ends, r.extra, value, extra);
+        } else if n == 3 {
+            used = expire(used, in ends, r.extra, value, extra);
+        }
+        if vector && (is_vector_result(r.op) || r.op == VECTOR_STORE) {
+            let lhs = if vector_left {
+                materialize_vector(inout out, left, VECTOR_LEFT, frame_bytes)
+            } else {
+                materialize(inout out, left, SPILL_LEFT, frame_bytes)
+            };
+            let rhs = if vector_right {
+                materialize_vector(inout out, right, VECTOR_RIGHT, frame_bytes)
+            } else {
+                UNASSIGNED
+            };
+            if r.op == VECTOR_STORE {
+                memory(inout out, false, VECTOR_BITS, lhs, rhs, r.extra);
+                locations.push(UNASSIGNED);
+                continue;
+            }
+            let available = VECTOR_REGISTER_MASK & ~vector_used;
+            let assigned = if !live {
+                UNASSIGNED
+            } else if available != 0 && last <= next_call {
+                let reg = if is_vector_float_fma(r.op)
+                    && extra < UNASSIGNED
+                    && (available & sh(1, extra)) != 0
+                {
+                    // FMLA accumulates in its destination. Reuse an expired addend.
+                    extra
+                } else {
+                    trailing_zeros_u64(widen_u64(available))
+                };
+                vector_used = vector_used | sh(1, reg);
+                reg
+            } else {
+                // AAPCS64 preserves only the low halves of its nonvolatile
+                // vector registers. A complete vector live across a call spills.
+                if !spill_mode {
+                    retry = Option::Some(Retry::Allocate(Allocation::Spills));
+                    return ChunkSeq::new[u8]();
+                }
+                match allocate_vector_spill(inout spills, frame_bytes, value, last) {
+                    Option::Some(spill) => spill,
+                    Option::None => {
+                        if callee_mask != 0 {
+                            retry = Option::Some(Retry::WithoutCalleeRegisters);
+                        }
+                        return ChunkSeq::new[u8]();
+                    },
+                }
+            };
+            let dest = if assigned >= UNASSIGNED {
+                VECTOR_LEFT
+            } else {
+                assigned
+            };
+            match r.op {
+                VECTOR_CONSTANT => vector_constant(inout out, dest, r.left, r.right),
+                VECTOR_SPLAT => vector_splat(inout out, dest, lhs, r.extra),
+                VECTOR_LOAD => memory(inout out, true, VECTOR_BITS, lhs, dest, r.right),
+                VECTOR_INTEGER_COMPARE => vector_integer_compare(inout out, in r, dest, lhs, rhs),
+                VECTOR_INTEGER_MIN_MAX => vector_integer_min_max(inout out, in r, dest, lhs, rhs),
+                VECTOR_WIDEN => vector_widen(inout out, r.extra, dest, lhs),
+                VECTOR_NARROW => vector_narrow(inout out, r.extra, dest, lhs, rhs),
+                VECTOR_SHL | VECTOR_SHR | VECTOR_SAR => {
+                    let count = if (r.extra & VECTOR_SHIFT_IMMEDIATE) != 0 {
+                        UNASSIGNED
+                    } else {
+                        materialize(inout out, right, SPILL_RIGHT, frame_bytes)
+                    };
+                    vector_shift(inout out, in r, dest, lhs, count);
+                },
+                VECTOR_FLOAT_COMPARE => vector_float_compare(inout out, in r, dest, lhs, rhs),
+                VECTOR_FLOAT_FMA32 | VECTOR_FLOAT_FMA64 => {
+                    let addend = materialize_vector(inout out, extra, FP_LEFT, frame_bytes);
+                    vector_float_fma(inout out, dest, lhs, rhs, addend, r.op == VECTOR_FLOAT_FMA64);
+                },
+                VECTOR_FLOAT_COPY_SIGN => vector_float_copy_sign(
+                    inout out,
+                    dest,
+                    lhs,
+                    rhs,
+                    r.extra
+                ),
+                VECTOR_FLOAT_ADD
+                    | VECTOR_FLOAT_SUB
+                    | VECTOR_FLOAT_MUL
+                    | VECTOR_FLOAT_DIV
+                    | VECTOR_FLOAT_SQRT
+                    | VECTOR_FLOAT_NEG
+                    | VECTOR_FLOAT_ABS
+                    | VECTOR_FLOAT_CEIL
+                    | VECTOR_FLOAT_FLOOR
+                    | VECTOR_FLOAT_TRUNC
+                    | VECTOR_FLOAT_NEAREST
+                    | VECTOR_FLOAT_MIN
+                    | VECTOR_FLOAT_MAX => vector_float(inout out, in r, dest, lhs, rhs),
+                VECTOR_INSERT => {
+                    let lane = wrapping_shr_u64(r.extra, VECTOR_LANE_INDEX_SHIFT);
+                    let width = r.extra & VECTOR_LANE_WIDTH_MASK;
+                    let value = materialize(inout out, right, SPILL_RIGHT, frame_bytes);
+                    if dest != lhs {
+                        rrr(inout out, VECTOR_OR_REG, dest, lhs, lhs);
+                    }
+                    push32(
+                        inout out,
+                        VECTOR_INSERT_GP
+                            | vector_lane_immediate(lane, width)
+                            | sh(value, RN_SHIFT)
+                            | dest
+                    );
+                },
+                VECTOR_PROMOTE_LOW | VECTOR_DEMOTE => {
+                    let op = if r.op == VECTOR_DEMOTE {
+                        VECTOR_FLOAT_NARROW
+                    } else {
+                        VECTOR_FLOAT_WIDEN
+                    };
+                    push32(inout out, op | sh(lhs, RN_SHIFT) | dest);
+                },
+                _ => vector_binary(inout out, in r, dest, lhs, rhs),
+            };
+            if assigned >= SPILL_BASE {
+                memory(
+                    inout out,
+                    false,
+                    VECTOR_BITS,
+                    SP,
+                    dest,
+                    spill_offset(frame_bytes, assigned)
+                );
+            }
+            locations.push(assigned);
+            continue;
+        }
+        if stored != 0 || r.op == ATOMIC_STORE {
+            if r.op == ATOMIC_STORE {
+                let address = materialize(inout out, left, SPILL_LEFT, frame_bytes);
+                let source = store_source(inout out, right, SPILL_RIGHT, frame_bytes);
+                push32(inout out, STORE_RELEASE | atomic_address(r.extra, address) | source);
+            } else if is_stack_store(r.op) {
+                let source = store_source(inout out, left, SPILL_LEFT, frame_bytes);
+                let displacement = wrapping_add(
+                    outgoing_bytes,
+                    stack_displacement(in frame, in r).unwrap_or(0)
+                );
+                let home = if homes != 0 {
+                    home_register(home_first, home_cell(in r, home_slot), homes)
+                } else {
+                    UNASSIGNED
+                };
+                if home != UNASSIGNED {
+                    write_home(inout out, home, source, stored);
+                } else {
+                    memory(inout out, false, stored, SP, source, displacement);
+                }
+            } else {
+                let address = materialize(inout out, left, SPILL_LEFT, frame_bytes);
+                let source = store_source(inout out, right, SPILL_RIGHT, frame_bytes);
+                if index_location != UNASSIGNED {
+                    let offset = materialize(inout out, index_location, SPILL_THIRD, frame_bytes);
+                    indexed_memory(inout out, false, stored, address, source, offset);
+                } else {
+                    memory(inout out, false, stored, address, source, r.extra);
+                }
+            }
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        let mut lhs = if vector_left {
+            materialize_vector(inout out, left, VECTOR_LEFT, frame_bytes)
+        } else {
+            materialize(inout out, left, SPILL_LEFT, frame_bytes)
+        };
+        let mut rhs = materialize(inout out, right, SPILL_RIGHT, frame_bytes);
+        let third = if consumes_carry(r.op) {
+            UNASSIGNED
+        } else {
+            materialize(inout out, extra, SPILL_THIRD, frame_bytes)
+        };
+        if is_conditional_trap(r.op) {
+            let skip = if r.op == TRAP_IF_ZERO {
+                BRANCH_IF_NOT_ZERO
+            } else {
+                BRANCH_IF_ZERO
+            };
+            push32(inout out, skip | sh(SKIP_TRAP_DISPLACEMENT, BRANCH_IMM19_SHIFT) | lhs);
+            push32(inout out, TRAP_INSTRUCTION);
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        if checked && !live {
+            emit_checked(inout out, in r, ZERO, lhs, rhs, overflow_live);
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        if atomic && !live {
+            emit_atomic(inout out, in r, SCRATCH, lhs, rhs, third);
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        if division {
+            if r.extra < DWORD_BITS {
+                let (narrow_lhs, narrow_rhs) = narrow_division_operands(inout out, in r, lhs, rhs);
+                lhs = narrow_lhs;
+                rhs = narrow_rhs;
+            }
+            division_checks(inout out, in r, lhs, rhs);
+            if !live {
+                locations.push(UNASSIGNED);
+                continue;
+            }
+        }
+        if r.op == BRANCH_TABLE {
+            compare_table_index(inout out, lhs, r.right);
+            let instruction = BRANCH_IF_CONDITION | HS;
+            let default = Branch { offset: out.len(), instruction: instruction };
+            fixups.push(LabelBranch { branch: default, target: r.extra, block: true });
+            push32(inout out, instruction);
+            emit_table_lookup(inout out, lhs, long_tables);
+            let base = out.len();
+            for case in 0..r.right {
+                let target = read_record(in words, wrapping_add(wrapping_add(index, 1), case));
+                table_fixups
+                    .push(TableFixup { target: target.left, offset: out.len(), base: base });
+                if long_tables {
+                    push32(inout out, 0);
+                } else {
+                    push16(inout out, 0);
+                }
+            }
+            if !long_tables && r.right % SHORT_ENTRIES_PER_INSTRUCTION != 0 {
+                push16(inout out, 0);
+            }
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        if conditional_branch(r.op) {
+            let instruction = match flags_for_next {
+                Option::Some(cc) => BRANCH_IF_CONDITION | (cc ^ 1),
+                Option::None => BRANCH_IF_ZERO | lhs,
+            };
+            flags_for_next = Option::None;
+            let branch = Branch { offset: out.len(), instruction: instruction };
+            if r.op != BRANCH_ZERO {
+                fixups.push(LabelBranch {
+                    branch: branch,
+                    target: r.right,
+                    block: r.op == BRANCH_BLOCK
+                });
+            } else {
+                if depth == branches.len() {
+                    branches.push(branch);
+                } else {
+                    let _ = branches.try_set(depth, branch);
+                }
+                depth = wrapping_add(depth, 1);
+            }
+            push32(inout out, instruction);
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        if r.op == EARLY_RETURN || r.op == BLOCK_RETURN {
+            if r.left == TRAP_VALUE {
+                push32(inout out, TRAP_INSTRUCTION);
+            } else {
+                emit_return(
+                    inout out,
+                    lhs,
+                    rhs,
+                    float_return,
+                    adjustment,
+                    spill_mode,
+                    link_slot,
+                    in callee,
+                    inout restores
+                );
+            }
+            if r.op == EARLY_RETURN {
+                depth = wrapping_sub(depth, 1);
+                let target = out.len();
+                match branches.try_get(depth) {
+                    Option::Some(branch) => if !patch_branch(inout out, in branch, target) {
+                        return ChunkSeq::new[u8]();
+                    },
+                    Option::None => return ChunkSeq::new[u8](),
+                };
+            }
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        let overflow_cc = if r.op == OVERFLOW_FLAG {
+            Option::Some(overflow_condition(read_record(in words, wrapping_sub(index, 1)).op))
+        } else {
+            Option::None
+        };
+        if (comparison_width(r.op) != 0 || overflow_cc.is_some()) && last > value && last < values {
+            let consumer = wrapping_sub(last, args);
+            let following = wrapping_add(index, 1);
+            let next = read_record(in words, consumer);
+            if consumer == following
+                && overflow_cc.is_some()
+                && consumes_carry(next.op)
+                && next.left != value
+                && next.right != value
+            {
+                // The high operation reads carry directly from NZCV.
+                locations.push(UNASSIGNED);
+                continue;
+            }
+            if next.left == value
+                && (conditional_branch(next.op)
+                    || ((next.op == SELECT || next.op == FLOAT_SELECT)
+                        && next.right != value
+                        && next.extra != value))
+                && (consumer == following
+                    || flags_survive_stack_stores(in words, following, consumer, value))
+            {
+                flags_for_next = match overflow_cc {
+                    Option::Some(cc) => Option::Some(cc),
+                    Option::None => {
+                        compare(inout out, in r, lhs, rhs);
+                        Option::Some(condition(r.extra))
+                    },
+                };
+                locations.push(UNASSIGNED);
+                continue;
+            }
+        }
+        let home = if homes != 0 && is_stack_load(r.op) {
+            home_register(home_first, home_cell(in r, home_slot), homes)
+        } else {
+            UNASSIGNED
+        };
+        if index == next_alias {
+            remaining_aliases = wrapping_sub(remaining_aliases, 1);
+            next_alias = home_aliases.try_get(wrapping_sub(remaining_aliases, 1)).unwrap_or(count);
+            if home != UNASSIGNED {
+                locations.push(home);
+                continue;
+            }
+        }
+        // A failed store retries with the original operands.
+        let atomic_operands = if atomic_rmw {
+            sh(1, lhs) | sh(1, rhs) | (if cas { sh(1, third) } else { 0 })
+        } else {
+            0
+        };
+        let unavailable = used | home_mask | atomic_operands;
+        let preserved = if last > next_call {
+            callee_mask & ~unavailable
+        } else {
+            0
+        };
+        let available = if preserved != 0 {
+            preserved
+        } else {
+            register_mask & ~unavailable
+        };
+        let assigned = if available != 0 {
+            let reg = trailing_zeros_u64(widen_u64(available));
+            used = used | sh(1, reg);
+            reg
+        } else if spill_mode {
+            match rematerialized_constant(in r) {
+                Option::Some(instruction) => {
+                    locations.push(instruction);
+                    continue;
+                },
+                Option::None => (),
+            };
+            match allocate_spill(inout spills, frame_bytes, value, last) {
+                Option::Some(spill) => spill,
+                Option::None => {
+                    if callee_mask != 0 {
+                        retry = Option::Some(Retry::WithoutCalleeRegisters);
+                    }
+                    return ChunkSeq::new[u8]();
+                },
+            }
+        } else {
+            let next = if has_calls
+                && home_mask != 0
+                && worth_spilling_with_homes(in words, in home_aliases, homes, normal_returns)
+            {
+                Allocation::SpillsWithRegisterHomes
+            } else if home_mask != 0 {
+                Allocation::StackHomes
+            } else {
+                Allocation::Spills
+            };
+            retry = Option::Some(Retry::Allocate(next));
+            return ChunkSeq::new[u8]();
+        };
+        locations.push(assigned);
+        let dest = if assigned >= SPILL_BASE {
+            SPILL_RESULT
+        } else {
+            assigned
+        };
+        if call_result != UNASSIGNED {
+            if dest != call_result {
+                rrr(inout out, ORR_REG, dest, ZERO, call_result);
+            }
+        } else if checked {
+            emit_checked(inout out, in r, dest, lhs, rhs, overflow_live);
+        } else if atomic {
+            emit_atomic(inout out, in r, dest, lhs, rhs, third);
+        } else if r.op == OVERFLOW_FLAG {
+            let cc = overflow_cc.unwrap_or(EQ);
+            push32(inout out, CSET | sh(cc ^ 1, CONDITION_SHIFT) | dest);
+        } else if is_symbol(r.op) {
+            // Function pointers and data addresses use the same instructions.
+            // Keep their relocation namespaces distinct even for local symbols.
+            let function = r.op == FUNCTION_GOT;
+            relocations.push(out.len());
+            relocations.push(
+                if function {
+                    ARM64_FUNCTION_GOT_PAGE
+                } else {
+                    ARM64_GOT_PAGE
+                }
+            );
+            relocations.push(r.left);
+            push32(inout out, ADRP | dest);
+            relocations.push(out.len());
+            relocations.push(
+                if function {
+                    ARM64_FUNCTION_GOT_LOAD
+                } else {
+                    ARM64_GOT_LOAD
+                }
+            );
+            relocations.push(r.left);
+            memory(inout out, true, QWORD_BITS, dest, dest, 0);
+        } else if incoming_stack_argument(r.op) {
+            if spill_mode {
+                // The spill count is known after allocation. Patch this base
+                // to the caller's SP together with the prologue and epilogues.
+                incoming_bases.push(out.len());
+                push32(inout out, ADD_IMM | sh(SP, RN_SHIFT) | SECOND_SCRATCH);
+                memory(inout out, true, r.extra, SECOND_SCRATCH, dest, r.left);
+            } else {
+                memory(inout out, true, r.extra, SP, dest, wrapping_add(frame_bytes, r.left));
+            }
+        } else if r.op == STACK_POINTER {
+            push32(inout out, ADD_IMM | sh(SP, RN_SHIFT) | dest);
+        } else if r.op == STACK_ADDRESS || is_stack_load(r.op) {
+            let displacement = wrapping_add(
+                outgoing_bytes,
+                stack_displacement(in frame, in r).unwrap_or(0)
+            );
+            if r.op == STACK_ADDRESS {
+                let encoded = arithmetic_immediate(displacement).unwrap_or(0);
+                push32(inout out, ADD_IMM | encoded | sh(SP, RN_SHIFT) | dest);
+            } else if home != UNASSIGNED {
+                rrr(inout out, ORR_REG, dest, ZERO, home);
+            } else {
+                memory(inout out, true, r.extra, SP, dest, displacement);
+            }
+        } else if index_location != UNASSIGNED {
+            let offset = materialize(inout out, index_location, SPILL_THIRD, frame_bytes);
+            indexed_memory(inout out, true, r.extra, lhs, dest, offset);
+        } else {
+            match flags_for_next {
+                Option::Some(cc) => {
+                    rrr(inout out, CSEL | sh(cc, CONDITION_SHIFT), dest, rhs, third);
+                    flags_for_next = Option::None;
+                },
+                Option::None => emit_instruction(
+                    inout out,
+                    in words,
+                    args,
+                    in r,
+                    dest,
+                    lhs,
+                    rhs,
+                    third
+                ),
+            };
+        }
+        if assigned >= SPILL_BASE {
+            memory(inout out, false, QWORD_BITS, SP, dest, spill_offset(frame_bytes, assigned));
+        }
+    }
+    if labeled {
+        for index in 0..fixups.len() {
+            match fixups.try_get(index) {
+                Option::Some(fixup) => match labels.try_get(fixup.target) {
+                    Option::Some(label) => {
+                        if label.address == NO_VALUE
+                            || label.block != fixup.block
+                            || !patch_branch(inout out, in fixup.branch, label.address)
+                        {
+                            return ChunkSeq::new[u8]();
+                        }
+                    },
+                    Option::None => return ChunkSeq::new[u8](),
+                },
+                Option::None => return ChunkSeq::new[u8](),
+            };
+        }
+        for index in 0..table_fixups.len() {
+            let entry = match table_fixups.try_get(index) {
+                Option::Some(entry) => entry,
+                Option::None => return ChunkSeq::new[u8](),
+            };
+            let label = match labels.try_get(entry.target) {
+                Option::Some(label) => label,
+                Option::None => return ChunkSeq::new[u8](),
+            };
+            if label.address == NO_VALUE || !label.block {
+                return ChunkSeq::new[u8]();
+            }
+            if !patch_table_entry(inout out, in entry, label.address, long_tables) {
+                if !long_tables {
+                    retry = Option::Some(Retry::LongTables);
+                }
+                return ChunkSeq::new[u8]();
+            }
+        }
+    } else if terminal_trap {
+        push32(inout out, TRAP_INSTRUCTION);
+    } else if !terminal_call {
+        let low = materialize(inout out, location(in locations, result), SPILL_LEFT, frame_bytes);
+        let high = materialize(inout out, location(in locations, second), SPILL_RIGHT, frame_bytes);
+        emit_return(
+            inout out,
+            low,
+            high,
+            float_return,
+            adjustment,
+            spill_mode,
+            link_slot,
+            in callee,
+            inout restores
+        );
+    }
+    if spill_mode {
+        let size = align_up(
+            wrapping_add(frame_bytes, wrapping_mul(spills.len(), HOME_WORD_BYTES)),
+            STACK_ALIGNMENT
+        );
+        let adjusted = arithmetic_immediate(size).unwrap_or(0);
+        write_instruction(inout out, 0, stack_adjust(SUB_IMM, adjusted));
+        for index in 0..incoming_bases.len() {
+            let offset = incoming_bases.try_get(index).unwrap_or(0);
+            write_instruction(
+                inout out,
+                offset,
+                ADD_IMM | adjusted | sh(SP, RN_SHIFT) | SECOND_SCRATCH
+            );
+        }
+        for index in 0..restores.len() {
+            match restores.try_get(index) {
+                Option::Some(offset) => write_instruction(
+                    inout out,
+                    offset,
+                    stack_adjust(ADD_IMM, adjusted)
+                ),
+                Option::None => return ChunkSeq::new[u8](),
+            };
+        }
+    }
+    out
+}

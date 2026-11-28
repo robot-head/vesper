@@ -1,0 +1,552 @@
+use @vesper/codegen-freestanding::util::{grow, push16, push32, push64};
+use self::object_bytes::{fits, pad_to, valid_name};
+use self::scalar::{align_up, word_at};
+
+// Object request words:
+//   (architecture, section count, symbol count, relocation count, macOS minos, file flags)
+//   sections: (segment offset, segment length, name offset, name length,
+//              data offset, size, alignment, kind)
+//   symbols: (name offset, name length, section, value, kind)
+//   relocations: (source section, offset, target, Mach-O flags byte)
+// Offsets into the byte slice describe payloads and names. Sections and
+// symbols use zero-based indices. Relocations are grouped by source section.
+// The target is a symbol index for extern relocations and a section index
+// otherwise. Payloads carry any in-place addends.
+// External definitions and undefined symbols are each supplied in name order.
+// Groups can be interleaved, and local symbols retain their relative order.
+const ARM64: u64 = 0;
+const X86_64: u64 = 1;
+const ARCH: u64 = 0;
+const SECTION_COUNT: u64 = 1;
+const SYMBOL_COUNT: u64 = 2;
+const RELOC_COUNT: u64 = 3;
+const MIN_OS: u64 = 4;
+const FILE_FLAGS: u64 = 5;
+const REQUEST_HEADER: u64 = 6;
+const SECTION_WORDS: u64 = 8;
+const SYMBOL_WORDS: u64 = 5;
+const RELOC_WORDS: u64 = 4;
+const SEGMENT_NAME: u64 = 0;
+const SEGMENT_NAME_LEN: u64 = 1;
+const SECTION_NAME: u64 = 2;
+const SECTION_NAME_LEN: u64 = 3;
+const SECTION_DATA: u64 = 4;
+const SECTION_SIZE: u64 = 5;
+const SECTION_ALIGN: u64 = 6;
+const SECTION_KIND: u64 = 7;
+const SYMBOL_NAME: u64 = 0;
+const SYMBOL_NAME_LEN: u64 = 1;
+const SYMBOL_SECTION: u64 = 2;
+const SYMBOL_VALUE: u64 = 3;
+const SYMBOL_KIND: u64 = 4;
+const RELOC_SECTION: u64 = 0;
+const RELOC_OFFSET: u64 = 1;
+const RELOC_TARGET: u64 = 2;
+const RELOC_FLAGS: u64 = 3;
+const REGULAR: u64 = 0;
+const CODE: u64 = 1;
+const BSS: u64 = 2;
+const CSTRING: u64 = 3;
+const LOCAL: u64 = 0;
+const EXPORT: u64 = 1;
+const HIDDEN: u64 = 2;
+const UNDEFINED: u64 = 3;
+const SYMBOL_GROUPS: u64 = 3;
+const NO_SECTION: u64 = 0xffffffffffffffff;
+
+const MH_MAGIC_64: u32 = 0xfeedfacf;
+const CPU_ARM64: u32 = 0x0100000c;
+const CPU_X86_64: u32 = 0x01000007;
+const CPU_ARM64_ALL: u32 = 0;
+const CPU_X86_64_ALL: u32 = 3;
+const MH_OBJECT: u32 = 1;
+const MH_SUBSECTIONS_VIA_SYMBOLS: u64 = 0x2000;
+const LC_SEGMENT_64: u32 = 0x19;
+const LC_SYMTAB: u32 = 2;
+const LC_DYSYMTAB: u32 = 0xb;
+const LC_BUILD_VERSION: u32 = 0x32;
+const PLATFORM_MACOS: u32 = 1;
+const MACH_HEADER: u64 = 32;
+const SEGMENT_HEADER: u64 = 72;
+const SECTION_HEADER: u64 = 80;
+const BUILD_VERSION: u32 = 24;
+const SYMTAB: u32 = 24;
+const DYSYMTAB: u32 = 80;
+const DYSYMTAB_UNUSED: u64 = 48;
+const REQUIRED_COMMANDS: u32 = 3;
+const FIXED_NAME_LEN: u64 = 16;
+const FILE_ALIGNMENT: u64 = 8;
+const MAX_SECTION_ALIGNMENT: u64 = 0x8000;
+const MAX_SECTION_COUNT: u64 = 0xff;
+const MAX_FILE_OFFSET: u64 = 0xffffffff;
+const MAX_RELOC_OFFSET: u64 = 0x7fffffff;
+const MAX_RELOC_TARGET: u64 = 0xffffff;
+const VM_PROT_ALL: u32 = 7;
+const N_SECT: u8 = 0xe;
+const N_EXT: u8 = 1;
+const N_PEXT: u8 = 0x10;
+const S_INSTRUCTIONS: u32 = 0x80000400;
+const S_ZEROFILL: u32 = 1;
+const S_CSTRING: u32 = 2;
+const RELOC_BYTES: u64 = 8;
+const R_PCREL: u64 = 1;
+const R_LENGTH_SHIFT: u32 = 1;
+const R_LENGTH_MASK: u64 = 3;
+const R_EXTERN: u64 = 8;
+const R_TYPE_SHIFT: u32 = 4;
+const R_FLAGS_SHIFT: u32 = 24;
+const R_FLAGS_MAX: u64 = 0xff;
+const R_WORD: u64 = 2;
+const R_POINTER: u64 = 3;
+const R_UNSIGNED: u64 = 0;
+const ARM_BRANCH26: u64 = 2;
+const ARM_PAGE21: u64 = 3;
+const ARM_PAGEOFF12: u64 = 4;
+const ARM_GOT_PAGE21: u64 = 5;
+const ARM_GOT_PAGEOFF12: u64 = 6;
+const X86_SIGNED: u64 = 1;
+const X86_BRANCH: u64 = 2;
+const X86_GOT_LOAD: u64 = 3;
+const X86_GOT: u64 = 4;
+const X86_SIGNED_1: u64 = 6;
+const X86_SIGNED_2: u64 = 7;
+const X86_SIGNED_4: u64 = 8;
+
+copy struct Section {
+    address: u64,
+    file_offset: u64,
+    size: u64,
+    alignment: u64,
+    kind: u64,
+}
+
+copy struct Relocations {
+    offset: u64,
+    count: u64,
+}
+
+fn field(in words: Slice[u64], at: u64, index: u64) -> u64 {
+    word_at(in words, wrapping_add(at, index))
+}
+
+fn name_after(in bytes: Slice[u8], left: u64, left_len: u64, right: u64, right_len: u64) -> bool {
+    let common = if left_len < right_len {
+        left_len
+    } else {
+        right_len
+    };
+    for index in 0..common {
+        let a = bytes.try_get(wrapping_add(left, index)).unwrap_or(0);
+        let b = bytes.try_get(wrapping_add(right, index)).unwrap_or(0);
+        if a != b {
+            return a > b;
+        }
+    }
+    left_len > right_len
+}
+
+fn append_fixed_name(inout out: ChunkSeq[u8], in bytes: Slice[u8], offset: u64, size: u64) {
+    let end = wrapping_add(out.len(), FIXED_NAME_LEN);
+    let name = bytes[offset..wrapping_add(offset, size)];
+    out.extend(in name);
+    pad_to(inout out, end);
+}
+
+fn relocation_supported(arch: u64, flags: u64, length: u64) -> bool {
+    let kind = wrapping_shr_u64(flags, R_TYPE_SHIFT);
+    let relative = (flags & R_PCREL) != 0;
+    if kind == R_UNSIGNED {
+        return !relative && (length == R_WORD || length == R_POINTER);
+    }
+    if length != R_WORD {
+        return false;
+    }
+    if arch == ARM64 {
+        match kind {
+            ARM_BRANCH26 | ARM_PAGE21 | ARM_GOT_PAGE21 => relative,
+            ARM_PAGEOFF12 | ARM_GOT_PAGEOFF12 => !relative,
+            _ => false,
+        }
+    } else {
+        relative && match kind {
+            X86_SIGNED
+                | X86_BRANCH
+                | X86_GOT_LOAD
+                | X86_GOT
+                | X86_SIGNED_1
+                | X86_SIGNED_2
+                | X86_SIGNED_4 => true,
+            _ => false,
+        }
+    }
+}
+
+fn symbol_group(kind: u64) -> u64 {
+    if kind == LOCAL {
+        0
+    } else if kind == UNDEFINED {
+        2
+    } else {
+        1
+    }
+}
+
+pub fn write_macho(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
+    let empty = ChunkSeq::new[u8]();
+    if words.len() < REQUEST_HEADER {
+        return empty;
+    }
+    let arch = word_at(in words, ARCH);
+    let section_count = word_at(in words, SECTION_COUNT);
+    let symbol_count = word_at(in words, SYMBOL_COUNT);
+    let reloc_count = word_at(in words, RELOC_COUNT);
+    let minos = word_at(in words, MIN_OS);
+    let flags = word_at(in words, FILE_FLAGS);
+    if (arch != ARM64 && arch != X86_64)
+        || section_count == 0
+        || section_count > MAX_SECTION_COUNT
+        || symbol_count > MAX_RELOC_TARGET
+        || reloc_count > MAX_FILE_OFFSET / RELOC_BYTES
+        || minos > MAX_FILE_OFFSET
+        || (flags & ~MH_SUBSECTIONS_VIA_SYMBOLS) != 0
+    {
+        return empty;
+    }
+    let symbols_at = wrapping_add(REQUEST_HEADER, wrapping_mul(section_count, SECTION_WORDS));
+    let relocs_at = wrapping_add(symbols_at, wrapping_mul(symbol_count, SYMBOL_WORDS));
+    if wrapping_add(relocs_at, wrapping_mul(reloc_count, RELOC_WORDS)) != words.len() {
+        return empty;
+    }
+
+    let segment_bytes = wrapping_add(SEGMENT_HEADER, wrapping_mul(section_count, SECTION_HEADER));
+    let version_bytes = if minos == 0 { 0 } else { BUILD_VERSION };
+    let command_bytes = wrapping_add(
+        segment_bytes,
+        widen_u64(wrapping_add(wrapping_add(SYMTAB, DYSYMTAB), version_bytes))
+    );
+    let file_start = wrapping_add(MACH_HEADER, command_bytes);
+    let mut sections = ChunkSeq::with_capacity[Section](section_count);
+    let mut address: u64 = 0;
+    for index in 0..section_count {
+        let at = wrapping_add(REQUEST_HEADER, wrapping_mul(index, SECTION_WORDS));
+        let alignment = field(in words, at, SECTION_ALIGN);
+        let size = field(in words, at, SECTION_SIZE);
+        let kind = field(in words, at, SECTION_KIND);
+        let segment_len = field(in words, at, SEGMENT_NAME_LEN);
+        let name_len = field(in words, at, SECTION_NAME_LEN);
+        let data = field(in words, at, SECTION_DATA);
+        if alignment == 0
+            || alignment > MAX_SECTION_ALIGNMENT
+            || (alignment & wrapping_sub(alignment, 1)) != 0
+            || size > MAX_FILE_OFFSET
+            || kind > CSTRING
+            || segment_len > FIXED_NAME_LEN
+            || name_len > FIXED_NAME_LEN
+            || !valid_name(in bytes, field(in words, at, SEGMENT_NAME), segment_len)
+            || !valid_name(in bytes, field(in words, at, SECTION_NAME), name_len)
+            || (kind != BSS && !fits(data, size, bytes.len()))
+        {
+            return empty;
+        }
+        if kind != BSS {
+            address = align_up(address, alignment);
+        }
+        let section = Section {
+            address: address,
+            file_offset: if kind == BSS {
+                0
+            } else {
+                wrapping_add(file_start, address)
+            },
+            size: size,
+            alignment: alignment,
+            kind: kind,
+        };
+        sections.push(section);
+        if kind != BSS {
+            address = wrapping_add(address, size);
+        }
+    }
+    let file_bytes = address;
+    for index in 0..section_count {
+        let mut section = sections
+            .try_get(index)
+            .unwrap_or(Section {
+                address: 0,
+                file_offset: 0,
+                size: 0,
+                alignment: 1,
+                kind: REGULAR
+            });
+        if section.kind == BSS {
+            address = align_up(address, section.alignment);
+            section.address = address;
+            address = wrapping_add(address, section.size);
+            let _ = sections.try_set(index, section);
+        }
+    }
+    let reloc_start = align_up(wrapping_add(file_start, file_bytes), FILE_ALIGNMENT);
+    let symtab_start = wrapping_add(reloc_start, wrapping_mul(reloc_count, RELOC_BYTES));
+    if symtab_start > MAX_FILE_OFFSET {
+        return empty;
+    }
+
+    let mut strings = ChunkSeq::new[u8]();
+    strings.push(0);
+    let mut symbols = ChunkSeq::new[u8]();
+    let mut symbol_indices = ChunkSeq::with_capacity[u64](symbol_count);
+    symbol_indices.resize(symbol_count, 0);
+    let mut local_count: u64 = 0;
+    let mut external_count: u64 = 0;
+    let mut symbol_index: u64 = 0;
+    for group in 0..SYMBOL_GROUPS {
+        let mut previous: u64 = 0;
+        let mut previous_len: u64 = 0;
+        for index in 0..symbol_count {
+            let at = wrapping_add(symbols_at, wrapping_mul(index, SYMBOL_WORDS));
+            let kind = field(in words, at, SYMBOL_KIND);
+            if kind > UNDEFINED {
+                return empty;
+            }
+            if symbol_group(kind) != group {
+                continue;
+            }
+            let name = field(in words, at, SYMBOL_NAME);
+            let name_len = field(in words, at, SYMBOL_NAME_LEN);
+            let section_id = field(in words, at, SYMBOL_SECTION);
+            let value = field(in words, at, SYMBOL_VALUE);
+            if !valid_name(in bytes, name, name_len)
+                || !fits(strings.len(), name_len, MAX_FILE_OFFSET)
+                || (kind != LOCAL && name_after(in bytes, previous, previous_len, name, name_len))
+            {
+                return empty;
+            }
+            previous = name;
+            previous_len = name_len;
+            let mut flags: u8 = N_EXT;
+            let mut ordinal: u8 = 0;
+            let mut address: u64 = 0;
+            if kind == UNDEFINED {
+                if section_id != NO_SECTION || value != 0 {
+                    return empty;
+                }
+            } else {
+                let section = match sections.try_get(section_id) {
+                    Option::Some(section) => section,
+                    Option::None => return empty,
+                };
+                if value > section.size {
+                    return empty;
+                }
+                flags = if kind == LOCAL {
+                    N_SECT
+                } else if kind == HIDDEN {
+                    N_SECT | N_EXT | N_PEXT
+                } else if kind == EXPORT {
+                    N_SECT | N_EXT
+                } else {
+                    0
+                };
+                ordinal = wrapping_u8(wrapping_add(section_id, 1));
+                address = wrapping_add(section.address, value);
+                if kind == LOCAL {
+                    local_count = wrapping_add(local_count, 1);
+                } else {
+                    external_count = wrapping_add(external_count, 1);
+                }
+            }
+            let _ = symbol_indices.try_set(index, symbol_index);
+            symbol_index = wrapping_add(symbol_index, 1);
+            push32(inout symbols, wrapping_u32(strings.len()));
+            symbols.push(flags);
+            symbols.push(ordinal);
+            push16(inout symbols, 0);
+            push64(inout symbols, address);
+            let slice = bytes[name..wrapping_add(name, name_len)];
+            strings.extend(in slice);
+            strings.push(0);
+        }
+    }
+    let padded_strings = align_up(strings.len(), FILE_ALIGNMENT);
+    pad_to(inout strings, padded_strings);
+    let strings_at = wrapping_add(symtab_start, symbols.len());
+    if !fits(strings_at, strings.len(), MAX_FILE_OFFSET) {
+        return empty;
+    }
+
+    let mut relocations = ChunkSeq::new[u8]();
+    let mut ranges = ChunkSeq::with_capacity[Relocations](section_count);
+    let mut next_reloc: u64 = 0;
+    for index in 0..section_count {
+        let start = relocations.len();
+        let first = next_reloc;
+        let section = sections
+            .try_get(index)
+            .unwrap_or(Section {
+                address: 0,
+                file_offset: 0,
+                size: 0,
+                alignment: 1,
+                kind: REGULAR
+            });
+        for ordinal in first..reloc_count {
+            let at = wrapping_add(relocs_at, wrapping_mul(ordinal, RELOC_WORDS));
+            if field(in words, at, RELOC_SECTION) != index {
+                break;
+            }
+            let offset = field(in words, at, RELOC_OFFSET);
+            let flags = field(in words, at, RELOC_FLAGS);
+            let length = wrapping_shr_u64(flags, R_LENGTH_SHIFT) & R_LENGTH_MASK;
+            let width = wrapping_shl_u64(1, wrapping_u32(length));
+            let target = field(in words, at, RELOC_TARGET);
+            let external = (flags & R_EXTERN) != 0;
+            let symbol = if external {
+                if target >= symbol_count {
+                    return empty;
+                }
+                symbol_indices.try_get(target).unwrap_or(0)
+            } else {
+                if target >= section_count {
+                    return empty;
+                }
+                wrapping_add(target, 1)
+            };
+            if section.kind == BSS
+                || offset > MAX_RELOC_OFFSET
+                || flags > R_FLAGS_MAX
+                || !fits(offset, width, section.size)
+                || !relocation_supported(arch, flags, length)
+            {
+                return empty;
+            }
+            push32(inout relocations, wrapping_u32(offset));
+            push32(
+                inout relocations,
+                wrapping_u32(symbol | wrapping_shl_u64(flags, R_FLAGS_SHIFT))
+            );
+            next_reloc = wrapping_add(next_reloc, 1);
+        }
+        let count = wrapping_sub(next_reloc, first);
+        ranges.push(Relocations {
+            offset: if count == 0 {
+                0
+            } else {
+                wrapping_add(reloc_start, start)
+            },
+            count: count,
+        });
+    }
+    if next_reloc != reloc_count {
+        return empty;
+    }
+
+    let mut out = ChunkSeq::new[u8]();
+    let (cpu, subtype) = if arch == ARM64 {
+        (CPU_ARM64, CPU_ARM64_ALL)
+    } else {
+        (CPU_X86_64, CPU_X86_64_ALL)
+    };
+    push32(inout out, MH_MAGIC_64);
+    push32(inout out, cpu);
+    push32(inout out, subtype);
+    push32(inout out, MH_OBJECT);
+    push32(
+        inout out,
+        if minos == 0 {
+            REQUIRED_COMMANDS
+        } else {
+            REQUIRED_COMMANDS + 1
+        }
+    );
+    push32(inout out, wrapping_u32(command_bytes));
+    push32(inout out, wrapping_u32(flags));
+    push32(inout out, 0);
+    push32(inout out, LC_SEGMENT_64);
+    push32(inout out, wrapping_u32(segment_bytes));
+    let _ = grow(inout out, FIXED_NAME_LEN);
+    push64(inout out, 0);
+    push64(inout out, address);
+    push64(inout out, file_start);
+    push64(inout out, file_bytes);
+    push32(inout out, VM_PROT_ALL);
+    push32(inout out, VM_PROT_ALL);
+    push32(inout out, wrapping_u32(section_count));
+    push32(inout out, 0);
+    for index in 0..section_count {
+        let at = wrapping_add(REQUEST_HEADER, wrapping_mul(index, SECTION_WORDS));
+        let section = match sections.try_get(index) {
+            Option::Some(section) => section,
+            Option::None => return empty,
+        };
+        let range = ranges.try_get(index).unwrap_or(Relocations { offset: 0, count: 0 });
+        append_fixed_name(
+            inout out,
+            in bytes,
+            field(in words, at, SECTION_NAME),
+            field(in words, at, SECTION_NAME_LEN)
+        );
+        append_fixed_name(
+            inout out,
+            in bytes,
+            field(in words, at, SEGMENT_NAME),
+            field(in words, at, SEGMENT_NAME_LEN)
+        );
+        push64(inout out, section.address);
+        push64(inout out, section.size);
+        push32(inout out, wrapping_u32(section.file_offset));
+        push32(inout out, trailing_zeros_u64(section.alignment));
+        push32(inout out, wrapping_u32(range.offset));
+        push32(inout out, wrapping_u32(range.count));
+        push32(
+            inout out,
+            match section.kind {
+                CODE => S_INSTRUCTIONS,
+                BSS => S_ZEROFILL,
+                CSTRING => S_CSTRING,
+                _ => 0,
+            }
+        );
+        push32(inout out, 0);
+        push64(inout out, 0);
+    }
+    if minos != 0 {
+        push32(inout out, LC_BUILD_VERSION);
+        push32(inout out, BUILD_VERSION);
+        push32(inout out, PLATFORM_MACOS);
+        push32(inout out, wrapping_u32(minos));
+        push64(inout out, 0);
+    }
+    push32(inout out, LC_SYMTAB);
+    push32(inout out, SYMTAB);
+    push32(inout out, wrapping_u32(symtab_start));
+    push32(inout out, wrapping_u32(symbol_count));
+    push32(inout out, wrapping_u32(strings_at));
+    push32(inout out, wrapping_u32(strings.len()));
+    push32(inout out, LC_DYSYMTAB);
+    push32(inout out, DYSYMTAB);
+    push32(inout out, 0);
+    push32(inout out, wrapping_u32(local_count));
+    push32(inout out, wrapping_u32(local_count));
+    push32(inout out, wrapping_u32(external_count));
+    let defined = wrapping_add(local_count, external_count);
+    push32(inout out, wrapping_u32(defined));
+    push32(inout out, wrapping_u32(wrapping_sub(symbol_count, defined)));
+    let _ = grow(inout out, DYSYMTAB_UNUSED);
+    for index in 0..section_count {
+        let at = wrapping_add(REQUEST_HEADER, wrapping_mul(index, SECTION_WORDS));
+        match sections.try_get(index) {
+            Option::Some(section) => if section.kind != BSS {
+                pad_to(inout out, section.file_offset);
+                let offset = field(in words, at, SECTION_DATA);
+                let data = bytes[offset..wrapping_add(offset, section.size)];
+                out.extend(in data);
+            },
+            Option::None => return empty,
+        };
+    }
+    pad_to(inout out, reloc_start);
+    out.extend(in relocations.as_slice());
+    out.extend(in symbols.as_slice());
+    out.extend(in strings.as_slice());
+    out
+}

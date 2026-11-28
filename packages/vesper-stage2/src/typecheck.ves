@@ -17,6 +17,7 @@ use @vesper/check-data::world::{
 use @vesper/place-ir::codes::{Lit, Pat};
 use @vesper/wasm-backend::ir::{CallRow, Pair};
 use @vesper/place-ir-lower::ast::{Ast, Ef, Eop, Ex, FnR, Hd, Pm, Pt};
+use self::float_math::{FloatMath, NEAREST_PREFIX, SATURATING_PREFIX, math_op};
 use self::ffi::{OPEN_TYPE};
 use self::facts::{loop_breaks, loop_never_breaks, loop_plain_breaks};
 use self::traits::{
@@ -682,17 +683,13 @@ fn conv_prefix_len(in names: Names, sym: u32) -> u64 {
     } else if names.has_prefix(sym, in "wrapping_".as_bytes()) {
         9
     } else if names.has_prefix(sym, in NEAREST_PREFIX.as_bytes()) {
-        NEAREST_PREFIX_LEN
+        NEAREST_PREFIX.len()
+    } else if names.has_prefix(sym, in SATURATING_PREFIX.as_bytes()) {
+        SATURATING_PREFIX.len()
     } else {
         0
     }
 }
-
-// The float conversions and bit reinterpretations (#2375): `nearest_<f>`
-// rounds to the float kind `f`, `to_bits_<f>` gives `f`'s bits and
-// `from_bits_<f>` reads them.
-const NEAREST_PREFIX: Str = "nearest_";
-const NEAREST_PREFIX_LEN: u64 = 8;
 
 // The operand type of `to_bits_<f>` (`f`) or `from_bits_<f>` (`f`'s bits),
 // or `NONE32`: an unsuffixed literal operand takes it (`bits_call`).
@@ -729,8 +726,8 @@ fn bits_target_type(inout tc: Tc, sym: u32) -> u32 {
     tc.types.named0(ksym)
 }
 
-/// Returns the target scalar type for `widen_*`, `narrow_*`, or `wrapping_<int_kind>`,
-/// or `NONE32` if `sym` is not an integer-width conversion builtin.
+/// Returns the target scalar type of a numeric conversion or bit
+/// reinterpretation builtin, or `NONE32` for other names.
 fn conv_target_type(inout tc: Tc, sym: u32) -> u32 {
     let bits_ty = bits_target_type(inout tc, sym);
     if bits_ty != NONE32 {
@@ -1457,6 +1454,49 @@ fn constrain_literals(inout tc: Tc, in a: Ast, eid: u64, target: u32) {
     }
 }
 
+// An annotated `let` whose initializer joins branches (`if`, `match` or a
+// block tail) records the annotation as the join's type once every branch
+// settled to it (`refine_annotation`), so lowering sees one type at the
+// join (#2209). Returns whether `eid` now has `target`.
+fn is_join(in a: Ast, eid: u64) -> bool {
+    match a.exs.try_get(eid) {
+        Option::Some(e) => e.kind == X_IF || e.kind == X_MATCH || e.kind == X_BLOCK,
+        Option::None => false,
+    }
+}
+
+fn settle_join(inout tc: Tc, in a: Ast, eid: u64, target: u32) -> bool {
+    let e = match a.exs.try_get(eid) {
+        Option::Some(v) => v,
+        Option::None => return false,
+    };
+    let found = span_ty(in tc, e.s0, e.s1);
+    if found == target {
+        return true;
+    }
+    let settled = if e.kind == X_BLOCK && e.b != NONE64 {
+        settle_join(inout tc, in a, e.b, target)
+    } else if e.kind == X_IF && e.c != NONE64 {
+        let then_settled = settle_join(inout tc, in a, e.b, target);
+        settle_join(inout tc, in a, e.c, target) && then_settled
+    } else if e.kind == X_MATCH && e.n > 0 {
+        let mut all = true;
+        for i in 0..e.n {
+            let body = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
+            if !settle_join(inout tc, in a, body, target) {
+                all = false;
+            }
+        }
+        all
+    } else {
+        found == tc.never_ty
+    };
+    if settled && found != tc.never_ty {
+        retype_span(inout tc, e.s0, e.s1, target);
+    }
+    settled
+}
+
 // The type recorded last at `s0..s1`, or NONE32.
 fn span_ty(in tc: Tc, s0: u64, s1: u64) -> u32 {
     let mut i = tc.spans.len();
@@ -1545,25 +1585,77 @@ fn is_int_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
     }
 }
 
-// Whether `eid` is an integer literal tree or a (negated) float literal:
+// Whether `eid` is an integer or float literal tree:
 // on the left of a binary operator it takes the right operand's type, so
 // `0.5 == x` compares as `x`'s float kind.
 fn is_num_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
-    if is_int_lit_expr(in tc, in a, eid) {
-        return true;
+    is_int_lit_expr(in tc, in a, eid) || is_float_lit_expr(in tc, in a, eid)
+}
+
+fn conversion_operand_type(inout tc: Tc, in a: Ast, name: u32, argument: u64) -> u32 {
+    if is_op(in tc, name, in "widen_f32") && is_int_lit_expr(in tc, in a, argument) {
+        return tc.types.named0(tc.world.k.i16_);
     }
+    if is_op(in tc, name, in "widen_f64") && is_int_lit_expr(in tc, in a, argument) {
+        return tc.types.named0(tc.world.k.i32_);
+    }
+    bits_operand_type(inout tc, name)
+}
+
+fn is_float_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
     match a.exs.try_get(eid) {
         Option::Some(ex) => {
+            let op = n32(ex.a);
             if ex.kind == X_LITERAL {
                 ex.a == Lit::Float
-            } else if ex.kind == X_UNARY && is_op(in tc, n32(ex.a), in "-") {
-                is_num_lit_expr(in tc, in a, ex.b)
+            } else if ex.kind == X_UNARY && is_op(in tc, op, in "-") {
+                is_float_lit_expr(in tc, in a, ex.b)
             } else {
-                false
+                ex.kind == X_BINARY
+                    && (is_op(in tc, op, in "+")
+                        || is_op(in tc, op, in "-")
+                        || is_op(in tc, op, in "*")
+                        || is_op(in tc, op, in "/")
+                        || is_op(in tc, op, in "%"))
+                    && is_float_lit_expr(in tc, in a, ex.b)
+                    && is_float_lit_expr(in tc, in a, ex.c)
             }
         },
         Option::None => false,
     }
+}
+
+fn is_float_type(in tc: Tc, ty: u32) -> bool {
+    let name = tc.types.name(ty);
+    tc.types.kind(ty) == TyKind::Named && (name == tc.world.k.f32_ || name == tc.world.k.f64_)
+}
+
+fn check_math_call(inout tc: Tc, in a: Ast, e: Ex, callee: Ex, expected: u32) -> u32 {
+    let mut ty = expected;
+    let mut typed = e.n;
+    if !is_float_type(in tc, expected) {
+        ty = tc.f64_ty;
+        // A typed operand supplies the common width even if literals precede it.
+        for i in 0..e.n {
+            let argument = call_arg_expr(in a, e, i);
+            if !is_float_lit_expr(in tc, in a, argument) {
+                let found = check_expr(inout tc, in a, argument, tc.infer_ty);
+                if is_float_type(in tc, found) {
+                    ty = found;
+                }
+                typed = i;
+                break;
+            }
+        }
+    }
+    for i in 0..e.n {
+        if i != typed {
+            let _ = check_expr(inout tc, in a, call_arg_expr(in a, e, i), ty);
+        }
+    }
+    record_span(inout tc, callee.s0, callee.s1, ty);
+    record_span(inout tc, e.s0, e.s1, ty);
+    ty
 }
 
 fn check_sugar_try(inout tc: Tc, in a: Ast, e: Ex, expected: u32) -> u32 {
@@ -1807,7 +1899,13 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                 let float = tc.types.kind(et) == TyKind::Named
                     && (tc.types.name(et) == tc.world.k.f64_
                         || tc.types.name(et) == tc.world.k.f32_);
-                if float || tc.types.kind(et) == TyKind::Tuple {
+                // A payload-free constructor (`Option::None`) takes the
+                // element's generic enum type; it holds no literal to settle,
+                // and the native backend needs its payload cells (#2209).
+                let bare_ctor = a.ex(sub).kind == X_NAME
+                    && tc.types.kind(et) == TyKind::Named
+                    && tc.types.arity(et) > 0;
+                if float || tc.types.kind(et) == TyKind::Tuple || bare_ctor {
                     et
                 } else {
                     tc.infer_ty
@@ -2025,6 +2123,10 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             }
             let vt = check_owned_expr(inout tc, in a, val, exp);
             if is_let != 0 {
+                if tc.types.kind(exp) != TyKind::Infer && vt != exp && is_join(in a, val) {
+                    constrain_literals(inout tc, in a, val, exp);
+                    let _ = settle_join(inout tc, in a, val, exp);
+                }
                 // An annotated binding has its annotation's type
                 // (`refine_annotation`), whatever its literals settled to.
                 let bound = if tc.types.kind(exp) == TyKind::Infer {
@@ -2331,6 +2433,9 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                             if local != NONE32 && tc.types.kind(local) == TyKind::Fn {
                                 return check_value_call(inout tc, in a, local, e);
                             }
+                            if math_op(in tc.names, cname) != FloatMath::None {
+                                return check_math_call(inout tc, in a, e, ce, expected);
+                            }
                             if authored && lookup_var(in tc, cname) == NONE32 {
                                 match find_eop(in a, inout tc.names, cname) {
                                     Option::Some((ef, op)) => {
@@ -2414,9 +2519,14 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                         }
                                     }
                                     if adt == NONE32 && !same_int {
-                                        let bits_pt = bits_operand_type(inout tc, cname);
-                                        if bits_pt != NONE32 {
-                                            pt = bits_pt;
+                                        let operand_ty = conversion_operand_type(
+                                            inout tc,
+                                            in a,
+                                            cname,
+                                            av
+                                        );
+                                        if operand_ty != NONE32 {
+                                            pt = operand_ty;
                                         }
                                     }
                                     // A capacity is a `u64` (`SeqOp::WithCapacity`).

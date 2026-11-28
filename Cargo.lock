@@ -6854,6 +6854,7 @@ version = "0.1.0"
 name = "vesper-stage2-gate"
 version = "0.1.0"
 dependencies = [
+ "object 0.37.3",
  "wasmtime",
  "wasmtime-wasi",
 ]

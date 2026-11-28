@@ -1,0 +1,4857 @@
+use @vesper/check-data::types::{TyKind, TyMode, TyPass};
+use @vesper/check-data::util::{add, inc, n32, u32_at, w};
+use @vesper/check-data::world::{Adt, Variant, set_by_symbol};
+use @vesper/hybrid-native-backend::elf::{x86_text_object};
+use @vesper/hybrid-native-backend::scalar::{
+    ADD, AND, BLOCK_LABEL, BLOCK_RETURN, BRANCH_BLOCK, CALL, CALL_ARGUMENT, CALL_FLOAT, COMPARE,
+    COMPARE_BYTE, COMPARE_DWORD, COMPARE_IMMEDIATE, COMPARE_WORD, CONSTANT, EQUAL, FLOAT_ABS,
+    FLOAT_ADD, FLOAT_ARGUMENT, FLOAT_COMPARE32, FLOAT_COMPARE64, FLOAT_CONSTANT, FLOAT_DIV,
+    FLOAT_MUL, FLOAT_NEG, FLOAT_RETURN, FLOAT_RETURN_LAYOUT, FLOAT_SQRT, FLOAT_STACK_LOAD,
+    FLOAT_STACK_STORE32, FLOAT_STACK_STORE64, FLOAT_SUB, HEADER_WORDS, JUMP_LABEL, MAX_ARGUMENTS,
+    MUL, NEG, NOT_EQUAL, NO_VALUE, NOT, OR, RECORD_WORDS, RETURN_VALUE, Record, SAR, SAR_REGISTER,
+    SHL, SHL_REGISTER, SHR, SHR_REGISTER, SIGNED_DIV, SIGNED_GREATER, SIGNED_GREATER_EQUAL,
+    SIGNED_LESS, SIGNED_LESS_EQUAL, SIGNED_REM, SIGN_EXTEND, STACK_LOAD, STACK_SLOT,
+    STACK_STORE_QWORD, SUB, TRUNCATE, UNSIGNED_DIV, UNSIGNED_GREATER, UNSIGNED_GREATER_EQUAL,
+    UNSIGNED_LESS, UNSIGNED_LESS_EQUAL, UNSIGNED_REM, XMM_ARGUMENTS, XOR, encode_block, read_record
+};
+use @vesper/hybrid-native-backend::scalar::{
+    BITS_TO_FLOAT, FLOAT_DEMOTE, FLOAT_MAX, FLOAT_MIN, FLOAT_PROMOTE, FLOAT_TO_BITS,
+    FLOAT_TO_SIGNED_SAT, FLOAT_TO_UNSIGNED_SAT, SIGNED_TO_FLOAT, UNSIGNED_TO_FLOAT
+};
+use @vesper/hybrid-native-backend::x86_64::{
+    ALL_REGISTER_BITS, BYTE_BITS, DWORD_BITS, FLOAT_EQUAL, FLOAT_GREATER, FLOAT_GREATER_EQUAL,
+    FLOAT_LESS, FLOAT_LESS_EQUAL, FLOAT_NOT_EQUAL, QWORD_BITS, WORD_BITS
+};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, Lit, Op, Pat, Tag, Term};
+use @vesper/place-ir-lower::ast::{FnR};
+use @vesper/place-ir-lower::lower::{L};
+use @vesper/hybrid-native-backend::scalar::{
+    CALL_VOID, DISP32_MASK, FLOAT_LOAD, FLOAT_STORE32, FLOAT_STORE64, LOAD, STACK_ADDRESS,
+    STORE_QWORD, ROTATE_LEFT_REGISTER, ROTATE_RIGHT, ROTATE_RIGHT_REGISTER
+};
+use @vesper/hybrid-native-backend::scalar::{
+    COMPARE_BYTE_IMMEDIATE, COMPARE_DWORD_IMMEDIATE, COMPARE_WORD_IMMEDIATE
+};
+use @vesper/stage2::float_math::{
+    BINARY_FLOAT_ARGUMENTS, FUSED_FLOAT_ARGUMENTS, FloatMath, NEAREST_PREFIX, SATURATING_PREFIX,
+    UNARY_FLOAT_ARGUMENTS, math_arity, math_op
+};
+
+const LITERAL_WORDS: u64 = 3;
+const BINARY_WORDS: u64 = 3;
+const UNARY_WORDS: u64 = 2;
+const EMPTY_TUPLE_WORDS: u64 = 1;
+const DATA_FIELD_COUNT: u64 = 1;
+const DATA_HEADER_WORDS: u64 = 2;
+const DATA_FIELD_WORDS: u64 = 2;
+const PROJECT_WORDS: u64 = 2;
+const PROJECT_MEMBER: u64 = 1;
+const ASCII_ZERO: u8 = 48;
+const DECIMAL_BASE: u64 = 10;
+const PLAIN_READ_WORDS: u64 = 4;
+const LITERAL_LOW: u64 = 1;
+const LITERAL_HIGH: u64 = 2;
+const BINARY_LHS: u64 = 1;
+const BINARY_RHS: u64 = 2;
+const UNARY_VALUE: u64 = 1;
+const READ_PATH: u64 = 1;
+const READ_PASS: u64 = 2;
+const READ_PROJECTIONS: u64 = 3;
+const BIND_PATTERN: u64 = 1;
+const PATTERN_HEADER_WORDS: u64 = 3;
+const CONSTRUCTOR_PATTERN_NAME: u64 = PATTERN_HEADER_WORDS;
+const CONSTRUCTOR_PATTERN_COUNT: u64 = 5;
+const CONSTRUCTOR_PATTERN_FIELDS: u64 = 6;
+const BIND_NAME: u64 = BIND_PATTERN + PATTERN_HEADER_WORDS;
+const ENUM_TAG_CELLS: u64 = 1;
+const PATH_SEPARATOR: u8 = 58;
+const PATH_SEPARATOR_BYTES: u64 = 2;
+const WRITE_WORDS: u64 = 3;
+const WRITE_OPERATOR: u64 = 1;
+const WRITE_VALUE: u64 = 2;
+const EXIT_WORDS: u64 = 2;
+const EXIT_OWNER: u64 = 1;
+const RANGE_CURSOR_READ_DISTANCE: u64 = 2;
+const RANGE_CURSOR_PREFIX: Str = "$loop";
+const BLOCK_HEADER_WORDS: u64 = 4;
+const BLOCK_INCOMING_COUNT: u64 = 1;
+const BLOCK_INCOMING_WORDS: u64 = 2;
+const BRANCH_WORDS: u64 = 3;
+const BRANCH_TRUE: u64 = 1;
+const BRANCH_FALSE: u64 = 2;
+const MATCH_ARM_COUNT: u64 = 1;
+const MATCH_FIRST_ARM: u64 = 2;
+const DIRECT_MATCH_ARM_LIMIT: u64 = 2;
+const ALL_BOOL_PATTERNS: u64 = 3;
+const JUMP_ARGUMENT_COUNT: u64 = 1;
+const JUMP_ARGUMENT: u64 = 2;
+const HOME_BYTES: u64 = QWORD_BITS / BYTE_BITS;
+const HOME_SLOT: u64 = 0;
+const LITERAL_HOME: u64 = NO_VALUE - 1;
+const RESULT_ADDRESS: u64 = 0;
+const MAX_RESULT_OFFSET: u64 = DISP32_MASK >> 1;
+const MAX_RESULT_CELLS: u64 = MAX_RESULT_OFFSET / HOME_BYTES;
+const SCALAR_RESULTS: u64 = 1;
+const CALL_COUNT: u64 = 1;
+const CALL_ARGUMENTS: u64 = 2;
+const ARGUMENT_WORDS: u64 = 4;
+const ARGUMENT_VALUE: u64 = 1;
+const ARGUMENT_ROOT: u64 = 2;
+const ARGUMENT_PATH: u64 = 3;
+// A supported function has no parameter projections, bounds, or captures.
+const PARAMETER_WORDS: u64 = 6;
+const VALUE_TYPES_COUNT: u64 = 4;
+const VALUE_TYPE_WORDS: u64 = 2;
+const WRAPPING_CONVERSION_PREFIX: Str = "wrapping_";
+const WIDEN_CONVERSION_PREFIX: Str = "widen_";
+const NARROW_CONVERSION_PREFIX: Str = "narrow_";
+const INTEGER_BOUND_DEPTH: u64 = 3;
+const F64_FRACTION_BITS: u64 = 52;
+const F32_FRACTION_BITS: u64 = 23;
+const F64_EXPONENT_MASK: u64 = 2047;
+const F32_EXPONENT_MASK: u64 = 255;
+const F64_EXPONENT_BIAS: u64 = 1023;
+const F32_EXPONENT_BIAS: u64 = 127;
+const F64_TO_F32_BIAS: u64 = F64_EXPONENT_BIAS - F32_EXPONENT_BIAS;
+// Binary64 biased exponents at binary32's normal, half-subnormal, and overflow boundaries.
+const F32_MIN_NORMAL_F64_EXPONENT: u64 = 897;
+const F32_HALF_SUBNORMAL_F64_EXPONENT: u64 = 873;
+const F32_OVERFLOW_F64_EXPONENT: u64 = 1151;
+const F32_DISCARDED_BITS: u64 = F64_FRACTION_BITS - F32_FRACTION_BITS;
+const F32_INFINITY_BITS: u64 = F32_EXPONENT_MASK << F32_FRACTION_BITS;
+const F32_NAN_QUIET_BIT: u64 = 1 << (F32_FRACTION_BITS - 1);
+
+enum ScalarKind: _ {
+    Unsupported = 0,
+    U64 = 1,
+    I64 = 2,
+    Bool = 3,
+    Unit = 4,
+    U8 = 5,
+    I8 = 6,
+    U16 = 7,
+    I16 = 8,
+    U32 = 9,
+    I32 = 10,
+    Usize = 11,
+    Isize = 12,
+    F32 = 13,
+    F64 = 14,
+    Tuple = 15,
+    Struct = 16,
+    Enum = 17,
+}
+
+enum Assignment: _ {
+    Unsupported = 0,
+    Replace = 1,
+    Add = 2,
+    Subtract = 3,
+    Multiply = 4,
+    Divide = 5,
+    Remainder = 6,
+}
+
+enum NativeImport: _ {
+    None = 0,
+    Fmod = 1,
+    Fmodf = 2,
+    Floor = 3,
+    Floorf = 4,
+    Ceil = 5,
+    Ceilf = 6,
+    Trunc = 7,
+    Truncf = 8,
+    Round = 9,
+    Roundf = 10,
+    Fma = 11,
+    Fmaf = 12,
+    Count = 13,
+}
+
+fn import_symbol(imported: u64) -> Str {
+    match imported {
+        NativeImport::Fmod => "fmod",
+        NativeImport::Fmodf => "fmodf",
+        NativeImport::Floor => "floor",
+        NativeImport::Floorf => "floorf",
+        NativeImport::Ceil => "ceil",
+        NativeImport::Ceilf => "ceilf",
+        NativeImport::Trunc => "trunc",
+        NativeImport::Truncf => "truncf",
+        NativeImport::Round => "round",
+        NativeImport::Roundf => "roundf",
+        NativeImport::Fma => "fma",
+        NativeImport::Fmaf => "fmaf",
+        _ => "",
+    }
+}
+
+copy struct CallTarget {
+    function: u64,
+    imported: u64,
+}
+
+struct CallGraph {
+    indices: ChunkSeq[u64],
+    imports: ChunkSeq[u64],
+    pending: ChunkSeq[CallTarget],
+}
+
+impl CallGraph {
+    fn discover(inout self, index: u64) -> u64 {
+        let existing = self.indices.try_get(index).unwrap_or(NO_VALUE);
+        if existing != NO_VALUE {
+            return existing;
+        }
+        let id = self.pending.len();
+        if !self.indices.try_set(index, id) {
+            return NO_VALUE;
+        }
+        self.pending.push(CallTarget { function: index, imported: NativeImport::None });
+        id
+    }
+
+    fn discover_import(inout self, imported: u64) -> u64 {
+        if self.imports.len() == 0 {
+            self.imports.resize(NativeImport::Count, NO_VALUE);
+        }
+        let existing = self.imports.try_get(imported).unwrap_or(NO_VALUE);
+        if existing != NO_VALUE {
+            return existing;
+        }
+        let id = self.pending.len();
+        if !self.imports.try_set(imported, id) {
+            return NO_VALUE;
+        }
+        self.pending.push(CallTarget { function: NO_VALUE, imported: imported });
+        id
+    }
+}
+
+copy struct Value {
+    owner: u64,
+    // Byte offset, NO_VALUE, or LITERAL_HOME for a rematerializable integer.
+    home: u64,
+    live: u64,
+    block: u64,
+    machine: u64,
+}
+
+copy struct Product {
+    ty: u32,
+    // The originating constructor when known, and the base of synthetic
+    // children for an enum or a product arriving from an edge or call.
+    instruction: u64,
+    first_child: u64,
+}
+
+copy struct LocalValue {
+    block: u64,
+    machine: u64,
+    kind: u8,
+}
+
+struct Function {
+    arguments: u64,
+    gp_arguments: u64,
+    result: u8,
+    words: ChunkSeq[u64],
+    values: ChunkSeq[Value],
+    kinds: ChunkSeq[u8],
+    parameters: ChunkSeq[u8],
+    inout_parameters: ChunkSeq[bool],
+    labels: ChunkSeq[u64],
+    blocks: ChunkSeq[u64],
+    next_label: u64,
+    bindings: ChunkSeq[u32],
+    product_indices: ChunkSeq[u64],
+    products: ChunkSeq[Product],
+    call_result_bytes: u64,
+    call_argument_bytes: u64,
+    forwards_call_result: bool,
+    mutable_slots: ChunkSeq[u32],
+    mutable_values: ChunkSeq[LocalValue],
+    addressed_locals: ChunkSeq[u32],
+    mutable_bytes: u64,
+    home_bytes: u64,
+}
+
+fn value_new(owner: u64) -> Value {
+    Value { owner: owner, home: NO_VALUE, live: 0, block: NO_VALUE, machine: NO_VALUE }
+}
+
+fn block_bit(block: u64) -> u64 {
+    wrapping_shl_u64(1, wrapping_u32(block))
+}
+
+impl Function {
+    fn kind(in self, id: u64) -> u8 {
+        self.kinds.try_get(id).unwrap_or(ScalarKind::Unsupported)
+    }
+
+    fn value_kind(in self, id: u64) -> u8 {
+        if id < self.arguments {
+            self.parameters.try_get(id).unwrap_or(ScalarKind::Unsupported)
+        } else {
+            self.kind(wrapping_sub(id, self.arguments))
+        }
+    }
+
+    fn product_index(in self, id: u64) -> u64 {
+        self.product_indices.try_get(id).unwrap_or(NO_VALUE)
+    }
+
+    fn product(in self, id: u64) -> Option[Product] {
+        self.products.try_get(self.product_index(id))
+    }
+
+    fn is_inout(in self, id: u64) -> bool {
+        self.inout_parameters.try_get(id).unwrap_or(false)
+    }
+
+    fn home_kind(in self, id: u64) -> u8 {
+        if self.is_inout(id) {
+            ScalarKind::U64
+        } else {
+            self.value_kind(id)
+        }
+    }
+
+    fn return_layout(in self) -> u64 {
+        if is_float(self.result) {
+            FLOAT_RETURN_LAYOUT
+        } else {
+            SCALAR_RESULTS
+        }
+    }
+
+    fn labeled(in self) -> bool {
+        self.blocks.len() > 1 || self.forwards_call_result
+    }
+
+    fn result_is_resident(in self, value: u64, resident: u64) -> bool {
+        resident != NO_VALUE && self.product_index(value) == resident
+    }
+
+    fn store_cell(inout self, machine: u64, offset: u64, kind: u8) {
+        let op = match kind {
+            ScalarKind::F32 => FLOAT_STACK_STORE32,
+            ScalarKind::F64 => FLOAT_STACK_STORE64,
+            _ => STACK_STORE_QWORD,
+        };
+        let _ = self.record(op, machine, HOME_SLOT, offset);
+    }
+
+    fn load_cell(inout self, offset: u64, kind: u8) -> u64 {
+        if is_float(kind) {
+            self.record(FLOAT_STACK_LOAD, HOME_SLOT, offset, abi_width(kind))
+        } else {
+            self.record(STACK_LOAD, HOME_SLOT, offset, QWORD_BITS)
+        }
+    }
+
+    fn store_addressed(inout self, address: u64, value: u64, kind: u8, offset: u64) {
+        let width = abi_width(kind);
+        let stored = if is_signed(kind) && width < QWORD_BITS {
+            self.extend_signed(value, width, QWORD_BITS)
+        } else {
+            value
+        };
+        let op = match kind {
+            ScalarKind::F32 => FLOAT_STORE32,
+            ScalarKind::F64 => FLOAT_STORE64,
+            _ => STORE_QWORD,
+        };
+        let _ = self.record(op, address, stored, offset);
+    }
+
+    fn result_home(in self) -> u64 {
+        add(self.home_bytes, self.mutable_bytes)
+    }
+
+    fn call_result_home(in self) -> u64 {
+        let result_bytes = if is_aggregate(self.result) && self.blocks.len() > 1 {
+            HOME_BYTES
+        } else {
+            0
+        };
+        add(self.result_home(), result_bytes)
+    }
+
+    fn call_argument_home(in self) -> u64 {
+        add(self.call_result_home(), self.call_result_bytes)
+    }
+
+    fn label(in self, block: u64) -> u64 {
+        self.labels.try_get(block).unwrap_or(NO_VALUE)
+    }
+
+    fn mutable_offset(in self, name: u32) -> u64 {
+        // Keep mutable cells after the packed, live-range-based SSA homes.
+        let slot = u32_at(in self.mutable_slots, w(name));
+        if slot == 0 {
+            NO_VALUE
+        } else {
+            add(self.home_bytes, wrapping_mul(wrapping_sub(w(slot), 1), HOME_BYTES))
+        }
+    }
+
+    fn address_taken(in self, name: u32) -> bool {
+        u32_at(in self.addressed_locals, w(name)) != 0
+    }
+
+    fn load_mutable(inout self, name: u32, offset: u64, kind: u8, block: u64) -> u64 {
+        // Addressable signed cells use the native ABI's sign extension.
+        let width = abi_width(kind);
+        if self.address_taken(name) {
+            if is_signed(kind) && width < QWORD_BITS {
+                return self.record(STACK_LOAD, HOME_SLOT, offset, width);
+            }
+        } else if self.mutable_values.len() != 0 {
+            let slot = wrapping_sub(offset, self.home_bytes) / HOME_BYTES;
+            match self.mutable_values.try_get(slot) {
+                Option::Some(value) => if value.block == block {
+                    return value.machine;
+                },
+                Option::None => {},
+            };
+        }
+        self.load_cell(offset, kind)
+    }
+
+    fn flush_mutable(inout self, block: u64) {
+        for slot in 0..self.mutable_values.len() {
+            match self.mutable_values.try_get(slot) {
+                Option::Some(value) => if value.block == block {
+                    let offset = add(self.home_bytes, wrapping_mul(slot, HOME_BYTES));
+                    self.store_cell(value.machine, offset, value.kind);
+                },
+                Option::None => {},
+            };
+        }
+    }
+
+    fn record(inout self, op: u64, lhs: u64, rhs: u64, extra: u64) -> u64 {
+        let value = add(
+            self.gp_arguments,
+            wrapping_sub(self.words.len(), HEADER_WORDS) / RECORD_WORDS
+        );
+        self.words.push(op);
+        self.words.push(lhs);
+        self.words.push(rhs);
+        self.words.push(extra);
+        value
+    }
+
+    fn definition(in self, value: u64) -> Option[Record] {
+        if value < self.gp_arguments || value == NO_VALUE {
+            Option::None
+        } else {
+            Option::Some(read_record(
+                in self.words.as_slice(),
+                wrapping_sub(value, self.gp_arguments)
+            ))
+        }
+    }
+
+    fn constant(in self, value: u64) -> Option[u64] {
+        match self.definition(value) {
+            Option::Some(record) => if record.op == CONSTANT {
+                Option::Some(record.left)
+            } else {
+                Option::None
+            },
+            Option::None => Option::None,
+        }
+    }
+
+    fn extend_signed(inout self, source: u64, from: u64, to: u64) -> u64 {
+        let mut value = source;
+        let mut width = from;
+        loop {
+            match self.definition(value) {
+                Option::Some(inst) => {
+                    if inst.extra < width {
+                        break;
+                    }
+                    if inst.op == SIGN_EXTEND && inst.right <= width {
+                        width = inst.right;
+                    } else if inst.op != TRUNCATE {
+                        break;
+                    }
+                    value = inst.left;
+                },
+                Option::None => break,
+            };
+        }
+        self.record(SIGN_EXTEND, value, width, to)
+    }
+
+    fn float_bits(inout self, value: u64, width: u64) -> u64 {
+        match self.definition(value) {
+            Option::Some(inst) => if inst.op == BITS_TO_FLOAT && inst.extra == width {
+                // A raw f32 aggregate cell may have arbitrary high bits.
+                return if width == QWORD_BITS {
+                    inst.left
+                } else {
+                    self.record(TRUNCATE, inst.left, QWORD_BITS, width)
+                };
+            },
+            Option::None => {},
+        };
+        self.record(FLOAT_TO_BITS, value, 0, width)
+    }
+
+    fn home(inout self, id: u64, block: u64) -> bool {
+        let mut value = self.values.try_get(id).unwrap_or(value_new(NO_VALUE));
+        if value.owner == NO_VALUE {
+            return false;
+        }
+        if value.home >= LITERAL_HOME {
+            value.home = self.home_bytes;
+            self.home_bytes = add(self.home_bytes, HOME_BYTES);
+        }
+        value.live = value.live | block_bit(block);
+        self.values.try_set(id, value)
+    }
+
+    fn use_in(inout self, id: u64, block: u64) -> bool {
+        let v = self.values.try_get(id).unwrap_or(value_new(NO_VALUE));
+        v.owner == block || v.home == LITERAL_HOME || self.home(id, block)
+    }
+
+    fn define(inout self, id: u64, block: u64, machine: u64) -> bool {
+        let mut value = self.values.try_get(id).unwrap_or(value_new(NO_VALUE));
+        value.block = block;
+        value.machine = machine;
+        if value.home < LITERAL_HOME {
+            let kind = self.home_kind(id);
+            self.store_cell(machine, value.home, kind);
+        }
+        self.values.try_set(id, value)
+    }
+
+    fn read(inout self, id: u64, block: u64) -> u64 {
+        let mut value = self.values.try_get(id).unwrap_or(value_new(NO_VALUE));
+        if value.block == block {
+            return value.machine;
+        }
+        if value.home == NO_VALUE {
+            return NO_VALUE;
+        }
+        value.machine = if value.home == LITERAL_HOME {
+            match self.constant(value.machine) {
+                Option::Some(bits) => self.record(CONSTANT, bits, 0, 0),
+                Option::None => return NO_VALUE,
+            }
+        } else {
+            let kind = self.home_kind(id);
+            self.load_cell(value.home, kind)
+        };
+        value.block = block;
+        let _ = self.values.try_set(id, value);
+        value.machine
+    }
+}
+
+fn lower_operator(in low: L, symbol: u32) -> u64 {
+    if low.ctx.names.spells(symbol, in "wrapping_add".as_bytes()) {
+        ADD
+    } else if low.ctx.names.spells(symbol, in "wrapping_sub".as_bytes()) {
+        SUB
+    } else if low.ctx.names.spells(symbol, in "wrapping_mul".as_bytes()) {
+        MUL
+    } else if low.ctx.names.spells(symbol, in "&".as_bytes())
+        || low.ctx.names.spells(symbol, in "bit_and".as_bytes())
+    {
+        AND
+    } else if low.ctx.names.spells(symbol, in "|".as_bytes())
+        || low.ctx.names.spells(symbol, in "bit_or".as_bytes())
+    {
+        OR
+    } else if low.ctx.names.spells(symbol, in "^".as_bytes())
+        || low.ctx.names.spells(symbol, in "bit_xor".as_bytes())
+    {
+        XOR
+    } else {
+        NO_VALUE
+    }
+}
+
+fn integer_comparison(in low: L, symbol: u32, kind: u8) -> u64 {
+    let signed = is_signed(kind);
+    if low.ctx.names.spells(symbol, in "==".as_bytes()) {
+        EQUAL
+    } else if low.ctx.names.spells(symbol, in "!=".as_bytes()) {
+        NOT_EQUAL
+    } else if !is_integer(kind) {
+        NO_VALUE
+    } else if low.ctx.names.spells(symbol, in "<".as_bytes()) {
+        if signed { SIGNED_LESS } else { UNSIGNED_LESS }
+    } else if low.ctx.names.spells(symbol, in "<=".as_bytes()) {
+        if signed {
+            SIGNED_LESS_EQUAL
+        } else {
+            UNSIGNED_LESS_EQUAL
+        }
+    } else if low.ctx.names.spells(symbol, in ">".as_bytes()) {
+        if signed {
+            SIGNED_GREATER
+        } else {
+            UNSIGNED_GREATER
+        }
+    } else if low.ctx.names.spells(symbol, in ">=".as_bytes()) {
+        if signed {
+            SIGNED_GREATER_EQUAL
+        } else {
+            UNSIGNED_GREATER_EQUAL
+        }
+    } else {
+        NO_VALUE
+    }
+}
+
+fn is_integer(kind: u8) -> bool {
+    kind != ScalarKind::Bool && !is_float(kind) && abi_width(kind) != 0
+}
+
+fn is_float(kind: u8) -> bool {
+    kind == ScalarKind::F32 || kind == ScalarKind::F64
+}
+
+fn is_signed(kind: u8) -> bool {
+    kind == ScalarKind::I8
+        || kind == ScalarKind::I16
+        || kind == ScalarKind::I32
+        || kind == ScalarKind::I64
+        || kind == ScalarKind::Isize
+}
+
+fn abi_width(kind: u8) -> u64 {
+    match kind {
+        ScalarKind::Bool | ScalarKind::U8 | ScalarKind::I8 => BYTE_BITS,
+        ScalarKind::U16 | ScalarKind::I16 => WORD_BITS,
+        ScalarKind::U32 | ScalarKind::I32 | ScalarKind::F32 => DWORD_BITS,
+        ScalarKind::U64
+            | ScalarKind::I64
+            | ScalarKind::Usize
+            | ScalarKind::Isize
+            | ScalarKind::F64 => QWORD_BITS,
+        _ => 0,
+    }
+}
+
+fn scalar_kind(in low: L, ty: u32) -> u8 {
+    if ty == low.ctx.types.unit {
+        return ScalarKind::Unit;
+    }
+    let node = low.ctx.types.node(ty);
+    if node.kind == TyKind::Tuple {
+        return if node.n == 0 {
+            ScalarKind::Unit
+        } else {
+            ScalarKind::Tuple
+        };
+    }
+    if node.kind != TyKind::Named {
+        return ScalarKind::Unsupported;
+    }
+    if node.n != 0 {
+        let adt = low.ctx.world.adt(low.ctx.world.lookup(node.name));
+        return if adt.is_enum && adt.vn != 0 && adt.gn == node.n && adt.mode != TyMode::Linear {
+            ScalarKind::Enum
+        } else {
+            ScalarKind::Unsupported
+        };
+    }
+    let k = low.ctx.world.k;
+    if node.name == k.u64_ {
+        ScalarKind::U64
+    } else if node.name == k.i64_ {
+        ScalarKind::I64
+    } else if node.name == k.bool_ {
+        ScalarKind::Bool
+    } else if node.name == k.unit {
+        ScalarKind::Unit
+    } else if node.name == k.u8_ {
+        ScalarKind::U8
+    } else if node.name == k.i8_ {
+        ScalarKind::I8
+    } else if node.name == k.u16_ {
+        ScalarKind::U16
+    } else if node.name == k.i16_ {
+        ScalarKind::I16
+    } else if node.name == k.u32_ {
+        ScalarKind::U32
+    } else if node.name == k.i32_ {
+        ScalarKind::I32
+    } else if node.name == k.usize_ {
+        ScalarKind::Usize
+    } else if node.name == k.isize_ {
+        ScalarKind::Isize
+    } else if node.name == k.f32_ {
+        ScalarKind::F32
+    } else if node.name == k.f64_ {
+        ScalarKind::F64
+    } else {
+        let adt = low.ctx.world.adt(low.ctx.world.lookup(node.name));
+        if adt.is_enum && adt.vn != 0 && adt.gn == 0 && adt.mode != TyMode::Linear {
+            ScalarKind::Enum
+        } else if adt.vn == 1 && adt.gn == 0 && !adt.is_enum && adt.mode == TyMode::Copy {
+            ScalarKind::Struct
+        } else {
+            ScalarKind::Unsupported
+        }
+    }
+}
+
+fn is_aggregate(kind: u8) -> bool {
+    kind == ScalarKind::Tuple || kind == ScalarKind::Struct || kind == ScalarKind::Enum
+}
+
+fn sysv_signature(in low: L, f: FnR) -> bool {
+    let result = scalar_kind(in low, f.result);
+    let buffer = is_aggregate(result);
+    let arguments = add(f.param_count, if buffer { 1 } else { 0 });
+    if !f.has_body
+        || f.generic_count != 0
+        || f.ext_count != 0
+        || arguments > MAX_ARGUMENTS
+        || result == ScalarKind::Unsupported
+        || f.effects != low.ctx.types.empty_row
+    {
+        return false;
+    }
+    let mut floats: u64 = 0;
+    for index in 0..f.param_count {
+        let p = low.ast.param(add(f.param_start, index));
+        let kind = scalar_kind(in low, p.ty);
+        if p.proj_count != 0
+            || (abi_width(kind) == 0 && (!is_aggregate(kind) || p.pass == TyPass::Inout))
+        {
+            return false;
+        }
+        if p.pass != TyPass::Inout && is_float(kind) {
+            floats = inc(floats);
+        }
+    }
+    floats <= XMM_ARGUMENTS
+}
+
+fn argument_value(in low: L, f: FnR, root: u32) -> u64 {
+    for index in 0..f.param_count {
+        if low.ast.param(add(f.param_start, index)).name == root {
+            return index;
+        }
+    }
+    NO_VALUE
+}
+
+fn struct_variant(in low: L, ty: u32) -> Variant {
+    low.ctx.world.variant(w(product_adt(in low, ty).va))
+}
+
+fn product_adt(in low: L, ty: u32) -> Adt {
+    let node = low.ctx.types.node(ty);
+    low.ctx.world.adt(low.ctx.world.lookup(node.name))
+}
+
+copy struct EnumVariant {
+    ordinal: u64,
+    variant: Variant,
+}
+
+fn constructor_name(in low: L, name: u32, short: u32) -> bool {
+    let size = low.ctx.names.size(name);
+    let suffix = low.ctx.names.size(short);
+    if size < suffix {
+        return false;
+    }
+    let start = wrapping_sub(size, suffix);
+    if start != 0
+        && (start <= PATH_SEPARATOR_BYTES
+            || low.ctx.names.byte(name, wrapping_sub(start, 1)) != PATH_SEPARATOR
+            || low.ctx.names.byte(name, wrapping_sub(start, PATH_SEPARATOR_BYTES))
+                != PATH_SEPARATOR)
+    {
+        return false;
+    }
+    for i in 0..suffix {
+        if low.ctx.names.byte(name, add(start, i)) != low.ctx.names.byte(short, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn enum_variant(in low: L, ty: u32, name: u32) -> Option[EnumVariant] {
+    let adt = product_adt(in low, ty);
+    for ordinal in 0..w(adt.vn) {
+        let variant = low.ctx.world.variant(add(w(adt.va), ordinal));
+        if constructor_name(in low, name, variant.name) {
+            return Option::Some(EnumVariant { ordinal: ordinal, variant: variant });
+        }
+    }
+    Option::None
+}
+
+// Scalar payloads need only the direct type-parameter substitution. Composite
+// fields still fall back, so no new type nodes are needed here.
+fn enum_field_kind(in low: L, ty: u32, field: u32) -> u8 {
+    let adt = product_adt(in low, ty);
+    if adt.gn != 0 {
+        let node = low.ctx.types.node(field);
+        if node.kind == TyKind::Named && node.n == 0 {
+            for i in 0..w(adt.gn) {
+                let generic = low.ctx.world.generic(add(w(adt.ga), i));
+                if !generic.row && generic.name == node.name {
+                    return scalar_kind(in low, low.ctx.types.arg(ty, i));
+                }
+            }
+        }
+    }
+    scalar_kind(in low, field)
+}
+
+// The native enum layout is one tag word and enough cells for its largest payload.
+fn enum_cells(in low: L, ty: u32) -> u64 {
+    let adt = product_adt(in low, ty);
+    let mut payload: u64 = 0;
+    for i in 0..w(adt.vn) {
+        let variant = low.ctx.world.variant(add(w(adt.va), i));
+        for field in 0..w(variant.fc) {
+            let kind = enum_field_kind(
+                in low,
+                ty,
+                low.ctx.world.field(add(w(variant.fa), field)).ty
+            );
+            if abi_width(kind) == 0 && kind != ScalarKind::Unit {
+                return 0;
+            }
+        }
+        if w(variant.fc) > payload {
+            payload = w(variant.fc);
+        }
+    }
+    add(ENUM_TAG_CELLS, payload)
+}
+
+fn product_count(in low: L, ty: u32) -> u64 {
+    let node = low.ctx.types.node(ty);
+    if node.kind == TyKind::Tuple {
+        w(node.n)
+    } else if product_adt(in low, ty).is_enum {
+        enum_cells(in low, ty)
+    } else {
+        w(struct_variant(in low, ty).fc)
+    }
+}
+
+fn product_field_type(in low: L, ty: u32, field: u64) -> u32 {
+    if low.ctx.types.kind(ty) == TyKind::Tuple {
+        low.ctx.types.arg(ty, field)
+    } else {
+        let variant = struct_variant(in low, ty);
+        low.ctx.world.field(add(w(variant.fa), field)).ty
+    }
+}
+
+fn struct_member(in low: L, inst: InstRow, name: u32) -> u64 {
+    let count = low.program.op(add(inst.a, DATA_FIELD_COUNT));
+    if inst.op != Op::Data
+        || inst.n != add(DATA_HEADER_WORDS, wrapping_mul(count, DATA_FIELD_WORDS))
+    {
+        return NO_VALUE;
+    }
+    let mut at = add(inst.a, DATA_HEADER_WORDS);
+    for _ in 0..count {
+        if n32(low.program.op(at)) == name {
+            return low.program.op(inc(at));
+        }
+        at = add(at, DATA_FIELD_WORDS);
+    }
+    NO_VALUE
+}
+
+fn product_field(in low: L, product: Product, field: u64, in m: Function) -> u64 {
+    let count = product_count(in low, product.ty);
+    if field >= count {
+        return NO_VALUE;
+    }
+    if product.first_child != NO_VALUE {
+        return add(product.first_child, field);
+    }
+    let inst = low.program.inst(product.instruction);
+    if inst.op == Op::Tuple && inst.n == inc(count) && low.program.op(inst.a) == count {
+        return add(m.arguments, low.program.op(add(inc(inst.a), field)));
+    }
+    if inst.op == Op::Data {
+        let variant = struct_variant(in low, inst.ty);
+        let name = low.ctx.world.field(add(w(variant.fa), field)).name;
+        let value = struct_member(in low, inst, name);
+        return if value == NO_VALUE {
+            NO_VALUE
+        } else {
+            add(m.arguments, value)
+        };
+    }
+    NO_VALUE
+}
+
+fn tuple_member(in low: L, value: u64, field: u64, in m: Function) -> u64 {
+    if m.value_kind(value) != ScalarKind::Tuple {
+        return NO_VALUE;
+    }
+    match m.product(value) {
+        Option::Some(product) => product_field(in low, product, field, in m),
+        Option::None => NO_VALUE,
+    }
+}
+
+fn supported_struct(in low: L, inst: InstRow, in m: Function) -> bool {
+    let node = low.ctx.types.node(inst.ty);
+    let adt = low.ctx.world.adt(low.ctx.world.lookup(node.name));
+    let variant = low.ctx.world.variant(w(adt.va));
+    let count = w(variant.fc);
+    if n32(low.program.op(inst.a)) != adt.name
+        || low.program.op(add(inst.a, DATA_FIELD_COUNT)) != count
+        || inst.n != add(DATA_HEADER_WORDS, wrapping_mul(count, DATA_FIELD_WORDS))
+    {
+        return false;
+    }
+    for i in 0..count {
+        let field = low.ctx.world.field(add(w(variant.fa), i));
+        let kind = scalar_kind(in low, field.ty);
+        let value = struct_member(in low, inst, field.name);
+        if kind == ScalarKind::Unsupported || value == NO_VALUE || m.kind(value) != kind {
+            return false;
+        }
+    }
+    true
+}
+
+fn enum_data_variant(in low: L, inst: InstRow, in m: Function) -> Option[EnumVariant] {
+    let shape = match enum_variant(in low, inst.ty, n32(low.program.op(inst.a))) {
+        Option::Some(shape) => shape,
+        Option::None => return Option::None,
+    };
+    let count = w(shape.variant.fc);
+    if low.program.op(add(inst.a, DATA_FIELD_COUNT)) != count
+        || inst.n != add(DATA_HEADER_WORDS, wrapping_mul(count, DATA_FIELD_WORDS))
+    {
+        return Option::None;
+    }
+    for i in 0..count {
+        let field = low.ctx.world.field(add(w(shape.variant.fa), i));
+        let value = struct_member(in low, inst, field.name);
+        if value == NO_VALUE || m.kind(value) != enum_field_kind(in low, inst.ty, field.ty) {
+            return Option::None;
+        }
+    }
+    Option::Some(shape)
+}
+
+copy struct EqualityPair {
+    left: u64,
+    right: u64,
+}
+
+fn queue_equality(
+    pair: EqualityPair,
+    in m: Function,
+    inout aggregates: ChunkSeq[EqualityPair],
+    inout leaves: ChunkSeq[EqualityPair]
+) -> bool {
+    let kind = m.value_kind(pair.left);
+    if kind == ScalarKind::Unsupported
+        || kind == ScalarKind::Enum
+        || kind != m.value_kind(pair.right)
+    {
+        return false;
+    }
+    if is_aggregate(kind) {
+        // Several fields can refer to the same subproduct. Expand it once.
+        for i in 0..aggregates.len() {
+            let queued = aggregates.try_get(i).unwrap_or(pair);
+            if queued.left == pair.left && queued.right == pair.right {
+                return true;
+            }
+        }
+        aggregates.push(pair);
+    } else if kind != ScalarKind::Unit && (pair.left != pair.right || is_float(kind)) {
+        leaves.push(pair);
+    }
+    true
+}
+
+fn equality_leaves(
+    in low: L,
+    pair: EqualityPair,
+    in m: Function,
+    inout leaves: ChunkSeq[EqualityPair]
+) -> bool {
+    let mut aggregates = ChunkSeq::new[EqualityPair]();
+    if !queue_equality(pair, in m, inout aggregates, inout leaves) {
+        return false;
+    }
+    let mut index: u64 = 0;
+    loop {
+        let pair = match aggregates.try_get(index) {
+            Option::Some(pair) => pair,
+            Option::None => return true,
+        };
+        let left = match m.product(pair.left) {
+            Option::Some(product) => product,
+            Option::None => return false,
+        };
+        let right = match m.product(pair.right) {
+            Option::Some(product) => product,
+            Option::None => return false,
+        };
+        if left.ty != right.ty {
+            return false;
+        }
+        for field in 0..product_count(in low, left.ty) {
+            let child = EqualityPair {
+                left: product_field(in low, left, field, in m),
+                right: product_field(in low, right, field, in m)
+            };
+            if !queue_equality(child, in m, inout aggregates, inout leaves) {
+                return false;
+            }
+        }
+        index = inc(index);
+    }
+}
+
+fn place_value(in low: L, f: FnR, root: u32, in m: Function) -> u64 {
+    let binding = u32_at(in m.bindings, w(root));
+    if binding == 0 {
+        return argument_value(in low, f, root);
+    }
+    wrapping_sub(w(binding), 1)
+}
+
+fn aggregate_member(in low: L, source: u64, member: u32, in m: Function) -> u64 {
+    let kind = m.value_kind(source);
+    if kind == ScalarKind::Struct {
+        let product = match m.product(source) {
+            Option::Some(product) => product,
+            Option::None => return NO_VALUE,
+        };
+        let variant = struct_variant(in low, product.ty);
+        let field = low.ctx.world.find_field(variant, member);
+        return product_field(in low, product, wrapping_sub(w(field), w(variant.fa)), in m);
+    }
+    if kind != ScalarKind::Tuple {
+        return NO_VALUE;
+    }
+    let length = low.ctx.names.size(member);
+    if length == 0 {
+        return NO_VALUE;
+    }
+    let mut field: u64 = 0;
+    for i in 0..length {
+        let digit = widen_u64(wrapping_sub(low.ctx.names.byte(member, i), ASCII_ZERO));
+        if digit >= DECIMAL_BASE || field > wrapping_sub(ALL_REGISTER_BITS, digit) / DECIMAL_BASE {
+            return NO_VALUE;
+        }
+        field = add(wrapping_mul(field, DECIMAL_BASE), digit);
+    }
+    tuple_member(in low, source, field, in m)
+}
+
+fn read_source(in low: L, f: FnR, at: u64, in m: Function) -> u64 {
+    let name = n32(low.program.op(at));
+    let mut source = place_value(in low, f, name, in m);
+    let path = low.program.op(add(at, READ_PATH));
+    let count = low.program.path(path).n;
+    if count != 0
+        && (m.mutable_offset(name) != NO_VALUE
+            || low.program.op(add(at, READ_PASS)) == TyPass::Inout)
+    {
+        return NO_VALUE;
+    }
+    for step in 0..count {
+        source = aggregate_member(in low, source, low.program.path_name(path, step), in m);
+        if source == NO_VALUE {
+            return NO_VALUE;
+        }
+    }
+    source
+}
+
+fn project_source(in low: L, at: u64, in m: Function) -> u64 {
+    let source = add(m.arguments, low.program.op(at));
+    aggregate_member(in low, source, n32(low.program.op(add(at, PROJECT_MEMBER))), in m)
+}
+
+// The native result buffer is a sequence of word cells. Struct fields use
+// declaration order even when initializers appeared in a different order.
+fn product_cells(in low: L, root: u64, in m: Function, inout fields: ChunkSeq[u64]) -> bool {
+    let mut pending = ChunkSeq::new[u64]();
+    pending.push(root);
+    loop {
+        let value = match pending.pop() {
+            Option::Some(value) => value,
+            Option::None => return true,
+        };
+        let kind = m.value_kind(value);
+        if kind == ScalarKind::Unsupported {
+            return false;
+        }
+        if !is_aggregate(kind) {
+            fields.push(value);
+            continue;
+        }
+        let product = match m.product(value) {
+            Option::Some(product) => product,
+            Option::None => return false,
+        };
+        let count = product_count(in low, product.ty);
+        if count == 0 {
+            // An empty struct occupies one zero-filled cell without a value.
+            fields.push(NO_VALUE);
+        }
+        for i in 0..count {
+            let member = product_field(in low, product, wrapping_sub(count, inc(i)), in m);
+            if member == NO_VALUE {
+                return false;
+            }
+            pending.push(member);
+        }
+        if add(pending.len(), fields.len()) > MAX_RESULT_CELLS {
+            return false;
+        }
+    }
+}
+
+fn record_binding(name: u32, value: u64, inout m: Function) -> bool {
+    if u32_at(in m.bindings, w(name)) != 0 {
+        return false;
+    }
+    set_by_symbol(inout m.bindings, name, n32(inc(value)));
+    true
+}
+
+fn collect_binding(in low: L, inst: InstRow, inout m: Function) -> bool {
+    let at = inst.a;
+    let source = low.program.op(at);
+    let pattern = low.program.op(add(at, BIND_PATTERN));
+    if pattern == Pat::Wild {
+        return inst.n == BIND_NAME;
+    }
+    if pattern == Pat::Bind {
+        // Shadowed names already have distinct Place IR symbols.
+        return inst.n == inc(BIND_NAME)
+            && record_binding(
+                n32(low.program.op(add(at, BIND_NAME))),
+                add(m.arguments, source),
+                inout m
+            );
+    }
+    // Product fields are available only after their source values are planned.
+    pattern == Pat::Tuple || pattern == Pat::Constructor
+}
+fn collect_mutating_place(in low: L, f: FnR, name: u32, inout m: Function) -> bool {
+    if m.is_inout(argument_value(in low, f, name)) {
+        return true;
+    }
+    if u32_at(in m.bindings, w(name)) == 0 {
+        return false;
+    }
+    if u32_at(in m.mutable_slots, w(name)) == 0 {
+        let slot = inc(m.mutable_bytes / HOME_BYTES);
+        set_by_symbol(inout m.mutable_slots, name, n32(slot));
+        m.mutable_bytes = add(m.mutable_bytes, HOME_BYTES);
+    }
+    true
+}
+
+fn assignment(in low: L, at: u64) -> u8 {
+    let op = n32(low.program.op(add(at, WRITE_OPERATOR)));
+    if low.ctx.names.spells(op, in "=".as_bytes()) {
+        Assignment::Replace
+    } else if low.ctx.names.spells(op, in "+=".as_bytes()) {
+        Assignment::Add
+    } else if low.ctx.names.spells(op, in "-=".as_bytes()) {
+        Assignment::Subtract
+    } else if low.ctx.names.spells(op, in "*=".as_bytes()) {
+        Assignment::Multiply
+    } else if low.ctx.names.spells(op, in "/=".as_bytes()) {
+        Assignment::Divide
+    } else if low.ctx.names.spells(op, in "%=".as_bytes()) {
+        Assignment::Remainder
+    } else {
+        Assignment::Unsupported
+    }
+}
+
+fn collect_mutable_slots(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
+    let mut track_writes = false;
+    for layout in 0..m.blocks.len() {
+        let block = m.blocks.try_get(layout).unwrap_or(0);
+        let b = low.program.block(add(row.b0, block));
+        for index in b.i0..add(b.i0, b.ic) {
+            let inst = low.program.inst(index);
+            if inst.op == Op::Write {
+                let name = n32(low.program.op(inst.a));
+                let op = assignment(in low, inst.a);
+                if inst.n != WRITE_WORDS
+                    || inst.fallible != 0
+                    || op == Assignment::Unsupported
+                    || !collect_mutating_place(in low, f, name, inout m)
+                {
+                    return false;
+                }
+                track_writes = track_writes || op != Assignment::Replace;
+            } else if inst.op == Op::Call {
+                let count = call_arity(in low, inst);
+                if count == NO_VALUE {
+                    return false;
+                }
+                for index in 0..count {
+                    let at = call_argument(inst.a, index);
+                    if low.program.op(at) == TyPass::Inout {
+                        let name = argument_root(in low, at);
+                        if low.program.path(low.program.op(add(at, ARGUMENT_PATH))).n != 0
+                            || !collect_mutating_place(in low, f, name, inout m)
+                        {
+                            return false;
+                        }
+                        if !m.is_inout(argument_value(in low, f, name)) {
+                            set_by_symbol(inout m.addressed_locals, name, 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if track_writes {
+        m.mutable_values.resize(
+            m.mutable_bytes / HOME_BYTES,
+            LocalValue { block: NO_VALUE, machine: NO_VALUE, kind: ScalarKind::Unsupported }
+        );
+    }
+    true
+}
+
+fn lower_compound(
+    op: u8,
+    kind: u8,
+    lhs: u64,
+    rhs: u64,
+    inout m: Function,
+    inout graph: CallGraph
+) -> u64 {
+    let width = abi_width(kind);
+    if is_float(kind) {
+        if op == Assignment::Remainder {
+            return lower_float_remainder(kind, lhs, rhs, inout m, inout graph);
+        }
+        let instruction = match op {
+            Assignment::Add => FLOAT_ADD,
+            Assignment::Subtract => FLOAT_SUB,
+            Assignment::Multiply => FLOAT_MUL,
+            Assignment::Divide => FLOAT_DIV,
+            _ => return NO_VALUE,
+        };
+        return m.record(instruction, lhs, rhs, width);
+    }
+    if !is_integer(kind) {
+        return NO_VALUE;
+    }
+    let signed = is_signed(kind);
+    if op == Assignment::Divide || op == Assignment::Remainder {
+        return lower_division(op == Assignment::Remainder, signed, width, lhs, rhs, inout m);
+    }
+    let instruction = match op {
+        Assignment::Add => ADD,
+        Assignment::Subtract => SUB,
+        Assignment::Multiply => MUL,
+        _ => return NO_VALUE,
+    };
+    lower_checked_integer(instruction, lhs, rhs, signed, width, inout m)
+}
+
+fn lower_local_store(
+    in low: L,
+    f: FnR,
+    inst: InstRow,
+    block: u64,
+    inout m: Function,
+    inout graph: CallGraph
+) -> bool {
+    let at = inst.a;
+    if inst.op == Op::Bind {
+        let pattern = low.program.op(add(at, BIND_PATTERN));
+        if pattern == Pat::Constructor {
+            return lower_enum_binding(in low, inst, block, inout m);
+        }
+        if pattern == Pat::Tuple {
+            return true;
+        }
+        if pattern == Pat::Wild || pattern == Pat::Literal {
+            // Planning confirms that literal binds belong to match arms.
+            return m.kind(low.program.op(at)) != ScalarKind::Unsupported;
+        }
+    }
+    let name_at = if inst.op == Op::Bind {
+        add(at, BIND_NAME)
+    } else {
+        at
+    };
+    let name = n32(low.program.op(name_at));
+    let offset = m.mutable_offset(name);
+    let source_at = if inst.op == Op::Bind {
+        at
+    } else {
+        add(at, WRITE_VALUE)
+    };
+    let source = low.program.op(source_at);
+    let kind = m.kind(source);
+    let op = if inst.op == Op::Write {
+        assignment(in low, at)
+    } else {
+        Assignment::Replace
+    };
+    if inst.op == Op::Write {
+        let target = argument_value(in low, f, name);
+        if m.is_inout(target) {
+            let width = abi_width(kind);
+            if width == 0 || m.value_kind(target) != kind {
+                return false;
+            }
+            let address = m.read(target, block);
+            let rhs = m.read(add(m.arguments, source), block);
+            if address == NO_VALUE || rhs == NO_VALUE {
+                return false;
+            }
+            let value = if op == Assignment::Replace {
+                rhs
+            } else {
+                let load = if is_float(kind) { FLOAT_LOAD } else { LOAD };
+                let lhs = m.record(load, address, 0, width);
+                lower_compound(op, kind, lhs, rhs, inout m, inout graph)
+            };
+            if value == NO_VALUE {
+                return false;
+            }
+            m.store_addressed(address, value, kind, 0);
+            return true;
+        }
+    }
+    if offset == NO_VALUE {
+        return inst.op == Op::Bind && kind != ScalarKind::Unsupported;
+    }
+    let initial = u32_at(in m.bindings, w(name));
+    if initial == 0 || abi_width(kind) == 0 || kind != m.value_kind(wrapping_sub(w(initial), 1)) {
+        return false;
+    }
+    let rhs = m.read(add(m.arguments, source), block);
+    if rhs == NO_VALUE {
+        return false;
+    }
+    let addressed = m.address_taken(name);
+    let slot = wrapping_sub(offset, m.home_bytes) / HOME_BYTES;
+    let value = if op == Assignment::Replace {
+        rhs
+    } else {
+        let lhs = m.load_mutable(name, offset, kind, block);
+        lower_compound(op, kind, lhs, rhs, inout m, inout graph)
+    };
+    if value == NO_VALUE {
+        return false;
+    }
+    if m.mutable_values.len() != 0 && !addressed {
+        // Private cells only need their last write at a control-flow edge.
+        return m.mutable_values
+            .try_set(slot, LocalValue { block: block, machine: value, kind: kind });
+    }
+    let width = abi_width(kind);
+    let stored = if is_signed(kind) && width < QWORD_BITS && addressed {
+        m.extend_signed(value, width, QWORD_BITS)
+    } else {
+        value
+    };
+    m.store_cell(stored, offset, kind);
+    true
+}
+
+fn call_arity(in low: L, inst: InstRow) -> u64 {
+    let count = low.program.op(add(inst.a, CALL_COUNT));
+    if count > MAX_ARGUMENTS {
+        return NO_VALUE;
+    }
+    let type_args = add(CALL_ARGUMENTS, wrapping_mul(count, ARGUMENT_WORDS));
+    let capability = inc(type_args);
+    if inst.n != inc(capability)
+        || low.program.op(add(inst.a, type_args)) != 0
+        || low.program.op(add(inst.a, capability)) != 0
+    {
+        return NO_VALUE;
+    }
+    count
+}
+
+fn call_argument(at: u64, index: u64) -> u64 {
+    add(add(at, CALL_ARGUMENTS), wrapping_mul(index, ARGUMENT_WORDS))
+}
+
+fn argument_root(in low: L, at: u64) -> u32 {
+    // Place IR uses symbol + 1 for optional names, with zero for no root.
+    n32(wrapping_sub(low.program.op(add(at, ARGUMENT_ROOT)), 1))
+}
+
+fn math_argument(in low: L, at: u64, kind: u8, block: u64, inout m: Function) -> u64 {
+    let arg = low.program.op(add(at, ARGUMENT_VALUE));
+    if low.program.op(at) == TyPass::Inout || m.kind(arg) != kind {
+        return NO_VALUE;
+    }
+    m.read(add(m.arguments, arg), block)
+}
+
+fn lower_call(
+    in low: L,
+    caller: FnR,
+    inst: InstRow,
+    block: u64,
+    resident: u64,
+    inout m: Function,
+    inout graph: CallGraph
+) -> u64 {
+    let index = low.ast.fn_index(n32(low.program.op(inst.a)));
+    let count = call_arity(in low, inst);
+    if count == NO_VALUE {
+        return NO_VALUE;
+    }
+    if index >= low.ast.fns.len() {
+        let symbol = n32(low.program.op(inst.a));
+        let result_kind = scalar_kind(in low, inst.ty);
+        if count != UNARY_FLOAT_ARGUMENTS {
+            let op = math_op(in low.ctx.names, symbol);
+            if !is_float(result_kind) || op != FloatMath::Fma || count != FUSED_FLOAT_ARGUMENTS {
+                return NO_VALUE;
+            }
+            let first = math_argument(
+                in low,
+                call_argument(inst.a, 0),
+                result_kind,
+                block,
+                inout m
+            );
+            let second = math_argument(
+                in low,
+                call_argument(inst.a, 1),
+                result_kind,
+                block,
+                inout m
+            );
+            let third = math_argument(
+                in low,
+                call_argument(inst.a, 2),
+                result_kind,
+                block,
+                inout m
+            );
+            let args = FloatOperands { first: first, second: second, third: third };
+            return lower_float_math(op, result_kind, args, inout m, inout graph);
+        }
+        let at = call_argument(inst.a, 0);
+        if low.program.op(at) == TyPass::Inout {
+            return NO_VALUE;
+        }
+        let arg = low.program.op(add(at, ARGUMENT_VALUE));
+        let source_kind = m.kind(arg);
+        let value = m.read(add(m.arguments, arg), block);
+        if value == NO_VALUE {
+            return NO_VALUE;
+        }
+        return lower_float_unary(in low, symbol, inst.ty, source_kind, value, inout m, inout graph);
+    }
+    let callee = low.ast.function(index);
+    let result = scalar_kind(in low, inst.ty);
+    let aggregate = is_aggregate(result);
+    if count != callee.param_count
+        || !sysv_signature(in low, callee)
+        || result != scalar_kind(in low, callee.result)
+        || (aggregate && inst.ty != callee.result)
+    {
+        return NO_VALUE;
+    }
+    let mut args = ChunkSeq::new[u64]();
+    let mut floats = ChunkSeq::new[u64]();
+    let buffer = m.call_result_home();
+    let mut argument_buffer = m.call_argument_home();
+    let argument_end = add(argument_buffer, m.call_argument_bytes);
+    let mut result_pointer = NO_VALUE;
+    if aggregate {
+        result_pointer = m.record(STACK_ADDRESS, HOME_SLOT, buffer, 0);
+        args.push(result_pointer);
+    }
+    for i in 0..count {
+        let at = call_argument(inst.a, i);
+        let operand = low.program.op(add(at, ARGUMENT_VALUE));
+        let param = low.ast.param(add(callee.param_start, i));
+        let kind = m.kind(operand);
+        let inout_arg = low.program.op(at) == TyPass::Inout;
+        if inout_arg != (param.pass == TyPass::Inout)
+            || (inout_arg && low.program.path(low.program.op(add(at, ARGUMENT_PATH))).n != 0)
+            || kind != scalar_kind(in low, param.ty)
+        {
+            return NO_VALUE;
+        }
+        let value = if inout_arg {
+            let name = argument_root(in low, at);
+            let place = place_value(in low, caller, name, in m);
+            if abi_width(kind) == 0 || m.value_kind(place) != kind {
+                return NO_VALUE;
+            }
+            if m.is_inout(place) {
+                m.read(place, block)
+            } else {
+                let offset = m.mutable_offset(name);
+                if offset == NO_VALUE {
+                    return NO_VALUE;
+                }
+                m.record(STACK_ADDRESS, HOME_SLOT, offset, 0)
+            }
+        } else if is_aggregate(kind) {
+            let source = add(m.arguments, operand);
+            match m.product(source) {
+                Option::Some(product) => if product.ty != param.ty {
+                    return NO_VALUE;
+                },
+                Option::None => return NO_VALUE,
+            };
+            if m.result_is_resident(source, resident) {
+                // The callee snapshots its value parameters before writing a result.
+                if result_pointer == NO_VALUE {
+                    result_pointer = m.record(STACK_ADDRESS, HOME_SLOT, buffer, 0);
+                }
+                result_pointer
+            } else {
+                let mut fields = ChunkSeq::new[u64]();
+                if !product_cells(in low, source, in m, inout fields) {
+                    return NO_VALUE;
+                }
+                let end = add(argument_buffer, wrapping_mul(fields.len(), HOME_BYTES));
+                if end > argument_end {
+                    return NO_VALUE;
+                }
+                let pointer = m.record(STACK_ADDRESS, HOME_SLOT, argument_buffer, 0);
+                if !store_fields(in fields, pointer, block, inout m) {
+                    return NO_VALUE;
+                }
+                argument_buffer = end;
+                pointer
+            }
+        } else {
+            m.read(add(m.arguments, operand), block)
+        };
+        if value == NO_VALUE {
+            return NO_VALUE;
+        }
+        if !inout_arg && is_float(kind) {
+            floats.push(value);
+        } else {
+            args.push(value);
+        }
+    }
+    let target = graph.discover(index);
+    if target == NO_VALUE {
+        return NO_VALUE;
+    }
+    // Operand loads must precede the contiguous call argument records.
+    for i in 0..args.len() {
+        let _ = m.record(CALL_ARGUMENT, args.try_get(i).unwrap_or(NO_VALUE), 0, 0);
+    }
+    for i in 0..floats.len() {
+        let _ = m.record(CALL_ARGUMENT, floats.try_get(i).unwrap_or(NO_VALUE), 0, 0);
+    }
+    let op = if result == ScalarKind::Unit || aggregate {
+        CALL_VOID
+    } else if is_float(result) {
+        CALL_FLOAT
+    } else {
+        CALL
+    };
+    let call = m.record(op, target, add(args.len(), floats.len()), floats.len());
+    if aggregate {
+        // Take the scalar fields out before another call can reuse this buffer.
+        let mut fields = ChunkSeq::new[u64]();
+        if !product_cells(in low, add(m.arguments, w(inst.dest)), in m, inout fields) {
+            return NO_VALUE;
+        }
+        for i in 0..fields.len() {
+            let field = fields.try_get(i).unwrap_or(NO_VALUE);
+            let kind = m.value_kind(field);
+            if field == NO_VALUE || kind == ScalarKind::Unit {
+                continue;
+            }
+            let offset = add(buffer, wrapping_mul(i, HOME_BYTES));
+            let value = if is_float(kind) {
+                m.record(FLOAT_STACK_LOAD, HOME_SLOT, offset, abi_width(kind))
+            } else {
+                m.record(STACK_LOAD, HOME_SLOT, offset, abi_width(kind))
+            };
+            if !m.define(field, block, value) {
+                return NO_VALUE;
+            }
+        }
+    }
+    call
+}
+
+fn block_parameter(in low: L, b: BlockRow) -> u64 {
+    let incoming = low.program.op(add(b.ha, BLOCK_INCOMING_COUNT));
+    let first = add(BLOCK_HEADER_WORDS, wrapping_mul(incoming, BLOCK_INCOMING_WORDS));
+    if b.hn == inc(first) {
+        low.program.op(add(b.ha, first))
+    } else {
+        NO_VALUE
+    }
+}
+
+fn pattern_payload(in low: L, at: u64, end: u64) -> u64 {
+    if end < at || wrapping_sub(end, at) < PATTERN_HEADER_WORDS {
+        return NO_VALUE;
+    }
+    let extra = match low.program.op(at) {
+        Pat::Wild => 0,
+        Pat::Bind | Pat::Tuple => 1,
+        Pat::Literal => LITERAL_WORDS,
+        Pat::Constructor => wrapping_sub(CONSTRUCTOR_PATTERN_FIELDS, PATTERN_HEADER_WORDS),
+        _ => return NO_VALUE,
+    };
+    let next = add(add(at, PATTERN_HEADER_WORDS), extra);
+    if next > end { NO_VALUE } else { next }
+}
+
+copy struct MatchArm {
+    target: u64,
+    tests: u64,
+}
+
+fn enum_pattern_child(in low: L, field: u64, end: u64) -> u64 {
+    if field >= end || low.program.tag(field) != Tag::Name {
+        return NO_VALUE;
+    }
+    let at = inc(field);
+    let next = pattern_payload(in low, at, end);
+    if next == NO_VALUE {
+        return NO_VALUE;
+    }
+    let kind = low.program.op(at);
+    if kind == Pat::Constructor
+        || (kind == Pat::Tuple && low.program.op(add(at, PATTERN_HEADER_WORDS)) != 0)
+    {
+        NO_VALUE
+    } else {
+        next
+    }
+}
+
+fn enum_match_arm(in low: L, pattern: u64, end: u64) -> MatchArm {
+    let invalid = MatchArm { target: NO_VALUE, tests: 0 };
+    let mut field = pattern_payload(in low, pattern, end);
+    if field == NO_VALUE {
+        return invalid;
+    }
+    let count = low.program.op(add(pattern, CONSTRUCTOR_PATTERN_COUNT));
+    let mut tests: u64 = 1;
+    for _ in 0..count {
+        let next = enum_pattern_child(in low, field, end);
+        if next == NO_VALUE {
+            return invalid;
+        }
+        if low.program.op(inc(field)) == Pat::Literal {
+            tests = inc(tests);
+        }
+        field = next;
+    }
+    if field >= end || low.program.tag(field) != Tag::Block {
+        invalid
+    } else {
+        MatchArm { target: field, tests: tests }
+    }
+}
+
+fn match_arm(in low: L, pattern: u64, end: u64) -> MatchArm {
+    let invalid = MatchArm { target: NO_VALUE, tests: 0 };
+    if pattern < end && low.program.op(pattern) == Pat::Constructor {
+        return enum_match_arm(in low, pattern, end);
+    }
+    let mut at = pattern;
+    let mut pending: u64 = 1;
+    let mut tests: u64 = 0;
+    loop {
+        if pending == 0 {
+            break;
+        }
+        let next = pattern_payload(in low, at, end);
+        if next == NO_VALUE {
+            return invalid;
+        }
+        pending = wrapping_sub(pending, 1);
+        let kind = low.program.op(at);
+        if kind == Pat::Constructor {
+            return invalid;
+        }
+        if kind == Pat::Tuple {
+            let fields = low.program.op(add(at, PATTERN_HEADER_WORDS));
+            if fields > wrapping_sub(end, next) / PATTERN_HEADER_WORDS {
+                return invalid;
+            }
+            pending = add(pending, fields);
+        }
+        if kind == Pat::Literal {
+            tests = inc(tests);
+        }
+        at = next;
+    }
+    if at >= end || low.program.tag(at) != Tag::Block {
+        invalid
+    } else {
+        MatchArm { target: at, tests: tests }
+    }
+}
+
+copy struct PatternLeaf {
+    value: u64,
+    operand: u64,
+    kind: u8,
+}
+
+copy struct EnumPatternField {
+    value: u64,
+    kind: u8,
+    pattern: u64,
+}
+
+fn enum_pattern_fields(
+    in low: L,
+    product: Product,
+    pattern: u64,
+    end: u64,
+    inout children: ChunkSeq[EnumPatternField]
+) -> Option[u64] {
+    if scalar_kind(in low, product.ty) != ScalarKind::Enum
+        || low.program.op(pattern) != Pat::Constructor
+    {
+        return Option::None;
+    }
+    let constructor = n32(low.program.op(add(pattern, CONSTRUCTOR_PATTERN_NAME)));
+    let shape = match enum_variant(in low, product.ty, constructor) {
+        Option::Some(shape) => shape,
+        Option::None => return Option::None,
+    };
+    let mut field = pattern_payload(in low, pattern, end);
+    let count = low.program.op(add(pattern, CONSTRUCTOR_PATTERN_COUNT));
+    if field == NO_VALUE || count > w(shape.variant.fc) {
+        return Option::None;
+    }
+    for _ in 0..count {
+        let next = enum_pattern_child(in low, field, end);
+        if next == NO_VALUE {
+            return Option::None;
+        }
+        let index = low.ctx.world.find_field(shape.variant, n32(low.program.op(field)));
+        let position = wrapping_sub(w(index), w(shape.variant.fa));
+        if position >= w(shape.variant.fc) {
+            return Option::None;
+        }
+        let kind = enum_field_kind(in low, product.ty, low.ctx.world.field(w(index)).ty);
+        let child = inc(field);
+        if low.program.op(child) == Pat::Tuple && kind != ScalarKind::Unit {
+            return Option::None;
+        }
+        let value = add(add(product.first_child, ENUM_TAG_CELLS), position);
+        children.push(EnumPatternField { value: value, kind: kind, pattern: child });
+        field = next;
+    }
+    if field == end {
+        Option::Some(shape.ordinal)
+    } else {
+        Option::None
+    }
+}
+
+fn pattern_leaves(
+    in low: L,
+    root: u64,
+    pattern: u64,
+    end: u64,
+    in m: Function,
+    inout leaves: ChunkSeq[PatternLeaf]
+) -> bool {
+    let mut values = ChunkSeq::new[u64]();
+    values.push(root);
+    let mut at = pattern;
+    loop {
+        let value = match values.pop() {
+            Option::Some(value) => value,
+            Option::None => return at == end,
+        };
+        let next = pattern_payload(in low, at, end);
+        let kind = m.value_kind(value);
+        if next == NO_VALUE || kind == ScalarKind::Unsupported {
+            return false;
+        }
+        let payload = add(at, PATTERN_HEADER_WORDS);
+        match low.program.op(at) {
+            Pat::Tuple => {
+                let count = low.program.op(payload);
+                if count == 0 && kind == ScalarKind::Unit {
+                    at = next;
+                    continue;
+                }
+                let product = match m.product(value) {
+                    Option::Some(product) => product,
+                    Option::None => return false,
+                };
+                if kind != ScalarKind::Tuple
+                    || count != product_count(in low, product.ty)
+                    || count > wrapping_sub(end, next) / PATTERN_HEADER_WORDS
+                {
+                    return false;
+                }
+                for i in 0..count {
+                    let child = product_field(in low, product, wrapping_sub(count, inc(i)), in m);
+                    if child == NO_VALUE {
+                        return false;
+                    }
+                    values.push(child);
+                }
+            },
+            Pat::Bind => {
+                if low.program.tag(payload) != Tag::Name {
+                    return false;
+                }
+                leaves.push(PatternLeaf {
+                    value: value,
+                    operand: low.program.op(payload),
+                    kind: Pat::Bind
+                });
+            },
+            Pat::Literal => {
+                let bits = match literal_bits(in low, payload, kind) {
+                    Option::Some(bits) => bits,
+                    Option::None => return false,
+                };
+                leaves.push(PatternLeaf { value: value, operand: bits, kind: Pat::Literal });
+            },
+            Pat::Wild => (),
+            _ => return false,
+        };
+        at = next;
+    }
+}
+
+fn is_match_binding(in low: L, row: FnRow, b: BlockRow, index: u64, inst: InstRow) -> bool {
+    if index != b.i0 {
+        return false;
+    }
+    let count = add(b.ha, BLOCK_INCOMING_COUNT);
+    if low.program.op(count) != 1 {
+        return false;
+    }
+    let pred = low.program.block(add(row.b0, low.program.op(inc(count))));
+    pred.term == Term::Match && low.program.op(pred.ta) == low.program.op(inst.a)
+}
+
+fn is_match_literal_binding(in low: L, row: FnRow, b: BlockRow, index: u64, inst: InstRow) -> bool {
+    inst.n == add(BIND_NAME, LITERAL_WORDS)
+        && low.program.op(add(inst.a, BIND_PATTERN)) == Pat::Literal
+        && is_match_binding(in low, row, b, index, inst)
+}
+
+fn queue_block(inout labels: ChunkSeq[u64], inout pending: ChunkSeq[u64], target: u64) -> bool {
+    if target >= labels.len() {
+        return false;
+    }
+    if labels.try_get(target).unwrap_or(NO_VALUE) == NO_VALUE {
+        let _ = labels.try_set(target, 0);
+        pending.push(target);
+    }
+    true
+}
+
+// A `break` or `continue` can be followed by synthetic blocks with no
+// reachable predecessor. Assign labels only to reachable blocks, keeping
+// their original layout order so the encoder can retain fallthroughs.
+fn plan_blocks(in low: L, row: FnRow, inout m: Function) -> bool {
+    m.labels.resize(row.bc, NO_VALUE);
+    let mut pending = ChunkSeq::new[u64]();
+    if !queue_block(inout m.labels, inout pending, 0) {
+        return false;
+    }
+    let mut index: u64 = 0;
+    loop {
+        let block = match pending.try_get(index) {
+            Option::Some(found) => found,
+            Option::None => break,
+        };
+        let b = low.program.block(add(row.b0, block));
+        if b.term == Term::Jump {
+            if !queue_block(inout m.labels, inout pending, low.program.op(b.ta)) {
+                return false;
+            }
+        } else if b.term == Term::Branch {
+            let yes = low.program.op(add(b.ta, BRANCH_TRUE));
+            let no = low.program.op(add(b.ta, BRANCH_FALSE));
+            if !queue_block(inout m.labels, inout pending, yes)
+                || !queue_block(inout m.labels, inout pending, no)
+            {
+                return false;
+            }
+        } else if b.term == Term::Match {
+            let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
+            let end = add(b.ta, b.tn);
+            let mut pattern = add(b.ta, MATCH_FIRST_ARM);
+            for arm in 0..count {
+                let shape = match_arm(in low, pattern, end);
+                if shape.target == NO_VALUE
+                    || !queue_block(inout m.labels, inout pending, low.program.op(shape.target))
+                {
+                    return false;
+                }
+                if shape.tests == 0 {
+                    break;
+                }
+                pattern = inc(shape.target);
+            }
+        }
+        index = inc(index);
+    }
+    for block in 0..row.bc {
+        if m.label(block) != NO_VALUE {
+            let _ = m.labels.try_set(block, m.blocks.len());
+            m.blocks.push(block);
+        }
+    }
+    m.next_label = m.blocks.len();
+    true
+}
+
+fn value_types_count_at(row: FnRow, arguments: u64) -> u64 {
+    // After the parameters come the result, effects, bound count and capture
+    // count, then the table of (value ID, type ID) pairs.
+    let after_parameters = inc(add(row.ha, wrapping_mul(arguments, PARAMETER_WORDS)));
+    add(after_parameters, VALUE_TYPES_COUNT)
+}
+
+fn plan_types(in low: L, row: FnRow, inout m: Function) -> bool {
+    let count_at = value_types_count_at(row, m.arguments);
+    let end = add(row.ha, row.hn);
+    if count_at >= end {
+        return false;
+    }
+    let first = inc(count_at);
+    let count = low.program.op(count_at);
+    if count > wrapping_sub(end, first) / VALUE_TYPE_WORDS {
+        return false;
+    }
+    m.kinds.resize(wrapping_sub(m.values.len(), m.arguments), ScalarKind::Unsupported);
+    for i in 0..count {
+        let at = add(first, wrapping_mul(i, VALUE_TYPE_WORDS));
+        let ty_at = inc(at);
+        if low.program.tag(at) != Tag::Value || low.program.tag(ty_at) != Tag::Type {
+            return false;
+        }
+        let kind = scalar_kind(in low, n32(low.program.op(ty_at)));
+        if !m.kinds.try_set(low.program.op(at), kind) {
+            return false;
+        }
+    }
+    true
+}
+
+fn declared_value_type(in low: L, row: FnRow, arguments: u64, value: u64) -> Option[u32] {
+    let count_at = value_types_count_at(row, arguments);
+    let first = inc(count_at);
+    for i in 0..low.program.op(count_at) {
+        let at = add(first, wrapping_mul(i, VALUE_TYPE_WORDS));
+        if low.program.op(at) == value {
+            return Option::Some(n32(low.program.op(inc(at))));
+        }
+    }
+    Option::None
+}
+
+copy struct PendingProduct {
+    value: u64,
+    ty: u32,
+}
+
+// Reserve scalar SSA values for a product arriving from another block or
+// through the native ABI.
+fn plan_product(
+    in low: L,
+    root: PendingProduct,
+    block: u64,
+    constructor: u64,
+    inout m: Function
+) -> u64 {
+    let mut pending = ChunkSeq::new[PendingProduct]();
+    pending.push(root);
+    let start = m.values.len();
+    let mut cells: u64 = 0;
+    loop {
+        let node = match pending.pop() {
+            Option::Some(node) => node,
+            Option::None => break,
+        };
+        let count = product_count(in low, node.ty);
+        let enum_value = scalar_kind(in low, node.ty) == ScalarKind::Enum;
+        let first = m.values.len();
+        if (enum_value && count == 0)
+            || add(wrapping_sub(first, start), count) > MAX_RESULT_CELLS
+            || !m.product_indices.try_set(node.value, m.products.len())
+        {
+            return 0;
+        }
+        let instruction = if node.value == root.value {
+            constructor
+        } else {
+            NO_VALUE
+        };
+        m.products.push(Product { ty: node.ty, instruction: instruction, first_child: first });
+        if count == 0 {
+            cells = inc(cells);
+        }
+        for i in 0..count {
+            let kind = if enum_value {
+                cells = inc(cells);
+                ScalarKind::U64
+            } else {
+                let ty = product_field_type(in low, node.ty, i);
+                let kind = scalar_kind(in low, ty);
+                if kind == ScalarKind::Unsupported {
+                    return 0;
+                }
+                if is_aggregate(kind) {
+                    pending.push(PendingProduct { value: m.values.len(), ty: ty });
+                } else {
+                    cells = inc(cells);
+                }
+                kind
+            };
+            m.kinds.push(kind);
+            m.values.push(value_new(block));
+            m.product_indices.push(NO_VALUE);
+        }
+    }
+    wrapping_mul(cells, HOME_BYTES)
+}
+
+fn plan_call_arguments(in low: L, inst: InstRow, resident: u64, inout m: Function) -> bool {
+    let count = call_arity(in low, inst);
+    if count == NO_VALUE {
+        return false;
+    }
+    let mut cells: u64 = 0;
+    for i in 0..count {
+        let at = call_argument(inst.a, i);
+        let operand = low.program.op(add(at, ARGUMENT_VALUE));
+        if !is_aggregate(m.kind(operand)) {
+            continue;
+        }
+        if low.program.op(at) == TyPass::Inout {
+            return false;
+        }
+        let source = add(m.arguments, operand);
+        if m.result_is_resident(source, resident) {
+            m.forwards_call_result = true;
+            continue;
+        }
+        let mut fields = ChunkSeq::new[u64]();
+        if !product_cells(in low, source, in m, inout fields) {
+            return false;
+        }
+        cells = add(cells, fields.len());
+        if cells > MAX_RESULT_CELLS {
+            return false;
+        }
+    }
+    let bytes = wrapping_mul(cells, HOME_BYTES);
+    if bytes > m.call_argument_bytes {
+        m.call_argument_bytes = bytes;
+    }
+    true
+}
+
+fn plan_tuple_binding(in low: L, inst: InstRow, matched: bool, inout m: Function) -> bool {
+    let root = add(m.arguments, low.program.op(inst.a));
+    let mut leaves = ChunkSeq::new[PatternLeaf]();
+    if !pattern_leaves(
+        in low,
+        root,
+        add(inst.a, BIND_PATTERN),
+        add(inst.a, inst.n),
+        in m,
+        inout leaves
+    ) {
+        return false;
+    }
+    for i in 0..leaves.len() {
+        match leaves.try_get(i) {
+            Option::Some(leaf) => {
+                if leaf.kind == Pat::Bind {
+                    if !record_binding(n32(leaf.operand), leaf.value, inout m) {
+                        return false;
+                    }
+                } else if !matched {
+                    return false;
+                }
+            },
+            Option::None => return false,
+        };
+    }
+    true
+}
+
+fn enum_binding_fields(
+    in low: L,
+    inst: InstRow,
+    in m: Function,
+    inout fields: ChunkSeq[EnumPatternField]
+) -> bool {
+    let source = add(m.arguments, low.program.op(inst.a));
+    let product = match m.product(source) {
+        Option::Some(product) => product,
+        Option::None => return false,
+    };
+    enum_pattern_fields(
+        in low,
+        product,
+        add(inst.a, BIND_PATTERN),
+        add(inst.a, inst.n),
+        inout fields
+    )
+        .is_some()
+}
+
+fn plan_enum_binding(in low: L, inst: InstRow, block: u64, inout m: Function) -> bool {
+    let mut fields = ChunkSeq::new[EnumPatternField]();
+    if !enum_binding_fields(in low, inst, in m, inout fields) {
+        return false;
+    }
+    for i in 0..fields.len() {
+        let field = match fields.try_get(i) {
+            Option::Some(field) => field,
+            Option::None => return false,
+        };
+        if low.program.op(field.pattern) == Pat::Bind {
+            let at = add(field.pattern, PATTERN_HEADER_WORDS);
+            if low.program.tag(at) != Tag::Name
+                || !record_binding(n32(low.program.op(at)), m.values.len(), inout m)
+            {
+                return false;
+            }
+            m.kinds.push(field.kind);
+            m.values.push(value_new(block));
+            m.product_indices.push(NO_VALUE);
+        }
+    }
+    true
+}
+
+fn lower_enum_binding(in low: L, inst: InstRow, block: u64, inout m: Function) -> bool {
+    let mut fields = ChunkSeq::new[EnumPatternField]();
+    if !enum_binding_fields(in low, inst, in m, inout fields) {
+        return false;
+    }
+    for i in 0..fields.len() {
+        let field = match fields.try_get(i) {
+            Option::Some(field) => field,
+            Option::None => return false,
+        };
+        if low.program.op(field.pattern) != Pat::Bind || field.kind == ScalarKind::Unit {
+            continue;
+        }
+        let name = n32(low.program.op(add(field.pattern, PATTERN_HEADER_WORDS)));
+        let dest = wrapping_sub(w(u32_at(in m.bindings, w(name))), 1);
+        let raw = m.read(field.value, block);
+        if dest == NO_VALUE || raw == NO_VALUE {
+            return false;
+        }
+        let width = abi_width(field.kind);
+        let value = if is_float(field.kind) {
+            m.record(BITS_TO_FLOAT, raw, 0, width)
+        } else if width < QWORD_BITS {
+            m.record(TRUNCATE, raw, QWORD_BITS, width)
+        } else {
+            raw
+        };
+        if !m.define(dest, block, value) {
+            return false;
+        }
+    }
+    true
+}
+
+// Cache the product behind each aggregate SSA value.
+fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
+    m.product_indices.resize(m.values.len(), NO_VALUE);
+    for arg in 0..f.param_count {
+        if is_aggregate(m.value_kind(arg)) {
+            let ty = low.ast.param(add(f.param_start, arg)).ty;
+            let root = PendingProduct { value: arg, ty: ty };
+            if plan_product(in low, root, 0, NO_VALUE, inout m) == 0 {
+                return false;
+            }
+        }
+    }
+    for layout in 0..m.blocks.len() {
+        let block = m.blocks.try_get(layout).unwrap_or(0);
+        let b = low.program.block(add(row.b0, block));
+        let param = block_parameter(in low, b);
+        if is_aggregate(m.kind(param)) {
+            let ty = match declared_value_type(in low, row, m.arguments, param) {
+                Option::Some(ty) => ty,
+                Option::None => return false,
+            };
+            let value = add(m.arguments, param);
+            let root = PendingProduct { value: value, ty: ty };
+            if plan_product(in low, root, block, NO_VALUE, inout m) == 0 {
+                return false;
+            }
+            let mut fields = ChunkSeq::new[u64]();
+            if !product_cells(in low, value, in m, inout fields) {
+                return false;
+            }
+            for i in 0..fields.len() {
+                let field = fields.try_get(i).unwrap_or(NO_VALUE);
+                if field != NO_VALUE
+                    && m.value_kind(field) != ScalarKind::Unit
+                    && !m.home(field, block)
+                {
+                    return false;
+                }
+            }
+        }
+        let mut resident = NO_VALUE;
+        for index in b.i0..add(b.i0, b.ic) {
+            let inst = low.program.inst(index);
+            let value = add(m.arguments, w(inst.dest));
+            let aggregate = is_aggregate(m.value_kind(value));
+            if inst.op == Op::Bind && low.program.op(add(inst.a, BIND_PATTERN)) == Pat::Tuple {
+                let matched = is_match_binding(in low, row, b, index, inst);
+                if !plan_tuple_binding(in low, inst, matched, inout m) {
+                    return false;
+                }
+                continue;
+            }
+            if inst.op == Op::Bind
+                && low.program.op(add(inst.a, BIND_PATTERN)) == Pat::Constructor
+            {
+                if !is_match_binding(in low, row, b, index, inst)
+                    || !plan_enum_binding(in low, inst, block, inout m)
+                {
+                    return false;
+                }
+                continue;
+            }
+            if inst.op == Op::Data && m.value_kind(value) == ScalarKind::Enum {
+                let root = PendingProduct { value: value, ty: inst.ty };
+                if plan_product(in low, root, block, index, inout m) == 0 {
+                    return false;
+                }
+                continue;
+            }
+            if inst.op == Op::Call {
+                if !plan_call_arguments(in low, inst, resident, inout m) {
+                    return false;
+                }
+                if aggregate {
+                    let root = PendingProduct { value: value, ty: inst.ty };
+                    let bytes = plan_product(in low, root, block, NO_VALUE, inout m);
+                    if bytes == 0 {
+                        return false;
+                    }
+                    if bytes > m.call_result_bytes {
+                        m.call_result_bytes = bytes;
+                    }
+                    resident = m.product_index(value);
+                }
+                continue;
+            }
+            if !aggregate {
+                continue;
+            }
+            let at = inst.a;
+            let product = if inst.op == Op::Tuple || inst.op == Op::Data {
+                let product = m.products.len();
+                m.products.push(Product { ty: inst.ty, instruction: index, first_child: NO_VALUE });
+                product
+            } else if inst.op == Op::Read
+                && inst.n == PLAIN_READ_WORDS
+                && low.program.op(add(at, READ_PROJECTIONS)) == 0
+                && low.program.op(add(at, READ_PASS)) != TyPass::Inout
+                && m.mutable_offset(n32(low.program.op(at))) == NO_VALUE
+            {
+                m.product_index(read_source(in low, f, at, in m))
+            } else if inst.op == Op::Project && inst.n == PROJECT_WORDS {
+                m.product_index(project_source(in low, at, in m))
+            } else {
+                NO_VALUE
+            };
+            if product != NO_VALUE {
+                let _ = m.product_indices.try_set(value, product);
+            }
+        }
+    }
+    true
+}
+
+// Walk backward from each use to its definition. Jump operands are read
+// before the destination parameter is written, so those two lifetimes may
+// share a home at the edge. A block in both sets keeps distinct homes.
+fn home_liveness(in predecessors: ChunkSeq[u64], v: Value) -> u64 {
+    let mut live = block_bit(v.owner);
+    let mut pending = v.live & ~live;
+    loop {
+        if pending == 0 {
+            return live;
+        }
+        let block = w(trailing_zeros_u64(pending));
+        let bit = block_bit(block);
+        live = live | bit;
+        pending = (pending | predecessors.try_get(block).unwrap_or(0)) & ~live;
+    }
+}
+
+fn pack_homes(in low: L, row: FnRow, inout m: Function) {
+    // Each bit denotes a block. Large functions retain the initial unique slots.
+    if m.home_bytes == 0 || row.bc > QWORD_BITS {
+        return;
+    }
+    let mut predecessors = ChunkSeq::new[u64]();
+    for block in 0..row.bc {
+        let b = low.program.block(add(row.b0, block));
+        let count_at = add(b.ha, BLOCK_INCOMING_COUNT);
+        let mut mask: u64 = 0;
+        for edge in 0..low.program.op(count_at) {
+            let source = add(inc(count_at), wrapping_mul(edge, BLOCK_INCOMING_WORDS));
+            let pred = low.program.op(source);
+            if m.label(pred) != NO_VALUE {
+                mask = mask | block_bit(pred);
+            }
+        }
+        predecessors.push(mask);
+    }
+    let mut occupied = ChunkSeq::new[u64]();
+    for id in 0..m.values.len() {
+        let mut value = m.values.try_get(id).unwrap_or(value_new(NO_VALUE));
+        if value.home >= LITERAL_HOME {
+            continue;
+        }
+        let live = home_liveness(in predecessors, value);
+        let mut cell: u64 = 0;
+        loop {
+            match occupied.try_get(cell) {
+                Option::Some(other) => {
+                    if (live & other) == 0 {
+                        let _ = occupied.try_set(cell, live | other);
+                        break;
+                    }
+                },
+                Option::None => {
+                    occupied.push(live);
+                    break;
+                },
+            }
+            cell = inc(cell);
+        }
+        value.home = wrapping_mul(cell, HOME_BYTES);
+        let _ = m.values.try_set(id, value);
+    }
+    m.home_bytes = wrapping_mul(occupied.len(), HOME_BYTES);
+}
+
+fn plan_value(in low: L, value: u64, block: u64, inout m: Function) -> bool {
+    let kind = m.kind(value);
+    let source = add(m.arguments, value);
+    if !is_aggregate(kind) {
+        return kind == ScalarKind::Unit || m.use_in(source, block);
+    }
+    let mut fields = ChunkSeq::new[u64]();
+    if !product_cells(in low, source, in m, inout fields) {
+        return false;
+    }
+    for i in 0..fields.len() {
+        let field = fields.try_get(i).unwrap_or(NO_VALUE);
+        if field != NO_VALUE && m.value_kind(field) != ScalarKind::Unit && !m.use_in(field, block) {
+            return false;
+        }
+    }
+    true
+}
+
+fn plan_tuple_match(in low: L, b: BlockRow, source: u64, block: u64, inout m: Function) -> bool {
+    let end = add(b.ta, b.tn);
+    let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
+    let mut pattern = add(b.ta, MATCH_FIRST_ARM);
+    for arm in 0..count {
+        let shape = match_arm(in low, pattern, end);
+        if shape.target == NO_VALUE {
+            return false;
+        }
+        let mut leaves = ChunkSeq::new[PatternLeaf]();
+        if !pattern_leaves(in low, source, pattern, shape.target, in m, inout leaves) {
+            return false;
+        }
+        for i in 0..leaves.len() {
+            match leaves.try_get(i) {
+                Option::Some(leaf) => if leaf.kind == Pat::Literal {
+                    // Later arm tests use synthetic machine blocks and reload their operands.
+                    let planned = if arm == 0 {
+                        m.use_in(leaf.value, block)
+                    } else {
+                        m.home(leaf.value, block)
+                    };
+                    if !planned {
+                        return false;
+                    }
+                },
+                Option::None => return false,
+            };
+        }
+        if shape.tests == 0 {
+            return true;
+        }
+        pattern = inc(shape.target);
+    }
+    false
+}
+
+fn plan_match_operand(inout m: Function, value: u64, arm: u64, block: u64) -> bool {
+    if arm == 0 {
+        m.use_in(value, block)
+    } else {
+        m.home(value, block)
+    }
+}
+
+struct EnumCoverage {
+    seen: ChunkSeq[bool],
+    remaining: u64,
+}
+
+fn enum_coverage(variants: u64) -> EnumCoverage {
+    let mut seen = ChunkSeq::new[bool]();
+    seen.resize(variants, false);
+    EnumCoverage { seen: seen, remaining: variants }
+}
+
+impl EnumCoverage {
+    fn excludes_rest(inout self, ordinal: u64, tests: u64) -> bool {
+        if tests != 1 || self.seen.try_get(ordinal).unwrap_or(true) {
+            return false;
+        }
+        let _ = self.seen.try_set(ordinal, true);
+        self.remaining = wrapping_sub(self.remaining, 1);
+        self.remaining == 0
+    }
+}
+
+fn known_enum_variant(in low: L, product: Product) -> Option[EnumVariant] {
+    if product.instruction == NO_VALUE || scalar_kind(in low, product.ty) != ScalarKind::Enum {
+        return Option::None;
+    }
+    let inst = low.program.inst(product.instruction);
+    enum_variant(in low, product.ty, n32(low.program.op(inst.a)))
+}
+
+// Return an arm's target operand if knowing the tag alone decides the
+// match. A prior arm that tests this variant's payload still has priority.
+fn enum_target_for_tag(in low: L, b: BlockRow, product: Product, tag: u64) -> u64 {
+    let end = add(b.ta, b.tn);
+    let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
+    let mut pattern = add(b.ta, MATCH_FIRST_ARM);
+    let mut fields = ChunkSeq::new[EnumPatternField]();
+    for _ in 0..count {
+        let shape = match_arm(in low, pattern, end);
+        if shape.target == NO_VALUE {
+            return NO_VALUE;
+        }
+        let kind = low.program.op(pattern);
+        if kind == Pat::Bind || kind == Pat::Wild {
+            return shape.target;
+        }
+        let ordinal = match enum_pattern_fields(
+            in low,
+            product,
+            pattern,
+            shape.target,
+            inout fields
+        ) {
+            Option::Some(ordinal) => ordinal,
+            Option::None => return NO_VALUE,
+        };
+        if ordinal == tag {
+            return if shape.tests == 1 {
+                shape.target
+            } else {
+                NO_VALUE
+            };
+        }
+        fields.clear();
+        pattern = inc(shape.target);
+    }
+    NO_VALUE
+}
+
+fn plan_enum_match(in low: L, b: BlockRow, source: u64, block: u64, inout m: Function) -> bool {
+    let product = match m.product(source) {
+        Option::Some(product) => product,
+        Option::None => return false,
+    };
+    match known_enum_variant(in low, product) {
+        Option::Some(variant) => if enum_target_for_tag(in low, b, product, variant.ordinal)
+            != NO_VALUE
+        {
+            return true;
+        },
+        Option::None => {},
+    };
+    let mut coverage = enum_coverage(w(product_adt(in low, product.ty).vn));
+    let end = add(b.ta, b.tn);
+    let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
+    let mut pattern = add(b.ta, MATCH_FIRST_ARM);
+    for arm in 0..count {
+        let shape = match_arm(in low, pattern, end);
+        if shape.target == NO_VALUE {
+            return false;
+        }
+        let kind = low.program.op(pattern);
+        if kind == Pat::Bind || kind == Pat::Wild {
+            return true;
+        }
+        let mut fields = ChunkSeq::new[EnumPatternField]();
+        let ordinal = match enum_pattern_fields(
+            in low,
+            product,
+            pattern,
+            shape.target,
+            inout fields
+        ) {
+            Option::Some(ordinal) => ordinal,
+            Option::None => return false,
+        };
+        if coverage.excludes_rest(ordinal, shape.tests) {
+            return true;
+        }
+        if !plan_match_operand(inout m, product.first_child, arm, block) {
+            return false;
+        }
+        for i in 0..fields.len() {
+            let field = match fields.try_get(i) {
+                Option::Some(field) => field,
+                Option::None => return false,
+            };
+            if low.program.op(field.pattern) == Pat::Literal
+                && !plan_match_operand(inout m, field.value, arm, block)
+            {
+                return false;
+            }
+        }
+        pattern = inc(shape.target);
+    }
+    true
+}
+
+// Stack homes hold branch results and the values read outside their defining block.
+fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
+    let mut value_count: u64 = 0;
+    let mut has_place_actions = false;
+    let mut has_aggregates = false;
+    for arg in 0..f.param_count {
+        has_aggregates = has_aggregates || is_aggregate(m.value_kind(arg));
+    }
+    for block in 0..row.bc {
+        let b = low.program.block(add(row.b0, block));
+        let reachable = m.label(block) != NO_VALUE;
+        let param = block_parameter(in low, b);
+        if param != NO_VALUE && param >= value_count {
+            value_count = inc(param);
+        }
+        for index in b.i0..add(b.i0, b.ic) {
+            let inst = low.program.inst(index);
+            let dest = w(inst.dest);
+            if dest >= value_count {
+                value_count = inc(dest);
+            }
+            if reachable {
+                has_aggregates = has_aggregates
+                    || (inst.op == Op::Tuple && inst.n > EMPTY_TUPLE_WORDS)
+                    || inst.op == Op::Data
+                    || (inst.op == Op::Bind
+                        && (low.program.op(add(inst.a, BIND_PATTERN)) == Pat::Tuple
+                            || low.program.op(add(inst.a, BIND_PATTERN)) == Pat::Constructor))
+                    || (inst.op == Op::Call && is_aggregate(scalar_kind(in low, inst.ty)));
+                if inst.op == Op::Bind
+                    && !is_match_literal_binding(in low, row, b, index, inst)
+                    && !collect_binding(in low, inst, inout m)
+                {
+                    return false;
+                }
+                has_place_actions = has_place_actions
+                    || inst.op == Op::Write
+                    || inst.op == Op::Call;
+            }
+        }
+    }
+    m.values.resize(add(f.param_count, value_count), value_new(NO_VALUE));
+    if !plan_types(in low, row, inout m)
+        || (has_place_actions && !collect_mutable_slots(in low, f, row, inout m))
+    {
+        return false;
+    }
+    if has_aggregates && !plan_aggregates(in low, f, row, inout m) {
+        return false;
+    }
+    if m.blocks.len() == 1 {
+        return block_parameter(in low, low.program.block(row.b0)) == NO_VALUE;
+    }
+    for arg in 0..f.param_count {
+        let _ = m.values.try_set(arg, value_new(0));
+    }
+    for layout in 0..m.blocks.len() {
+        let block = m.blocks.try_get(layout).unwrap_or(0);
+        let b = low.program.block(add(row.b0, block));
+        let param = block_parameter(in low, b);
+        if param != NO_VALUE && !is_aggregate(m.kind(param)) {
+            let id = add(f.param_count, param);
+            if !m.values.try_set(id, value_new(block))
+                || (m.kind(param) != ScalarKind::Unit && !m.home(id, block))
+            {
+                return false;
+            }
+        }
+        for index in b.i0..add(b.i0, b.ic) {
+            let inst = low.program.inst(index);
+            let dest = w(inst.dest);
+            let mut value = value_new(block);
+            if inst.op == Op::Const && inst.n == LITERAL_WORDS {
+                let kind = m.kind(dest);
+                if is_integer(kind) || kind == ScalarKind::Bool {
+                    value.home = LITERAL_HOME;
+                }
+            }
+            if !m.values.try_set(add(f.param_count, dest), value) {
+                return false;
+            }
+        }
+    }
+    for layout in 0..m.blocks.len() {
+        let block = m.blocks.try_get(layout).unwrap_or(0);
+        let b = low.program.block(add(row.b0, block));
+        for index in b.i0..add(b.i0, b.ic) {
+            let inst = low.program.inst(index);
+            let at = inst.a;
+            if inst.op == Op::Read {
+                let name = n32(low.program.op(at));
+                let value = read_source(in low, f, at, in m);
+                let kind = m.value_kind(value);
+                if m.mutable_offset(name) == NO_VALUE
+                    && kind != ScalarKind::Unit
+                    && !is_aggregate(kind)
+                    && !m.use_in(value, block)
+                {
+                    return false;
+                }
+            } else if inst.op == Op::Project {
+                let source = project_source(in low, at, in m);
+                let kind = m.value_kind(source);
+                if inst.n != PROJECT_WORDS
+                    || (kind != ScalarKind::Unit && !is_aggregate(kind) && !m.use_in(source, block))
+                {
+                    return false;
+                }
+            } else if inst.op == Op::Write {
+                if !m.use_in(add(f.param_count, low.program.op(add(at, WRITE_VALUE))), block) {
+                    return false;
+                }
+                let dst = argument_value(in low, f, n32(low.program.op(at)));
+                if m.is_inout(dst) && !m.use_in(dst, block) {
+                    return false;
+                }
+            } else if inst.op == Op::Bind && inst.n == inc(BIND_NAME) {
+                let name = n32(low.program.op(add(at, BIND_NAME)));
+                if m.mutable_offset(name) != NO_VALUE
+                    && !m.use_in(add(f.param_count, low.program.op(at)), block)
+                {
+                    return false;
+                }
+            } else if inst.op == Op::Bind
+                && low.program.op(add(at, BIND_PATTERN)) == Pat::Constructor
+            {
+                let mut fields = ChunkSeq::new[EnumPatternField]();
+                if !enum_binding_fields(in low, inst, in m, inout fields) {
+                    return false;
+                }
+                for i in 0..fields.len() {
+                    let field = match fields.try_get(i) {
+                        Option::Some(field) => field,
+                        Option::None => return false,
+                    };
+                    if low.program.op(field.pattern) == Pat::Bind
+                        && field.kind != ScalarKind::Unit
+                        && !m.use_in(field.value, block)
+                    {
+                        return false;
+                    }
+                }
+            } else if inst.op == Op::Binary {
+                let lhs = add(f.param_count, low.program.op(add(at, BINARY_LHS)));
+                let rhs = add(f.param_count, low.program.op(add(at, BINARY_RHS)));
+                let kind = m.value_kind(lhs);
+                if is_aggregate(kind) {
+                    let mut leaves = ChunkSeq::new[EqualityPair]();
+                    let pair = EqualityPair { left: lhs, right: rhs };
+                    if !equality_leaves(in low, pair, in m, inout leaves) {
+                        return false;
+                    }
+                    for i in 0..leaves.len() {
+                        let pair = leaves
+                            .try_get(i)
+                            .unwrap_or(EqualityPair { left: NO_VALUE, right: NO_VALUE });
+                        if !m.use_in(pair.left, block) || !m.use_in(pair.right, block) {
+                            return false;
+                        }
+                    }
+                } else if kind != ScalarKind::Unit
+                    && (!m.use_in(lhs, block) || !m.use_in(rhs, block))
+                {
+                    return false;
+                }
+            } else if inst.op == Op::Unary {
+                if !m.use_in(add(f.param_count, low.program.op(add(at, UNARY_VALUE))), block) {
+                    return false;
+                }
+            } else if inst.op == Op::Data && m.kind(w(inst.dest)) == ScalarKind::Enum {
+                let shape = match enum_data_variant(in low, inst, in m) {
+                    Option::Some(shape) => shape,
+                    Option::None => return false,
+                };
+                for i in 0..w(shape.variant.fc) {
+                    let field = low.ctx.world.field(add(w(shape.variant.fa), i));
+                    let value = struct_member(in low, inst, field.name);
+                    if m.kind(value) != ScalarKind::Unit
+                        && !m.use_in(add(m.arguments, value), block)
+                    {
+                        return false;
+                    }
+                }
+            } else if inst.op == Op::Exit {
+                if !plan_value(in low, low.program.op(at), block, inout m) {
+                    return false;
+                }
+            } else if inst.op == Op::Call {
+                let count = call_arity(in low, inst);
+                if count == NO_VALUE {
+                    return false;
+                }
+                for i in 0..count {
+                    let argument = call_argument(at, i);
+                    if low.program.op(argument) == TyPass::Inout {
+                        let name = argument_root(in low, argument);
+                        let dst = argument_value(in low, f, name);
+                        if m.is_inout(dst) && !m.use_in(dst, block) {
+                            return false;
+                        }
+                    } else {
+                        let value = low.program.op(add(argument, ARGUMENT_VALUE));
+                        if !plan_value(in low, value, block, inout m) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        if b.term == Term::Return {
+            if !plan_value(in low, low.program.op(b.ta), block, inout m) {
+                return false;
+            }
+        } else if b.term == Term::Branch || b.term == Term::Match {
+            let id = low.program.op(b.ta);
+            let source = add(f.param_count, id);
+            if b.term == Term::Match && m.kind(id) == ScalarKind::Enum {
+                if !plan_enum_match(in low, b, source, block, inout m) {
+                    return false;
+                }
+                continue;
+            }
+            if b.term == Term::Match
+                && (m.kind(id) == ScalarKind::Tuple || m.kind(id) == ScalarKind::Unit)
+            {
+                if !plan_tuple_match(in low, b, source, block, inout m) {
+                    return false;
+                }
+                continue;
+            }
+            if m.kind(id) != ScalarKind::Unit && !m.use_in(source, block) {
+                return false;
+            }
+            if b.term == Term::Match
+                && low.program.op(add(b.ta, MATCH_ARM_COUNT)) > DIRECT_MATCH_ARM_LIMIT
+                && low.program.op(add(b.ta, MATCH_FIRST_ARM)) == Pat::Literal
+                && !m.home(source, block)
+            {
+                return false;
+            }
+        } else if b.term == Term::Jump && b.tn == inc(JUMP_ARGUMENT) {
+            let id = low.program.op(add(b.ta, JUMP_ARGUMENT));
+            if !plan_value(in low, id, block, inout m) {
+                return false;
+            }
+        }
+    }
+    pack_homes(in low, row, inout m);
+    true
+}
+
+fn low_bits_mask(width: u64) -> u64 {
+    wrapping_shr_u64(ALL_REGISTER_BITS, wrapping_u32(wrapping_sub(QWORD_BITS, width)))
+}
+
+fn sign_bit(width: u64) -> u64 {
+    wrapping_shl_u64(1, wrapping_u32(wrapping_sub(width, 1)))
+}
+
+copy struct IntegerBounds {
+    min: u64,
+    max: u64,
+}
+
+// Endpoints are canonical bit patterns ordered by the integer kind, so a
+// signed negative minimum can have a larger raw pattern than the maximum.
+fn integer_bounds(
+    in m: Function,
+    value: u64,
+    signed: bool,
+    width: u64,
+    depth: u64
+) -> IntegerBounds {
+    let mask = low_bits_mask(width);
+    let sign = sign_bit(width);
+    match m.definition(value) {
+        Option::Some(record) => {
+            if record.op == CONSTANT {
+                return IntegerBounds { min: record.left, max: record.left };
+            }
+            if record.op == AND {
+                let bound = m.constant(record.left).unwrap_or(mask)
+                    & m.constant(record.right).unwrap_or(mask);
+                if !signed || bound < sign {
+                    return IntegerBounds { min: 0, max: bound };
+                }
+            }
+            // No-op widening may reuse a narrower machine value. Arithmetic
+            // at a different width can wrap at a different boundary.
+            if depth != 0
+                && record.extra == width
+                && (record.op == ADD || record.op == SUB || record.op == MUL)
+            {
+                let remaining = wrapping_sub(depth, 1);
+                let left = integer_bounds(in m, record.left, signed, width, remaining);
+                let right = integer_bounds(in m, record.right, signed, width, remaining);
+                match arithmetic_bounds(record.op, left, right, signed, width) {
+                    Option::Some(bounds) => return bounds,
+                    Option::None => {},
+                };
+            }
+        },
+        Option::None => {},
+    };
+    if signed {
+        IntegerBounds { min: sign, max: wrapping_sub(sign, 1) }
+    } else {
+        IntegerBounds { min: 0, max: mask }
+    }
+}
+
+fn checked_integer(op: u64, lhs: u64, rhs: u64, signed: bool, width: u64) -> Option[u64] {
+    let mask = low_bits_mask(width);
+    let sign = sign_bit(width);
+    if op == ADD {
+        let result = wrapping_add(lhs, rhs) & mask;
+        let overflow = if signed {
+            ((lhs ^ result) & (rhs ^ result) & sign) != 0
+        } else {
+            lhs > wrapping_sub(mask, rhs)
+        };
+        if overflow {
+            Option::None
+        } else {
+            Option::Some(result)
+        }
+    } else if op == SUB {
+        let result = wrapping_sub(lhs, rhs) & mask;
+        let overflow = if signed {
+            ((lhs ^ rhs) & (lhs ^ result) & sign) != 0
+        } else {
+            lhs < rhs
+        };
+        if overflow {
+            Option::None
+        } else {
+            Option::Some(result)
+        }
+    } else {
+        // Multiplication of the magnitudes covers both signed extrema,
+        // including MIN's magnitude, which is representable as u64.
+        let a_negative = signed && (lhs & sign) != 0;
+        let b_negative = signed && (rhs & sign) != 0;
+        let a = if a_negative {
+            wrapping_sub(0, lhs) & mask
+        } else {
+            lhs
+        };
+        let b = if b_negative {
+            wrapping_sub(0, rhs) & mask
+        } else {
+            rhs
+        };
+        let limit = if !signed {
+            mask
+        } else if a_negative != b_negative {
+            sign
+        } else {
+            wrapping_sub(sign, 1)
+        };
+        let (lo, hi) = mul_wide(a, b);
+        if hi != 0 || lo > limit {
+            Option::None
+        } else {
+            Option::Some(wrapping_mul(lhs, rhs) & mask)
+        }
+    }
+}
+
+fn ordered_integer(bits: u64, signed: bool, width: u64) -> u64 {
+    if signed { bits ^ sign_bit(width) } else { bits }
+}
+
+fn bounds_include(bounds: IntegerBounds, bits: u64, signed: bool, width: u64) -> bool {
+    let at = ordered_integer(bits, signed, width);
+    at >= ordered_integer(bounds.min, signed, width)
+        && at <= ordered_integer(bounds.max, signed, width)
+}
+
+fn extend_bounds(bounds: IntegerBounds, bits: u64, signed: bool, width: u64) -> IntegerBounds {
+    let rank = ordered_integer(bits, signed, width);
+    IntegerBounds {
+        min: if rank < ordered_integer(bounds.min, signed, width) {
+            bits
+        } else {
+            bounds.min
+        },
+        max: if rank > ordered_integer(bounds.max, signed, width) {
+            bits
+        } else {
+            bounds.max
+        },
+    }
+}
+
+fn arithmetic_bounds(
+    op: u64,
+    a: IntegerBounds,
+    b: IntegerBounds,
+    signed: bool,
+    width: u64
+) -> Option[IntegerBounds] {
+    let low_rhs = if op == SUB { b.max } else { b.min };
+    let high_rhs = if op == SUB { b.min } else { b.max };
+    let first = match checked_integer(op, a.min, low_rhs, signed, width) {
+        Option::Some(bits) => bits,
+        Option::None => return Option::None,
+    };
+    if a.min == a.max && b.min == b.max {
+        return Option::Some(IntegerBounds { min: first, max: first });
+    }
+    let last = match checked_integer(op, a.max, high_rhs, signed, width) {
+        Option::Some(bits) => bits,
+        Option::None => return Option::None,
+    };
+    if op != MUL {
+        return Option::Some(IntegerBounds { min: first, max: last });
+    }
+    // A product's extrema over two intervals occur at the corners.
+    let cross1 = match checked_integer(op, a.min, b.max, signed, width) {
+        Option::Some(bits) => bits,
+        Option::None => return Option::None,
+    };
+    let cross2 = match checked_integer(op, a.max, b.min, signed, width) {
+        Option::Some(bits) => bits,
+        Option::None => return Option::None,
+    };
+    let bounds = extend_bounds(IntegerBounds { min: first, max: first }, last, signed, width);
+    let bounds = extend_bounds(bounds, cross1, signed, width);
+    Option::Some(extend_bounds(bounds, cross2, signed, width))
+}
+
+fn lower_checked_integer(
+    op: u64,
+    lhs: u64,
+    rhs: u64,
+    signed: bool,
+    width: u64,
+    inout m: Function
+) -> u64 {
+    if op == SUB && lhs == rhs {
+        return m.record(CONSTANT, 0, 0, 0);
+    }
+    let a = integer_bounds(in m, lhs, signed, width, INTEGER_BOUND_DEPTH);
+    let b = integer_bounds(in m, rhs, signed, width, INTEGER_BOUND_DEPTH);
+    match arithmetic_bounds(op, a, b, signed, width) {
+        Option::Some(result) => if result.min == result.max {
+            m.record(CONSTANT, result.min, 0, 0)
+        } else {
+            m.record(op, lhs, rhs, width)
+        },
+        Option::None => NO_VALUE,
+    }
+}
+
+fn literal_bits(in low: L, at: u64, kind: u8) -> Option[u64] {
+    let literal = low.program.op(at);
+    let bits = low.program.op(add(at, LITERAL_LOW));
+    let high = low.program.op(add(at, LITERAL_HIGH));
+    if kind == ScalarKind::Bool && literal == Lit::Bool && bits <= 1 && high == 0 {
+        return Option::Some(bits);
+    }
+    if !is_integer(kind) || literal != Lit::Int {
+        return Option::None;
+    }
+    let width = abi_width(kind);
+    let mask = low_bits_mask(width);
+    let upper_mask = mask ^ ALL_REGISTER_BITS;
+    let fill = if is_signed(kind) && (bits & sign_bit(width)) != 0 {
+        ALL_REGISTER_BITS
+    } else {
+        0
+    };
+    if high != fill || (bits & upper_mask) != (fill & upper_mask) {
+        return Option::None;
+    }
+    Option::Some(bits & mask)
+}
+
+// Place IR stores the parsed binary64 bits. Round those bits to binary32
+// without depending on floating-point instructions in the bootstrap compiler.
+fn binary32_literal_bits(bits: u64) -> u64 {
+    let sign = (bits >> (QWORD_BITS - 1)) << (DWORD_BITS - 1);
+    let exponent = (bits >> F64_FRACTION_BITS) & F64_EXPONENT_MASK;
+    let fraction = bits & low_bits_mask(F64_FRACTION_BITS);
+    if exponent == F64_EXPONENT_MASK && fraction != 0 {
+        let payload = wrapping_shr_u64(fraction, wrapping_u32(F32_DISCARDED_BITS));
+        return sign | F32_INFINITY_BITS | F32_NAN_QUIET_BIT | payload;
+    }
+    if exponent >= F32_OVERFLOW_F64_EXPONENT {
+        return sign | F32_INFINITY_BITS;
+    }
+    if exponent < F32_HALF_SUBNORMAL_F64_EXPONENT {
+        return sign;
+    }
+    let (base, significand, shift) = if exponent >= F32_MIN_NORMAL_F64_EXPONENT {
+        (wrapping_sub(exponent, F64_TO_F32_BIAS) << F32_FRACTION_BITS, fraction, F32_DISCARDED_BITS)
+    } else {
+        (
+            0,
+            fraction | (1 << F64_FRACTION_BITS),
+            add(F32_DISCARDED_BITS, wrapping_sub(F32_MIN_NORMAL_F64_EXPONENT, exponent))
+        )
+    };
+    let kept = wrapping_shr_u64(significand, wrapping_u32(shift));
+    let discarded = significand & low_bits_mask(shift);
+    let half = sign_bit(shift);
+    let rounded = if discarded > half || (discarded == half && (kept & 1) != 0) {
+        inc(kept)
+    } else {
+        kept
+    };
+    // Carry out of the fraction rounds into the adjacent exponent.
+    sign | add(base, rounded)
+}
+
+fn lower_literal(in low: L, at: u64, kind: u8, inout m: Function) -> u64 {
+    if is_float(kind)
+        && low.program.op(at) == Lit::Float
+        && low.program.op(add(at, LITERAL_HIGH)) == 0
+    {
+        let bits = low.program.op(add(at, LITERAL_LOW));
+        let native = if kind == ScalarKind::F32 {
+            binary32_literal_bits(bits)
+        } else {
+            bits
+        };
+        return m.record(FLOAT_CONSTANT, native, 0, abi_width(kind));
+    }
+    match literal_bits(in low, at, kind) {
+        Option::Some(bits) => m.record(CONSTANT, bits, 0, 0),
+        Option::None => NO_VALUE,
+    }
+}
+
+fn conversion_spells(in low: L, op: u32, target: u32, in prefix: Slice[u8]) -> bool {
+    let count = low.ctx.names.size(target);
+    if low.ctx.names.size(op) != add(prefix.len(), count)
+        || !low.ctx.names.has_prefix(op, in prefix)
+    {
+        return false;
+    }
+    for i in 0..count {
+        if low.ctx.names.byte(op, add(prefix.len(), i)) != low.ctx.names.byte(target, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn conversion_fits(bits: u64, signed: bool, from: u64, target_signed: bool, to: u64) -> bool {
+    if signed && (bits & sign_bit(from)) != 0 {
+        let magnitude = wrapping_sub(0, bits) & low_bits_mask(from);
+        target_signed && magnitude <= sign_bit(to)
+    } else {
+        let max = if target_signed {
+            wrapping_sub(sign_bit(to), 1)
+        } else {
+            low_bits_mask(to)
+        };
+        bits <= max
+    }
+}
+
+copy struct FloatOperands {
+    first: u64,
+    second: u64,
+    third: u64,
+}
+
+fn lower_float_import(
+    imported: u64,
+    count: u64,
+    args: FloatOperands,
+    inout m: Function,
+    inout graph: CallGraph
+) -> u64 {
+    if imported == NativeImport::None
+        || args.first == NO_VALUE
+        || (count >= BINARY_FLOAT_ARGUMENTS && args.second == NO_VALUE)
+        || (count == FUSED_FLOAT_ARGUMENTS && args.third == NO_VALUE)
+    {
+        return NO_VALUE;
+    }
+    let target = graph.discover_import(imported);
+    if target == NO_VALUE {
+        return NO_VALUE;
+    }
+    let _ = m.record(CALL_ARGUMENT, args.first, 0, 0);
+    if count >= BINARY_FLOAT_ARGUMENTS {
+        let _ = m.record(CALL_ARGUMENT, args.second, 0, 0);
+    }
+    if count == FUSED_FLOAT_ARGUMENTS {
+        let _ = m.record(CALL_ARGUMENT, args.third, 0, 0);
+    }
+    m.record(CALL_FLOAT, target, count, count)
+}
+
+fn lower_float_remainder(
+    kind: u8,
+    lhs: u64,
+    rhs: u64,
+    inout m: Function,
+    inout graph: CallGraph
+) -> u64 {
+    let imported = if kind == ScalarKind::F32 {
+        NativeImport::Fmodf
+    } else {
+        NativeImport::Fmod
+    };
+    let args = FloatOperands { first: lhs, second: rhs, third: NO_VALUE };
+    lower_float_import(imported, BINARY_FLOAT_ARGUMENTS, args, inout m, inout graph)
+}
+
+fn lower_float_math(
+    op: u8,
+    kind: u8,
+    args: FloatOperands,
+    inout m: Function,
+    inout graph: CallGraph
+) -> u64 {
+    let width = abi_width(kind);
+    if op == FloatMath::Sqrt || op == FloatMath::Abs {
+        let instruction = if op == FloatMath::Sqrt {
+            FLOAT_SQRT
+        } else {
+            FLOAT_ABS
+        };
+        return m.record(instruction, args.first, 0, width);
+    }
+    // These entry points work on baseline SysV CPUs without SSE4.1 or FMA.
+    let single = kind == ScalarKind::F32;
+    let imported = match op {
+        FloatMath::Floor => if single {
+            NativeImport::Floorf
+        } else {
+            NativeImport::Floor
+        },
+        FloatMath::Ceil => if single {
+            NativeImport::Ceilf
+        } else {
+            NativeImport::Ceil
+        },
+        FloatMath::Trunc => if single {
+            NativeImport::Truncf
+        } else {
+            NativeImport::Trunc
+        },
+        FloatMath::Round => if single {
+            NativeImport::Roundf
+        } else {
+            NativeImport::Round
+        },
+        FloatMath::Fma => if single {
+            NativeImport::Fmaf
+        } else {
+            NativeImport::Fma
+        },
+        _ => NativeImport::None,
+    };
+    lower_float_import(imported, math_arity(op), args, inout m, inout graph)
+}
+
+fn lower_float_unary(
+    in low: L,
+    symbol: u32,
+    ty: u32,
+    operand: u8,
+    value: u64,
+    inout m: Function,
+    inout graph: CallGraph
+) -> u64 {
+    let kind = scalar_kind(in low, ty);
+    let from = abi_width(operand);
+    let to = abi_width(kind);
+    if is_integer(operand) && is_float(kind) {
+        let exact_limit = if kind == ScalarKind::F32 {
+            WORD_BITS
+        } else {
+            DWORD_BITS
+        };
+        let target = low.ctx.types.node(ty).name;
+        let nearest = conversion_spells(in low, symbol, target, in NEAREST_PREFIX.as_bytes());
+        let widen = from <= exact_limit
+            && conversion_spells(in low, symbol, target, in "widen_".as_bytes());
+        if nearest || widen {
+            let op = if is_signed(operand) {
+                SIGNED_TO_FLOAT
+            } else {
+                UNSIGNED_TO_FLOAT
+            };
+            return m.record(op, value, from, to);
+        }
+    }
+    if is_float(operand)
+        && is_integer(kind)
+        && conversion_spells(
+            in low,
+            symbol,
+            low.ctx.types.node(ty).name,
+            in SATURATING_PREFIX.as_bytes()
+        )
+    {
+        let op = if is_signed(kind) {
+            FLOAT_TO_SIGNED_SAT
+        } else {
+            FLOAT_TO_UNSIGNED_SAT
+        };
+        return m.record(op, value, from, to);
+    }
+    if is_float(kind) && kind == operand {
+        if low.ctx.names.spells(symbol, in "-".as_bytes()) {
+            return m.record(FLOAT_NEG, value, 0, to);
+        }
+        let target = low.ctx.types.node(ty).name;
+        if conversion_spells(in low, symbol, target, in NEAREST_PREFIX.as_bytes())
+            || conversion_spells(in low, symbol, target, in "widen_".as_bytes())
+        {
+            return value;
+        }
+        let op = math_op(in low.ctx.names, symbol);
+        if math_arity(op) != UNARY_FLOAT_ARGUMENTS {
+            return NO_VALUE;
+        }
+        let args = FloatOperands { first: value, second: NO_VALUE, third: NO_VALUE };
+        return lower_float_math(op, kind, args, inout m, inout graph);
+    }
+    if kind == ScalarKind::F64
+        && operand == ScalarKind::F32
+        && (low.ctx.names.spells(symbol, in "widen_f64".as_bytes())
+            || low.ctx.names.spells(symbol, in "nearest_f64".as_bytes()))
+    {
+        return m.record(FLOAT_PROMOTE, value, DWORD_BITS, QWORD_BITS);
+    }
+    if kind == ScalarKind::F32
+        && operand == ScalarKind::F64
+        && low.ctx.names.spells(symbol, in "nearest_f32".as_bytes())
+    {
+        return m.record(FLOAT_DEMOTE, value, QWORD_BITS, DWORD_BITS);
+    }
+    if (kind == ScalarKind::U32
+        && operand == ScalarKind::F32
+        && low.ctx.names.spells(symbol, in "to_bits_f32".as_bytes()))
+        || (kind == ScalarKind::U64
+            && operand == ScalarKind::F64
+            && low.ctx.names.spells(symbol, in "to_bits_f64".as_bytes()))
+    {
+        return m.float_bits(value, abi_width(kind));
+    }
+    if (kind == ScalarKind::F32
+        && operand == ScalarKind::U32
+        && low.ctx.names.spells(symbol, in "from_bits_f32".as_bytes()))
+        || (kind == ScalarKind::F64
+            && operand == ScalarKind::U64
+            && low.ctx.names.spells(symbol, in "from_bits_f64".as_bytes()))
+    {
+        return m.record(BITS_TO_FLOAT, value, 0, abi_width(kind));
+    }
+    NO_VALUE
+}
+
+fn lower_unary(
+    in low: L,
+    inst: InstRow,
+    kind: u8,
+    block: u64,
+    inout m: Function,
+    inout graph: CallGraph
+) -> u64 {
+    let at = inst.a;
+    let symbol = n32(low.program.op(at));
+    let operand = low.program.op(add(at, UNARY_VALUE));
+    let operand_kind = m.kind(operand);
+    let value = m.read(add(m.arguments, operand), block);
+    if value == NO_VALUE {
+        return NO_VALUE;
+    }
+    if is_float(kind) || is_float(operand_kind) {
+        return lower_float_unary(
+            in low,
+            symbol,
+            inst.ty,
+            operand_kind,
+            value,
+            inout m,
+            inout graph
+        );
+    }
+    if kind == ScalarKind::Bool
+        && operand_kind == ScalarKind::Bool
+        && low.ctx.names.spells(symbol, in "!".as_bytes())
+    {
+        return m.record(COMPARE_IMMEDIATE, value, 0, EQUAL);
+    } else if is_integer(kind)
+        && kind == operand_kind
+        && (low.ctx.names.spells(symbol, in "~".as_bytes())
+            || low.ctx.names.spells(symbol, in "!".as_bytes()))
+    {
+        return m.record(NOT, value, 0, abi_width(kind));
+    }
+    if !is_integer(operand_kind) || !is_integer(kind) {
+        return NO_VALUE;
+    }
+    let from = abi_width(operand_kind);
+    let to = abi_width(kind);
+    let signed = is_signed(operand_kind);
+    if operand_kind == kind && low.ctx.names.spells(symbol, in "-".as_bytes()) {
+        let zero = m.record(CONSTANT, 0, 0, 0);
+        return lower_checked_integer(SUB, zero, value, signed, from, inout m);
+    }
+    let target = low.ctx.types.node(inst.ty).name;
+    let lossless = if signed == is_signed(kind) {
+        from <= to
+    } else {
+        !signed && from < to
+    };
+    if conversion_spells(in low, symbol, target, in NARROW_CONVERSION_PREFIX.as_bytes()) {
+        let bounds = integer_bounds(in m, value, signed, from, INTEGER_BOUND_DEPTH);
+        let target_signed = is_signed(kind);
+        if !conversion_fits(bounds.min, signed, from, target_signed, to)
+            || !conversion_fits(bounds.max, signed, from, target_signed, to)
+        {
+            return NO_VALUE;
+        }
+    } else if !conversion_spells(in low, symbol, target, in WRAPPING_CONVERSION_PREFIX.as_bytes())
+        && !(lossless
+            && conversion_spells(in low, symbol, target, in WIDEN_CONVERSION_PREFIX.as_bytes()))
+    {
+        return NO_VALUE;
+    }
+    if to < from {
+        m.record(TRUNCATE, value, from, to)
+    } else if to > from && signed {
+        m.extend_signed(value, from, to)
+    } else {
+        value
+    }
+}
+
+// A range latch reads the compiler-generated cursor, adds one, writes it
+// back, and jumps to the header. Its predecessor guards the increment even
+// for an inclusive range at the integer maximum.
+fn range_increment(in low: L, b: BlockRow, index: u64, inst: InstRow) -> bool {
+    let write_index = inc(index);
+    if b.term != Term::Jump
+        || b.tn != JUMP_ARGUMENT
+        || inst.s0 != inst.s1
+        || index < add(b.i0, RANGE_CURSOR_READ_DISTANCE)
+        || inc(write_index) != add(b.i0, b.ic)
+        || !low.ctx.names.spells(n32(low.program.op(inst.a)), in "+".as_bytes())
+    {
+        return false;
+    }
+    let read = low.program.inst(wrapping_sub(index, RANGE_CURSOR_READ_DISTANCE));
+    let one = low.program.inst(wrapping_sub(index, 1));
+    let write = low.program.inst(write_index);
+    let cursor = low.program.op(read.a);
+    read.op == Op::Read
+        && one.op == Op::Const
+        && one.n == LITERAL_WORDS
+        && write.op == Op::Write
+        && write.n == WRITE_WORDS
+        && low.ctx.names.has_prefix(n32(cursor), in RANGE_CURSOR_PREFIX.as_bytes())
+        && low.program.op(write.a) == cursor
+        && low.program.op(add(write.a, WRITE_VALUE)) == w(inst.dest)
+        && low.program.op(add(inst.a, BINARY_LHS)) == w(read.dest)
+        && low.program.op(add(inst.a, BINARY_RHS)) == w(one.dest)
+        && low.program.op(one.a) == Lit::Int
+        && low.program.op(add(one.a, LITERAL_LOW)) == 1
+        && low.program.op(add(one.a, LITERAL_HIGH)) == 0
+}
+
+fn comparison_operation(kind: u8) -> u64 {
+    match abi_width(kind) {
+        BYTE_BITS => if kind == ScalarKind::Bool {
+            COMPARE
+        } else {
+            COMPARE_BYTE
+        },
+        WORD_BITS => COMPARE_WORD,
+        DWORD_BITS => COMPARE_DWORD,
+        _ => COMPARE,
+    }
+}
+
+fn lower_product_equality(
+    in low: L,
+    pair: EqualityPair,
+    compare: u64,
+    block: u64,
+    inout m: Function
+) -> u64 {
+    if compare != EQUAL && compare != NOT_EQUAL {
+        return NO_VALUE;
+    }
+    let mut leaves = ChunkSeq::new[EqualityPair]();
+    if !equality_leaves(in low, pair, in m, inout leaves) {
+        return NO_VALUE;
+    }
+    let equal = compare == EQUAL;
+    let combine = if equal { AND } else { OR };
+    let mut result = NO_VALUE;
+    for i in 0..leaves.len() {
+        let field = leaves.try_get(i).unwrap_or(EqualityPair { left: NO_VALUE, right: NO_VALUE });
+        let kind = m.value_kind(field.left);
+        let lhs = m.read(field.left, block);
+        let rhs = m.read(field.right, block);
+        if lhs == NO_VALUE || rhs == NO_VALUE {
+            return NO_VALUE;
+        }
+        let test = if is_float(kind) {
+            let op = if kind == ScalarKind::F32 {
+                FLOAT_COMPARE32
+            } else {
+                FLOAT_COMPARE64
+            };
+            m.record(op, lhs, rhs, if equal { FLOAT_EQUAL } else { FLOAT_NOT_EQUAL })
+        } else {
+            m.record(comparison_operation(kind), lhs, rhs, compare)
+        };
+        result = if result == NO_VALUE {
+            test
+        } else {
+            m.record(combine, result, test, BYTE_BITS)
+        };
+    }
+    if result == NO_VALUE {
+        m.record(CONSTANT, if equal { 1 } else { 0 }, 0, 0)
+    } else {
+        result
+    }
+}
+
+fn lower_shift(
+    left: bool,
+    signed: bool,
+    width: u64,
+    lhs: u64,
+    rhs: u64,
+    checked_kind: Option[u8],
+    inout m: Function
+) -> u64 {
+    match m.constant(rhs) {
+        Option::Some(bits) => {
+            let count = if checked_kind.is_some() {
+                bits
+            } else {
+                bits & wrapping_sub(width, 1)
+            };
+            if count >= width {
+                return NO_VALUE;
+            }
+            if count == 0 {
+                return lhs;
+            }
+            let op = if left {
+                SHL
+            } else if signed {
+                SAR
+            } else {
+                SHR
+            };
+            return m.record(op, lhs, count, width);
+        },
+        Option::None => {},
+    };
+    let count = match checked_kind {
+        Option::Some(kind) => {
+            let count_signed = is_signed(kind);
+            let count_width = abi_width(kind);
+            let bounds = integer_bounds(in m, rhs, count_signed, count_width, INTEGER_BOUND_DEPTH);
+            if (count_signed && (bounds.min & sign_bit(count_width)) != 0) || bounds.max >= width {
+                return NO_VALUE;
+            }
+            rhs
+        },
+        Option::None => {
+            // x86 masks counts at the instruction width for 32 and 64 bits.
+            // The encoder widens narrow variable shifts, so mask those here.
+            if width < DWORD_BITS {
+                let mask = m.record(CONSTANT, wrapping_sub(width, 1), 0, 0);
+                m.record(AND, rhs, mask, DWORD_BITS)
+            } else {
+                rhs
+            }
+        },
+    };
+    let op = if left {
+        SHL_REGISTER
+    } else if signed {
+        SAR_REGISTER
+    } else {
+        SHR_REGISTER
+    };
+    if width >= DWORD_BITS {
+        return m.record(op, lhs, count, width);
+    }
+    let value = if op == SAR_REGISTER {
+        m.record(SIGN_EXTEND, lhs, width, DWORD_BITS)
+    } else {
+        lhs
+    };
+    let result = m.record(op, value, count, DWORD_BITS);
+    m.record(TRUNCATE, result, DWORD_BITS, width)
+}
+
+fn lower_rotate(left: bool, width: u64, lhs: u64, rhs: u64, inout m: Function) -> u64 {
+    match m.constant(rhs) {
+        Option::Some(bits) => {
+            let right = if left { wrapping_sub(0, bits) } else { bits };
+            let count = right & wrapping_sub(width, 1);
+            if count == 0 {
+                lhs
+            } else {
+                m.record(ROTATE_RIGHT, lhs, count, width)
+            }
+        },
+        Option::None => {
+            let op = if left {
+                ROTATE_LEFT_REGISTER
+            } else {
+                ROTATE_RIGHT_REGISTER
+            };
+            m.record(op, lhs, rhs, width)
+        },
+    }
+}
+
+fn constant_division(remainder: bool, signed: bool, width: u64, lhs: u64, rhs: u64) -> Option[u64] {
+    let mask = low_bits_mask(width);
+    let sign = sign_bit(width);
+    if !remainder && signed && lhs == sign && rhs == mask {
+        return Option::None;
+    }
+    let left_negative = signed && (lhs & sign) != 0;
+    let right_negative = signed && (rhs & sign) != 0;
+    // Unsigned magnitudes also represent the magnitude of a signed minimum.
+    let a = if left_negative {
+        wrapping_sub(0, lhs) & mask
+    } else {
+        lhs
+    };
+    let b = if right_negative {
+        wrapping_sub(0, rhs) & mask
+    } else {
+        rhs
+    };
+    if b == 0 {
+        return Option::None;
+    }
+    let magnitude = if remainder { a % b } else { a / b };
+    let negative = if remainder {
+        left_negative
+    } else {
+        left_negative != right_negative
+    };
+    Option::Some(
+        if negative {
+            wrapping_sub(0, magnitude) & mask
+        } else {
+            magnitude
+        }
+    )
+}
+
+fn lower_division(
+    remainder: bool,
+    signed: bool,
+    width: u64,
+    lhs: u64,
+    rhs: u64,
+    inout m: Function
+) -> u64 {
+    let divisor = m.constant(rhs);
+    let mask = low_bits_mask(width);
+    match divisor {
+        Option::Some(bits) => {
+            match m.constant(lhs) {
+                Option::Some(a) => return match constant_division(
+                    remainder,
+                    signed,
+                    width,
+                    a,
+                    bits
+                ) {
+                    Option::Some(result) => m.record(CONSTANT, result, 0, 0),
+                    Option::None => NO_VALUE,
+                },
+                Option::None => (),
+            };
+            if bits == 0 {
+                return NO_VALUE;
+            }
+            if remainder && (bits == 1 || (signed && bits == mask)) {
+                // MIN % -1 is zero, even though the hardware quotient overflows.
+                return m.record(CONSTANT, 0, 0, 0);
+            }
+            if bits == 1 {
+                return lhs;
+            }
+            if signed && bits == mask {
+                let numerator = integer_bounds(in m, lhs, signed, width, INTEGER_BOUND_DEPTH);
+                if numerator.min == sign_bit(width) {
+                    return NO_VALUE;
+                }
+                return m.record(NEG, lhs, 0, width);
+            }
+        },
+        Option::None => {
+            let bounds = integer_bounds(in m, rhs, signed, width, INTEGER_BOUND_DEPTH);
+            if bounds_include(bounds, 0, signed, width) {
+                return NO_VALUE;
+            }
+            if signed && !remainder && bounds_include(bounds, mask, signed, width) {
+                let numerator = integer_bounds(in m, lhs, signed, width, INTEGER_BOUND_DEPTH);
+                if numerator.min == sign_bit(width) {
+                    return NO_VALUE;
+                }
+            }
+        },
+    };
+    let op = if signed {
+        if remainder { SIGNED_REM } else { SIGNED_DIV }
+    } else if remainder {
+        UNSIGNED_REM
+    } else {
+        UNSIGNED_DIV
+    };
+    if width >= DWORD_BITS {
+        return m.record(op, lhs, rhs, width);
+    }
+    let dividend = if signed {
+        m.record(SIGN_EXTEND, lhs, width, DWORD_BITS)
+    } else {
+        lhs
+    };
+    let divisor_value = if signed {
+        match divisor {
+            Option::Some(bits) => if (bits & sign_bit(width)) != 0 {
+                let extended = bits | (low_bits_mask(DWORD_BITS) ^ mask);
+                m.record(CONSTANT, extended, 0, 0)
+            } else {
+                rhs
+            },
+            Option::None => m.record(SIGN_EXTEND, rhs, width, DWORD_BITS),
+        }
+    } else {
+        rhs
+    };
+    let result = m.record(op, dividend, divisor_value, DWORD_BITS);
+    m.record(TRUNCATE, result, DWORD_BITS, width)
+}
+
+fn lower_binary(
+    in low: L,
+    at: u64,
+    kind: u8,
+    block: u64,
+    range_step: bool,
+    inout m: Function,
+    inout graph: CallGraph
+) -> u64 {
+    let symbol = n32(low.program.op(at));
+    let left = low.program.op(add(at, BINARY_LHS));
+    let right = low.program.op(add(at, BINARY_RHS));
+    let operand_kind = m.kind(left);
+    let right_kind = m.kind(right);
+    if kind == ScalarKind::Bool
+        && (is_aggregate(operand_kind) || operand_kind == ScalarKind::Unit)
+    {
+        let pair = EqualityPair { left: add(m.arguments, left), right: add(m.arguments, right) };
+        let compare = integer_comparison(in low, symbol, operand_kind);
+        return lower_product_equality(in low, pair, compare, block, inout m);
+    }
+    if abi_width(operand_kind) == 0 || abi_width(right_kind) == 0 {
+        return NO_VALUE;
+    }
+    let lhs = m.read(add(m.arguments, left), block);
+    let rhs = m.read(add(m.arguments, right), block);
+    if lhs == NO_VALUE || rhs == NO_VALUE {
+        return NO_VALUE;
+    }
+    if is_float(operand_kind) && operand_kind == right_kind {
+        if kind == operand_kind && low.ctx.names.spells(symbol, in "%".as_bytes()) {
+            return lower_float_remainder(kind, lhs, rhs, inout m, inout graph);
+        }
+        return lower_float_binary(in low, symbol, kind, operand_kind, lhs, rhs, inout m);
+    }
+    if kind == ScalarKind::Bool && operand_kind == right_kind {
+        let compare = integer_comparison(in low, symbol, operand_kind);
+        if compare != NO_VALUE {
+            return m.record(comparison_operation(operand_kind), lhs, rhs, compare);
+        }
+    } else if is_integer(kind) && kind == operand_kind && is_integer(right_kind) {
+        let width = abi_width(kind);
+        let signed = is_signed(kind);
+        if operand_kind == right_kind {
+            let op = if range_step {
+                ADD
+            } else {
+                lower_operator(in low, symbol)
+            };
+            if op != NO_VALUE {
+                return m.record(op, lhs, rhs, width);
+            }
+            let bit_left = low.ctx.names.spells(symbol, in "bit_shl".as_bytes());
+            if bit_left || low.ctx.names.spells(symbol, in "bit_shr".as_bytes()) {
+                return lower_shift(bit_left, signed, width, lhs, rhs, Option::None, inout m);
+            }
+            let checked = if low.ctx.names.spells(symbol, in "+".as_bytes()) {
+                ADD
+            } else if low.ctx.names.spells(symbol, in "-".as_bytes()) {
+                SUB
+            } else if low.ctx.names.spells(symbol, in "*".as_bytes()) {
+                MUL
+            } else {
+                NO_VALUE
+            };
+            if checked != NO_VALUE {
+                return lower_checked_integer(checked, lhs, rhs, signed, width, inout m);
+            }
+            let remainder = low.ctx.names.spells(symbol, in "%".as_bytes());
+            if remainder || low.ctx.names.spells(symbol, in "/".as_bytes()) {
+                return lower_division(remainder, signed, width, lhs, rhs, inout m);
+            }
+        }
+        let left_shift = low.ctx.names.spells(symbol, in "<<".as_bytes());
+        if left_shift || low.ctx.names.spells(symbol, in ">>".as_bytes()) {
+            return lower_shift(
+                left_shift,
+                signed,
+                width,
+                lhs,
+                rhs,
+                Option::Some(right_kind),
+                inout m
+            );
+        }
+        let left_rotate = low.ctx.names.spells(symbol, in "rotate_left".as_bytes());
+        if left_rotate || low.ctx.names.spells(symbol, in "rotate_right".as_bytes()) {
+            return lower_rotate(left_rotate, width, lhs, rhs, inout m);
+        }
+    }
+    NO_VALUE
+}
+
+fn lower_float_binary(
+    in low: L,
+    symbol: u32,
+    kind: u8,
+    operands: u8,
+    lhs: u64,
+    rhs: u64,
+    inout m: Function
+) -> u64 {
+    if kind == ScalarKind::Bool {
+        let condition = if low.ctx.names.spells(symbol, in "==".as_bytes()) {
+            FLOAT_EQUAL
+        } else if low.ctx.names.spells(symbol, in "!=".as_bytes()) {
+            FLOAT_NOT_EQUAL
+        } else if low.ctx.names.spells(symbol, in "<".as_bytes()) {
+            FLOAT_LESS
+        } else if low.ctx.names.spells(symbol, in "<=".as_bytes()) {
+            FLOAT_LESS_EQUAL
+        } else if low.ctx.names.spells(symbol, in ">".as_bytes()) {
+            FLOAT_GREATER
+        } else if low.ctx.names.spells(symbol, in ">=".as_bytes()) {
+            FLOAT_GREATER_EQUAL
+        } else {
+            return NO_VALUE;
+        };
+        let op = if operands == ScalarKind::F32 {
+            FLOAT_COMPARE32
+        } else {
+            FLOAT_COMPARE64
+        };
+        return m.record(op, lhs, rhs, condition);
+    }
+    if kind != operands {
+        return NO_VALUE;
+    }
+    let op = if low.ctx.names.spells(symbol, in "+".as_bytes()) {
+        FLOAT_ADD
+    } else if low.ctx.names.spells(symbol, in "-".as_bytes()) {
+        FLOAT_SUB
+    } else if low.ctx.names.spells(symbol, in "*".as_bytes()) {
+        FLOAT_MUL
+    } else if low.ctx.names.spells(symbol, in "/".as_bytes()) {
+        FLOAT_DIV
+    } else {
+        match math_op(in low.ctx.names, symbol) {
+            FloatMath::Min => FLOAT_MIN,
+            FloatMath::Max => FLOAT_MAX,
+            _ => return NO_VALUE,
+        }
+    };
+    m.record(op, lhs, rhs, abi_width(kind))
+}
+
+fn lower_enum_data(in low: L, inst: InstRow, block: u64, inout m: Function) -> bool {
+    let shape = match enum_data_variant(in low, inst, in m) {
+        Option::Some(shape) => shape,
+        Option::None => return false,
+    };
+    let product = match m.product(add(m.arguments, w(inst.dest))) {
+        Option::Some(product) => product,
+        Option::None => return false,
+    };
+    let tag = m.record(CONSTANT, shape.ordinal, 0, 0);
+    if !m.define(product.first_child, block, tag) {
+        return false;
+    }
+    let count = enum_cells(in low, product.ty);
+    for i in ENUM_TAG_CELLS..count {
+        let position = wrapping_sub(i, ENUM_TAG_CELLS);
+        let raw = if position >= w(shape.variant.fc) {
+            m.record(CONSTANT, 0, 0, 0)
+        } else {
+            let field = low.ctx.world.field(add(w(shape.variant.fa), position));
+            let source = struct_member(in low, inst, field.name);
+            let kind = m.kind(source);
+            if kind == ScalarKind::Unit {
+                m.record(CONSTANT, 0, 0, 0)
+            } else {
+                let value = m.read(add(m.arguments, source), block);
+                if value == NO_VALUE {
+                    return false;
+                }
+                let width = abi_width(kind);
+                if is_float(kind) {
+                    m.float_bits(value, width)
+                } else if is_signed(kind) && width < QWORD_BITS {
+                    m.extend_signed(value, width, QWORD_BITS)
+                } else {
+                    value
+                }
+            }
+        };
+        if !m.define(add(product.first_child, i), block, raw) {
+            return false;
+        }
+    }
+    true
+}
+
+fn lower_block(
+    in low: L,
+    f: FnR,
+    b: BlockRow,
+    block: u64,
+    inout m: Function,
+    inout graph: CallGraph
+) -> bool {
+    // A result is resident until another call writes this block's shared buffer.
+    let mut resident = NO_VALUE;
+    for index in b.i0..add(b.i0, b.ic) {
+        let inst = low.program.inst(index);
+        let at = inst.a;
+        if inst.op == Op::Bind || inst.op == Op::Write {
+            if !lower_local_store(in low, f, inst, block, inout m, inout graph) {
+                return false;
+            }
+            continue;
+        }
+        if (inst.op == Op::Unit || inst.op == Op::Loop) && inst.n == 0 {
+            continue;
+        }
+        if inst.op == Op::Exit
+            && b.term == Term::Unreachable
+            && inc(index) == add(b.i0, b.ic)
+            && inst.n == EXIT_WORDS
+            && n32(low.program.op(add(at, EXIT_OWNER))) == f.name
+        {
+            continue;
+        }
+        let kind = scalar_kind(in low, inst.ty);
+        if inst.fallible != 0 || kind == ScalarKind::Unsupported {
+            return false;
+        }
+        if inst.op == Op::Tuple {
+            let count = low.program.op(at);
+            if kind == ScalarKind::Unit && inst.n == EMPTY_TUPLE_WORDS && count == 0 {
+                continue;
+            }
+            if kind != ScalarKind::Tuple
+                || inst.n != inc(count)
+                || count != low.ctx.types.arity(inst.ty)
+            {
+                return false;
+            }
+            for field in 0..count {
+                let field_kind = scalar_kind(in low, low.ctx.types.arg(inst.ty, field));
+                let value = low.program.op(add(inc(at), field));
+                if field_kind == ScalarKind::Unsupported || m.kind(value) != field_kind {
+                    return false;
+                }
+            }
+            continue;
+        }
+        if inst.op == Op::Data {
+            let supported = if kind == ScalarKind::Enum {
+                lower_enum_data(in low, inst, block, inout m)
+            } else {
+                kind == ScalarKind::Struct && supported_struct(in low, inst, in m)
+            };
+            if !supported {
+                return false;
+            }
+            continue;
+        }
+        let value = if inst.op == Op::Const && inst.n == LITERAL_WORDS {
+            lower_literal(in low, at, kind, inout m)
+        } else if inst.op == Op::Read
+            && inst.n == PLAIN_READ_WORDS
+            && low.program.op(add(at, READ_PROJECTIONS)) == 0
+        {
+            let name = n32(low.program.op(at));
+            let source = read_source(in low, f, at, in m);
+            if source == NO_VALUE {
+                return false;
+            }
+            if m.value_kind(source) != kind {
+                return false;
+            }
+            let offset = m.mutable_offset(name);
+            let inout_read = low.program.op(add(at, READ_PASS)) == TyPass::Inout;
+            if inout_read && offset == NO_VALUE && !m.is_inout(source) {
+                return false;
+            }
+            if kind == ScalarKind::Unit {
+                continue;
+            }
+            if is_aggregate(kind) {
+                if m.product_index(add(m.arguments, w(inst.dest))) == NO_VALUE {
+                    return false;
+                }
+                continue;
+            }
+            if m.is_inout(source) {
+                let address = m.read(source, block);
+                if address == NO_VALUE {
+                    return false;
+                }
+                let op = if is_float(kind) { FLOAT_LOAD } else { LOAD };
+                m.record(op, address, 0, abi_width(kind))
+            } else if offset == NO_VALUE {
+                m.read(source, block)
+            } else {
+                m.load_mutable(name, offset, kind, block)
+            }
+        } else if inst.op == Op::Project && inst.n == PROJECT_WORDS {
+            let source = project_source(in low, at, in m);
+            if source == NO_VALUE || m.value_kind(source) != kind {
+                return false;
+            }
+            if kind == ScalarKind::Unit || is_aggregate(kind) {
+                continue;
+            }
+            m.read(source, block)
+        } else if inst.op == Op::Unary && inst.n == UNARY_WORDS {
+            lower_unary(in low, inst, kind, block, inout m, inout graph)
+        } else if inst.op == Op::Binary && inst.n == BINARY_WORDS {
+            lower_binary(
+                in low,
+                at,
+                kind,
+                block,
+                range_increment(in low, b, index, inst),
+                inout m,
+                inout graph
+            )
+        } else if inst.op == Op::Call {
+            let value = lower_call(in low, f, inst, block, resident, inout m, inout graph);
+            if is_aggregate(kind) {
+                resident = m.product_index(add(m.arguments, w(inst.dest)));
+            }
+            value
+        } else {
+            return false;
+        };
+        if value == NO_VALUE {
+            return false;
+        }
+        if kind != ScalarKind::Unit
+            && !is_aggregate(kind)
+            && !m.define(add(f.param_count, w(inst.dest)), block, value)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn store_fields(in fields: ChunkSeq[u64], address: u64, block: u64, inout m: Function) -> bool {
+    for index in 0..fields.len() {
+        let field = fields.try_get(index).unwrap_or(NO_VALUE);
+        let kind = if field == NO_VALUE {
+            ScalarKind::Unit
+        } else {
+            m.value_kind(field)
+        };
+        let value = if kind == ScalarKind::Unit {
+            m.record(CONSTANT, 0, 0, 0)
+        } else {
+            m.read(field, block)
+        };
+        if value == NO_VALUE {
+            return false;
+        }
+        m.store_addressed(address, value, kind, wrapping_mul(index, HOME_BYTES));
+    }
+    true
+}
+
+fn store_result(in low: L, source: u64, block: u64, inout m: Function) -> bool {
+    let mut fields = ChunkSeq::new[u64]();
+    if !product_cells(in low, source, in m, inout fields) {
+        return false;
+    }
+    let address = if block == 0 {
+        RESULT_ADDRESS
+    } else {
+        let home = m.result_home();
+        m.load_cell(home, ScalarKind::U64)
+    };
+    store_fields(in fields, address, block, inout m)
+}
+
+fn lower_return(in low: L, result: u64, block: u64, inout m: Function) -> bool {
+    if m.kind(result) != m.result {
+        return false;
+    }
+    let source = add(m.arguments, result);
+    let aggregate = is_aggregate(m.result);
+    if aggregate && !store_result(in low, source, block, inout m) {
+        return false;
+    }
+    // Unit and aggregate returns both return zero in the integer bank.
+    let value = if m.result == ScalarKind::Unit || aggregate {
+        m.record(CONSTANT, 0, 0, 0)
+    } else {
+        m.read(source, block)
+    };
+    if value == NO_VALUE {
+        return false;
+    }
+    if !m.labeled() {
+        if is_float(m.result) {
+            let _ = m.record(FLOAT_RETURN, 0, 0, 0);
+        }
+        return m.words.try_set(RETURN_VALUE, value);
+    }
+    let _ = m.record(BLOCK_RETURN, value, 0, 0);
+    true
+}
+
+fn match_label(in low: L, row: FnRow, target: u64, in m: Function) -> u64 {
+    let block = low.program.op(target);
+    let label = m.label(block);
+    if label == 0
+        || label == NO_VALUE
+        || block_parameter(in low, low.program.block(add(row.b0, block))) != NO_VALUE
+    {
+        NO_VALUE
+    } else {
+        label
+    }
+}
+
+fn match_value(inout m: Function, source: u64, arm: u64, block: u64) -> u64 {
+    if arm == 0 {
+        return m.read(source, block);
+    }
+    let home = m.values.try_get(source).unwrap_or(value_new(NO_VALUE)).home;
+    if home >= LITERAL_HOME {
+        return NO_VALUE;
+    }
+    m.record(STACK_LOAD, HOME_SLOT, home, QWORD_BITS)
+}
+
+fn match_branch(condition: u64, label: u64, inout m: Function) {
+    let next_test = m.next_label;
+    m.next_label = inc(next_test);
+    let _ = m.record(BRANCH_BLOCK, condition, label, 0);
+    let _ = m.record(JUMP_LABEL, next_test, 0, 0);
+    let returns = m.return_layout();
+    let _ = m.record(BLOCK_LABEL, next_test, 0, returns);
+}
+
+fn lower_enum_match(
+    in low: L,
+    row: FnRow,
+    b: BlockRow,
+    source: u64,
+    block: u64,
+    inout m: Function
+) -> bool {
+    let product = match m.product(source) {
+        Option::Some(product) => product,
+        Option::None => return false,
+    };
+    match known_enum_variant(in low, product) {
+        Option::Some(variant) => {
+            let target = enum_target_for_tag(in low, b, product, variant.ordinal);
+            if target != NO_VALUE {
+                let label = match_label(in low, row, target, in m);
+                if label == NO_VALUE {
+                    return false;
+                }
+                let _ = m.record(JUMP_LABEL, label, 0, 0);
+                return true;
+            }
+        },
+        Option::None => {},
+    };
+    let mut coverage = enum_coverage(w(product_adt(in low, product.ty).vn));
+    let end = add(b.ta, b.tn);
+    let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
+    let mut pattern = add(b.ta, MATCH_FIRST_ARM);
+    for arm in 0..count {
+        let shape = match_arm(in low, pattern, end);
+        if shape.target == NO_VALUE {
+            return false;
+        }
+        let label = match_label(in low, row, shape.target, in m);
+        if label == NO_VALUE {
+            return false;
+        }
+        let kind = low.program.op(pattern);
+        if kind == Pat::Bind || kind == Pat::Wild {
+            let _ = m.record(JUMP_LABEL, label, 0, 0);
+            return true;
+        }
+        let mut fields = ChunkSeq::new[EnumPatternField]();
+        let ordinal = match enum_pattern_fields(
+            in low,
+            product,
+            pattern,
+            shape.target,
+            inout fields
+        ) {
+            Option::Some(ordinal) => ordinal,
+            Option::None => return false,
+        };
+        if coverage.excludes_rest(ordinal, shape.tests) {
+            let _ = m.record(JUMP_LABEL, label, 0, 0);
+            return true;
+        }
+        if inc(arm) == count {
+            return false;
+        }
+        let tag = match_value(inout m, product.first_child, arm, block);
+        if tag == NO_VALUE {
+            return false;
+        }
+        let mut condition = m.record(COMPARE_IMMEDIATE, tag, ordinal, NOT_EQUAL);
+        for i in 0..fields.len() {
+            let field = match fields.try_get(i) {
+                Option::Some(field) => field,
+                Option::None => return false,
+            };
+            if low.program.op(field.pattern) != Pat::Literal {
+                continue;
+            }
+            let bits = match literal_bits(
+                in low,
+                add(field.pattern, PATTERN_HEADER_WORDS),
+                field.kind
+            ) {
+                Option::Some(bits) => bits,
+                Option::None => return false,
+            };
+            let raw = match_value(inout m, field.value, arm, block);
+            if raw == NO_VALUE {
+                return false;
+            }
+            let literal = m.record(CONSTANT, bits, 0, 0);
+            let test = m.record(comparison_operation(field.kind), raw, literal, NOT_EQUAL);
+            condition = m.record(OR, condition, test, BYTE_BITS);
+        }
+        match_branch(condition, label, inout m);
+        pattern = inc(shape.target);
+    }
+    false
+}
+
+fn lower_tuple_match(
+    in low: L,
+    row: FnRow,
+    b: BlockRow,
+    source: u64,
+    block: u64,
+    inout m: Function
+) -> bool {
+    let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
+    let end = add(b.ta, b.tn);
+    let mut pattern = add(b.ta, MATCH_FIRST_ARM);
+    for arm in 0..count {
+        let shape = match_arm(in low, pattern, end);
+        if shape.target == NO_VALUE {
+            return false;
+        }
+        let label = match_label(in low, row, shape.target, in m);
+        if label == NO_VALUE {
+            return false;
+        }
+        if shape.tests == 0 {
+            let _ = m.record(JUMP_LABEL, label, 0, 0);
+            return true;
+        }
+        let mut leaves = ChunkSeq::new[PatternLeaf]();
+        if !pattern_leaves(in low, source, pattern, shape.target, in m, inout leaves) {
+            return false;
+        }
+        let mut condition = NO_VALUE;
+        for i in 0..leaves.len() {
+            let leaf = match leaves.try_get(i) {
+                Option::Some(leaf) => leaf,
+                Option::None => return false,
+            };
+            if leaf.kind != Pat::Literal {
+                continue;
+            }
+            let value = match_value(inout m, leaf.value, arm, block);
+            if value == NO_VALUE {
+                return false;
+            }
+            let test = if leaf.operand == 0 {
+                value
+            } else if shape.tests == 1 {
+                let kind = m.value_kind(leaf.value);
+                let immediate = match abi_width(kind) {
+                    BYTE_BITS => COMPARE_BYTE_IMMEDIATE,
+                    WORD_BITS => COMPARE_WORD_IMMEDIATE,
+                    DWORD_BITS => COMPARE_DWORD_IMMEDIATE,
+                    _ => NO_VALUE,
+                };
+                if immediate == NO_VALUE {
+                    let literal = m.record(CONSTANT, leaf.operand, 0, 0);
+                    m.record(comparison_operation(kind), value, literal, NOT_EQUAL)
+                } else {
+                    m.record(immediate, value, leaf.operand, NOT_EQUAL)
+                }
+            } else {
+                // Canonical integer lanes can share one zero test for all fields.
+                let literal = m.record(CONSTANT, leaf.operand, 0, 0);
+                m.record(XOR, value, literal, QWORD_BITS)
+            };
+            condition = if condition == NO_VALUE {
+                test
+            } else {
+                m.record(OR, condition, test, QWORD_BITS)
+            };
+        }
+        if condition == NO_VALUE || inc(arm) == count {
+            return false;
+        }
+        match_branch(condition, label, inout m);
+        pattern = inc(shape.target);
+    }
+    false
+}
+
+fn lower_match(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function) -> bool {
+    let id = low.program.op(b.ta);
+    let kind = m.kind(id);
+    let source = add(m.arguments, id);
+    if kind == ScalarKind::Enum {
+        return lower_enum_match(in low, row, b, source, block, inout m);
+    }
+    if kind == ScalarKind::Tuple || kind == ScalarKind::Unit {
+        return lower_tuple_match(in low, row, b, source, block, inout m);
+    }
+    if abi_width(kind) == 0 || is_float(kind) {
+        return false;
+    }
+    let end = add(b.ta, b.tn);
+    let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
+    let mut seen_bools: u64 = 0;
+    let mut pattern = add(b.ta, MATCH_FIRST_ARM);
+    for arm in 0..count {
+        let target = match_arm(in low, pattern, end).target;
+        if target == NO_VALUE {
+            return false;
+        }
+        let label = match_label(in low, row, target, in m);
+        if label == NO_VALUE {
+            return false;
+        }
+        let pat = low.program.op(pattern);
+        if pat == Pat::Wild || pat == Pat::Bind {
+            let _ = m.record(JUMP_LABEL, label, 0, 0);
+            return true;
+        }
+        if pat != Pat::Literal {
+            return false;
+        }
+        let bits = match literal_bits(in low, add(pattern, PATTERN_HEADER_WORDS), kind) {
+            Option::Some(bits) => bits,
+            Option::None => return false,
+        };
+        if kind == ScalarKind::Bool {
+            seen_bools = seen_bools | block_bit(bits);
+            if seen_bools == ALL_BOOL_PATTERNS {
+                let _ = m.record(JUMP_LABEL, label, 0, 0);
+                return true;
+            }
+        }
+        if inc(arm) == count {
+            return false;
+        }
+        let value = match_value(inout m, source, arm, block);
+        if value == NO_VALUE {
+            return false;
+        }
+        let constant = m.record(CONSTANT, bits, 0, 0);
+        let condition = m.record(comparison_operation(kind), value, constant, NOT_EQUAL);
+        match_branch(condition, label, inout m);
+        pattern = inc(target);
+    }
+    false
+}
+
+fn copy_product_to_block(in low: L, source: u64, dest: u64, block: u64, inout m: Function) -> bool {
+    let from = match m.product(source) {
+        Option::Some(product) => product,
+        Option::None => return false,
+    };
+    let to = match m.product(dest) {
+        Option::Some(product) => product,
+        Option::None => return false,
+    };
+    let mut sources = ChunkSeq::new[u64]();
+    let mut targets = ChunkSeq::new[u64]();
+    if from.ty != to.ty
+        || !product_cells(in low, source, in m, inout sources)
+        || !product_cells(in low, dest, in m, inout targets)
+        || sources.len() != targets.len()
+    {
+        return false;
+    }
+    // Read all incoming fields before writing any destination. Packed homes
+    // can overlap at an edge, including when two incoming fields swap places.
+    let mut values = ChunkSeq::new[u64]();
+    for i in 0..sources.len() {
+        let from = sources.try_get(i).unwrap_or(NO_VALUE);
+        let to = targets.try_get(i).unwrap_or(NO_VALUE);
+        if from == NO_VALUE && to == NO_VALUE {
+            values.push(NO_VALUE);
+            continue;
+        }
+        let kind = m.value_kind(from);
+        if kind == ScalarKind::Unsupported || kind != m.value_kind(to) {
+            return false;
+        }
+        let old_home = m.values.try_get(from).unwrap_or(value_new(NO_VALUE)).home;
+        let new_home = m.values.try_get(to).unwrap_or(value_new(NO_VALUE)).home;
+        if kind == ScalarKind::Unit || old_home == new_home {
+            values.push(NO_VALUE);
+        } else {
+            let value = m.read(from, block);
+            if value == NO_VALUE || new_home >= LITERAL_HOME {
+                return false;
+            }
+            values.push(value);
+        }
+    }
+    for i in 0..values.len() {
+        let value = values.try_get(i).unwrap_or(NO_VALUE);
+        if value != NO_VALUE {
+            let field = targets.try_get(i).unwrap_or(NO_VALUE);
+            let home = m.values.try_get(field).unwrap_or(value_new(NO_VALUE)).home;
+            let kind = m.value_kind(field);
+            m.store_cell(value, home, kind);
+        }
+    }
+    true
+}
+
+// The edge still copies the block parameter into its planned homes. Bypass
+// the destination's test only when its instructions are aliases of that
+// parameter and the incoming tag determines the arm.
+fn enum_edge_label(
+    in low: L,
+    row: FnRow,
+    join: BlockRow,
+    source: u64,
+    dest: u64,
+    in m: Function
+) -> u64 {
+    if join.term != Term::Match || m.value_kind(dest) != ScalarKind::Enum {
+        return NO_VALUE;
+    }
+    let product_index = m.product_index(dest);
+    if product_index == NO_VALUE
+        || product_index != m.product_index(add(m.arguments, low.program.op(join.ta)))
+    {
+        return NO_VALUE;
+    }
+    let product = match m.product(source) {
+        Option::Some(product) => product,
+        Option::None => return NO_VALUE,
+    };
+    let variant = match known_enum_variant(in low, product) {
+        Option::Some(variant) => variant,
+        Option::None => return NO_VALUE,
+    };
+    for i in join.i0..add(join.i0, join.ic) {
+        let inst = low.program.inst(i);
+        let alias = if inst.op == Op::Bind
+            && inst.n == inc(BIND_NAME)
+            && low.program.op(add(inst.a, BIND_PATTERN)) == Pat::Bind
+        {
+            let name = n32(low.program.op(add(inst.a, BIND_NAME)));
+            m.mutable_offset(name) == NO_VALUE
+                && m.product_index(add(m.arguments, low.program.op(inst.a))) == product_index
+        } else if inst.op == Op::Read && inst.n == PLAIN_READ_WORDS {
+            m.product_index(add(m.arguments, w(inst.dest))) == product_index
+        } else {
+            false
+        };
+        if !alias || inst.fallible != 0 {
+            return NO_VALUE;
+        }
+    }
+    let target = enum_target_for_tag(in low, join, product, variant.ordinal);
+    if target == NO_VALUE {
+        NO_VALUE
+    } else {
+        match_label(in low, row, target, in m)
+    }
+}
+
+fn enum_join_is_bypassed(
+    in low: L,
+    row: FnRow,
+    join: BlockRow,
+    block: u64,
+    in m: Function
+) -> bool {
+    if block == 0 || join.term != Term::Match {
+        return false;
+    }
+    let param = block_parameter(in low, join);
+    if m.kind(param) != ScalarKind::Enum {
+        return false;
+    }
+    let dest = add(m.arguments, param);
+    let count_at = add(join.ha, BLOCK_INCOMING_COUNT);
+    let mut bypassed = false;
+    for i in 0..low.program.op(count_at) {
+        let at = add(inc(count_at), wrapping_mul(i, BLOCK_INCOMING_WORDS));
+        let pred = low.program.op(at);
+        if m.label(pred) == NO_VALUE {
+            continue;
+        }
+        let from = low.program.block(add(row.b0, pred));
+        if from.term != Term::Jump
+            || from.tn != inc(JUMP_ARGUMENT)
+            || low.program.op(from.ta) != block
+            || low.program.op(add(from.ta, JUMP_ARGUMENT_COUNT)) != 1
+        {
+            return false;
+        }
+        let source = add(m.arguments, low.program.op(add(from.ta, JUMP_ARGUMENT)));
+        if enum_edge_label(in low, row, join, source, dest, in m) == NO_VALUE {
+            return false;
+        }
+        bypassed = true;
+    }
+    bypassed
+}
+
+fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function) -> bool {
+    if b.term == Term::Return && b.tn == 1 {
+        return lower_return(in low, low.program.op(b.ta), block, inout m);
+    } else if b.term == Term::Unreachable && b.ic != 0 {
+        // The block lowerer verifies the exit belongs to this function.
+        let last = low.program.inst(wrapping_sub(add(b.i0, b.ic), 1));
+        return last.op == Op::Exit && lower_return(in low, low.program.op(last.a), block, inout m);
+    } else if b.term == Term::Jump {
+        let target = low.program.op(b.ta);
+        let label = m.label(target);
+        if label == 0 || label == NO_VALUE {
+            return false;
+        }
+        let join = low.program.block(add(row.b0, target));
+        let param = block_parameter(in low, join);
+        let count = low.program.op(add(b.ta, JUMP_ARGUMENT_COUNT));
+        if param == NO_VALUE {
+            if count != 0 || b.tn != JUMP_ARGUMENT {
+                return false;
+            }
+        } else {
+            if count != 1 || b.tn != inc(JUMP_ARGUMENT) {
+                return false;
+            }
+            let argument = low.program.op(add(b.ta, JUMP_ARGUMENT));
+            let kind = m.kind(param);
+            if kind == ScalarKind::Unsupported || kind != m.kind(argument) {
+                return false;
+            }
+            if kind == ScalarKind::Unit {
+                let _ = m.record(JUMP_LABEL, label, 0, 0);
+                return true;
+            }
+            let source = add(m.arguments, argument);
+            let dest = add(m.arguments, param);
+            if is_aggregate(kind) {
+                if !copy_product_to_block(in low, source, dest, block, inout m) {
+                    return false;
+                }
+                let arm = enum_edge_label(in low, row, join, source, dest, in m);
+                let _ = m.record(JUMP_LABEL, if arm == NO_VALUE { label } else { arm }, 0, 0);
+                return true;
+            }
+            let home = m.values.try_get(dest).unwrap_or(value_new(NO_VALUE)).home;
+            if home == NO_VALUE {
+                return false;
+            }
+            if m.values.try_get(source).unwrap_or(value_new(NO_VALUE)).home != home {
+                let value = m.read(source, block);
+                if value == NO_VALUE {
+                    return false;
+                }
+                m.store_cell(value, home, kind);
+            }
+        }
+        let _ = m.record(JUMP_LABEL, label, 0, 0);
+    } else if b.term == Term::Branch && b.tn == BRANCH_WORDS {
+        let id = low.program.op(b.ta);
+        if m.kind(id) != ScalarKind::Bool {
+            return false;
+        }
+        let condition = m.read(add(m.arguments, id), block);
+        let yes = low.program.op(add(b.ta, BRANCH_TRUE));
+        let no = low.program.op(add(b.ta, BRANCH_FALSE));
+        let yes_label = m.label(yes);
+        let no_label = m.label(no);
+        if condition == NO_VALUE
+            || yes_label == 0
+            || no_label == 0
+            || yes_label == NO_VALUE
+            || no_label == NO_VALUE
+            || block_parameter(in low, low.program.block(add(row.b0, yes))) != NO_VALUE
+            || block_parameter(in low, low.program.block(add(row.b0, no))) != NO_VALUE
+        {
+            return false;
+        }
+        let _ = m.record(BRANCH_BLOCK, condition, no_label, 0);
+        let _ = m.record(JUMP_LABEL, yes_label, 0, 0);
+    } else if b.term == Term::Match {
+        return lower_match(in low, row, b, block, inout m);
+    } else {
+        return false;
+    }
+    true
+}
+
+fn load_product_parameter(in low: L, arg: u64, address: u64, inout m: Function) -> bool {
+    let mut fields = ChunkSeq::new[u64]();
+    if !product_cells(in low, arg, in m, inout fields) {
+        return false;
+    }
+    for i in 0..fields.len() {
+        let field = fields.try_get(i).unwrap_or(NO_VALUE);
+        let kind = m.value_kind(field);
+        if field != NO_VALUE && kind != ScalarKind::Unit {
+            let op = if is_float(kind) { FLOAT_LOAD } else { LOAD };
+            let value = m.record(op, address, wrapping_mul(i, HOME_BYTES), abi_width(kind));
+            if !m.define(field, 0, value) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn lower_entry(in low: L, inout m: Function) -> bool {
+    // The encoder expects all floating argument records before ordinary SSA.
+    let mut float_start = NO_VALUE;
+    let mut fp: u64 = 0;
+    for arg in 0..m.arguments {
+        let kind = m.value_kind(arg);
+        if !m.is_inout(arg) && is_float(kind) {
+            let value = m.record(FLOAT_ARGUMENT, fp, 0, abi_width(kind));
+            if fp == 0 {
+                float_start = value;
+            }
+            fp = inc(fp);
+        }
+    }
+    let mut gp: u64 = 0;
+    if is_aggregate(m.result) {
+        if m.blocks.len() > 1 {
+            let home = m.result_home();
+            m.store_cell(RESULT_ADDRESS, home, ScalarKind::U64);
+        }
+        gp = inc(gp);
+    }
+    let mut float_value = float_start;
+    for arg in 0..m.arguments {
+        let kind = m.value_kind(arg);
+        if is_aggregate(kind) {
+            // Snapshot by-value fields before calls or writes through an aliased result pointer.
+            if !load_product_parameter(in low, arg, gp, inout m) {
+                return false;
+            }
+            gp = inc(gp);
+            continue;
+        }
+        let inout_arg = m.is_inout(arg);
+        let width = if inout_arg {
+            QWORD_BITS
+        } else {
+            abi_width(kind)
+        };
+        let value = if !inout_arg && is_float(kind) {
+            let value = float_value;
+            float_value = inc(float_value);
+            value
+        } else {
+            // SysV leaves unused bits of narrow integer arguments unspecified.
+            let value = if width < QWORD_BITS {
+                m.record(TRUNCATE, gp, QWORD_BITS, width)
+            } else {
+                gp
+            };
+            gp = inc(gp);
+            value
+        };
+        if !m.define(arg, 0, value) {
+            return false;
+        }
+    }
+    true
+}
+
+fn lower_function(
+    in low: L,
+    f: FnR,
+    row: FnRow,
+    inout graph: CallGraph,
+    inout calls: ChunkSeq[u64]
+) -> ChunkSeq[u8] {
+    if row.bc == 0 {
+        return ChunkSeq::new[u8]();
+    }
+    let result = scalar_kind(in low, f.result);
+    let aggregate = is_aggregate(result);
+    let mut m = Function {
+        arguments: f.param_count,
+        gp_arguments: if aggregate { 1 } else { 0 },
+        result: result,
+        words: ChunkSeq::new[u64](),
+        values: ChunkSeq::new[Value](),
+        kinds: ChunkSeq::new[u8](),
+        parameters: ChunkSeq::new[u8](),
+        inout_parameters: ChunkSeq::new[bool](),
+        labels: ChunkSeq::new[u64](),
+        blocks: ChunkSeq::new[u64](),
+        next_label: 0,
+        bindings: ChunkSeq::new[u32](),
+        product_indices: ChunkSeq::new[u64](),
+        products: ChunkSeq::new[Product](),
+        call_result_bytes: 0,
+        call_argument_bytes: 0,
+        forwards_call_result: false,
+        mutable_slots: ChunkSeq::new[u32](),
+        mutable_values: ChunkSeq::new[LocalValue](),
+        addressed_locals: ChunkSeq::new[u32](),
+        mutable_bytes: 0,
+        home_bytes: 0
+    };
+    for arg in 0..f.param_count {
+        let param = low.ast.param(add(f.param_start, arg));
+        let kind = scalar_kind(in low, param.ty);
+        m.parameters.push(kind);
+        m.inout_parameters.push(param.pass == TyPass::Inout);
+        if param.pass == TyPass::Inout || !is_float(kind) {
+            m.gp_arguments = inc(m.gp_arguments);
+        }
+    }
+    if !plan_blocks(in low, row, inout m) || !plan_homes(in low, f, row, inout m) {
+        return ChunkSeq::new[u8]();
+    }
+    m.words.push(m.gp_arguments);
+    m.words.push(NO_VALUE);
+    let frame_bytes = add(m.call_argument_home(), m.call_argument_bytes);
+    if frame_bytes != 0 {
+        let _ = m.record(STACK_SLOT, frame_bytes, HOME_BYTES, 0);
+    }
+    for layout in 0..m.blocks.len() {
+        let block = m.blocks.try_get(layout).unwrap_or(0);
+        let b = low.program.block(add(row.b0, block));
+        if enum_join_is_bypassed(in low, row, b, block, in m) {
+            continue;
+        }
+        // Mark the private frame slot even for a single block when forwarding.
+        // The encoder can then discard result reloads with no scalar users.
+        if m.labeled() {
+            let home = if block == 0 && frame_bytes != 0 {
+                inc(HOME_SLOT)
+            } else {
+                0
+            };
+            let returns = m.return_layout();
+            let _ = m.record(BLOCK_LABEL, layout, home, returns);
+        }
+        if block == 0 && !lower_entry(in low, inout m) {
+            return ChunkSeq::new[u8]();
+        }
+        if !lower_block(in low, f, b, block, inout m, inout graph) {
+            return ChunkSeq::new[u8]();
+        }
+        if b.term == Term::Branch || b.term == Term::Jump || b.term == Term::Match {
+            m.flush_mutable(block);
+        }
+        if !lower_terminator(in low, row, b, block, inout m) {
+            return ChunkSeq::new[u8]();
+        }
+    }
+    encode_block(in m.words.as_slice(), true, inout calls)
+}
+
+// Emit the entry and its reachable effect-free SysV functions, exporting only
+// the requested entry. Keep the object private until every definition passes.
+pub fn compile_x86_64_elf(in low: L, entry: u32, in name: Slice[u8]) -> ChunkSeq[u8] {
+    let entry_index = low.ast.fn_index(entry);
+    if entry_index >= low.ast.fns.len() || !sysv_signature(in low, low.ast.function(entry_index)) {
+        return ChunkSeq::new[u8]();
+    }
+    let mut rows = ChunkSeq::new[u64]();
+    rows.resize(low.ast.fns.len(), NO_VALUE);
+    for row_index in 0..low.program.fns.len() {
+        let row = low.program.function(row_index);
+        let index = low.ast.fn_index(row.name);
+        let _ = rows.try_set(index, row_index);
+    }
+    let mut graph = CallGraph {
+        indices: ChunkSeq::new[u64](),
+        imports: ChunkSeq::new[u64](),
+        pending: ChunkSeq::new[CallTarget]()
+    };
+    graph.indices.resize(low.ast.fns.len(), NO_VALUE);
+    let _ = graph.discover(entry_index);
+    let mut object = x86_text_object();
+    let mut symbol: u64 = 0;
+    loop {
+        let target = match graph.pending.try_get(symbol) {
+            Option::Some(next) => next,
+            Option::None => return object.write(),
+        };
+        if target.imported != NativeImport::None {
+            let runtime = import_symbol(target.imported);
+            // The entry's global symbol must not mask the runtime import.
+            if low.ctx.names.spells(entry, in runtime.as_bytes())
+                || !object.add_import(in runtime.as_bytes())
+            {
+                return ChunkSeq::new[u8]();
+            }
+            symbol = inc(symbol);
+            continue;
+        }
+        let index = target.function;
+        let row_index = rows.try_get(index).unwrap_or(NO_VALUE);
+        if row_index == NO_VALUE {
+            return ChunkSeq::new[u8]();
+        }
+        let f = low.ast.function(index);
+        let row = low.program.function(row_index);
+        let mut calls = ChunkSeq::new[u64]();
+        let code = lower_function(in low, f, row, inout graph, inout calls);
+        let mut spelling = ChunkSeq::new[u8]();
+        if symbol == 0 {
+            spelling.extend(in name);
+        } else {
+            for i in 0..low.ctx.names.size(f.name) {
+                spelling.push(low.ctx.names.byte(f.name, i));
+            }
+        }
+        if !object.add_function(
+            in code.as_slice(),
+            in spelling.as_slice(),
+            in calls.as_slice(),
+            symbol == 0
+        ) {
+            return ChunkSeq::new[u8]();
+        }
+        symbol = inc(symbol);
+    }
+}

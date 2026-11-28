@@ -83,6 +83,8 @@ pub fn sugar_policy_exports_valid(
     !has_failure(violation)
 }
 
+const OUTPUT_WRITE_FAILED: u64 = 4;
+
 /// Load, assemble, and collect declarations of a Loom package from `root_dir`
 /// via `@vesper-std/fs`, returning `(module_count, fn_count, adt_count, diagnostic_bytes)`.
 pub fn stage2_collect_dir(in root_dir: Str) -> (u64, u64, u64, u64) eff [Ffi[StdFs]] {
@@ -219,7 +221,7 @@ fn mark_mut_element_views(inout l: L) {
     }
 }
 
-fn write_stage(want_syms: bool, in out_wasm: Str, in stage: Str, inout log: ChunkSeq[u8]) eff [
+pub fn write_stage(want_syms: bool, in out_wasm: Str, in stage: Str, inout log: ChunkSeq[u8]) eff [
     Ffi[StdFs]
 ] {
     if !want_syms {
@@ -232,7 +234,7 @@ fn write_stage(want_syms: bool, in out_wasm: Str, in stage: Str, inout log: Chun
     write_sidecar(in out_wasm, in ".stage", in log.as_slice());
 }
 
-fn write_err_header(in out_wasm: Str, in stage: Str, in detail: Slice[u8]) eff [Ffi[StdFs]] {
+pub fn write_err_header(in out_wasm: Str, in stage: Str, in detail: Slice[u8]) eff [Ffi[StdFs]] {
     let mut msg = ChunkSeq::new[u8]();
     msg.extend(in "stage2 error (stage=".as_bytes());
     msg.extend(in stage.as_bytes());
@@ -588,14 +590,24 @@ pub fn stage2_compile_dir(
     stage2_compile_dir_impl(in root_dir, in out_wasm, in entry_name, false)
 }
 
-fn stage2_compile_dir_impl(
+/// Stage 2's front end for `entry_name` in the package at `root_dir`, up to
+/// the lowered program (`lower_all`): what `stage2_compile_dir` emits Wasm
+/// from, and what @vesper/stage2-native emits x86-64 ELF from (SH7, #2209).
+/// Diagnostics go to `out`'s sidecars. On a failure, `fault` holds the exit
+/// code and its value. `front_perm_buf` keeps the front's permanent region
+/// alive for the caller.
+pub fn stage2_lower_entry(
     in root_dir: Str,
     in out_wasm: Str,
     in entry_name: Str,
-    want_syms: bool
-) -> (u64, u64) eff [Ffi[StdFs]] {
-    let mut stage_log = ChunkSeq::new[u8]();
-    stage_log.reserve(4096);
+    want_syms: bool,
+    inout stage_log: ChunkSeq[u8],
+    inout front_perm_buf: ChunkSeq[u8],
+    inout entry: u32,
+    inout calls: ChunkSeq[CallRow],
+    inout pairs: ChunkSeq[Pair],
+    inout fault: (u64, u64)
+) -> Option[L] eff [Ffi[StdFs]] {
     write_stage(want_syms, in out_wasm, in "load_package_graph", inout stage_log);
     let encoded = match load_graph_compact(in root_dir.as_bytes(), in "".as_bytes(), false) {
         Option::Some(b) => b,
@@ -604,12 +616,12 @@ fn stage2_compile_dir_impl(
             d.extend(in "load_package_graph_bytes returned None for root_dir=".as_bytes());
             d.extend(in root_dir.as_bytes());
             write_err_header(in out_wasm, in "load_package_graph", in d.as_slice());
-            return (1, 1);
+            fault = (1, 1);
+            return Option::None;
         },
     };
     write_stage(want_syms, in out_wasm, in "assembly_begin", inout stage_log);
     let has_front_perm = stage2_heap_mark() != 0;
-    let mut front_perm_buf = ChunkSeq::new[u8]();
     let front_perm_end = if has_front_perm {
         front_perm_buf.reserve(268435456);
         stage2_heap_mark()
@@ -643,7 +655,8 @@ fn stage2_compile_dir_impl(
                 Option::None => detail.extend(in INVALID_SUGAR_POLICY.as_bytes()),
             }
             write_err_header(in out_wasm, in "assembly", in detail.as_slice());
-            return (2, detail.len());
+            fault = (2, detail.len());
+            return Option::None;
         },
     };
     write_stage(want_syms, in out_wasm, in "collect_program", inout stage_log);
@@ -658,12 +671,14 @@ fn stage2_compile_dir_impl(
     let mut types0_in = types_seed;
     if !resolve_rows(inout sugar0, inout a, inout names0_in, inout types0_in) {
         write_err_header(in out_wasm, in "assembly", in INVALID_SUGAR_POLICY.as_bytes());
-        return (2, INVALID_SUGAR_POLICY.len());
+        fault = (2, INVALID_SUGAR_POLICY.len());
+        return Option::None;
     }
     let meta = assembly_metadata(sink a);
     if meta.diagnostics.len() > 0 {
         write_err_header(in out_wasm, in "assembly", in meta.diagnostics.as_slice());
-        return (2, meta.diagnostics.len());
+        fault = (2, meta.diagnostics.len());
+        return Option::None;
     }
     write_stage(want_syms, in out_wasm, in "front_clone", inout stage_log);
     let (ir_ast, names0, types0, world0, sugar, front_used, front_ok) = move_front_to_perm(
@@ -705,7 +720,8 @@ fn stage2_compile_dir_impl(
             let mut detail = ChunkSeq::new[u8]();
             write_policy_diagnostic(problem, inout detail);
             write_err_header(in out_wasm, in "typecheck", in detail.as_slice());
-            return (2, detail.len());
+            fault = (2, detail.len());
+            return Option::None;
         },
         Option::None => {},
     }
@@ -722,15 +738,49 @@ fn stage2_compile_dir_impl(
         let mut detail = ChunkSeq::new[u8]();
         write_linear_fault(in c.names, linear_fault, inout detail);
         write_err_header(in out_wasm, in "linearity", in detail.as_slice());
-        return (2, detail.len());
+        fault = (2, detail.len());
+        return Option::None;
     }
-    let entry_sym = c.names.intern(in entry_name.as_bytes());
-    let mut facts = empty_facts(entry_sym, 65535, 65536, 50000000);
-    facts.calls = call_rows;
-    facts.pairs = call_pairs;
+    entry = c.names.intern(in entry_name.as_bytes());
+    calls = call_rows;
+    pairs = call_pairs;
     write_stage(want_syms, in out_wasm, in "lower_all", inout stage_log);
     let mut low = l_new(sink c, sink ir_ast);
     lower_all(inout low);
+    Option::Some(low)
+}
+
+fn stage2_compile_dir_impl(
+    in root_dir: Str,
+    in out_wasm: Str,
+    in entry_name: Str,
+    want_syms: bool
+) -> (u64, u64) eff [Ffi[StdFs]] {
+    let mut stage_log = ChunkSeq::new[u8]();
+    stage_log.reserve(4096);
+    let mut front_perm_buf = ChunkSeq::new[u8]();
+    let mut entry_sym: u32 = 0;
+    let mut call_rows = ChunkSeq::new[CallRow]();
+    let mut call_pairs = ChunkSeq::new[Pair]();
+    let mut fault: (u64, u64) = (0, 0);
+    let mut low = match stage2_lower_entry(
+        in root_dir,
+        in out_wasm,
+        in entry_name,
+        want_syms,
+        inout stage_log,
+        inout front_perm_buf,
+        inout entry_sym,
+        inout call_rows,
+        inout call_pairs,
+        inout fault
+    ) {
+        Option::Some(low) => low,
+        Option::None => return fault,
+    };
+    let mut facts = empty_facts(entry_sym, 65535, 65536, 50000000);
+    facts.calls = call_rows;
+    facts.pairs = call_pairs;
     mark_mut_element_views(inout low);
     for fi in 0..low.ast.fns.len() {
         match low.ast.fns.try_get(fi) {
@@ -1005,7 +1055,7 @@ fn stage2_compile_dir_impl(
         d.extend(in "IoError writing ".as_bytes());
         d.extend(in out_wasm.as_bytes());
         write_err_header(in out_wasm, in "write_wasm", in d.as_slice());
-        return (4, 0);
+        return (OUTPUT_WRITE_FAILED, 0);
     }
     (0, clen)
 }
