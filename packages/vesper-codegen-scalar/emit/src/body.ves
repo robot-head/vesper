@@ -102,6 +102,8 @@ const RECORD_PAYLOAD: i64 = 8;
 // A re-raised error copied by words (`/codegen-scalar`).
 const AGGREGATE_ERROR: u64 = 18446744073709551615;
 const INST_FAIL_CALL: u64 = 41;
+// An explicit `Fail::raise` of a value (#2657).
+const INST_RAISE: u64 = 44;
 // A direct call that borrows scalar locals `inout` (#2563), and its
 // argument tags.
 const INST_INOUT_CALL: u64 = 48;
@@ -1326,9 +1328,13 @@ impl Body {
     // payload a word at a time (`copy_bytes`), then a zero result returned
     // beside the tag. Emission goes on in a fresh block no edge reaches,
     // after the zero the walk answers for the raise.
-    fn fail_exit(inout self, inout b: Builder, index: u64, error: Value, size: u64) eff [
-        Ffi[Cranelift]
-    ] {
+    fn fail_exit(
+        inout self,
+        inout b: Builder,
+        index: u64,
+        error: Value,
+        size: u64
+    ) -> Value eff [Ffi[Cranelift]] {
         let tag = self.fail_tag(inout b, index);
         let payload = ins_iadd_imm(inout b, self.record, RECORD_PAYLOAD);
         let mut offset: u64 = 0;
@@ -1340,19 +1346,23 @@ impl Body {
             ins_store(inout b, PLAIN, word, payload, wrapping_i32(offset));
             offset = wrapping_add(offset, widen_u64(WORD_BYTES));
         }
-        self.fail_return(inout b, tag);
+        self.fail_return(inout b, tag)
     }
 
     // `fail_exit` of a one-word scalar error: stored after `coerce` to its
     // kind.
-    fn fail_exit_scalar(inout self, inout b: Builder, index: u64, error: Value, kind: u64) eff [
-        Ffi[Cranelift]
-    ] {
+    fn fail_exit_scalar(
+        inout self,
+        inout b: Builder,
+        index: u64,
+        error: Value,
+        kind: u64
+    ) -> Value eff [Ffi[Cranelift]] {
         let tag = self.fail_tag(inout b, index);
         let payload = ins_iadd_imm(inout b, self.record, RECORD_PAYLOAD);
         let value = coerce(inout b, error, kind, self.optimize);
         ins_store(inout b, PLAIN, value, payload, 0);
-        self.fail_return(inout b, tag);
+        self.fail_return(inout b, tag)
     }
 
     // The tag of instance `index`, stored in the record unless the status
@@ -1366,8 +1376,9 @@ impl Body {
     }
 
     // A failure exit's return of a zero result (beside the tag), then the
-    // unreachable block emission goes on in and the walk's zero.
-    fn fail_return(inout self, inout b: Builder, tag: Value) eff [Ffi[Cranelift]] {
+    // unreachable block emission goes on in and the walk's zero, which
+    // stands for the raise's `Never` result.
+    fn fail_return(inout self, inout b: Builder, tag: Value) -> Value eff [Ffi[Cranelift]] {
         let placeholder = zero_of(inout b, self.fail_lane);
         let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
         out.push(placeholder.id);
@@ -1377,7 +1388,7 @@ impl Body {
         ins_return(inout b, in out.as_slice());
         let dead = create_block(inout b);
         switch_to_block(inout b, dead);
-        let _ = ins_iconst(inout b, ty_i64(), 0);
+        ins_iconst(inout b, ty_i64(), 0)
     }
 
     // `Codegen::data` of a payload-free constructor of `size` bytes (enum
@@ -1417,9 +1428,10 @@ impl Body {
             ins_store(inout b, PLAIN, t, ptr, 0);
         }
         if index >= HANDLER_BASE {
-            return self.perform(inout b, inout m, inout w, wrapping_sub(index, HANDLER_BASE), ptr);
+            let depth = wrapping_sub(index, HANDLER_BASE);
+            return !is_invalid(self.perform(inout b, inout m, inout w, depth, ptr));
         }
-        self.fail_exit(inout b, index, ptr, size);
+        let _ = self.fail_exit(inout b, index, ptr, size);
         true
     }
 
@@ -1497,14 +1509,14 @@ impl Body {
                     ins_load(inout b, ty_i64(), PLAIN, payload, 0)
                 };
                 let depth = wrapping_sub(index, HANDLER_BASE);
-                if !self.perform(inout b, inout m, inout w, depth, error) {
+                if is_invalid(self.perform(inout b, inout m, inout w, depth, error)) {
                     return false;
                 }
             } else if scalar_kind == AGGREGATE_ERROR {
-                self.fail_exit(inout b, index, payload, size);
+                let _ = self.fail_exit(inout b, index, payload, size);
             } else {
                 let error = ins_load(inout b, ty_i64(), PLAIN, payload, 0);
-                self.fail_exit_scalar(inout b, index, error, scalar_kind);
+                let _ = self.fail_exit_scalar(inout b, index, error, scalar_kind);
             }
             ins_jump(inout b, good, in no_args.as_slice());
             switch_to_block(inout b, good);
@@ -2183,6 +2195,46 @@ impl Body {
                     return false;
                 }
                 result
+            }
+        } else if kind == INST_RAISE {
+            // `Codegen::perform` of `Fail::raise` (#2657): the error's
+            // `ir_temp` read back, then the handler clause in scope (the
+            // value is its entry's parameter) or `fail_exit` (the value is
+            // the unreachable block's zero).
+            let index = w.next();
+            let size = w.next();
+            let scalar_kind = w.next();
+            let read = w.next();
+            let tv = temp(inout b, x);
+            let read_back = body_operand(inout b, tv, read, self.optimize);
+            // An aggregate error is read as a copy in fresh storage
+            // (`Codegen::expr` of a name), a word at a time.
+            let error = if scalar_kind == AGGREGATE_ERROR {
+                let copy = self.storage(inout b, in m, size);
+                let mut offset: u64 = 0;
+                loop {
+                    if offset >= size {
+                        break;
+                    }
+                    let word = ins_load(inout b, ty_i64(), PLAIN, read_back, wrapping_i32(offset));
+                    ins_store(inout b, PLAIN, word, copy, wrapping_i32(offset));
+                    offset = wrapping_add(offset, widen_u64(WORD_BYTES));
+                }
+                copy
+            } else {
+                read_back
+            };
+            if index >= HANDLER_BASE {
+                let depth = wrapping_sub(index, HANDLER_BASE);
+                let resumed = self.perform(inout b, inout m, inout w, depth, error);
+                if is_invalid(resumed) {
+                    return false;
+                }
+                resumed
+            } else if scalar_kind == AGGREGATE_ERROR {
+                self.fail_exit(inout b, index, error, size)
+            } else {
+                self.fail_exit_scalar(inout b, index, error, scalar_kind)
             }
         } else if kind == INST_INOUT_CALL {
             // A pure callee that borrows scalar locals `inout` (#2563):
@@ -3216,7 +3268,7 @@ impl Body {
         inout w: Words,
         depth: u64,
         error: Value
-    ) -> bool eff [Ffi[Cranelift]] {
+    ) -> Value eff [Ffi[Cranelift]] {
         let a = at64(in self.hcap_a, depth);
         let n = at64(in self.hcap_n, depth);
         let mut cap_names: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -3240,14 +3292,14 @@ impl Body {
         swap(inout names, inout self.snames);
         swap(inout slots, inout self.sslots);
         if is_invalid(out) {
-            return false;
+            return out;
         }
         let output = body_coerce(inout b, out, at64(in self.hkind, depth), self.optimize);
         let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
         args.push(output.id);
         ins_jump(inout b, Block { id: at32(in self.hdispatch, depth) }, in args.as_slice());
         switch_to_block(inout b, entry);
-        true
+        resumed
     }
 
     fn terminator(inout self, inout b: Builder, inout w: Words) -> bool eff [Ffi[Cranelift]] {
