@@ -183,6 +183,27 @@ pub fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
 // One definition: the entry block with the parameters bound to variables
 // (as `define_instances_observed_with_trace` binds them for a plain
 // frame), then the body. Empty on success, else the error.
+// ` (<name>)`: instance `index`'s function name, after an error that
+// names the definition by its index.
+fn push_instance_name(inout err: ChunkSeq[u8], in d: Declared, index: u64) {
+    let start = at64(in d.name_at, index);
+    let next = wrapping_add(index, 1);
+    let end = if next < d.name_at.len() {
+        at64(in d.name_at, next)
+    } else {
+        d.names.len()
+    };
+    if start > end || end > d.names.len() {
+        return;
+    }
+    err.extend(in NAME_OPEN.as_bytes());
+    err.extend(in d.names[start..end]);
+    err.extend(in NAME_CLOSE.as_bytes());
+}
+
+const NAME_OPEN: Str = " (";
+const NAME_CLOSE: Str = ")";
+
 fn define_one(
     inout m: Module,
     index: u64,
@@ -197,6 +218,7 @@ fn define_one(
     if at64(in d.plain, index) != SET || !plans.graph_plain(index) {
         err.extend(in NOT_PLAIN.as_bytes());
         push_dec(inout err, index);
+        push_instance_name(inout err, in d, index);
         return err;
     }
     let call_at = match calls.at.try_get(index) {
@@ -206,6 +228,7 @@ fn define_one(
     if call_at == NO_PLAN {
         err.extend(in NO_CALL_WORDS.as_bytes());
         push_dec(inout err, index);
+        push_instance_name(inout err, in d, index);
         return err;
     }
     let nc = at64(in calls.words, call_at);
@@ -237,6 +260,7 @@ fn define_one(
     if at == NO_PLAN {
         err.extend(in NO_BODY_PLAN.as_bytes());
         push_dec(inout err, index);
+        push_instance_name(inout err, in d, index);
         return err;
     }
     let plan_end = wrapping_add(at, at64(in plans.words, wrapping_sub(at, 1)));
@@ -299,6 +323,7 @@ fn define_one(
         builder_free(b);
         err.extend(in DECLINED_BODY.as_bytes());
         push_dec(inout err, index);
+        push_instance_name(inout err, in d, index);
         return err;
     }
     // `define_instances_observed_with_trace` seals what the walk left
@@ -310,6 +335,7 @@ fn define_one(
             builder_free(b);
             err.extend(in failed.as_slice());
             push_dec(inout err, index);
+            push_instance_name(inout err, in d, index);
             return err;
         }
     }
@@ -324,6 +350,7 @@ fn define_one(
             builder_free(b);
             err.extend(in PASS_FAILED.as_bytes());
             push_dec(inout err, index);
+            push_instance_name(inout err, in d, index);
             return err;
         }
     }
