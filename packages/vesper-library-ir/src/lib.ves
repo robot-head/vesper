@@ -11,24 +11,29 @@
 // - optimized: `ir_opt::optimize` through the native policy
 //   (@vesper/ir-opt-policy's screen, @vesper/ir-opt's memory forwarding),
 //   then tokens.ves (`ir::thread_tokens`); unoptimized: `fip_reuse_pass`.
-// - optimized: the inliner (not ported here yet).
+// - optimized: the inliner under `Budget::for_program` (inline.ves, over
+//   @vesper/ir-inline), with the world's facts from facts.ves.
 // - `fip::elaborate_non_fip_drops`.
-// - optimized: bounds hoisting (@vesper/bounds-hoist).
+// - optimized: bounds hoisting (@vesper/bounds-hoist's `hoist_program`).
 //
 // `@fip` reuse and drop elaboration do nothing in a world without the
 // `Box` prelude; a world with it is refused until they are ported. The
-// output is a status word (`S_*`), then, when it is `S_OK`, the program as
+// output is a status word (`Status`), then, when it is `Status::Ok`, the program as
 // `put_program` words (names, types, program section), which
 // tests/common/ir_words.rs `decode_program` reads back.
 
-use @vesper/check-data::input::{Reader, read_ctx};
-use @vesper/place-ir::{put_program, read_program};
-use @vesper/codegen-calls::data::{read_calls};
+use @vesper/check-data::input::{Ctx, Reader, put_world, read_ctx};
+use @vesper/place-ir::{
+    Program, put_names, put_program, put_program_section, put_types, read_program
+};
+use @vesper/codegen-calls::data::{Calls, put_calls, read_calls};
 use @vesper/ir-opt::view::{type_classes};
 use @vesper/ir-opt::forward::{forward_program_kept};
 use @vesper/ir-opt-policy::screen::{screen_program};
+use @vesper/bounds-hoist::pass::{hoist_program};
 use self::widths::{lower_bit_builtin_calls, refine_wide_tuples};
 use self::tokens::{thread_tokens};
+use self::inline::{inline_input_words, inline_program};
 
 // `LibraryStage`, in order: each stage includes the ones before it.
 pub enum Stage: _ {
@@ -46,8 +51,8 @@ pub enum Status: _ {
     // The world has the `Box` prelude: `@fip` reuse and drop elaboration
     // are not ported yet.
     FipActive = 16,
-    // An optimized build past the optimizer: the inliner is not wired yet.
-    Inline = 17,
+    // The inliner's output does not list the program's functions in order.
+    InlineMismatch = 17,
 }
 
 // @vesper/ir-opt's status for a program it optimized.
@@ -72,11 +77,56 @@ pub fn library_ir_words(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut c = read_ctx(inout r, in b);
     let mut p = read_program(inout r, in b, in c);
     let calls = read_calls(inout r, in b, in c);
+    let status = run(inout c, inout p, in calls, stage, optimize);
+    if status != Status::Ok {
+        return refused(status);
+    }
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(Status::Ok);
+    put_program(in p, in c.types, in c.names, inout out);
+    out
+}
+
+// The bytes of one word of a calls input.
+const WORD_BYTES: u64 = 8;
+
+// The calls input of the program the walk defines a library's instances
+// from (`native_export::library_walk_program`, slice 3f of #2659): the
+// whole pipeline (`Stage::Hoist`) over `input`, the calls input of the
+// first lowering, written back as a calls input (check-data's names,
+// types and world, the place-ir program section, the calls section) for
+// @vesper/native-lib. The status word, then the input's bytes when it is
+// `Status::Ok`.
+pub fn library_walk_calls_input(in input: Slice[u8], optimize: bool) -> (u64, ChunkSeq[u8]) {
+    let mut r = Reader { pos: 0 };
+    let mut c = read_ctx(inout r, in input);
+    let mut p = read_program(inout r, in input, in c);
+    let calls = read_calls(inout r, in input, in c);
+    let status = run(inout c, inout p, in calls, Stage::Hoist, optimize);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if status != Status::Ok {
+        return (status, out);
+    }
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    put_names(inout o, in c.names);
+    put_types(inout o, in c.types);
+    put_world(in c.world, inout o);
+    put_program_section(in p, inout o);
+    put_calls(in calls, in c.types, inout o);
+    out.resize(wrapping_mul(o.len(), WORD_BYTES), 0);
+    for i in 0..o.len() {
+        let ok = out.try_write_u64_le(wrapping_mul(i, WORD_BYTES), o.try_get(i).unwrap_or(0));
+    }
+    (status, out)
+}
+
+// The pipeline through `stage` over the first lowering `p`: the status.
+fn run(inout c: Ctx, inout p: Program, in calls: Calls, stage: u64, optimize: bool) -> u64 {
     lower_bit_builtin_calls(inout p, in c.names, c.world.k, in calls);
     refine_wide_tuples(inout p, inout c.types, c.world.k);
     if stage >= Stage::Optimize {
         if c.world.box_active {
-            return refused(Status::FipActive);
+            return Status::FipActive;
         }
         if optimize {
             let cls = type_classes(in c.types, in c.names);
@@ -95,17 +145,66 @@ pub fn library_ir_words(in b: Slice[u8]) -> ChunkSeq[u64] {
                     in keep
                 );
                 if st != OPT_OK {
-                    return refused(widen_u64(st));
+                    return widen_u64(st);
                 }
             }
             thread_tokens(inout p, in c.names);
             if stage >= Stage::Inline {
-                return refused(Status::Inline);
+                if !inline_program(inout p, inout c.names, inout c.types, in c.world, in calls) {
+                    return Status::InlineMismatch;
+                }
+                thread_tokens(inout p, in c.names);
             }
         }
     }
-    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    out.push(Status::Ok);
-    put_program(in p, in c.types, in c.names, inout out);
+    // `elaborate_non_fip_drops` adds nothing without the `Box` prelude.
+    if stage >= Stage::Hoist && optimize {
+        let versioned = hoist_program(inout p, inout c);
+    }
+    Status::Ok
+}
+
+// The harness's view of the inliner's input (inline.ves `encode`): the
+// pipeline through the optimizer, then `inline_input`'s bytes for the
+// optimized program as `inline_input_words` packs them, after a status
+// word.
+pub fn library_inline_input_text(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader { pos: 0 };
+    let stage = r.word(in b);
+    let optimize = r.word(in b) != 0;
+    let mut c = read_ctx(inout r, in b);
+    let mut p = read_program(inout r, in b, in c);
+    let calls = read_calls(inout r, in b, in c);
+    lower_bit_builtin_calls(inout p, in c.names, c.world.k, in calls);
+    refine_wide_tuples(inout p, inout c.types, c.world.k);
+    if c.world.box_active {
+        return refused(Status::FipActive);
+    }
+    if optimize {
+        let cls = type_classes(in c.types, in c.names);
+        let (keep, kept) = screen_program(in p, in c.names, in cls);
+        if kept != 0 {
+            let n = p.insts.len();
+            let mut orig: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+            for k in 0..n {
+                orig.push(k);
+            }
+            let (st, forwarded) = forward_program_kept(
+                inout p,
+                in c.names,
+                in cls,
+                inout orig,
+                in keep
+            );
+            if st != OPT_OK {
+                return refused(widen_u64(st));
+            }
+        }
+        thread_tokens(inout p, in c.names);
+    }
+    let mut out = refused(Status::Ok);
+    let words = inline_input_words(inout p, inout c.names, inout c.types, in c.world, in calls);
+    out.extend(in words.as_slice());
     out
 }

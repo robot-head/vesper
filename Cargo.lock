@@ -5845,10 +5845,7 @@ name = "vesper-cranelift-component"
 version = "0.1.0"
 dependencies = [
  "cranelift-codegen 0.125.4",
- "vesper",
  "vesper-cranelift-sys",
- "wasmtime",
- "wasmtime-wasi",
  "wit-component",
  "wit-parser",
 ]
@@ -5864,8 +5861,9 @@ dependencies = [
  "cranelift-native 0.125.4",
  "cranelift-object",
  "target-lexicon",
- "vesper",
  "vesper-ffi",
+ "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]
@@ -6781,7 +6779,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "vesper",
  "vesper-port-abi",
  "vesper-port-harness",
  "vesper-simpulse-seed",

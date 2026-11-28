@@ -40,6 +40,8 @@ USES_BYTES = ["decoder", "response", "target"]
         visibility = [
             "//:__pkg__",
             "//crates/vesper-hybrid:__pkg__",
+            # The Stage 2 port builder differential (#2666).
+            "//crates/vesper-port-harness:__pkg__",
         ],
     )
     for library in LIBRARIES

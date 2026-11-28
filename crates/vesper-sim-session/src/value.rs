@@ -3,13 +3,12 @@
 //! Every host-supplied value is decoded against the checked operation signature
 //! before it can reach a continuation. Unsupported types (functions, rows,
 //! `Never`, unresolved generics) are rejected rather than passed through.
+use crate::{
+    machine::Value,
+    world::{Type, World, substitute},
+};
 use serde_json::{Map, Number, Value as Json};
 use std::collections::BTreeMap;
-use vesper::{
-    ast::{Type, substitute},
-    check::World,
-    runtime::Value,
-};
 
 const MAX_DEPTH: usize = 64;
 
@@ -159,7 +158,7 @@ fn decode_at(world: &World, ty: &Type, json: &Json, depth: usize) -> Result<Valu
                     ty: adt.name.clone(),
                     constructor: variant.name.clone(),
                     fields,
-                    resource_identity: None,
+                    tracked: false,
                 })
             }
         },
@@ -177,13 +176,7 @@ pub fn encode(world: &World, ty: &Type, value: &Value) -> Result<Json, String> {
 }
 
 fn encode_at(world: &World, ty: &Type, value: &Value, depth: usize) -> Result<Json, String> {
-    if matches!(
-        value,
-        Value::Data {
-            resource_identity: Some(_),
-            ..
-        }
-    ) {
+    if matches!(value, Value::Data { tracked: true, .. }) {
         return Err(
             "tracked resource identity cannot cross an uninstrumented JSON boundary".into(),
         );
@@ -276,59 +269,5 @@ fn encode_at(world: &World, ty: &Type, value: &Value, depth: usize) -> Result<Js
             _ => Err(mismatch()),
         },
         _ => Err(mismatch()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn world() -> World {
-        let parsed = vesper::parser::parse(
-            "copy struct Point { x: i64, y: i64 } copy enum Shape { Dot, Empty {}, Line(Point, Point), Named { label: String } } linear effect E { fn f(p: Option[(u8, Shape)]) -> bool; }",
-        );
-        assert!(parsed.diagnostics.is_empty());
-        let checked = vesper::check::check(&parsed.module);
-        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
-        checked.world
-    }
-
-    #[test]
-    fn round_trips_nested_generic_values() {
-        let world = world();
-        let ty = world.effects["E"].ops[0].params[0].ty.clone();
-        for json in [
-            json!("None"),
-            json!({"Some": [255, "Dot"]}),
-            json!({"Some": [7, "Empty"]}),
-            json!({"Some": [1, {"Line": [{"x": -1, "y": 2}, {"x": 3, "y": 4}]}]}),
-            json!({"Some": [0, {"Named": {"label": "a"}}]}),
-        ] {
-            let value = decode(&world, &ty, &json).unwrap();
-            assert_eq!(encode(&world, &ty, &value).unwrap(), json);
-        }
-    }
-
-    #[test]
-    fn rejects_shape_and_range_errors() {
-        let world = world();
-        let ty = world.effects["E"].ops[0].params[0].ty.clone();
-        for json in [
-            json!({"Some": [256, "Dot"]}),
-            json!({"Some": [1]}),
-            json!({"Some": [1, "Square"]}),
-            json!({"Some": [1, {"Dot": null}]}),
-            json!({"Some": [1, {"Named": {"label": "a", "extra": 1}}]}),
-            json!({"Some": [1, {"Line": [{"x": 1}, {"x": 3, "y": 4}]}]}),
-            json!("Some"),
-            json!(null),
-        ] {
-            assert!(decode(&world, &ty, &json).is_err(), "{json}");
-        }
-        assert!(decode(&world, &Type::named("Never"), &json!(null)).is_err());
-        assert!(decode(&world, &Type::named("Unknown"), &json!(1)).is_err());
-        assert!(encode(&world, &Type::named("u32"), &Value::UInt(1, 64)).is_err());
-        assert!(encode(&world, &Type::named("u64"), &Value::Function("f".into())).is_err());
     }
 }

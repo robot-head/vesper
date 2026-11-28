@@ -7,6 +7,7 @@
 //! kernel-replays local Lean `.olean` proofs (`0 sorryAx`), verifies an Ed25519
 //! builder operator quorum, and only then ingests the release into the local CAS
 //! (`--store`) and writes a deterministic publication receipt (`-o`).
+use crate::compiler;
 use serde_json::{Value, json};
 use std::{
     fs::File,
@@ -14,7 +15,6 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
-use vesper::{check, parser};
 use vesper_loom_audit::{
     Outcome, audit, parse_catalog, parse_policy as parse_audit_policy, parse_solution,
 };
@@ -24,6 +24,8 @@ use vesper_loom_trust::{parse_bundle, parse_identity, parse_policy, verify_attes
 
 const MAX_SMALL_JSON_BYTES: u64 = 1024 * 1024;
 const MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+/// The `vesper tool-facts` kind that checks the released source.
+const PUBLISH_FACTS: &str = "publish";
 
 const HELP: &str = "Usage:
   vesper publish <SOURCE.ves> (--initial | --baseline <old.vhir> --old-version <semver>) [options]
@@ -94,26 +96,28 @@ fn fail(json_out: bool, kind: &str, message: String, extra: Option<Value>) -> Re
     Err(message)
 }
 
-fn format_effect_capability(effect: &vesper::ast::Effect) -> String {
-    if effect.args.is_empty() {
-        effect.name.clone()
-    } else {
-        let args = effect
-            .args
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("{}[{args}]", effect.name)
-    }
+/// One effect instance of a checked function, as the compiler reports it.
+#[derive(serde::Deserialize)]
+struct EffectFact {
+    function: String,
+    name: String,
+    /// `Name` or `Name[args]`, as `capability_ceiling` spells it.
+    capability: String,
+}
+
+/// Every function's effect instances, in the checker's order.
+fn effect_facts(facts: &Value) -> Result<Vec<EffectFact>, String> {
+    let effects = facts
+        .get("effects")
+        .ok_or("publish facts: missing 'effects'")?;
+    serde_json::from_value(effects.clone()).map_err(|e| format!("publish facts: effects: {e}"))
 }
 
 fn effect_permitted_by_ceiling(
-    effect: &vesper::ast::Effect,
+    effect: &EffectFact,
     ceiling: &std::collections::BTreeSet<String>,
 ) -> bool {
-    let full = format_effect_capability(effect);
-    ceiling.contains(&full) || ceiling.contains(&effect.name)
+    ceiling.contains(&effect.capability) || ceiling.contains(&effect.name)
 }
 
 fn is_foreign_effect_name(name: &str) -> bool {
@@ -234,7 +238,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             }
             "--allow-axiom" => {
                 let v = it.next().ok_or("--allow-axiom requires an axiom name")?;
-                if vesper::proof_commands::forbidden_axiom(&v) {
+                if crate::proof_gate::forbidden_axiom(&v) {
                     return Err(format!("{v} cannot be allowed by publish proof policy"));
                 }
                 opts.allowed_axioms.push(v);
@@ -379,30 +383,33 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     }
 
     let source = read_utf8_bounded(source_path, MAX_SOURCE_BYTES, "source")?;
-    let parsed = parser::parse(&source);
-    if !parsed.diagnostics.is_empty() {
-        return fail(
-            opts.json,
-            "syntax_error",
-            format!(
-                "{source_path}: {} syntax error(s)",
-                parsed.diagnostics.len()
-            ),
-            Some(json!({"count": parsed.diagnostics.len()})),
-        );
+    // The shipped compiler checks the source and exports its interface (#2670).
+    let facts = compiler::facts(
+        PUBLISH_FACTS,
+        Path::new(source_path),
+        &["--package", manifest.package.name.as_str()],
+    )?;
+    match compiler::rejected(&facts) {
+        Some(compiler::Rejected::Syntax(count)) => {
+            return fail(
+                opts.json,
+                "syntax_error",
+                format!("{source_path}: {count} syntax error(s)"),
+                Some(json!({"count": count})),
+            );
+        }
+        Some(compiler::Rejected::Semantic(count)) => {
+            return fail(
+                opts.json,
+                "typecheck_error",
+                format!("{source_path}: {count} semantic error(s)"),
+                Some(json!({"count": count})),
+            );
+        }
+        None => {}
     }
-    let checked = check::check(&parsed.module);
-    if !checked.diagnostics.is_empty() {
-        return fail(
-            opts.json,
-            "typecheck_error",
-            format!(
-                "{source_path}: {} semantic error(s)",
-                checked.diagnostics.len()
-            ),
-            Some(json!({"count": checked.diagnostics.len()})),
-        );
-    }
+    let effects = effect_facts(&facts)?;
+
     if manifest.package.forbid_unsafe_ffi {
         let mut bad_ffi = Vec::new();
         for cap in &manifest.package.capability_ceiling {
@@ -410,11 +417,9 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                 bad_ffi.push(format!("manifest capability_ceiling ({cap})"));
             }
         }
-        for (fn_name, func) in &checked.world.functions {
-            for inst in &func.effects.instances {
-                if is_foreign_effect_name(&inst.name) {
-                    bad_ffi.push(format!("{fn_name} ({})", format_effect_capability(inst)));
-                }
+        for effect in &effects {
+            if is_foreign_effect_name(&effect.name) {
+                bad_ffi.push(format!("{} ({})", effect.function, effect.capability));
             }
         }
         if !bad_ffi.is_empty() {
@@ -432,11 +437,9 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     }
 
     let mut ceiling_violations = Vec::new();
-    for (fn_name, func) in &checked.world.functions {
-        for inst in &func.effects.instances {
-            if !effect_permitted_by_ceiling(inst, &manifest.package.capability_ceiling) {
-                ceiling_violations.push(format!("{fn_name} ({})", format_effect_capability(inst)));
-            }
+    for effect in &effects {
+        if !effect_permitted_by_ceiling(effect, &manifest.package.capability_ceiling) {
+            ceiling_violations.push(format!("{} ({})", effect.function, effect.capability));
         }
     }
     if !ceiling_violations.is_empty() {
@@ -452,8 +455,20 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         );
     }
 
-    let interface = vesper::interface::export(&checked.world, manifest.package.name.as_str())?;
-    let interface_bytes = serde_json::to_vec_pretty(&interface).map_err(|e| e.to_string())?;
+    let interface_text = match facts.get("interface").and_then(Value::as_str) {
+        Some(text) => text,
+        None => {
+            return Err(facts
+                .get("interface_error")
+                .and_then(Value::as_str)
+                .unwrap_or("publish facts: no interface")
+                .to_owned());
+        }
+    };
+    let interface: vesper_semver::Interface = serde_json::from_str(interface_text)
+        .map_err(|e| format!("publish facts: invalid interface: {e}"))?;
+    // The compiler's exact bytes, as the in-process export serialized them.
+    let interface_bytes = interface_text.as_bytes().to_vec();
     let source_id = blob_id(Domain::Source, source.as_bytes());
     let interface_id = blob_id(Domain::Interface, &interface_bytes);
     let interface_mif = format!("mif:blake3:{}", interface_id.digest.to_hex());
@@ -578,7 +593,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     let proof_gate = if let (Some(root), Some(module)) =
         (opts.olean_root.as_deref(), opts.olean_module.as_deref())
     {
-        let (accepted, report) = vesper::proof_commands::audit_policy(
+        let (accepted, report) = crate::proof_gate::audit_policy(
             root,
             module,
             &opts.theorems,
@@ -736,7 +751,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
 
     if let Some(out_path) = opts.output.as_deref() {
         let receipt_bytes = serde_json::to_vec_pretty(&receipt).map_err(|e| e.to_string())?;
-        vesper::atomic_file::atomic_write(out_path, &receipt_bytes)?;
+        crate::atomic_file::atomic_write(out_path, &receipt_bytes)?;
     }
 
     if opts.json {

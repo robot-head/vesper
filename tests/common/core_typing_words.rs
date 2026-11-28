@@ -192,18 +192,74 @@ fn wide_words(neg: bool, magnitude: u128) -> [u64; 3] {
 /// Whether an integer literal at `span` is an array's `len()` that
 /// `arrays::lower_world` wrote after checking: the checker typed the call,
 /// whose array receiver it recorded inside the span. Such a literal is
-/// encoded as `E_OTHER`, so its function is skipped.
+/// encoded as the call it replaced (`Src::lens`), or as `E_OTHER` (so its
+/// function is skipped) when the parsed module has none there.
 fn lowered_len(w: &World, span: &vesper::ast::Span) -> bool {
     w.types
         .range((span.start, span.start)..(span.start, span.end))
         .any(|(_, ty)| vesper::arrays::element(ty).is_some())
 }
 
+/// The world whose bodies are encoded, with the parsed module's `len()`
+/// method calls by span: the calls `arrays::lower_world` may have
+/// rewritten to their array's length after checking.
+struct Src<'a> {
+    world: &'a World,
+    lens: BTreeMap<(usize, usize), &'a Expr>,
+}
+
+impl std::ops::Deref for Src<'_> {
+    type Target = World;
+    fn deref(&self) -> &World {
+        self.world
+    }
+}
+
+impl<'a> Src<'a> {
+    fn new(world: &'a World, module: &'a Module) -> Self {
+        let mut lens = BTreeMap::new();
+        let mut visit = |body: &'a Expr| {
+            vesper::lean::visit_exprs(body, &mut |x: &'a Expr| {
+                if let ExprKind::Call { callee, args, .. } = &x.kind
+                    && args.is_empty()
+                    && matches!(&callee.kind, ExprKind::Field(_, m) if m == ARRAY_LEN)
+                {
+                    lens.insert((x.span.start, x.span.end), x);
+                }
+            });
+        };
+        for item in &module.items {
+            match item {
+                Item::Function(f) => f.body.iter().for_each(&mut visit),
+                Item::Impl { methods, .. } => {
+                    methods.iter().flat_map(|f| &f.body).for_each(&mut visit)
+                }
+                _ => {}
+            }
+        }
+        Src { world, lens }
+    }
+
+    /// The call a lowered `len()` literal at `span` replaced.
+    fn lowered(&self, span: &vesper::ast::Span) -> Option<&'a Expr> {
+        if !lowered_len(self.world, span) {
+            return None;
+        }
+        self.lens.get(&(span.start, span.end)).copied()
+    }
+}
+
+/// The array method `arrays::lower_world` rewrites to a constant.
+const ARRAY_LEN: &str = "len";
+
 /// An expression in pre-order: kind, start, end, then the payload. Kinds
 /// the Vesper checker does not cover yet are `E_OTHER` with no payload.
-fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
+fn encode_expr(w: &Src, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
     let (s, t) = (x.span.start as u64, x.span.end as u64);
     match &x.kind {
+        ExprKind::Literal(Literal::Int(_)) if let Some(call) = w.lowered(&x.span) => {
+            encode_expr(w, e, call, out);
+        }
         ExprKind::Literal(Literal::Int(n)) if fits_literal(*n) && !lowered_len(w, &x.span) => {
             out.extend([E_INT, s, t, (*n < 0) as u64, n.unsigned_abs() as u64]);
         }
@@ -493,6 +549,7 @@ pub fn checked_functions(w: &World) -> Vec<&Function> {
 /// method names the module's traits declare, and the checked functions'
 /// bodies.
 pub fn exprs_input(w: &World, module: &Module) -> Vec<u8> {
+    let src = Src::new(w, module);
     encode(w, |e, tail| {
         tail.push(w.functions.len() as u64);
         for f in w.functions.values() {
@@ -576,7 +633,7 @@ pub fn exprs_input(w: &World, module: &Module) -> Vec<u8> {
         for f in fs {
             tail.push(e.name(&f.name));
             tail.extend([f.span.start as u64, f.span.end as u64]);
-            encode_expr(w, e, f.body.as_ref().unwrap(), tail);
+            encode_expr(&src, e, f.body.as_ref().unwrap(), tail);
         }
     })
 }
@@ -635,6 +692,44 @@ pub fn rust_results(w: &World, spans: &[(usize, usize)]) -> Vec<((usize, usize),
         .collect()
 }
 
+/// Vesper's `H start end type` rows: each handler's inferred effects, as
+/// the empty function type that carries them.
+pub fn vesper_handler_effects(text: &str) -> Vec<((usize, usize), String)> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("H "))
+        .map(|rest| {
+            let parts: Vec<&str> = rest.splitn(3, ' ').collect();
+            let num = |i: usize| parts[i].parse::<usize>().unwrap();
+            ((num(0), num(1)), parts[2].to_string())
+        })
+        .collect()
+}
+
+/// The Rust checker's effects for each handler span in `spans`
+/// (`World::handler_effects`), as `vesper_handler_effects` writes them.
+pub fn rust_handler_effects(w: &World, spans: &[(usize, usize)]) -> Vec<((usize, usize), String)> {
+    spans
+        .iter()
+        .map(|span| {
+            let ty = w.handler_effects.get(span).map_or_else(
+                || "none".to_string(),
+                |effects| {
+                    format!(
+                        "{:?}",
+                        vesper::ast::Type::Function {
+                            params: vec![],
+                            result: Box::new(vesper::ast::Type::unit()),
+                            effects: effects.clone(),
+                            mode: vesper::ast::Mode::Copy,
+                        }
+                    )
+                },
+            );
+            (*span, ty)
+        })
+        .collect()
+}
+
 /// Vesper's text: `F start end` then `T start end type` rows in insertion
 /// order (a later row for a span replaces an earlier one, as
 /// `types.insert` does), `S start end` for a skipped function and `D code
@@ -672,8 +767,9 @@ pub fn vesper_types(text: &str) -> (String, Vec<(usize, usize)>, usize) {
             }
             "S" => skipped += 1,
             "D" => out.push_str(&format!("{line}\n")),
-            // A checked function's result: `vesper_results`.
-            "R" => {}
+            // A checked function's result (`vesper_results`) and a
+            // handler's effects (`vesper_handler_effects`).
+            "R" | "H" => {}
             _ => panic!("unexpected line {line}"),
         }
     }

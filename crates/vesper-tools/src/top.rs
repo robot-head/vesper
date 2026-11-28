@@ -10,6 +10,7 @@
 //!   active effects, open/leaked linear obligations, and wait-for cycles.
 //! - `vesper top <SOURCE.ves> [--entry <fn>] [--fuel <steps>]`:
 //!   runs a checked Vesper module and emits TelemetryPulse metrics for the run.
+use crate::compiler;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -18,20 +19,13 @@ use std::{
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
-    time::Instant,
-};
-use vesper::{
-    ast::Mode,
-    check, parser,
-    runtime::{
-        Runtime,
-        resource_trace::{ResourceTraceConfig, ResourceTraceLimits},
-    },
 };
 use vesper_chrono::{BundleKey, BundleLimits, HopKind, ReplaySession, simpulse::TraceEvent};
 
 const MAX_TRACE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+/// The `vesper tool-facts` kind that runs a module for `top SOURCE.ves`.
+const TOP_FACTS: &str = "top";
 
 const HELP: &str = "Usage:
   vesper top --trace <pulse-trace.json> [options]
@@ -739,94 +733,51 @@ fn run_module_snapshot(
     fuel: u64,
 ) -> Result<TelemetrySnapshot, String> {
     let bytes = read_bounded(path, MAX_SOURCE_BYTES)?;
-    let source = String::from_utf8(bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-    let parsed = parser::parse(&source);
-    if !parsed.diagnostics.is_empty() {
-        return Err(format!(
-            "{}: {} syntax error(s)",
-            path.display(),
-            parsed.diagnostics.len()
-        ));
-    }
-    let checked = check::check(&parsed.module);
-    if !checked.diagnostics.is_empty() {
-        return Err(format!(
-            "{}: {} semantic error(s)",
-            path.display(),
-            checked.diagnostics.len()
-        ));
-    }
-    let f = checked
-        .world
-        .functions
-        .get(entry)
-        .ok_or_else(|| format!("missing entry function '{entry}'"))?;
-    if !f.params.is_empty() {
-        return Err("entry function must take no arguments".into());
-    }
-    if !f.effects.instances.is_empty() || f.effects.tail.is_some() {
-        return Err("entry function must handle all effects".into());
-    }
-    let linear_types: Vec<String> = checked
-        .world
-        .adts
-        .values()
-        .filter(|adt| {
-            adt.mode == Mode::Linear
-                && !adt.is_enum
-                && adt.generics.is_empty()
-                && adt.variants.len() == 1
-                && adt.variants[0].name == adt.name
-                && adt.variants[0].fields.is_empty()
-        })
-        .map(|adt| adt.name.clone())
-        .take(ResourceTraceLimits::HARD.max_selected_types)
-        .collect();
-    let started = Instant::now();
-    let mut runtime = Runtime::new(&checked.world);
-    runtime.fuel = fuel;
-    let observer = if linear_types.is_empty() {
-        None
-    } else {
-        let mut limits = ResourceTraceLimits::HARD;
-        limits.max_selected_types = linear_types.len();
-        let total_name_bytes: usize = linear_types.iter().map(String::len).sum();
-        if total_name_bytes <= ResourceTraceLimits::HARD.max_selected_name_bytes {
-            limits.max_selected_name_bytes = total_name_bytes.max(1);
+    String::from_utf8(bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    // The shipped compiler checks and runs the module (#2670).
+    let fuel = fuel.to_string();
+    let facts = compiler::facts(TOP_FACTS, path, &["--entry", entry, "--fuel", &fuel])?;
+    match compiler::rejected(&facts) {
+        Some(compiler::Rejected::Syntax(count)) => {
+            return Err(format!("{}: {count} syntax error(s)", path.display()));
         }
-        let selected_refs: Vec<&str> = linear_types.iter().map(String::as_str).collect();
-        let config = ResourceTraceConfig::new(&checked.world, &selected_refs, limits)
-            .map_err(|e| e.to_string())?
-            .with_best_effort(true);
-        Some(
-            runtime
-                .observe_resources(config)
-                .map_err(|e| e.to_string())?,
-        )
+        Some(compiler::Rejected::Semantic(count)) => {
+            return Err(format!("{}: {count} semantic error(s)", path.display()));
+        }
+        None => {}
+    }
+    let field = |name: &str| {
+        facts
+            .get(name)
+            .ok_or_else(|| format!("{TOP_FACTS} facts: missing '{name}'"))
     };
-    let _val = runtime.run(entry, vec![])?;
-    let elapsed_ns = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
-    let effect_stack = runtime.active_effects();
+    let elapsed_ns = field("elapsed_ns")?
+        .as_u64()
+        .ok_or("top facts: elapsed_ns is not a count")?;
+    let effect_stack: Vec<String> =
+        serde_json::from_value(field("effect_stack")?.clone()).map_err(|e| e.to_string())?;
+    let observer_truncated = field("observer_truncated")?.as_bool().unwrap_or(false);
     let mut obligations = Vec::new();
-    let mut observer_truncated = false;
-    if let Some(observer) = observer {
-        let report = observer.snapshot().map_err(|e| e.to_string())?;
-        observer_truncated = report.truncated();
-        let selected = report.selected_types();
-        for live in report.live() {
-            obligations.push(ObligationEntry {
-                obligation_id: live.identity().serial().saturating_add(1),
-                kind: selected
-                    .get(live.kind())
-                    .cloned()
-                    .unwrap_or_else(|| "LinearResource".into()),
-                parked: false,
-                waiting_on_fiber: None,
-                waiting_on_obligation: None,
-            });
-        }
-        obligations.sort_by_key(|ob| ob.obligation_id);
+    for live in field("obligations")?
+        .as_array()
+        .ok_or("top facts: obligations is not a list")?
+    {
+        let serial = live
+            .get("serial")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("top facts: an obligation has no serial")?;
+        obligations.push(ObligationEntry {
+            obligation_id: serial.saturating_add(1),
+            kind: live
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .map_or_else(|| "LinearResource".into(), str::to_owned),
+            parked: false,
+            waiting_on_fiber: None,
+            waiting_on_obligation: None,
+        });
     }
+    obligations.sort_by_key(|ob| ob.obligation_id);
 
     Ok(TelemetrySnapshot {
         schema_version: 1,
@@ -1052,7 +1003,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
 
     if let Some(out) = write_trace.as_deref() {
         let bytes = serde_json::to_vec_pretty(&snapshot).map_err(|e| e.to_string())?;
-        vesper::atomic_file::atomic_write(out, &bytes)?;
+        crate::atomic_file::atomic_write(out, &bytes)?;
     }
 
     let report = analyze_snapshot(&snapshot);

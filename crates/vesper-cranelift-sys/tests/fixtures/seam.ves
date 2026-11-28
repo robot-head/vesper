@@ -1,8 +1,7 @@
 // The CLIF seam from Vesper (#2606): a finalized builder's function read
 // back as the words of crates/vesper-cranelift-sys/src/clif_words.rs, and
-// an edit script replayed on it before the builder is defined. Run against
-// the native shim (tests/seam.rs) and through the Cranelift component
-// (crates/vesper-cranelift-component/tests/objects.rs).
+// an edit script replayed on it before the builder is defined. Built by
+// Stage 2 and run through the Cranelift component (tests/seam.rs).
 
 // Edit ops of clif_words.rs.
 fn e_end() -> u64 {

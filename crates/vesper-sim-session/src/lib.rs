@@ -3,7 +3,8 @@
 //! [`CheckedProgram`] parses and checks real source. A versioned [`Scenario`]
 //! binds each checked external operation signature to a simulated action
 //! (virtual clock, yield, virtual sleep, scripted I/O, or host-completed I/O).
-//! [`Session`] runs every task on the reference CEK evaluator and routes each
+//! [`Session`] runs every task on the reference CEK evaluator (in a
+//! long-lived `vesper sim-host` process, see [`machine`]) and routes each
 //! external linear operation through a `vesper_simpulse::Simulator` task token,
 //! producing a [`Recording`] that replays only under the same executable,
 //! source, scenario, bindings, options and semantics.
@@ -25,6 +26,7 @@
 //! DPOR, not a crash-consistency check of any real filesystem or kernel I/O
 //! path, and not a production storage or network implementation.
 pub mod identity;
+pub mod machine;
 pub mod model;
 // The WAL, SHA-256, process and failure parts of the port are used only
 // under `vesper-port`.
@@ -34,8 +36,10 @@ pub mod program;
 pub mod scenario;
 pub mod session;
 pub mod value;
+pub mod world;
 
 pub use identity::{ExecutionIdentity, IdentityMismatch, SEMANTICS, executable_sha256};
+pub use machine::{Execution, ExternalRequest, Runtime, Suspension, Value, compiler};
 pub use model::{
     CrashChoice, DurableLog, DurableState, FailOp, FailureSpec, Fault, LinkSpec, LogSpec,
     LostState, MODEL_SEMANTICS, ModelEvent, ModelLimits, ModelSnapshot, ModelSpec, NetworkSpec,
@@ -50,3 +54,4 @@ pub use session::{
     LostOwner, LostTask, PendingOperation, Recording, RecoveredOwner, RejectedCompletion, Report,
     RunResult, Session, SessionError, SourceEvent, StalledOwner, TaskSlot, TerminalFailure,
 };
+pub use world::{Pass, Type, World};
