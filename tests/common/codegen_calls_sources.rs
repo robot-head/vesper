@@ -32,6 +32,10 @@ const SOURCE_TESTS: &[&str] = &[
     "tests/vector_f32.rs",
     "tests/native_export_f32.rs",
     "tests/native_spans.rs",
+    // The CLI halves of three of them (#2743).
+    "crates/vesper-cli-tests/tests/capability_effects.rs",
+    "crates/vesper-cli-tests/tests/capability_verifiers.rs",
+    "crates/vesper-cli-tests/tests/native_spans.rs",
 ];
 
 /// The string literals of a Rust test file that look like Vesper sources

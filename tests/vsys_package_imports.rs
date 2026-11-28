@@ -16,7 +16,6 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 use vesper::ffi_lowering;
 
@@ -314,89 +313,6 @@ fn a_root_reexport_is_not_an_exported_item() {
         "{:?}",
         p.module.public_items
     );
-}
-
-fn vesper() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_vesper"))
-}
-
-fn run(c: &mut Command) -> String {
-    let out = c.output().unwrap();
-    assert!(
-        out.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-/// `vesper check` of the executable, and `vesper build` linking it with a
-/// C `libprobe.a` (Unix hosts with `cc` and `ar`; Windows executables with
-/// imports are not linked yet, SH1 lane 7 gap 2).
-#[test]
-fn cli_checks_and_builds_an_executable_that_imports_a_type() {
-    let t = Temp::new("cli");
-    let app = graph(&t, true, APP_MAIN);
-    let checked = run(vesper().arg("check").arg(&app));
-    assert!(checked.contains("checked @t/app"), "{checked}");
-    if cfg!(windows) || !host_jit() {
-        return;
-    }
-    t.write(
-        "c/probe.c",
-        "#include <stdint.h>\n#include <stdlib.h>\n\
-         uint64_t *probe_open(uint64_t s) { uint64_t *c = malloc(8); *c = s; return c; }\n\
-         uint64_t probe_bump(uint64_t *c, uint32_t step) { *c += step; return *c; }\n\
-         uint64_t probe_close(uint64_t *c) { uint64_t v = *c; free(c); return v; }\n",
-    );
-    let c = t.0.join("c");
-    run(Command::new("cc")
-        .current_dir(&c)
-        .args(["-c", "probe.c", "-o", "probe.o"]));
-    run(Command::new("ar")
-        .current_dir(&c)
-        .args(["rcs", "libprobe.a", "probe.o"]));
-    let exe = t.0.join("app.bin");
-    run(vesper()
-        .arg("build")
-        .arg(&app)
-        .arg("-o")
-        .arg(&exe)
-        .arg("--link-search")
-        .arg(&c));
-    let status = Command::new(&exe).status().unwrap();
-    assert_eq!(status.code(), Some(41));
-}
-
-/// `vesper build --lib` of a library that imports the type: its exported
-/// function keeps handles inside (the export ABI refuses them in
-/// signatures), and the binding links the carried library by name.
-#[test]
-fn a_library_build_imports_a_type() {
-    let t = Temp::new("lib");
-    let app = graph(&t, true, "");
-    fs::remove_file(app.join("src/main.ves")).unwrap();
-    t.write(
-        "app/src/lib.ves",
-        "// @export vsys Probe rust=crate::probe\n\
-         use @t/counter::{Counter, Step, open, bump, close};\n\n\
-         fn ten(inout c: Counter) -> u64 eff [Ffi[Probe]] {\n    bump(inout c, Step::Ten)\n}\n\n\
-         pub fn go(start: u64) -> u64 eff [Ffi[Probe]] {\n    \
-         match open(start) {\n        Option::Some(c) => {\n            let mut c = c;\n            \
-         ten(inout c);\n            close(c)\n        },\n        Option::None => 0,\n    }\n}\n",
-    );
-    let binding = t.0.join("binding.rs");
-    run(vesper()
-        .args(["build", "--lib", "--lib-name", "app"])
-        .arg(&app)
-        .arg("-o")
-        .arg(t.0.join("app.o"))
-        .arg("--rust-binding")
-        .arg(&binding));
-    let text = fs::read_to_string(&binding).unwrap();
-    assert!(text.contains("crate::probe::probe_open"), "{text}");
-    assert!(text.contains("pub fn go"), "{text}");
 }
 
 fn repo() -> PathBuf {

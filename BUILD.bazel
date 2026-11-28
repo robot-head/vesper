@@ -375,6 +375,9 @@ vesper_crate(
             "tests/native_spans.rs",
             "tests/vector_f32.rs",
             "tests/wide_integers.rs",
+            # The CLI halves of capability_effects, capability_verifiers and
+            # native_spans moved there (#2743).
+            "//crates/vesper-cli-tests:files",
         ],
         # Rust exit gap wave 1 lane 11, part 3a (#1876): @vesper/native-walk's
         # entry-block plans against `native::frame_plan` over the corpus and
@@ -403,6 +406,9 @@ vesper_crate(
             "tests/native_spans.rs",
             "tests/vector_f32.rs",
             "tests/wide_integers.rs",
+            # The CLI halves of capability_effects, capability_verifiers and
+            # native_spans moved there (#2743).
+            "//crates/vesper-cli-tests:files",
         ],
         # SH4 lane 15 (#1289): @vesper/wasm-backend against src/wasm_backend
         # over the tests/wasm_backend.rs programs and the corpus.

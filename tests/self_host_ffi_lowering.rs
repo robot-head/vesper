@@ -923,7 +923,7 @@ fn directive_sources(text: &str) -> Vec<String> {
 }
 
 /// The Rust test files whose string literals hold `.vsys` sources.
-const VSYS_TESTS: [&str; 15] = [
+const VSYS_TESTS: [&str; 16] = [
     "tests/borrowed_box_match.rs",
     "tests/ffi_affine_drops.rs",
     "tests/ffi_handles.rs",
@@ -932,6 +932,7 @@ const VSYS_TESTS: [&str; 15] = [
     "crates/vesper-cli-tests/tests/test_runner_cli.rs",
     "tests/tree_abi.rs",
     "tests/vsys_packages.rs",
+    "crates/vesper-cli-tests/tests/vsys_packages.rs",
     "tests/dyn_effects.rs",
     "crates/vesper-ffi/tests/sys.rs",
     "crates/vesper-ffi/tests/sys_c_abi.rs",

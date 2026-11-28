@@ -868,7 +868,7 @@ fn compare(case: &Case) -> (String, Option<String>) {
 
 /// The Rust test files whose string literals hold `.vsys` libraries and
 /// the Vesper sources that call them.
-const FFI_TESTS: [&str; 12] = [
+const FFI_TESTS: [&str; 13] = [
     "tests/ffi_lowering.rs",
     "tests/ffi_handles.rs",
     "tests/ffi_affine_drops.rs",
@@ -879,6 +879,7 @@ const FFI_TESTS: [&str; 12] = [
     "tests/package_submodule_exports.rs",
     "tests/tree_abi.rs",
     "tests/vsys_packages.rs",
+    "crates/vesper-cli-tests/tests/vsys_packages.rs",
     "tests/dyn_effects.rs",
     "crates/vesper-cli-tests/tests/test_runner_cli.rs",
 ];
