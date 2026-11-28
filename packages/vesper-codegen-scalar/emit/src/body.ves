@@ -51,7 +51,9 @@ use @vesper/cranelift::{
     ty_i64, ty_i8, use_var, vals1, value_type, create_stack_slot, ins_iadd_imm, ins_load,
     ins_stack_addr, ins_store, module_pointer_type, ins_imul_imm, ins_uload8, ins_uload16,
     ins_uload32, mem_can_move, mem_readonly, mem_trusted, data_align, data_define, data_new,
-    declare_anonymous_data, define_data, import_data, ins_symbol_value
+    declare_anonymous_data, define_data, import_data, ins_symbol_value, call_conv_default,
+    declare_function, ext_none, ext_sext, ext_uext, linkage_import, sig_new, sig_param_ext,
+    sig_return_ext, ty_i16
 };
 use super::{
     BODY_ERROR, DECLINED, HANDLED, coerce, emit_overflow_test, kind_max_imm, kind_min_imm,
@@ -400,6 +402,48 @@ const WORD_BYTES: u32 = 8;
 const WIDE_BYTES: u32 = 16;
 const SLOT_ALIGN_SHIFT: u32 = 3;
 const PLAIN: u32 = 0;
+
+// Foreign calls (#2751, codegen-scalar foreign.ves): an argument's source,
+// the parameter and result forms, and a scalar word's fields (`bits |
+// signed << 8`).
+const INST_FOREIGN: u64 = 96;
+const FOREIGN_SOURCE_TEMP: u64 = 0;
+const FOREIGN_PARAM_BOOL: u64 = 1;
+const FOREIGN_RESULT_SCALAR: u64 = 1;
+const FOREIGN_BITS_MASK: u64 = 255;
+const FOREIGN_SIGNED: u64 = 256;
+const WORD_BYTES_64: u64 = 8;
+const HALF_BITS: u64 = 16;
+const QUARTER_BITS: u64 = 32;
+
+fn foreign_bits(scalar: u64) -> u64 {
+    scalar & FOREIGN_BITS_MASK
+}
+
+// `c_type`: the C carrier of a scalar of these bits.
+fn foreign_carrier(scalar: u64) -> Ty {
+    let bits = foreign_bits(scalar);
+    if bits == BYTE_BITS {
+        ty_i8()
+    } else if bits == HALF_BITS {
+        ty_i16()
+    } else if bits == QUARTER_BITS {
+        ty_i32()
+    } else {
+        ty_i64()
+    }
+}
+
+// `abi_param`'s extension: none for a word, else by signedness.
+fn foreign_ext(scalar: u64) -> u32 {
+    if foreign_bits(scalar) == WORD_BITS {
+        ext_none()
+    } else if (scalar & FOREIGN_SIGNED) != 0 {
+        ext_sext()
+    } else {
+        ext_uext()
+    }
+}
 
 // A reader over the request's words (0 past the end, as `call_arg`).
 struct Words {
@@ -1280,6 +1324,94 @@ impl Body {
         let address = declare_var(inout b, pointer_ty);
         def_var(inout b, address, ptr);
         let ok = self.addresses.try_set(l, address.id);
+    }
+
+    // `Codegen::foreign_perform` of a planned foreign call (#2751): each
+    // argument evaluated in order (a temporary read back, or a whole local
+    // read at the call) and narrowed to its C carrier, the import of the C
+    // symbol under its C signature (`foreign_import`), the call, then the
+    // result widened back to a word (`foreign_result`).
+    fn foreign(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words,
+        in ops: ChunkSeq[u64]
+    ) -> Value eff [Ffi[Cranelift]] {
+        let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let len = w.next();
+        let mut word: u64 = 0;
+        for k in 0..len {
+            if k % WORD_BYTES_64 == 0 {
+                word = w.next();
+            }
+            name.push(wrapping_u8(word & BYTE_MASK));
+            word = word >> BYTE_BITS;
+        }
+        let mut temps: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for k in 0..ops.len() {
+            temps.push(temp(inout b, self.value(at64(in ops, k))).id);
+        }
+        let sig = sig_new(inout m, call_conv_default());
+        let nargs = w.next();
+        let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut ti: u64 = 0;
+        for k in 0..nargs {
+            let source = w.next();
+            let value = if source == FOREIGN_SOURCE_TEMP {
+                let read = w.next();
+                if ti >= temps.len() {
+                    return Value { id: invalid() };
+                }
+                let tv = Var { id: at32(in temps, ti) };
+                ti = wrapping_add(ti, 1);
+                body_operand(inout b, tv, read, self.optimize)
+            } else {
+                let l = w.next();
+                let read = w.next();
+                if l >= self.locals.len() {
+                    return Value { id: invalid() };
+                }
+                let raw = self.use_local(inout b, l);
+                body_coerce(inout b, raw, read, self.optimize)
+            };
+            let form = w.next();
+            let scalar = w.next();
+            if form == FOREIGN_PARAM_BOOL {
+                // `ValueType::Bool`: a `uint8_t` carrier.
+                sig_param_ext(inout m, sig, ty_i8(), ext_uext());
+                args.push(ins_ireduce(inout b, ty_i8(), value).id);
+            } else {
+                let ty = foreign_carrier(scalar);
+                sig_param_ext(inout m, sig, ty, foreign_ext(scalar));
+                let narrowed = if foreign_bits(scalar) == WORD_BITS {
+                    value
+                } else {
+                    ins_ireduce(inout b, ty, value)
+                };
+                args.push(narrowed.id);
+            }
+        }
+        let result = w.next();
+        let scalar = w.next();
+        if result == FOREIGN_RESULT_SCALAR {
+            sig_return_ext(inout m, sig, foreign_carrier(scalar), foreign_ext(scalar));
+        }
+        let callee = declare_function(inout m, in name.as_slice(), linkage_import(), sig);
+        let fun = import_function(inout b, inout m, callee);
+        let _ = ins_call(inout b, fun, in args.as_slice());
+        if result == FOREIGN_RESULT_SCALAR {
+            let raw = inst_result(inout b, 0);
+            if foreign_bits(scalar) == WORD_BITS {
+                raw
+            } else if (scalar & FOREIGN_SIGNED) != 0 {
+                ins_sextend(inout b, ty_i64(), raw)
+            } else {
+                ins_uextend(inout b, ty_i64(), raw)
+            }
+        } else {
+            ins_iconst(inout b, ty_i64(), 0)
+        }
     }
 
     // A struct's own storage, of at least a word: `Codegen::alloc_uninit`
@@ -2835,6 +2967,12 @@ impl Body {
                 }
                 to
             }
+        } else if kind == INST_FOREIGN {
+            let out = self.foreign(inout b, inout m, inout w, in ops);
+            if is_invalid(out) {
+                return false;
+            }
+            out
         } else if kind == INST_HANDLE {
             let out = self.handle(inout b, inout m, inout w);
             if is_invalid(out) {

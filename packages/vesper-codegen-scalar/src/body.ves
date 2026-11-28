@@ -65,6 +65,9 @@ pub const LANE_PRODUCT: u64 = 5;
 // never reads; its words are values of their own.
 pub const LANE_WORDS: u64 = 6;
 
+// `ffi_lowering::EFFECT_PREFIX`: a `.vsys` library's effect is `Ffi$Lib`.
+const FOREIGN_EFFECT_PREFIX: Str = "Ffi$";
+
 // A local's entry: a lane code for a local the body declares, or
 // `LOCAL_PARAM` plus the parameter's index for one of the parameters.
 pub const LOCAL_PARAM: u64 = 16;
@@ -106,6 +109,10 @@ pub const INST_WORDS_CALL: u64 = 56;
 // A sequence or string operation (`Op::Seq`, #2653): one of the `SEQ_*`
 // forms below, then its words.
 pub const INST_SEQ: u64 = 80;
+// A foreign (`.vsys`) call (#2751, foreign.ves): the C symbol, each
+// argument and the result.
+pub const INST_FOREIGN: u64 = 96;
+
 // An arm's `Bind` of a fused `try_get` (`seq_fused_bind`): the local
 // `Some(x)` binds (NO_LOCAL for none), then the element's stride and lane.
 pub const INST_BIND_FUSED: u64 = 81;
@@ -878,6 +885,12 @@ impl Gen {
                     // graph raises to the handler in scope; `body`
                     // refuses it.
                     h.captures = inc(h.captures);
+                } else if eff.label == 0
+                    && eff.n == 0
+                    && self.ctx.names.has_prefix(eff_name, in FOREIGN_EFFECT_PREFIX.as_bytes())
+                {
+                    // A foreign library's `Ffi[Lib]` (#2751): passive for the
+                    // frame, its operations direct calls (`INST_FOREIGN`).
                 } else if eff_name != ops_s.const_time
                     && eff_name != ops_s.realtime
                     && eff_name != ops_s.det_float
@@ -2725,96 +2738,106 @@ impl Gen {
                 return false;
             }
         } else if i.op == Op::Call {
-            let mut bops: ChunkSeq[u64] = ChunkSeq::new[u64]();
-            if self.body_call_builtin(
-                in h,
-                i,
-                call,
-                inout builtin_calls,
-                inout bops,
-                inout kind,
-                inout extra
-            ) {
-                ops.extend(in bops.as_slice());
+            if self.foreign.row(n32(self.program.op(i.a))) != NONE64 {
+                // A foreign (`.vsys`) operation (#2751).
+                kind = INST_FOREIGN;
+                if !self.body_foreign(in h, i, inout ops, inout extra) {
+                    return false;
+                }
+                // Emitted with no callee word, as a builtin is.
+                builtin_calls.push(call);
             } else {
-                // Part 6b: a direct call (`Codegen::plain_call`); a
-                // `fail_only` callee's failures raised again (#2425).
-                let callee = if h.fails.len() == 0 && self.hstack.len() == 0 {
-                    NONE64
+                let mut bops: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                if self.body_call_builtin(
+                    in h,
+                    i,
+                    call,
+                    inout builtin_calls,
+                    inout bops,
+                    inout kind,
+                    inout extra
+                ) {
+                    ops.extend(in bops.as_slice());
                 } else {
-                    self.body_function(n32(self.program.op(i.a)))
-                };
-                let mut callee_fails: ChunkSeq[u64] = ChunkSeq::new[u64]();
-                if callee != NONE64 {
-                    let ch = self.body_header(self.program.function(callee));
-                    callee_fails = ch.fails;
-                }
-                kind = if callee_fails.len() != 0 {
-                    INST_FAIL_CALL
-                } else if kept != 0 {
-                    INST_WORDS_CALL
-                } else {
-                    INST_CALL
-                };
-                if kind == INST_FAIL_CALL && kept != 0 {
-                    return false;
-                }
-                extra.push(call);
-                let mut n = self.program.op(inc(i.a));
-                if self.body_has_inout(i, n) {
-                    // A pure callee that borrows scalar locals `inout`
-                    // (#2563): the `In` arguments are operands; each
-                    // `inout` one names its local and lane.
-                    // A `fail_only` callee also takes a failure record,
-                    // whose failure is raised again (#2614).
-                    let fails = kind == INST_FAIL_CALL;
-                    kind = INST_INOUT_CALL;
-                    if !self.body_inout_args(in h, i, n, inout ops, inout extra) {
+                    // Part 6b: a direct call (`Codegen::plain_call`); a
+                    // `fail_only` callee's failures raised again (#2425).
+                    let callee = if h.fails.len() == 0 && self.hstack.len() == 0 {
+                        NONE64
+                    } else {
+                        self.body_function(n32(self.program.op(i.a)))
+                    };
+                    let mut callee_fails: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                    if callee != NONE64 {
+                        let ch = self.body_header(self.program.function(callee));
+                        callee_fails = ch.fails;
+                    }
+                    kind = if callee_fails.len() != 0 {
+                        INST_FAIL_CALL
+                    } else if kept != 0 {
+                        INST_WORDS_CALL
+                    } else {
+                        INST_CALL
+                    };
+                    if kind == INST_FAIL_CALL && kept != 0 {
                         return false;
                     }
-                    if fails && !self.body_reraise(in h, in callee_fails, inout extra) {
-                        return false;
-                    }
-                    n = 0;
-                }
-                for k in 0..n {
-                    let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
-                    if !self.body_operand(in h, inc(at), inout ops) {
-                        return false;
-                    }
-                    let read = self.body_kind(n32(u64_at(in h.vty, u64_at(in ops, k))));
-                    if read == NONE64 {
-                        return false;
-                    }
-                    extra.push(read);
-                }
-                if kind == INST_FAIL_CALL
-                    && !self.body_reraise(in h, in callee_fails, inout extra)
-                {
-                    return false;
-                }
-                // A struct or enum result (#2654): its size, which the
-                // caller's storage for it takes (0 for a scalar result).
-                if kind == INST_CALL {
-                    extra.push(
-                        if self.body_lane(i.ty) == LANE_PRODUCT {
-                            self.body_product_size(i.ty)
-                        } else {
-                            0
-                        }
-                    );
-                }
-                // The result's words (`Codegen::scalar_call_words`): each
-                // word value and the kind it is coerced to.
-                if kind == INST_WORDS_CALL {
-                    extra.push(kept);
-                    for k in 0..kept {
-                        let word = self.body_word(in h, dest, k);
-                        if word == NONE64 {
+                    extra.push(call);
+                    let mut n = self.program.op(inc(i.a));
+                    if self.body_has_inout(i, n) {
+                        // A pure callee that borrows scalar locals `inout`
+                        // (#2563): the `In` arguments are operands; each
+                        // `inout` one names its local and lane.
+                        // A `fail_only` callee also takes a failure record,
+                        // whose failure is raised again (#2614).
+                        let fails = kind == INST_FAIL_CALL;
+                        kind = INST_INOUT_CALL;
+                        if !self.body_inout_args(in h, i, n, inout ops, inout extra) {
                             return false;
                         }
-                        extra.push(word);
-                        extra.push(self.body_kind(n32(u64_at(in h.vty, word))));
+                        if fails && !self.body_reraise(in h, in callee_fails, inout extra) {
+                            return false;
+                        }
+                        n = 0;
+                    }
+                    for k in 0..n {
+                        let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
+                        if !self.body_operand(in h, inc(at), inout ops) {
+                            return false;
+                        }
+                        let read = self.body_kind(n32(u64_at(in h.vty, u64_at(in ops, k))));
+                        if read == NONE64 {
+                            return false;
+                        }
+                        extra.push(read);
+                    }
+                    if kind == INST_FAIL_CALL
+                        && !self.body_reraise(in h, in callee_fails, inout extra)
+                    {
+                        return false;
+                    }
+                    // A struct or enum result (#2654): its size, which the
+                    // caller's storage for it takes (0 for a scalar result).
+                    if kind == INST_CALL {
+                        extra.push(
+                            if self.body_lane(i.ty) == LANE_PRODUCT {
+                                self.body_product_size(i.ty)
+                            } else {
+                                0
+                            }
+                        );
+                    }
+                    // The result's words (`Codegen::scalar_call_words`): each
+                    // word value and the kind it is coerced to.
+                    if kind == INST_WORDS_CALL {
+                        extra.push(kept);
+                        for k in 0..kept {
+                            let word = self.body_word(in h, dest, k);
+                            if word == NONE64 {
+                                return false;
+                            }
+                            extra.push(word);
+                            extra.push(self.body_kind(n32(u64_at(in h.vty, word))));
+                        }
                     }
                 }
             }
