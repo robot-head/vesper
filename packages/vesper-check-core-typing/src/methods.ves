@@ -488,7 +488,7 @@ pub fn is_seq_or_slice(in ck: Ck, ty: u32) -> bool {
 }
 
 // The element type of a `ChunkSeq[T]` or `Slice[T]`.
-fn seq_elem(in ck: Ck, ty: u32) -> u32 {
+pub fn seq_elem(in ck: Ck, ty: u32) -> u32 {
     ck.ctx.types.arg(ty, 0)
 }
 
