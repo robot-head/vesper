@@ -6,7 +6,7 @@ use @vesper/ast::{
     StmtNode, list_at, list_len, none as ast_none
 };
 use @vesper/check-data::names::{Names};
-use @vesper/check-data::types::{EffNode, Types};
+use @vesper/check-data::types::{EffNode, Types, Vars, substitute, vars_new};
 use @vesper/check-data::util::{n32, u32_at, w};
 use @vesper/check-data::world::{Generic, World, set_by_symbol};
 use @vesper/check-names-packages::{AssembledModule};
@@ -14,6 +14,7 @@ use @vesper/place-ir::codes::{Lit, Pat};
 use @vesper/place-ir-lower::ast::{Ast as IrAst, Cl, Ef, Eop, Ex, FnR, Gn, Hd, PathR, Pm, Pt};
 use @vesper-std/arena::{idx_from_raw};
 use self::collect::{CollectedProgram, ParamInfo, lower_effects, lower_ty, translate_sym};
+use self::traits::{MonoPlan, Rename, TraitInfo, find_rename, inst_vars};
 
 const NONE64: u64 = 18446744073709551615;
 const NONE32: u32 = 4294967295;
@@ -40,6 +41,8 @@ const X_CONTINUE: u8 = 19;
 const X_RETURN: u8 = 20;
 const X_CLOSURE: u8 = 21;
 const X_HANDLE: u8 = 22;
+// The surface kind of a field expression (@vesper/ast `ExprNode`).
+const SURF_FIELD: u8 = 7;
 
 struct LowerCtx {
     ir: IrAst,
@@ -47,6 +50,33 @@ struct LowerCtx {
     types: Types,
     tmp: String,
     caches: ChunkSeq[ChunkSeq[u32]],
+    // The trait frontend's second pass (traits.ves): the instances and the
+    // calls it rewrites; `inst` is the instance being lowered (0: none),
+    // `inst_vars` its type arguments, `inst_off` its span offset.
+    mono: MonoPlan,
+    inst: u32,
+    inst_vars: Vars,
+    inst_off: u64,
+    // The first pass of the trait frontend leaves `x.eq(y)` and `x.hash()`
+    // method calls for the checker to resolve.
+    plain_methods: bool,
+}
+
+// The span offset of module `mod_idx`, or of the instance being lowered.
+fn span_off(in lc: LowerCtx, mod_idx: u64) -> u64 {
+    if lc.inst != 0 {
+        lc.inst_off
+    } else {
+        wrapping_shl_u64(mod_idx, 32)
+    }
+}
+
+// A type of the body being lowered, with the instance's type arguments.
+fn inst_ty(inout lc: LowerCtx, ty: u32) -> u32 {
+    if lc.inst == 0 {
+        return ty;
+    }
+    substitute(inout lc.types, ty, in lc.inst_vars)
 }
 
 fn sym(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, sym_id: u32) -> u32 {
@@ -74,7 +104,7 @@ fn lower_pat(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, pat_id: u32) -> 
             return idx;
         },
     };
-    let off = wrapping_shl_u64(mod_idx, 32);
+    let off = span_off(in lc, mod_idx);
     let s0 = off | widen_u64(p.start);
     let s1 = off | widen_u64(p.end);
     if p.kind == 1 {
@@ -313,7 +343,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
         Option::Some(v) => v,
         Option::None => return NONE64,
     };
-    let off = wrapping_shl_u64(mod_idx, 32);
+    let off = span_off(in lc, mod_idx);
     let s0 = off | widen_u64(e.start);
     let s1 = off | widen_u64(e.end);
     if e.kind == 1 {
@@ -447,6 +477,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
                                 ),
                                 Option::None => 0,
                             };
+                            let lty = inst_ty(inout lc, lty);
                             match lc.ir.pts.try_get(p0) {
                                 Option::Some(pv) => {
                                     if pv.kind != Pat::Literal && pv.kind != Pat::Constructor {
@@ -478,6 +509,13 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
             .push(Ex { kind: X_BLOCK, s0: s0, s1: s1, a: a0, b: tail, c: 0, n: n, m: 0, x: 0 });
         return idx;
     }
+    if e.kind == 6 && lc.mono.active {
+        let home = wrapping_shl_u64(mod_idx, 32);
+        match find_rename(in lc.mono, lc.inst, home | widen_u64(e.start), home | widen_u64(e.end)) {
+            Option::Some(r) => return lower_renamed_call(inout lc, in ast, mod_idx, e, r, s0, s1),
+            Option::None => {},
+        }
+    }
     if e.kind == 6 {
         let callee = lower_expr(inout lc, in ast, mod_idx, e.a);
         let m = list_len(in ast, e.b);
@@ -497,6 +535,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
                     ),
                     Option::None => 0,
                 };
+                let ty = inst_ty(inout lc, ty);
                 targs.push(widen_u64(ty));
             }
             push_xs(inout lc, in targs)
@@ -504,7 +543,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
         let n = list_len(in ast, e.c);
         match lc.ir.exs.try_get(callee) {
             Option::Some(ce) => {
-                if ce.kind == X_FIELD && m == 0 {
+                if ce.kind == X_FIELD && m == 0 && !lc.plain_methods {
                     if n == 0 && lc.names.spells(n32(ce.b), in "hash".as_bytes()) {
                         let wop = widen_u64(lc.names.intern(in "widen_u64".as_bytes()));
                         let idx = lc.ir.exs.len();
@@ -756,6 +795,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
                 ),
                 Option::None => 0,
             };
+            let ty = inst_ty(inout lc, ty);
             targs.push(widen_u64(ty));
         }
         let ta = push_xs(inout lc, in targs);
@@ -911,6 +951,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
                     Option::None => 0,
                 }
             };
+            let pty = if pty == 0 { 0 } else { inst_ty(inout lc, pty) };
             lc.ir.pms.push(Pm {
                 name: pname,
                 pass: pm.pass,
@@ -958,6 +999,86 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
     idx
 }
 
+// A call the trait frontend's second pass rewrites (`Rename`, as Rust's
+// `rewrite_calls` and `Mono::instance` do): the callee becomes the
+// selected function, a method call's receiver its first argument, and an
+// instance's type arguments go.
+fn lower_renamed_call(
+    inout lc: LowerCtx,
+    in ast: SurfAst,
+    mod_idx: u64,
+    e: ExprNode,
+    r: Rename,
+    s0: u64,
+    s1: u64
+) -> u64 {
+    let ce = match ast.exprs.get(idx_from_raw[ExprNode](e.a)) {
+        Option::Some(v) => v,
+        Option::None => ExprNode { kind: 0, start: 0, end: 0, a: 0, b: 0, c: 0, d: 0, e: 0 },
+    };
+    let off = span_off(in lc, mod_idx);
+    let mut args = ChunkSeq::new[u64]();
+    let mut n = list_len(in ast, e.c);
+    if ce.kind == SURF_FIELD {
+        let base = lower_expr(inout lc, in ast, mod_idx, ce.a);
+        args.push(widen_u64(r.pass0));
+        args.push(base);
+        n = wrapping_add(n, 1);
+    }
+    let callee = lc.ir.exs.len();
+    lc.ir.exs.push(Ex {
+        kind: X_NAME,
+        s0: off | widen_u64(ce.start),
+        s1: off | widen_u64(ce.end),
+        a: widen_u64(r.target),
+        b: 0,
+        c: 0,
+        n: 0,
+        m: 0,
+        x: 0
+    });
+    let m = if r.inst { 0 } else { list_len(in ast, e.b) };
+    let c0 = if m == 0 {
+        0
+    } else {
+        let mut targs = ChunkSeq::new[u64]();
+        for i in 0..m {
+            let ty = match lc.caches.try_get_mut(mod_idx) {
+                Option::Some(cache) => lower_ty(
+                    in ast,
+                    list_at(in ast, e.b, i),
+                    inout lc.names,
+                    inout lc.types,
+                    inout cache,
+                    inout lc.tmp
+                ),
+                Option::None => 0,
+            };
+            let ty = inst_ty(inout lc, ty);
+            targs.push(widen_u64(ty));
+        }
+        push_xs(inout lc, in targs)
+    };
+    for i in 0..list_len(in ast, e.c) {
+        match ast.args.get(idx_from_raw[ArgNode](list_at(in ast, e.c, i))) {
+            Option::Some(ag) => {
+                let av = lower_expr(inout lc, in ast, mod_idx, ag.expr);
+                args.push(widen_u64(ag.pass));
+                args.push(av);
+            },
+            Option::None => {},
+        }
+    }
+    let b0 = if n == 0 {
+        0
+    } else {
+        push_xs(inout lc, in args)
+    };
+    let idx = lc.ir.exs.len();
+    lc.ir.exs.push(Ex { kind: X_CALL, s0: s0, s1: s1, a: callee, b: b0, c: c0, n: n, m: m, x: 0 });
+    idx
+}
+
 fn last_colon_seg(inout names: Names, sym: u32) -> u32 {
     if sym == 0 || sym == 4294967295 {
         return 0;
@@ -998,6 +1119,29 @@ pub fn build_ir_ast_for_entry(
     in mods: ChunkSeq[AssembledModule],
     in entry_name: Str
 ) -> (IrAst, Names, Types, World) {
+    let (ir, names, types, world, _tr) = build_ir_ast_traits(sink prog, in mods, in entry_name);
+    (ir, names, types, world)
+}
+
+// `build_ir_ast_for_entry`, also returning the trait frontend's tables.
+pub fn build_ir_ast_traits(
+    sink prog: CollectedProgram,
+    in mods: ChunkSeq[AssembledModule],
+    in entry_name: Str
+) -> (IrAst, Names, Types, World, TraitInfo) {
+    let CollectedProgram {
+        names: prog_names,
+        types: prog_types,
+        world: prog_world,
+        fns: prog_fns,
+        params: prog_params,
+        fn_generics: prog_fn_generics,
+        eff_decls: prog_eff_decls,
+        eff_ops: prog_eff_ops,
+        eff_gens: prog_eff_gens,
+        tr: prog_tr,
+        mono: prog_mono,
+    } = prog;
     let mut caches = ChunkSeq::new[ChunkSeq[u32]]();
     for _i in 0..mods.len() {
         caches.push(sink ChunkSeq::new[u32]());
@@ -1024,23 +1168,32 @@ pub fn build_ir_ast_for_entry(
         hds: ChunkSeq::new[Hd](),
         pool_count: 0
     };
+    let plain = prog_tr.active && !prog_mono.active;
     let mut lc = LowerCtx {
         ir: ir0,
-        names: prog.names,
-        types: prog.types,
+        names: prog_names,
+        types: prog_types,
         tmp: String::new(),
-        caches: caches
+        caches: caches,
+        mono: prog_mono,
+        inst: 0,
+        inst_vars: vars_new(),
+        inst_off: 0,
+        plain_methods: plain
     };
     let mut ex_start = ChunkSeq::new[u64]();
     let mut ex_end = ChunkSeq::new[u64]();
-    for fi in 0..prog.fns.len() {
-        let f = match prog.fns.try_get(fi) {
+    for fi in 0..prog_fns.len() {
+        let f = match prog_fns.try_get(fi) {
             Option::Some(v) => v,
             Option::None => continue,
         };
+        lc.inst = f.inst;
+        lc.inst_vars = inst_vars(in lc.mono, f.inst);
+        lc.inst_off = wrapping_shl_u64(wrapping_add(mods.len(), widen_u64(f.inst)), 32);
         let pa = lc.ir.pms.len();
         for pi in 0..w(f.pn) {
-            match prog.params.try_get(wrapping_add(w(f.pa), pi)) {
+            match prog_params.try_get(wrapping_add(w(f.pa), pi)) {
                 Option::Some(pm) => {
                     lc.ir.pms.push(Pm {
                         name: pm.name,
@@ -1057,7 +1210,7 @@ pub fn build_ir_ast_for_entry(
         }
         let ga = lc.ir.gens.len();
         for gi in 0..w(f.gn) {
-            match prog.fn_generics.try_get(wrapping_add(w(f.ga), gi)) {
+            match prog_fn_generics.try_get(wrapping_add(w(f.ga), gi)) {
                 Option::Some(gn) => {
                     lc.ir.gens.push(Gn { name: gn.name, bound: gn.bound, is_row: gn.row });
                 },
@@ -1074,6 +1227,7 @@ pub fn build_ir_ast_for_entry(
                 Option::None => NONE64,
             }
         };
+        lc.inst = 0;
         let ex1 = lc.ir.exs.len();
         ex_start.push(ex0);
         ex_end.push(ex1);
@@ -1097,27 +1251,27 @@ pub fn build_ir_ast_for_entry(
         });
         set_by_symbol(inout lc.ir.fn_by_key, f.name, n32(wrapping_add(fidx, 1)));
     }
-    for ei in 0..prog.eff_decls.len() {
-        let ed = match prog.eff_decls.try_get(ei) {
+    for ei in 0..prog_eff_decls.len() {
+        let ed = match prog_eff_decls.try_get(ei) {
             Option::Some(v) => v,
             Option::None => continue,
         };
         let ga = lc.ir.egens.len();
         for gi in 0..w(ed.gn) {
-            match prog.eff_gens.try_get(wrapping_add(w(ed.ga), gi)) {
+            match prog_eff_gens.try_get(wrapping_add(w(ed.ga), gi)) {
                 Option::Some(gn) => lc.ir.egens.push(gn.name),
                 Option::None => {},
             }
         }
         let oa = lc.ir.eops.len();
         for oi in 0..w(ed.on) {
-            let op = match prog.eff_ops.try_get(wrapping_add(w(ed.oa), oi)) {
+            let op = match prog_eff_ops.try_get(wrapping_add(w(ed.oa), oi)) {
                 Option::Some(v) => v,
                 Option::None => continue,
             };
             let pa = lc.ir.pms.len();
             for pi in 0..w(op.pn) {
-                match prog.params.try_get(wrapping_add(w(op.pa), pi)) {
+                match prog_params.try_get(wrapping_add(w(op.pa), pi)) {
                     Option::Some(pm) => {
                         lc.ir.pms.push(Pm {
                             name: pm.name,
@@ -1255,5 +1409,5 @@ pub fn build_ir_ast_for_entry(
             }
         }
     }
-    (lc.ir, lc.names, lc.types, prog.world)
+    (lc.ir, lc.names, lc.types, prog_world, prog_tr)
 }

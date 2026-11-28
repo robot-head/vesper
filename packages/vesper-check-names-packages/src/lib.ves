@@ -34,8 +34,8 @@ use self::load::{
     effect_decl_at, fn_at, item_at, item_name, tr, variant_name
 };
 use self::resolve::{
-    ambiguous, group, is_foreign, local_of, lookup, name_of, no_key, overrides, reexports, shown,
-    use_module
+    ambiguous, group, is_foreign, is_generated, local_of, lookup, name_of, no_key, overrides,
+    reexports, shown, use_module
 };
 use self::rename::{assoc_decl_at, conf_at, effects, item, owner, trait_ref};
 
@@ -86,6 +86,11 @@ fn hidden_and_variants(inout loader: St) {
         }
     }
     for enum_index in 0..loader.enum_mod.len() {
+        // Rust appends the generated preludes (the builtin `Ordering`) after
+        // package name checks, so their variants need no import.
+        if is_generated(in loader, at32(in loader.enum_mod, enum_index)) {
+            continue;
+        }
         let key = pair(at32(in loader.enum_mod, enum_index), at32(in loader.enum_name, enum_index));
         let owner_name = name_of(inout loader, key);
         let owner_shown = shown(inout loader, key);

@@ -3,11 +3,14 @@
 // (`Names`, `Types`, `World`) and Stage 2 function signatures.
 
 use @vesper/ast::{
-    AdtNode, Ast, EffectDeclNode, EffectNode, EffectsNode, FieldNode, FnNode, GenericNode, ImplNode,
-    ItemNode, ParamNode, TypeNode as AstTypeNode, VariantNode, list_at, list_len, none as ast_none
+    AdtNode, Ast, BoundNode, ConfNode, EffectDeclNode, EffectNode, EffectsNode, FieldNode, FnNode,
+    GenericNode, ImplNode, ItemNode, ParamNode, TraitNode, TraitRefNode, TypeNode as AstTypeNode,
+    VariantNode, WhereNode, list_at, list_len, none as ast_none
 };
 use @vesper/check-data::names::{Names, names_new};
-use @vesper/check-data::types::{EffNode, TyKind, TyMode, Types, types_new};
+use @vesper/check-data::types::{
+    EffNode, TyKind, TyMode, Types, substitute, substitute_row, types_new
+};
 use @vesper/check-data::util::{inc32, n32, u32_at, u64_at, u8_at, w};
 
 const NONE32: u32 = 4294967295;
@@ -26,6 +29,11 @@ const TY_ARG_CLOSE_BYTES: u64 = 1;
 const FS_META: Str = "FsMeta";
 // `TyMode::Copy`: a wire struct is a copy struct.
 const MODE_COPY: u8 = 0;
+// `Item` kinds (@vesper/ast `ItemNode`) of the trait frontend.
+const ITEM_TRAIT: u8 = 5;
+const ITEM_CONFORMANCE: u8 = 6;
+// The mode bound of a stub's `Self` parameter.
+const SELF_BOUND: u8 = 0;
 use @vesper/check-data::world::{
     Adt, EffectRow, Field, Generic, Known, Variant, World, known_new, set_by_symbol, world_new
 };
@@ -33,6 +41,10 @@ use @vesper/check-names-packages::{AssembledModule};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};
 use self::vcl_decls::{vcl_decl, vcl_decl_count};
+use self::traits::{
+    BoundRow, ConfRow, MonoPlan, TraitInfo, TraitRow, generated_name, inst_at, inst_vars,
+    is_dropped, key_segment, mark_bounded, mark_stub, mono_plan_new, stub_name, trait_info_new
+};
 
 pub copy struct FnInfo {
     name: u32,
@@ -45,6 +57,9 @@ pub copy struct FnInfo {
     effects: u32,
     mod_idx: u32,
     body: u32,
+    // The monomorphized instance this function is (traits.ves `Inst`, by
+    // id + 1), or 0.
+    inst: u32,
 }
 
 pub copy struct ParamInfo {
@@ -82,6 +97,11 @@ pub struct CollectedProgram {
     eff_decls: ChunkSeq[EffDeclInfo],
     eff_ops: ChunkSeq[EffOpInfo],
     eff_gens: ChunkSeq[Generic],
+    // The trait frontend's tables (traits.ves), inactive unless
+    // `collect_program_traits` collected them.
+    tr: TraitInfo,
+    // The instances of the second pass, inactive in the first.
+    mono: MonoPlan,
 }
 
 fn mod_asts_mention(in mods: ChunkSeq[AssembledModule], in name: Str) -> bool {
@@ -460,7 +480,8 @@ fn collect_fn_into(
         result: res,
         effects: effs,
         mod_idx: mod_idx,
-        body: fn_node.body
+        body: fn_node.body,
+        inst: 0
     });
 }
 
@@ -708,7 +729,33 @@ fn add_fs_meta_adt(inout names: Names, inout types: Types, inout world: World, s
 
 pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
     let mut names = names_new();
-    let mut types = types_new(inout names);
+    let types = types_new(inout names);
+    collect_program_with(in mods, sink names, sink types, false, sink mono_plan_new())
+}
+
+// `collect_program` with the trait frontend (traits.ves): traits become
+// stubs, conformance methods generated functions, and, when `plan` is the
+// second pass's, its instances replace the bounded originals and stubs.
+// `names` and `types` carry the first pass's ids, which `plan` uses.
+pub fn collect_program_traits(
+    in mods: ChunkSeq[AssembledModule],
+    sink names: Names,
+    sink types: Types,
+    sink plan: MonoPlan
+) -> CollectedProgram {
+    collect_program_with(in mods, sink names, sink types, true, sink plan)
+}
+
+fn collect_program_with(
+    in mods: ChunkSeq[AssembledModule],
+    sink names_in: Names,
+    sink types_in: Types,
+    traits: bool,
+    sink plan: MonoPlan
+) -> CollectedProgram {
+    let mut names = names_in;
+    let mut types = types_in;
+    let mut tr = trait_info_new(traits);
     let known = known_new(inout names);
     let mut world = world_new(known);
     let mut fns = ChunkSeq::new[FnInfo]();
@@ -981,11 +1028,45 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
                                 );
                             }
                         }
+                    } else if item.kind == ITEM_TRAIT && traits {
+                        collect_trait(
+                            in m.ast,
+                            item.node,
+                            n32(mi),
+                            inout names,
+                            inout types,
+                            inout cache,
+                            inout tmp,
+                            inout fn_generics,
+                            inout params,
+                            inout fns,
+                            inout tr
+                        );
+                    } else if item.kind == ITEM_CONFORMANCE && traits {
+                        collect_conformance(
+                            in m.ast,
+                            item.node,
+                            n32(mi),
+                            inout names,
+                            inout types,
+                            inout cache,
+                            inout tmp,
+                            inout fn_generics,
+                            inout params,
+                            inout fns,
+                            inout tr
+                        );
                     }
+                }
+                if traits {
+                    collect_bounds(in m.ast, inout names, inout cache, inout tmp, inout tr);
                 }
             },
             Option::None => {},
         }
+    }
+    if plan.active {
+        add_instances(in plan, inout types, inout params, inout fns);
     }
     let opt_sym = names.intern(in "Option".as_bytes());
     let has_opt = match world.by_name.try_get(w(opt_sym)) {
@@ -1580,6 +1661,306 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
         fn_generics: fn_generics,
         eff_decls: eff_decls,
         eff_ops: eff_ops,
-        eff_gens: eff_gens
+        eff_gens: eff_gens,
+        tr: tr,
+        mono: plan
     }
+}
+
+// A trait (`Item::Trait`): its methods, and for each a bodiless stub
+// `bound$Trait$method` generic over `Self` (`Elaborator::stubs`).
+fn collect_trait(
+    in ast: Ast,
+    node: u32,
+    mod_idx: u32,
+    inout names: Names,
+    inout types: Types,
+    inout cache: ChunkSeq[u32],
+    inout tmp: String,
+    inout fn_generics: ChunkSeq[Generic],
+    inout params: ChunkSeq[ParamInfo],
+    inout fns: ChunkSeq[FnInfo],
+    inout tr: TraitInfo
+) {
+    let t = match ast.traits.get(idx_from_raw[TraitNode](node)) {
+        Option::Some(v) => v,
+        Option::None => return,
+    };
+    let tname = translate_sym(in ast, t.name, inout names, inout cache, inout tmp);
+    let self_name = names.intern(in "Self".as_bytes());
+    let self_ty = types.named0(self_name);
+    let m0 = n32(tr.methods.len());
+    let mc = list_len(in ast, t.methods);
+    for k in 0..mc {
+        let fid = list_at(in ast, t.methods, k);
+        let fn_node = match ast.fns.get(idx_from_raw[FnNode](fid)) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        let mname = translate_sym(in ast, fn_node.name, inout names, inout cache, inout tmp);
+        let stub = stub_name(inout names, tname, mname);
+        tr.methods.push(mname);
+        tr.stubs.push(stub);
+        mark_stub(inout tr, stub);
+        let sga = n32(fn_generics.len());
+        fn_generics.push(Generic { name: self_name, bound: SELF_BOUND, row: false });
+        let mut bodiless = fn_node;
+        bodiless.body = ast_none();
+        collect_fn_into(
+            in ast,
+            bodiless,
+            stub,
+            ast_none(),
+            self_name,
+            self_ty,
+            mod_idx,
+            inout names,
+            inout types,
+            inout cache,
+            inout tmp,
+            inout fn_generics,
+            inout params,
+            inout fns
+        );
+        let last = wrapping_sub(fns.len(), 1);
+        match fns.try_get(last) {
+            Option::Some(f) => {
+                let mut g = f;
+                g.ga = sga;
+                g.gn = wrapping_add(g.gn, 1);
+                let _ = fns.try_set(last, g);
+            },
+            Option::None => {},
+        }
+    }
+    tr.traits.push(TraitRow { name: tname, m0: m0, mn: wrapping_sub(n32(tr.methods.len()), m0) });
+}
+
+// A canonical conformance (`Item::Conformance`): each method becomes the
+// generated function `impl$Trait.<key>$method` with the conformance's
+// generics and `Self` its type (`Elaborator::generate`); its where
+// clauses bound it.
+fn collect_conformance(
+    in ast: Ast,
+    node: u32,
+    mod_idx: u32,
+    inout names: Names,
+    inout types: Types,
+    inout cache: ChunkSeq[u32],
+    inout tmp: String,
+    inout fn_generics: ChunkSeq[Generic],
+    inout params: ChunkSeq[ParamInfo],
+    inout fns: ChunkSeq[FnInfo],
+    inout tr: TraitInfo
+) {
+    let c = match ast.confs.get(idx_from_raw[ConfNode](node)) {
+        Option::Some(v) => v,
+        Option::None => return,
+    };
+    if c.model != ast_none() {
+        return;
+    }
+    let tref = match ast.trait_refs.get(idx_from_raw[TraitRefNode](c.trait_ref)) {
+        Option::Some(v) => v,
+        Option::None => return,
+    };
+    if tref.package != ast_none() {
+        return;
+    }
+    let tname0 = translate_sym(in ast, tref.name, inout names, inout cache, inout tmp);
+    // A trait with arguments keys as the named type `Trait[args]`.
+    let tname = if list_len(in ast, tref.args) == 0 {
+        tname0
+    } else {
+        let mut targs = ChunkSeq::new[u32]();
+        for i in 0..list_len(in ast, tref.args) {
+            targs.push(lower_ty(
+                in ast,
+                list_at(in ast, tref.args, i),
+                inout names,
+                inout types,
+                inout cache,
+                inout tmp
+            ));
+        }
+        let tty = types.named(tname0, in targs);
+        let mut buf = ChunkSeq::new[u8]();
+        key_segment(in types, in names, tty, inout buf);
+        names.intern(in buf.as_slice())
+    };
+    let self_ty = lower_ty(in ast, c.self_ty, inout names, inout types, inout cache, inout tmp);
+    let self_name = names.intern(in "Self".as_bytes());
+    let g0 = n32(tr.conf_gens.len());
+    let gn = list_len(in ast, c.generics);
+    for i in 0..gn {
+        match ast.generics.get(idx_from_raw[GenericNode](list_at(in ast, c.generics, i))) {
+            Option::Some(g) => {
+                tr.conf_gens
+                    .push(translate_sym(in ast, g.name, inout names, inout cache, inout tmp));
+            },
+            Option::None => tr.conf_gens.push(NONE32),
+        }
+    }
+    let f0 = n32(tr.cf_fn.len());
+    let wn = list_len(in ast, c.wheres);
+    let mc = list_len(in ast, c.methods);
+    for k in 0..mc {
+        let fid = list_at(in ast, c.methods, k);
+        let fn_node = match ast.fns.get(idx_from_raw[FnNode](fid)) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        let mname = translate_sym(in ast, fn_node.name, inout names, inout cache, inout tmp);
+        let gname = generated_name(inout names, in types, tname, self_ty, mname);
+        tr.cf_method.push(mname);
+        tr.cf_fn.push(gname);
+        collect_fn_into(
+            in ast,
+            fn_node,
+            gname,
+            c.generics,
+            self_name,
+            self_ty,
+            mod_idx,
+            inout names,
+            inout types,
+            inout cache,
+            inout tmp,
+            inout fn_generics,
+            inout params,
+            inout fns
+        );
+        for wi in 0..wn {
+            let wnode = match ast.wheres
+                .get(idx_from_raw[WhereNode](list_at(in ast, c.wheres, wi)))
+            {
+                Option::Some(v) => v,
+                Option::None => continue,
+            };
+            let wref = match ast.trait_refs.get(idx_from_raw[TraitRefNode](wnode.trait_ref)) {
+                Option::Some(v) => v,
+                Option::None => continue,
+            };
+            let wty = lower_ty(in ast, wnode.ty, inout names, inout types, inout cache, inout tmp);
+            if types.kind(wty) != TyKind::Named || types.arity(wty) != 0 {
+                continue;
+            }
+            tr.bounds.push(BoundRow {
+                owner: gname,
+                param: types.name(wty),
+                trait_name: translate_sym(in ast, wref.name, inout names, inout cache, inout tmp)
+            });
+            mark_bounded(inout tr, gname);
+        }
+    }
+    tr.confs.push(ConfRow {
+        trait_name: tname0,
+        self_ty: self_ty,
+        g0: g0,
+        gn: n32(gn),
+        f0: f0,
+        fnn: wrapping_sub(n32(tr.cf_fn.len()), f0)
+    });
+}
+
+// The module's trait bounds (`Module::trait_bounds`): each bounds its
+// owner function.
+fn collect_bounds(
+    in ast: Ast,
+    inout names: Names,
+    inout cache: ChunkSeq[u32],
+    inout tmp: String,
+    inout tr: TraitInfo
+) {
+    for i in 0..ast.m_bounds.len() {
+        let b = match ast.bounds.get(idx_from_raw[BoundNode](u32_at(in ast.m_bounds, i))) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        let tref = match ast.trait_refs.get(idx_from_raw[TraitRefNode](b.trait_ref)) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        if b.owner == ast_none() || tref.package != ast_none() {
+            continue;
+        }
+        let owner = translate_sym(in ast, b.owner, inout names, inout cache, inout tmp);
+        tr.bounds.push(BoundRow {
+            owner: owner,
+            param: translate_sym(in ast, b.param, inout names, inout cache, inout tmp),
+            trait_name: translate_sym(in ast, tref.name, inout names, inout cache, inout tmp)
+        });
+        mark_bounded(inout tr, owner);
+    }
+}
+
+// The second pass's functions: the instances of `plan` (each its origin
+// with the instance's type arguments substituted and no generics) in place
+// of the bounded originals and the stubs.
+fn add_instances(
+    in plan: MonoPlan,
+    inout types: Types,
+    inout params: ChunkSeq[ParamInfo],
+    inout fns: ChunkSeq[FnInfo]
+) {
+    let mut by_name = ChunkSeq::new[u32]();
+    for fi in 0..fns.len() {
+        match fns.try_get(fi) {
+            Option::Some(f) => set_by_symbol(inout by_name, f.name, n32(wrapping_add(fi, 1))),
+            Option::None => {},
+        }
+    }
+    let mut kept = ChunkSeq::new[FnInfo]();
+    for fi in 0..fns.len() {
+        match fns.try_get(fi) {
+            Option::Some(f) => {
+                if !is_dropped(in plan, f.name) {
+                    kept.push(f);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    for ii in 0..plan.insts.len() {
+        let inst = inst_at(in plan, ii);
+        let oi = u32_at(in by_name, w(inst.origin));
+        if oi == 0 {
+            continue;
+        }
+        let o = match fns.try_get(wrapping_sub(w(oi), 1)) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        let vars = inst_vars(in plan, n32(wrapping_add(ii, 1)));
+        let pa = n32(params.len());
+        for pi in 0..w(o.pn) {
+            match params.try_get(wrapping_add(w(o.pa), pi)) {
+                Option::Some(p) => {
+                    let ty = substitute(inout types, p.ty, in vars);
+                    params.push(ParamInfo {
+                        name: p.name,
+                        pass: p.pass,
+                        ty: ty,
+                        start: p.start,
+                        end: p.end
+                    });
+                },
+                Option::None => {},
+            }
+        }
+        kept.push(FnInfo {
+            name: inst.name,
+            fip: o.fip,
+            ga: 0,
+            gn: 0,
+            pa: pa,
+            pn: o.pn,
+            result: substitute(inout types, o.result, in vars),
+            effects: substitute_row(inout types, o.effects, in vars),
+            mod_idx: o.mod_idx,
+            body: o.body,
+            inst: n32(wrapping_add(ii, 1))
+        });
+    }
+    fns = kept;
 }

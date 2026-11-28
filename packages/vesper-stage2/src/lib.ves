@@ -1,8 +1,8 @@
 // @vesper/stage2: pure-Vesper Stage 2 compiler driver (#1397).
 
 use @vesper/check-data::input::{Ctx};
-use @vesper/check-data::names::{Names};
-use @vesper/check-data::types::{TyPass, Types};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::types::{TyPass, Types, types_new};
 use @vesper/check-data::util::{
     add, inc, n32, push_decimal, stage2_heap_mark, stage2_heap_reset, stage2_heap_swap, u32_at,
     u64_at, w
@@ -25,16 +25,19 @@ use @vesper/wasm-backend::ir::{
 use @vesper/place-ir::codes::{Op, Pat, PoolKind};
 use @vesper-std/env::{arg, arg_count, var};
 use @vesper-std/fs::{IoError, write_path};
-use self::ast_lower::{build_ir_ast, build_ir_ast_for_entry};
-use self::collect::{collect_program};
+use self::ast_lower::{build_ir_ast, build_ir_ast_for_entry, build_ir_ast_traits};
+use self::collect::{collect_program, collect_program_traits};
+use self::traits::{mono_plan, mono_plan_new};
 use self::facts::{record_failure_ops};
 use self::tables::{lower_table_reads};
-use self::loader::{load_package_graph_bytes, load_package_graph_bytes_for};
-use self::sugar_policy::{
-    PolicyFailure, PolicyFailureKind, PolicyInputs, copy_inputs, explicit_access_valid, has_failure,
-    policy_inputs, resolve_rows
+use self::loader::{
+    load_package_graph_bytes, load_package_graph_bytes_for, load_package_graph_bytes_traits
 };
-use self::typecheck::{typecheck_ast};
+use self::sugar_policy::{
+    PolicyFailure, PolicyFailureKind, PolicyInputs, copy_inputs, empty_inputs,
+    explicit_access_valid, has_failure, policy_inputs, resolve_rows
+};
+use self::typecheck::{typecheck_ast, typecheck_ast_traits};
 
 const INVALID_SUGAR_POLICY: Str = "invalid sugar policy metadata";
 
@@ -318,7 +321,7 @@ pub fn stage2_lower_dir(
     in os: Slice[u8],
     inout err: ChunkSeq[u8]
 ) -> Option[Lowered] eff [Ffi[StdFs]] {
-    let encoded = match load_package_graph_bytes_for(in root_dir, in os) {
+    let encoded = match load_package_graph_bytes_traits(in root_dir, in os, true) {
         Option::Some(b) => b,
         Option::None => {
             err.extend(in "load_package_graph".as_bytes());
@@ -346,12 +349,7 @@ pub fn stage2_lower_dir(
             return Option::None;
         },
     };
-    let collected = collect_program(in mods);
-    let (ir_ast, names_seed, types_seed, world0) = build_ir_ast_for_entry(
-        sink collected,
-        in mods,
-        in ""
-    );
+    let (ir_ast, names_seed, types_seed, world0) = front_with_traits(in mods);
     let mut names0 = names_seed;
     let mut types0 = types_seed;
     if !resolve_rows(inout sugar, inout a, inout names0, inout types0) {
@@ -393,6 +391,33 @@ pub fn stage2_lower_dir(
     let mut low = l_new(sink c, sink ir_ast);
     lower_all(inout low);
     Option::Some(Lowered { low: low, call_rows: call_rows, call_pairs: call_pairs })
+}
+
+// Collects and lowers `mods` through the trait frontend (traits.ves): a
+// package with traits or conformances is checked once to plan its
+// instances, then collected and lowered again with them, as Rust's
+// `check_lowered_package` checks pass 1 and then the elaborated module.
+fn front_with_traits(in mods: ChunkSeq[AssembledModule]) -> (IrAst, Names, Types, World) {
+    let mut names0 = names_new();
+    let types0 = types_new(inout names0);
+    let first = collect_program_traits(in mods, sink names0, sink types0, sink mono_plan_new());
+    if first.tr.traits.len() == 0 && first.tr.confs.len() == 0 {
+        return build_ir_ast_for_entry(sink first, in mods, in "");
+    }
+    let (ir1, names1, types1, world1, tr1) = build_ir_ast_traits(sink first, in mods, in "");
+    let (names2, types2, _world2, _rows, _pairs, _bad, calls, tr2) = typecheck_ast_traits(
+        in ir1,
+        sink names1,
+        sink types1,
+        sink world1,
+        sink empty_inputs(),
+        sink tr1
+    );
+    let mut names = names2;
+    let mut types = types2;
+    let plan = mono_plan(in ir1, in tr2, in calls, inout names, inout types);
+    let second = collect_program_traits(in mods, sink names, sink types, sink plan);
+    build_ir_ast_for_entry(sink second, in mods, in "")
 }
 
 /// Compile a Loom package from `root_dir` to a core Wasm module at `out_wasm`

@@ -1365,7 +1365,8 @@ fn add_instance(
         result: result,
         effects: effects,
         mod_idx: f.mod_idx,
-        body: NONE32
+        body: NONE32,
+        inst: 0
     });
     insert_by_name(inout exported, in cp.fns, in cp.names, w(wrapper));
     true

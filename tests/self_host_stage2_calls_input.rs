@@ -84,7 +84,7 @@ const DECLINES: &[&str] = &[
 const MIN_SAME_FUNCTIONS: usize = 32;
 
 /// The port functions Stage 2 must lower as Rust does today.
-const MIN_SAME_PORT_FUNCTIONS: usize = 11438;
+const MIN_SAME_PORT_FUNCTIONS: usize = 13000;
 
 /// Set to print the Rust and Stage 2 bodies of each function that differs.
 const SHOW_DIFFS: &str = "VESPER_STAGE2_CALLS_DIFFS";
@@ -120,17 +120,47 @@ fn functions(dump: &str) -> std::collections::BTreeMap<String, Vec<String>> {
     out
 }
 
+/// The range `lo..=hi` of a body's `@a..b` spans.
+fn span_range(body: &[String]) -> Option<(u64, u64)> {
+    let mut range: Option<(u64, u64)> = None;
+    for w in body.iter().flat_map(|l| l.split(' ')) {
+        let Some((a, b)) = w.strip_prefix('@').and_then(|s| s.split_once("..")) else {
+            continue;
+        };
+        if let (Ok(a), Ok(b)) = (a.parse::<u64>(), b.parse::<u64>()) {
+            let (lo, hi) = range.unwrap_or((a, b));
+            range = Some((lo.min(a), hi.max(b)));
+        }
+    }
+    range
+}
+
 /// Whether two bodies agree once spans are left out: `@a..b` tokens and
-/// every number of a header line (parameter spans sit among them).
+/// every number of a header line (parameter spans sit among them). A body
+/// the trait frontend generated or cloned sits in its own span range
+/// (Rust's `SpanMap` past the source, Stage 2 an instance's offset), so the
+/// pattern spans of `term` and `bind` lines are compared relative to the
+/// start of each body's range.
 fn same_body(a: &[String], b: &[String]) -> bool {
-    let strip = |l: &String| -> String {
+    let strip = |l: &String, range: Option<(u64, u64)>| -> String {
         let header = l.starts_with("header");
         l.split(' ')
             .filter(|w| !w.starts_with('@') && !(header && w.parse::<u64>().is_ok()))
+            .map(|w| match (w.parse::<u64>(), range) {
+                (Ok(n), Some((lo, hi))) if n >= lo && n <= hi => format!("+{}", n - lo),
+                _ => w.to_string(),
+            })
             .collect::<Vec<_>>()
             .join(" ")
     };
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| strip(x) == strip(y))
+    let (ra, rb) = (span_range(a), span_range(b));
+    // Bodies in the same range compare their spans as they are.
+    let (ra, rb) = if ra.map(|r| r.0) == rb.map(|r| r.0) {
+        (None, None)
+    } else {
+        (ra, rb)
+    };
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| strip(x, ra) == strip(y, rb))
 }
 
 /// The calls task flags (packages/vesper-codegen-calls/src/data.ves).
@@ -216,6 +246,21 @@ pub fn second(n: u64) -> u64 eff [Fail[RuntimeError]] { let mut v = ChunkSeq::ne
         "pub fn lerp(a: f64, b: f64, t: f64) -> f64 { a + (b - a) * t }
 pub fn half(x: f32) -> f32 { x * 0.5 }",
         &["half", "lerp"],
+    ),
+    // The trait frontend (packages/vesper-stage2/src/traits.ves, #2727):
+    // derived and scalar conformances, a trait path call, and a bounded
+    // generic's `$mono$` instances.
+    (
+        "traits",
+        "copy struct Edge { a: u32, b: u64 }
+impl Ord for Edge {}
+impl Eq for Edge {}
+fn less[T: mod copy](a: T, b: T) -> bool where T: Ord { match a.cmp(b) { Less => true, _ => false } }
+pub fn edge_less(x: u32, y: u32) -> bool { less(Edge { a: x, b: 1 }, Edge { a: y, b: 2 }) }
+pub fn num_less(x: u64, y: u64) -> bool { less(x, y) }
+pub fn pair_less(x: u64, y: u64) -> bool { less((x, y), (y, x)) }
+pub fn same_edge(x: u32) -> bool { Eq::eq(Edge { a: x, b: 0 }, Edge { a: x, b: 1 }) }",
+        &["edge_less", "num_less", "pair_less", "same_edge"],
     ),
 ];
 

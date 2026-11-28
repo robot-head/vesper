@@ -1,0 +1,871 @@
+// Stage 2's trait frontend: the static evidence elaboration and the
+// monomorphization of src/pact_frontend.rs and src/pact_frontend/mono.rs
+// for a package whose traits and canonical conformances are its own.
+//
+// As in Rust, it runs in two checking passes (lib.ves `stage2_lower_dir`):
+//
+// 1. Collect (collect.ves) lowers each trait method to a bodiless stub
+//    `bound$Trait$method[Self]` and each conformance method to a generated
+//    function `impl$Trait.<self key>$method` (`generated_name`). The
+//    checker (typecheck.ves) resolves a method or `Trait::method` call on
+//    a concrete receiver to the generated function of the conformance for
+//    its type, and one on a bounded parameter to the bound's stub. It
+//    records both (`TraitCall`) and every call of a generic function with
+//    its type arguments (`GenCall`).
+// 2. `mono_plan` starts from every unbounded function, as `Mono` does:
+//    each call of a bounded function at concrete type arguments names an
+//    instance `f$mono$<keys>`, whose body is the original's with the type
+//    arguments substituted and whose stub calls name the conformance
+//    selected for the concrete type. Collect and lowering then run again
+//    with the instances in place of the bounded originals and the stubs,
+//    and with every trait call an ordinary call of the function it
+//    selected (`Rename`, applied by ast_lower.ves), so the second check
+//    sees only ordinary calls, as Rust's `check_core` of pass 2 does.
+//
+// Coherence, `use model` scopes, named models, associated types and `dyn`
+// are not part of it yet; the Rust frontend has accepted every package
+// Stage 2 lowers here.
+
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, Types, Vars, substitute, vars_new};
+use @vesper/check-data::util::{n32, u32_at, u64_at, w};
+use @vesper/check-data::world::{set_by_symbol};
+use @vesper/place-ir-lower::ast::{Ast as IrAst, FnR};
+use @vesper/wasm-backend::ir::{Pair};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+// The byte `Mono::instance` joins instance key segments with.
+const KEY_JOIN: u8 = 46;
+// `$`, which joins the parts of generated names.
+const DOLLAR: u8 = 36;
+
+// A trait: its method names are `methods[m0..m0+mn]`, their stubs
+// `stubs[m0..m0+mn]`.
+pub copy struct TraitRow {
+    name: u32,
+    m0: u32,
+    mn: u32,
+}
+
+// A canonical conformance `impl[gens] Trait for self_ty`: its generics'
+// names are `conf_gens[g0..g0+gn]`; its methods `cf_method[f0..f0+fnn]`
+// are generated as `cf_fn[f0..f0+fnn]`.
+pub copy struct ConfRow {
+    trait_name: u32,
+    self_ty: u32,
+    g0: u32,
+    gn: u32,
+    f0: u32,
+    fnn: u32,
+}
+
+// One trait bound `param: trait_name` of function `owner`.
+pub copy struct BoundRow {
+    owner: u32,
+    param: u32,
+    trait_name: u32,
+}
+
+pub struct TraitInfo {
+    active: bool,
+    traits: ChunkSeq[TraitRow],
+    methods: ChunkSeq[u32],
+    stubs: ChunkSeq[u32],
+    confs: ChunkSeq[ConfRow],
+    conf_gens: ChunkSeq[u32],
+    cf_method: ChunkSeq[u32],
+    cf_fn: ChunkSeq[u32],
+    bounds: ChunkSeq[BoundRow],
+    // By function symbol: 1 when the function has trait bounds.
+    bounded: ChunkSeq[u32],
+    // By function symbol: 1 for a stub.
+    is_stub: ChunkSeq[u32],
+}
+
+pub fn trait_info_new(active: bool) -> TraitInfo {
+    TraitInfo {
+        active: active,
+        traits: ChunkSeq::new[TraitRow](),
+        methods: ChunkSeq::new[u32](),
+        stubs: ChunkSeq::new[u32](),
+        confs: ChunkSeq::new[ConfRow](),
+        conf_gens: ChunkSeq::new[u32](),
+        cf_method: ChunkSeq::new[u32](),
+        cf_fn: ChunkSeq::new[u32](),
+        bounds: ChunkSeq::new[BoundRow](),
+        bounded: ChunkSeq::new[u32](),
+        is_stub: ChunkSeq::new[u32]()
+    }
+}
+
+pub fn is_bounded(in tr: TraitInfo, sym: u32) -> bool {
+    u32_at(in tr.bounded, w(sym)) != 0
+}
+
+pub fn is_stub(in tr: TraitInfo, sym: u32) -> bool {
+    u32_at(in tr.is_stub, w(sym)) != 0
+}
+
+pub fn mark_bounded(inout tr: TraitInfo, sym: u32) {
+    set_by_symbol(inout tr.bounded, sym, 1);
+}
+
+pub fn mark_stub(inout tr: TraitInfo, sym: u32) {
+    set_by_symbol(inout tr.is_stub, sym, 1);
+}
+
+fn trait_at(in tr: TraitInfo, i: u64) -> TraitRow {
+    match tr.traits.try_get(i) {
+        Option::Some(t) => t,
+        Option::None => TraitRow { name: NONE32, m0: 0, mn: 0 },
+    }
+}
+
+fn conf_at(in tr: TraitInfo, i: u64) -> ConfRow {
+    match tr.confs.try_get(i) {
+        Option::Some(c) => c,
+        Option::None => ConfRow {
+            trait_name: NONE32,
+            self_ty: NONE32,
+            g0: 0,
+            gn: 0,
+            f0: 0,
+            fnn: 0
+        },
+    }
+}
+
+// The index of trait `name`, or NONE64.
+pub fn trait_index(in tr: TraitInfo, name: u32) -> u64 {
+    for i in 0..tr.traits.len() {
+        if trait_at(in tr, i).name == name {
+            return i;
+        }
+    }
+    NONE64
+}
+
+// The stub of method `method` of trait `name`, or NONE32.
+pub fn stub_of(in tr: TraitInfo, name: u32, method: u32) -> u32 {
+    let ti = trait_index(in tr, name);
+    if ti == NONE64 {
+        return NONE32;
+    }
+    let t = trait_at(in tr, ti);
+    for k in 0..w(t.mn) {
+        let mi = wrapping_add(w(t.m0), k);
+        if u32_at(in tr.methods, mi) == method {
+            return u32_at(in tr.stubs, mi);
+        }
+    }
+    NONE32
+}
+
+// The trait whose method `stub` is, or NONE32.
+pub fn stub_trait(in tr: TraitInfo, stub: u32) -> u32 {
+    for ti in 0..tr.traits.len() {
+        let t = trait_at(in tr, ti);
+        for k in 0..w(t.mn) {
+            if u32_at(in tr.stubs, wrapping_add(w(t.m0), k)) == stub {
+                return t.name;
+            }
+        }
+    }
+    NONE32
+}
+
+// The stub that a call of `method` on parameter `param` of function
+// `owner` selects through one of the function's bounds, or NONE32.
+pub fn bound_stub(in tr: TraitInfo, owner: u32, param: u32, method: u32) -> u32 {
+    for i in 0..tr.bounds.len() {
+        match tr.bounds.try_get(i) {
+            Option::Some(b) => {
+                if b.owner == owner && b.param == param {
+                    let s = stub_of(in tr, b.trait_name, method);
+                    if s != NONE32 {
+                        return s;
+                    }
+                }
+            },
+            Option::None => {},
+        }
+    }
+    NONE32
+}
+
+// Whether `ty` is an instance of `pat`, whose names `gens` are variables;
+// binds them in `vars`.
+pub fn ty_bind(
+    inout types: Types,
+    pat: u32,
+    ty: u32,
+    in gens: ChunkSeq[u32],
+    g0: u64,
+    gn: u64,
+    inout vars: Vars
+) -> bool {
+    let pk = types.kind(pat);
+    if pk == TyKind::Named && types.arity(pat) == 0 {
+        let pn = types.name(pat);
+        for i in 0..gn {
+            match gens.try_get(wrapping_add(g0, i)) {
+                Option::Some(g) => {
+                    if g == pn {
+                        let had = vars.get(pn);
+                        if had != NONE32 {
+                            return had == ty;
+                        }
+                        vars.set(pn, ty);
+                        return true;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+    }
+    if pat == ty {
+        return true;
+    }
+    if pk != types.kind(ty) || types.arity(pat) != types.arity(ty) {
+        return false;
+    }
+    if pk == TyKind::Named && types.name(pat) != types.name(ty) {
+        return false;
+    }
+    if pk != TyKind::Named && pk != TyKind::Tuple {
+        return false;
+    }
+    for i in 0..types.arity(pat) {
+        let pa = types.arg(pat, i);
+        let ta = types.arg(ty, i);
+        if !ty_bind(inout types, pa, ta, in gens, g0, gn, inout vars) {
+            return false;
+        }
+    }
+    true
+}
+
+// The conformance whose generated function implements `method` for
+// receiver type `recv` (of trait `trait_name`, or of any trait when it is
+// NONE32): (the function, the conformance index), or (NONE32, NONE64).
+pub fn resolve_conf(
+    in tr: TraitInfo,
+    inout types: Types,
+    trait_name: u32,
+    method: u32,
+    recv: u32
+) -> (u32, u64) {
+    for ci in 0..tr.confs.len() {
+        let c = conf_at(in tr, ci);
+        if trait_name != NONE32 && c.trait_name != trait_name {
+            continue;
+        }
+        let mut target = NONE32;
+        for k in 0..w(c.fnn) {
+            let fi = wrapping_add(w(c.f0), k);
+            if u32_at(in tr.cf_method, fi) == method {
+                target = u32_at(in tr.cf_fn, fi);
+            }
+        }
+        if target == NONE32 {
+            continue;
+        }
+        if c.gn == 0 {
+            if c.self_ty == recv {
+                return (target, ci);
+            }
+            continue;
+        }
+        let mut vars = vars_new();
+        if ty_bind(inout types, c.self_ty, recv, in tr.conf_gens, w(c.g0), w(c.gn), inout vars) {
+            return (target, ci);
+        }
+    }
+    (NONE32, NONE64)
+}
+
+// `key_segment`: the injective encoding of a type in generated names.
+pub fn key_segment(in types: Types, in names: Names, ty: u32, inout out: ChunkSeq[u8]) {
+    let k = types.kind(ty);
+    let n = types.arity(ty);
+    if k == TyKind::Named {
+        names.write(types.name(ty), inout out);
+        if n > 0 {
+            out.extend(in "-0-".as_bytes());
+            for i in 0..n {
+                if i > 0 {
+                    out.extend(in "-1-".as_bytes());
+                }
+                key_segment(in types, in names, types.arg(ty, i), inout out);
+            }
+            out.extend(in "-2".as_bytes());
+        }
+        return;
+    }
+    if k == TyKind::Tuple {
+        if n == 0 {
+            out.extend(in "Unit".as_bytes());
+            return;
+        }
+        out.extend(in "3-0-".as_bytes());
+        for i in 0..n {
+            if i > 0 {
+                out.extend(in "-1-".as_bytes());
+            }
+            key_segment(in types, in names, types.arg(ty, i), inout out);
+        }
+        out.extend(in "-2".as_bytes());
+        return;
+    }
+    out.extend(in "5".as_bytes());
+}
+
+// `generated_name`: `impl$<Trait>.<self key>$<method>`.
+pub fn generated_name(
+    inout names: Names,
+    in types: Types,
+    trait_name: u32,
+    self_ty: u32,
+    method: u32
+) -> u32 {
+    let mut buf = ChunkSeq::new[u8]();
+    buf.extend(in "impl$".as_bytes());
+    names.write(trait_name, inout buf);
+    buf.push(KEY_JOIN);
+    key_segment(in types, in names, self_ty, inout buf);
+    buf.push(DOLLAR);
+    names.write(method, inout buf);
+    names.intern(in buf.as_slice())
+}
+
+// The stub of a trait method: `bound$<Trait>$<method>`.
+pub fn stub_name(inout names: Names, trait_name: u32, method: u32) -> u32 {
+    let mut buf = ChunkSeq::new[u8]();
+    buf.extend(in "bound$".as_bytes());
+    names.write(trait_name, inout buf);
+    buf.push(DOLLAR);
+    names.write(method, inout buf);
+    names.intern(in buf.as_slice())
+}
+
+// ---------------------------------------------------------------------------
+// What the first check records
+
+// A trait call at `s0..s1` in function `caller`: resolved to `target` (a
+// generated function, or the stub of a bound when `stub`) for receiver
+// type `recv`.
+pub copy struct TraitCall {
+    s0: u64,
+    s1: u64,
+    caller: u32,
+    target: u32,
+    recv: u32,
+    stub: bool,
+    trait_name: u32,
+    method: u32,
+}
+
+// A call at `s0..s1` in function `caller` of generic function `callee`,
+// with type arguments `pairs[v0..v0+vn]`.
+pub copy struct GenCall {
+    s0: u64,
+    s1: u64,
+    caller: u32,
+    callee: u32,
+    v0: u64,
+    vn: u64,
+}
+
+pub struct TraitCalls {
+    calls: ChunkSeq[TraitCall],
+    gcalls: ChunkSeq[GenCall],
+    pairs: ChunkSeq[Pair],
+}
+
+pub fn trait_calls_new() -> TraitCalls {
+    TraitCalls {
+        calls: ChunkSeq::new[TraitCall](),
+        gcalls: ChunkSeq::new[GenCall](),
+        pairs: ChunkSeq::new[Pair]()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The monomorphization plan
+
+// An instance `name` of `origin` at type arguments `pairs[v0..v0+vn]`.
+pub copy struct Inst {
+    origin: u32,
+    name: u32,
+    v0: u64,
+    vn: u64,
+}
+
+// In the body of instance `ctx` (0: an original function), the call at
+// the original span `s0..s1` calls `target`; a method call passes its
+// receiver first, as `pass0`. `inst` when `target` is an instance (its
+// type arguments are dropped).
+pub copy struct Rename {
+    ctx: u32,
+    s0: u64,
+    s1: u64,
+    target: u32,
+    pass0: u8,
+    inst: bool,
+}
+
+pub struct MonoPlan {
+    active: bool,
+    insts: ChunkSeq[Inst],
+    pairs: ChunkSeq[Pair],
+    renames: ChunkSeq[Rename],
+    // By function symbol: 1 for the bounded originals and the stubs the
+    // second pass leaves out.
+    dropped: ChunkSeq[u32],
+}
+
+pub fn mono_plan_new() -> MonoPlan {
+    MonoPlan {
+        active: false,
+        insts: ChunkSeq::new[Inst](),
+        pairs: ChunkSeq::new[Pair](),
+        renames: ChunkSeq::new[Rename](),
+        dropped: ChunkSeq::new[u32]()
+    }
+}
+
+pub fn is_dropped(in plan: MonoPlan, sym: u32) -> bool {
+    u32_at(in plan.dropped, w(sym)) != 0
+}
+
+pub fn inst_at(in plan: MonoPlan, i: u64) -> Inst {
+    match plan.insts.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => Inst { origin: NONE32, name: NONE32, v0: 0, vn: 0 },
+    }
+}
+
+// The type arguments of instance `ctx` (1-based) as substitution vars.
+pub fn inst_vars(in plan: MonoPlan, ctx: u32) -> Vars {
+    let mut vars = vars_new();
+    if ctx == 0 {
+        return vars;
+    }
+    let inst = inst_at(in plan, wrapping_sub(w(ctx), 1));
+    for i in 0..inst.vn {
+        match plan.pairs.try_get(wrapping_add(inst.v0, i)) {
+            Option::Some(p) => vars.set(p.name, p.ty),
+            Option::None => {},
+        }
+    }
+    vars
+}
+
+fn rename_lt(in a: Rename, ctx: u32, s0: u64, s1: u64) -> bool {
+    if a.ctx != ctx {
+        return a.ctx < ctx;
+    }
+    if a.s0 != s0 {
+        return a.s0 < s0;
+    }
+    a.s1 < s1
+}
+
+// The rename of the call at original span `s0..s1` in instance `ctx`.
+pub fn find_rename(in plan: MonoPlan, ctx: u32, s0: u64, s1: u64) -> Option[Rename] {
+    let mut lo: u64 = 0;
+    let mut hi = plan.renames.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
+        let r = match plan.renames.try_get(mid) {
+            Option::Some(v) => v,
+            Option::None => return Option::None,
+        };
+        if rename_lt(in r, ctx, s0, s1) {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    match plan.renames.try_get(lo) {
+        Option::Some(r) => {
+            if r.ctx == ctx && r.s0 == s0 && r.s1 == s1 {
+                Option::Some(r)
+            } else {
+                Option::None
+            }
+        },
+        Option::None => Option::None,
+    }
+}
+
+fn fn_of(in a: IrAst, sym: u32) -> Option[FnR] {
+    let i = u32_at(in a.fn_by_key, w(sym));
+    if i == 0 {
+        return Option::None;
+    }
+    a.fns.try_get(wrapping_sub(w(i), 1))
+}
+
+fn first_pass(in a: IrAst, sym: u32) -> u8 {
+    match fn_of(in a, sym) {
+        Option::Some(f) => {
+            if f.param_count == 0 {
+                return 0;
+            }
+            match a.pms.try_get(f.param_start) {
+                Option::Some(p) => p.pass,
+                Option::None => 0,
+            }
+        },
+        Option::None => 0,
+    }
+}
+
+// Whether `ty` mentions one of the generic parameters of `f`.
+fn mentions_generic(in a: IrAst, in types: Types, in f: FnR, ty: u32) -> bool {
+    let k = types.kind(ty);
+    if k == TyKind::Named && types.arity(ty) == 0 {
+        let nm = types.name(ty);
+        for gi in 0..f.generic_count {
+            match a.gens.try_get(wrapping_add(f.generic_start, gi)) {
+                Option::Some(g) => {
+                    if g.name == nm {
+                        return true;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        return false;
+    }
+    if k == TyKind::Infer {
+        return true;
+    }
+    if k == TyKind::Named || k == TyKind::Tuple {
+        for i in 0..types.arity(ty) {
+            if mentions_generic(in a, in types, in f, types.arg(ty, i)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+struct Planner {
+    plan: MonoPlan,
+    // Worklist of instance contexts still to visit (1-based instance ids).
+    work: ChunkSeq[u32],
+    // By caller symbol: the first trait call (index + 1) and the next one.
+    tc_head: ChunkSeq[u32],
+    tc_next: ChunkSeq[u64],
+    gc_head: ChunkSeq[u32],
+    gc_next: ChunkSeq[u64],
+}
+
+fn push_rename(inout p: Planner, ctx: u32, s0: u64, s1: u64, target: u32, pass0: u8, inst: bool) {
+    p.plan
+        .renames
+        .push(Rename { ctx: ctx, s0: s0, s1: s1, target: target, pass0: pass0, inst: inst });
+}
+
+// `Mono::instance`: the instance of `origin` at `vars` (in the order of
+// its generics), made on first use.
+fn instance(
+    inout p: Planner,
+    in a: IrAst,
+    inout names: Names,
+    in types: Types,
+    origin: u32,
+    in vars: Vars
+) -> u32 {
+    let f = match fn_of(in a, origin) {
+        Option::Some(v) => v,
+        Option::None => return origin,
+    };
+    let mut args = ChunkSeq::new[Pair]();
+    for gi in 0..f.generic_count {
+        match a.gens.try_get(wrapping_add(f.generic_start, gi)) {
+            Option::Some(g) => {
+                let t = vars.get(g.name);
+                if t != NONE32 {
+                    args.push(Pair { name: g.name, ty: t });
+                }
+            },
+            Option::None => {},
+        }
+    }
+    for ii in 0..p.plan.insts.len() {
+        let inst = inst_at(in p.plan, ii);
+        if inst.origin != origin || inst.vn != args.len() {
+            continue;
+        }
+        let mut same = true;
+        for k in 0..args.len() {
+            let x = match args.try_get(k) {
+                Option::Some(v) => v.ty,
+                Option::None => NONE32,
+            };
+            let y = match p.plan.pairs.try_get(wrapping_add(inst.v0, k)) {
+                Option::Some(v) => v.ty,
+                Option::None => NONE32,
+            };
+            if x != y {
+                same = false;
+            }
+        }
+        if same {
+            return inst.name;
+        }
+    }
+    let mut buf = ChunkSeq::new[u8]();
+    names.write(origin, inout buf);
+    buf.extend(in "$mono$".as_bytes());
+    for k in 0..args.len() {
+        if k > 0 {
+            buf.push(KEY_JOIN);
+        }
+        match args.try_get(k) {
+            Option::Some(v) => key_segment(in types, in names, v.ty, inout buf),
+            Option::None => {},
+        }
+    }
+    let mut name = names.intern(in buf.as_slice());
+    for ii in 0..p.plan.insts.len() {
+        if inst_at(in p.plan, ii).name == name {
+            buf.push(DOLLAR);
+            push_dec(inout buf, p.plan.insts.len());
+            name = names.intern(in buf.as_slice());
+            break;
+        }
+    }
+    let v0 = p.plan.pairs.len();
+    for k in 0..args.len() {
+        match args.try_get(k) {
+            Option::Some(v) => p.plan.pairs.push(v),
+            Option::None => {},
+        }
+    }
+    p.plan.insts.push(Inst { origin: origin, name: name, v0: v0, vn: args.len() });
+    p.work.push(n32(p.plan.insts.len()));
+    name
+}
+
+fn push_dec(inout out: ChunkSeq[u8], v: u64) {
+    let mut digits = ChunkSeq::new[u8]();
+    let mut x = v;
+    loop {
+        digits.push(wrapping_add(48, wrapping_u8(x % 10)));
+        x = x / 10;
+        if x == 0 {
+            break;
+        }
+    }
+    let n = digits.len();
+    for i in 0..n {
+        match digits.try_get(wrapping_sub(wrapping_sub(n, 1), i)) {
+            Option::Some(d) => out.push(d),
+            Option::None => {},
+        }
+    }
+}
+
+// Visits the calls of function `fsym` in instance context `ctx` under
+// `vars`.
+fn visit(
+    inout p: Planner,
+    in a: IrAst,
+    in tr: TraitInfo,
+    in out: TraitCalls,
+    inout names: Names,
+    inout types: Types,
+    ctx: u32,
+    fsym: u32,
+    in vars: Vars
+) {
+    let f = match fn_of(in a, fsym) {
+        Option::Some(v) => v,
+        Option::None => return,
+    };
+    let mut cur = u32_at(in p.tc_head, w(fsym));
+    loop {
+        if cur == 0 {
+            break;
+        }
+        let ci = wrapping_sub(w(cur), 1);
+        cur = n32(u64_at(in p.tc_next, ci));
+        let c = match out.calls.try_get(ci) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        if c.stub {
+            let recv = substitute(inout types, c.recv, in vars);
+            if mentions_generic(in a, in types, in f, recv) {
+                continue;
+            }
+            let (target, conf) = resolve_conf(in tr, inout types, c.trait_name, c.method, recv);
+            if target == NONE32 {
+                continue;
+            }
+            let cr = conf_at(in tr, conf);
+            if cr.gn > 0 && is_bounded(in tr, target) {
+                let mut hv = vars_new();
+                let _ok = ty_bind(
+                    inout types,
+                    cr.self_ty,
+                    recv,
+                    in tr.conf_gens,
+                    w(cr.g0),
+                    w(cr.gn),
+                    inout hv
+                );
+                let name = instance(inout p, in a, inout names, in types, target, in hv);
+                push_rename(inout p, ctx, c.s0, c.s1, name, first_pass(in a, target), true);
+            } else {
+                push_rename(inout p, ctx, c.s0, c.s1, target, first_pass(in a, target), false);
+            }
+        } else if !is_bounded(in tr, c.target) {
+            push_rename(inout p, ctx, c.s0, c.s1, c.target, first_pass(in a, c.target), false);
+        }
+    }
+    let mut gcur = u32_at(in p.gc_head, w(fsym));
+    loop {
+        if gcur == 0 {
+            break;
+        }
+        let gi = wrapping_sub(w(gcur), 1);
+        gcur = n32(u64_at(in p.gc_next, gi));
+        let g = match out.gcalls.try_get(gi) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        if !is_bounded(in tr, g.callee) || is_stub(in tr, g.callee) {
+            continue;
+        }
+        let mut args = vars_new();
+        let mut closed = true;
+        for k in 0..g.vn {
+            match out.pairs.try_get(wrapping_add(g.v0, k)) {
+                Option::Some(pr) => {
+                    let t = substitute(inout types, pr.ty, in vars);
+                    if mentions_generic(in a, in types, in f, t) {
+                        closed = false;
+                    }
+                    args.set(pr.name, t);
+                },
+                Option::None => {},
+            }
+        }
+        if !closed {
+            continue;
+        }
+        let name = instance(inout p, in a, inout names, in types, g.callee, in args);
+        push_rename(inout p, ctx, g.s0, g.s1, name, first_pass(in a, g.callee), true);
+    }
+}
+
+fn sort_renames(inout rs: ChunkSeq[Rename]) {
+    // Insertion sort: the renames of a package number in the hundreds.
+    let n = rs.len();
+    for i in 1..n {
+        let x = match rs.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let y = match rs.try_get(wrapping_sub(j, 1)) {
+                Option::Some(v) => v,
+                Option::None => break,
+            };
+            if !rename_lt(in x, y.ctx, y.s0, y.s1) {
+                break;
+            }
+            let _ = rs.try_set(j, y);
+            j = wrapping_sub(j, 1);
+        }
+        let _ = rs.try_set(j, x);
+    }
+}
+
+// `Elaborator::monomorphize`'s instances and the calls the second pass
+// rewrites, from the first check of `a`.
+pub fn mono_plan(
+    in a: IrAst,
+    in tr: TraitInfo,
+    in out: TraitCalls,
+    inout names: Names,
+    inout types: Types
+) -> MonoPlan {
+    let mut plan = mono_plan_new();
+    plan.active = true;
+    let mut p = Planner {
+        plan: plan,
+        work: ChunkSeq::new[u32](),
+        tc_head: ChunkSeq::new[u32](),
+        tc_next: ChunkSeq::new[u64](),
+        gc_head: ChunkSeq::new[u32](),
+        gc_next: ChunkSeq::new[u64]()
+    };
+    for ci in 0..out.calls.len() {
+        match out.calls.try_get(ci) {
+            Option::Some(c) => {
+                p.tc_next.push(widen_u64(u32_at(in p.tc_head, w(c.caller))));
+                set_by_symbol(inout p.tc_head, c.caller, n32(wrapping_add(ci, 1)));
+            },
+            Option::None => p.tc_next.push(0),
+        }
+    }
+    for gi in 0..out.gcalls.len() {
+        match out.gcalls.try_get(gi) {
+            Option::Some(g) => {
+                p.gc_next.push(widen_u64(u32_at(in p.gc_head, w(g.caller))));
+                set_by_symbol(inout p.gc_head, g.caller, n32(wrapping_add(gi, 1)));
+            },
+            Option::None => p.gc_next.push(0),
+        }
+    }
+    let empty = vars_new();
+    for fi in 0..a.fns.len() {
+        let f = match a.fns.try_get(fi) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        if !f.has_body || is_bounded(in tr, f.name) || is_stub(in tr, f.name) {
+            continue;
+        }
+        visit(inout p, in a, in tr, in out, inout names, inout types, 0, f.name, in empty);
+    }
+    let mut wi: u64 = 0;
+    loop {
+        if wi >= p.work.len() {
+            break;
+        }
+        let ctx = u32_at(in p.work, wi);
+        wi = wrapping_add(wi, 1);
+        let inst = inst_at(in p.plan, wrapping_sub(w(ctx), 1));
+        let vars = inst_vars(in p.plan, ctx);
+        visit(inout p, in a, in tr, in out, inout names, inout types, ctx, inst.origin, in vars);
+    }
+    let Planner { plan: done, work: _w, tc_head: _a, tc_next: _b, gc_head: _c, gc_next: _d } = p;
+    let mut result = done;
+    for fi in 0..a.fns.len() {
+        match a.fns.try_get(fi) {
+            Option::Some(f) => {
+                if is_bounded(in tr, f.name) || is_stub(in tr, f.name) {
+                    set_by_symbol(inout result.dropped, f.name, 1);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    sort_renames(inout result.renames);
+    result
+}
