@@ -287,7 +287,13 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
             r.refused = Some(format!("{function}: an inout scalar parameter"));
             return;
         }
-        let homes = homes.len() + 1 + pointers.len();
+        // @vesper/native-lib reads no slice parameter at entry (#2653).
+        let views = codegen_swap::body::entry_views(args).unwrap_or_default();
+        if !views.is_empty() {
+            r.refused = Some(format!("{function}: a slice parameter read at entry"));
+            return;
+        }
+        let homes = homes.len() + 1 + pointers.len() + 1;
         let callees = callees.to_vec();
         if module_has_data(&*lent.module) {
             r.refused = Some("the module declares data".into());
