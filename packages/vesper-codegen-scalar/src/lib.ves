@@ -360,6 +360,10 @@ copy struct Ops {
     seq_last: u32,
     option_some: u32,
     option_none: u32,
+    // `try_byte_at` and `try_get`, whose `Option` results the body hook
+    // builds (#2654)
+    seq_str_try_byte_at: u32,
+    seq_try_get: u32,
 }
 
 fn mark(inout table: ChunkSeq[u32], symbol: u32, flag: u32) {
@@ -526,6 +530,8 @@ fn ops_new(inout names: Names, inout tables: Tables) -> Ops {
         seq_last: intern(inout names, in "Last"),
         option_some: intern(inout names, in "Some"),
         option_none: intern(inout names, in "None"),
+        seq_str_try_byte_at: intern(inout names, in "Str(TryByteAt)"),
+        seq_try_get: intern(inout names, in "TryGet"),
         amp: intern(inout names, in "&"),
         pipe: intern(inout names, in "|"),
         caret: intern(inout names, in "^"),
