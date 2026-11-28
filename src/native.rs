@@ -4502,8 +4502,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         )
     }
     /// Whether the walk lowers graph `body`'s sequence and string
-    /// operations with no drops, fused `try_get` matches or hoisted
-    /// header reads (#2653): true for a graph with none.
+    /// operations with no drops, element view matches or hoisted header
+    /// reads (#2653): true for a graph with none. A `try_get` fused with
+    /// its `match` is planned by the body hook unless the world has
+    /// element views, whose binds name the element in place.
     fn seq_body_plain(&self, body: &crate::ir::FunctionIr) -> bool {
         use crate::ir::Op;
         let has_seq = body
@@ -4511,7 +4513,16 @@ impl<M: Module> Codegen<'_, '_, M> {
             .iter()
             .flat_map(|b| &b.instructions)
             .any(|i| matches!(i.op, Op::Seq { .. }));
-        if !has_seq {
+        // A sequence value with no sequence op (#2750), such as a `sink`
+        // parameter moved into a product, can still own a drop.
+        let seq_values = body
+            .params
+            .iter()
+            .map(|p| &p.ty)
+            .chain(body.locals.values())
+            .chain(body.values.values())
+            .any(crate::seq::is_seq_type);
+        if !has_seq && !seq_values {
             return true;
         }
         // The graph `ir_graph_at` lowers: small enums kept as words.
@@ -4524,7 +4535,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 || !crate::fip::fail_exit_drops(self.world, graph).is_empty());
         !drops
             && self.seq_slots_plain(graph)
-            && seq_native::fused_reads(graph).is_empty()
+            && (self.world.element_views.is_empty() || seq_native::fused_reads(graph).is_empty())
             && self.entry_views(body).is_some()
     }
     /// Whether the body hook emits the drop slots of graph `f`

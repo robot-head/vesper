@@ -2400,6 +2400,12 @@ const STRING_LITERALS: &str = "
 fn empty_len() -> u64 {
     \"\".len()
 }
+fn fresh() -> String {
+    \"\"
+}
+fn named() -> String {
+    \"named\"
+}
 fn short_byte(i: u64) -> u64 eff [Fail[RuntimeError]] {
     widen_u64(\"hey\".byte_at(i))
 }
@@ -2414,7 +2420,8 @@ fn main() -> i64 {
         let a = wrapping_add(empty_len(), short_byte(1));
         let b = wrapping_add(word_len(2), long_byte(10));
         let c = short_byte(3);
-        wrapping_i64(a ^ wrapping_mul(b, 7) ^ c)
+        let d = wrapping_add(fresh().len(), named().len());
+        wrapping_i64(a ^ wrapping_mul(b, 7) ^ c ^ d)
     } with {
         return value => value,
         raise(error, resume) => 4242,
@@ -2704,6 +2711,173 @@ fn vesper_inout_arguments_to_fail_only_callees_match() {
 /// `SRET_FAIL_SOURCE`'s four struct results, both settings, both
 /// comparisons of a JIT-running host.
 const MIN_FAIL_SRET: u64 = 16;
+
+// #2654 slice 3: the `Option` results of `try_byte_at` and a slice's
+// `try_get`, kept as words or built in memory (`seq_option`).
+const SCALARS_6Y: &str = "
+fn first(in s: Str) -> Option[u8] {
+    s.try_byte_at(0)
+}
+fn byte_or(in s: Str, i: u64, d: u64) -> u64 {
+    let o = s.try_byte_at(i);
+    match o {
+        Option::Some(b) => widen_u64(b),
+        Option::None => d,
+    }
+}
+fn pick(in xs: Slice[u64], i: u64) -> Option[u64] {
+    xs.try_get(i)
+}
+fn small_or(in xs: Slice[u16], i: u64) -> u64 {
+    let o = xs.try_get(i);
+    match o {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 99,
+    }
+}
+fn unwrap_or(o: Option[u64], d: u64) -> u64 {
+    match o {
+        Option::Some(v) => v,
+        Option::None => d,
+    }
+}
+fn main() -> i64 {
+    let s: String = \"hello\";
+    let mut w: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    w.push(7);
+    w.push(11);
+    let mut h: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    h.push(300);
+    let a = match first(in s.as_str()) {
+        Option::Some(b) => widen_u64(b),
+        Option::None => 0,
+    };
+    let b = byte_or(in s.as_str(), 4, 1) ^ byte_or(in s.as_str(), 9, 2);
+    let c = unwrap_or(pick(in w.as_slice(), 1), 3) ^ unwrap_or(pick(in w.as_slice(), 5), 4);
+    let d = small_or(in h.as_slice(), 0) ^ small_or(in h.as_slice(), 1);
+    wrapping_i64(a ^ b ^ c ^ d)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_try_byte_at_and_try_get_options() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6Y);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the #2654 slice 3 program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6y", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6y: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 4 } else { 8 };
+        assert!(
+            emitted >= min_emitted,
+            "#2654 slice 3 functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+// #2653: a slice's `try_get` fused with its block's `match`
+// (`seq_native::fused_reads`): the bounds check and element address in
+// variables, the arms' tests on the check and `Some(x)` loading the
+// element.
+const FUSED_TRY_GET: &str = "
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+fn word(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::None => 5,
+        Option::Some(v) => v,
+    }
+}
+fn has(in s: Slice[u32], i: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(_) => true,
+        _ => false,
+    }
+}
+fn half_or(in s: Slice[u16], i: u64, d: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(h) => wrapping_add(widen_u64(h), d),
+        _ => d,
+    }
+}
+fn real(in s: Slice[f64], i: u64) -> f64 {
+    match s.try_get(i) {
+        Option::Some(x) => x * 2.0,
+        Option::None => 0.5,
+    }
+}
+fn main() -> i64 {
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    bytes.push(7);
+    bytes.push(9);
+    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    words.push(11);
+    let mut quads: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    quads.push(3);
+    let mut halves: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    halves.push(300);
+    let mut reals: ChunkSeq[f64] = ChunkSeq::new[f64]();
+    reals.push(1.25);
+    let a = widen_u64(byte(in bytes.as_slice(), 1)) ^ widen_u64(byte(in bytes.as_slice(), 4));
+    let b = word(in words.as_slice(), 0) ^ word(in words.as_slice(), 2);
+    let c = if has(in quads.as_slice(), 0) && !has(in quads.as_slice(), 1) { 13 } else { 17 };
+    let d = half_or(in halves.as_slice(), 0, 1) ^ half_or(in halves.as_slice(), 3, 2);
+    let e = if real(in reals.as_slice(), 0) > real(in reals.as_slice(), 1) { 19 } else { 23 };
+    wrapping_i64(a ^ b ^ c ^ d ^ e)
+}
+";
+
+/// `FUSED_TRY_GET`'s five functions, both settings, both comparisons of
+/// a JIT-running host.
+const MIN_FUSED_TRY_GET: u64 = 20;
+
+#[test]
+fn vesper_fused_try_get_matches_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(FUSED_TRY_GET);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the fused try_get program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("fused_try_get", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "fused_try_get: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() {
+            MIN_FUSED_TRY_GET / 2
+        } else {
+            MIN_FUSED_TRY_GET
+        };
+        assert!(
+            emitted >= min_emitted,
+            "fused try_get functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
 
 /// ChunkSeq values (#2750): a sequence is its header's handle word, read
 /// through `len`, a checked element and `as_slice`, kept in a register or

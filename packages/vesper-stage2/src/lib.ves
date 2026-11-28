@@ -33,7 +33,7 @@ pub use self::ffi::{ForeignSource, foreign_source};
 use self::ffi::{
     add_foreign_decls, close_foreign_ops, foreign_none, foreign_read, rename_foreign_calls
 };
-use self::loader::{load_package_graph_bytes_for};
+use self::loader::{load_package_graph_bytes_with};
 use self::sugar_policy::{
     PolicyFailure, PolicyFailureKind, PolicyInputs, copy_inputs, explicit_access_valid, has_failure,
     policy_inputs, resolve_rows
@@ -288,14 +288,26 @@ fn load_graph_compact(
     in root_dir: Slice[u8],
     in os: Slice[u8]
 ) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    load_graph_compact_with(in root_dir, in os, in NO_ROOT_EXTRA.as_bytes())
+}
+
+// No source appended to the root module.
+const NO_ROOT_EXTRA: Str = "";
+
+// `load_graph_compact` over `load_package_graph_bytes_with`.
+fn load_graph_compact_with(
+    in root_dir: Slice[u8],
+    in os: Slice[u8],
+    in root_extra: Slice[u8]
+) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
     if stage2_heap_mark() == 0 {
-        return load_package_graph_bytes_for(in root_dir, in os);
+        return load_package_graph_bytes_with(in root_dir, in os, in root_extra);
     }
     let mut hole = ChunkSeq::new[u8]();
     hole.reserve(LOAD_KEEP_BYTES);
     let scratch = stage2_heap_mark();
     let keep = wrapping_sub(scratch, LOAD_KEEP_BYTES);
-    let encoded = match load_package_graph_bytes_for(in root_dir, in os) {
+    let encoded = match load_package_graph_bytes_with(in root_dir, in os, in root_extra) {
         Option::Some(b) => b,
         Option::None => {
             return Option::None;
@@ -367,6 +379,24 @@ pub fn stage2_lower_dir(
     in foreign_sources: ChunkSeq[ForeignSource],
     inout err: ChunkSeq[u8]
 ) -> Option[Lowered] eff [Ffi[StdFs]] {
+    stage2_lower_dir_with(
+        in root_dir,
+        in os,
+        in foreign_sources,
+        in NO_ROOT_EXTRA.as_bytes(),
+        inout err
+    )
+}
+
+// `stage2_lower_dir` with `root_extra` appended to the root module's
+// source (`load_package_graph_bytes_with`).
+pub fn stage2_lower_dir_with(
+    in root_dir: Slice[u8],
+    in os: Slice[u8],
+    in foreign_sources: ChunkSeq[ForeignSource],
+    in root_extra: Slice[u8],
+    inout err: ChunkSeq[u8]
+) -> Option[Lowered] eff [Ffi[StdFs]] {
     // The `.vsys` imports (ffi.ves), as `ffi_lowering::check_module` reads them.
     let mut foreign = if foreign_sources.len() == 0 {
         foreign_none()
@@ -379,7 +409,7 @@ pub fn stage2_lower_dir(
             },
         }
     };
-    let encoded = match load_graph_compact(in root_dir, in os) {
+    let encoded = match load_graph_compact_with(in root_dir, in os, in root_extra) {
         Option::Some(b) => b,
         Option::None => {
             err.extend(in "load_package_graph".as_bytes());
