@@ -121,6 +121,8 @@ const SEQ_SAME: u64 = 2;
 const SEQ_AS_BYTES: u64 = 3;
 const SEQ_BYTE_AT: u64 = 4;
 const SEQ_GET: u64 = 5;
+const SEQ_TRY_BYTE_AT: u64 = 6;
+const SEQ_TRY_GET: u64 = 7;
 // The header words (src/strings/native.rs, src/seq/native.rs): a
 // string's `{len, cap, data}`, a slice view's `{handle, start, len}`, a
 // sequence header's data pointer.
@@ -401,6 +403,45 @@ fn wide_const(inout b: Builder, lo: u64, hi: u64) -> Value eff [Ffi[Cranelift]] 
 
 fn is_wide_kind(kind: u64) -> bool {
     kind == KIND_WIDE_I128 || kind == KIND_WIDE_U128
+}
+
+// `seq_option`'s state between its `None` and `Some` edges (#2654).
+struct OptionEdges {
+    out: Value,
+    some_tag: u64,
+    payload: u64,
+    end: u64,
+    size: u64,
+    store: u64,
+    words: u64,
+    done: Block,
+    // the join's tag and payload parameters, kept as words
+    joined: ChunkSeq[u32],
+}
+
+// `seq_elem_addr` and `seq_load_elem` of element `i` of the view at
+// `handle` from `start`, `stride` bytes apart, loaded into `lane`.
+fn slice_elem(
+    inout b: Builder,
+    handle: Value,
+    start: Value,
+    i: Value,
+    stride: u64,
+    lane: u64
+) -> Value eff [Ffi[Cranelift]] {
+    let data = ins_load(inout b, ty_i64(), PLAIN, handle, HEADER_DATA);
+    let at = ins_iadd(inout b, start, i);
+    let offset = ins_imul_imm(inout b, at, wrapping_i64(stride));
+    let addr = ins_iadd(inout b, data, offset);
+    if stride == STRIDE_BYTE {
+        ins_uload8(inout b, ty_i64(), PLAIN, addr, 0)
+    } else if stride == STRIDE_HALF {
+        ins_uload16(inout b, ty_i64(), PLAIN, addr, 0)
+    } else if stride == STRIDE_QUARTER {
+        ins_uload32(inout b, PLAIN, addr, 0)
+    } else {
+        ins_load(inout b, lane_type(lane), PLAIN, addr, 0)
+    }
 }
 
 // Full `Codegen::coerce` including `I64 <-> I128` widening/narrowing.
@@ -1358,7 +1399,8 @@ impl Body {
         in m: Module,
         inout w: Words,
         x: Value,
-        y: Value
+        y: Value,
+        dest: u64
     ) -> Value eff [Ffi[Cranelift]] {
         let form = w.next();
         if form == SEQ_WORD {
@@ -1411,21 +1453,168 @@ impl Body {
             let len = ins_load(inout b, ty_i64(), PLAIN, x, VIEW_LEN);
             let valid = ins_icmp(inout b, cc_ult(), y, len);
             self.raising(inout b, in m, valid, false, index, size, tag);
-            let data = ins_load(inout b, ty_i64(), PLAIN, handle, HEADER_DATA);
-            let at = ins_iadd(inout b, start, y);
-            let offset = ins_imul_imm(inout b, at, wrapping_i64(stride));
-            let addr = ins_iadd(inout b, data, offset);
-            return if stride == STRIDE_BYTE {
-                ins_uload8(inout b, ty_i64(), PLAIN, addr, 0)
-            } else if stride == STRIDE_HALF {
-                ins_uload16(inout b, ty_i64(), PLAIN, addr, 0)
-            } else if stride == STRIDE_QUARTER {
-                ins_uload32(inout b, PLAIN, addr, 0)
-            } else {
-                ins_load(inout b, lane_type(lane), PLAIN, addr, 0)
-            };
+            return slice_elem(inout b, handle, start, y, stride, lane);
+        }
+        if form == SEQ_TRY_BYTE_AT {
+            // `str_op`'s `try_byte_at`: the bound check, then
+            // `seq_option` around `str_byte`.
+            let len = ins_load(inout b, ty_i64(), PLAIN, x, STR_LEN);
+            let valid = ins_icmp(inout b, cc_ult(), y, len);
+            let o = self.option_open(inout b, in m, inout w, dest, valid);
+            if is_invalid(o.out) {
+                return o.out;
+            }
+            let data = ins_load(inout b, ty_i64(), PLAIN, x, STR_DATA);
+            let at = ins_iadd(inout b, data, y);
+            let value = ins_uload8(inout b, ty_i64(), PLAIN, at, 0);
+            return self.option_close(inout b, inout w, in o, value);
+        }
+        if form == SEQ_TRY_GET {
+            // `seq_op`'s `try_get` of a slice: its view, the bound check,
+            // then `seq_option` around `seq_elem_addr` and
+            // `seq_load_elem`.
+            let stride = w.next();
+            let lane = w.next();
+            let handle = ins_load(inout b, ty_i64(), PLAIN, x, VIEW_HANDLE);
+            let start = ins_load(inout b, ty_i64(), PLAIN, x, VIEW_START);
+            let len = ins_load(inout b, ty_i64(), PLAIN, x, VIEW_LEN);
+            let valid = ins_icmp(inout b, cc_ult(), y, len);
+            let o = self.option_open(inout b, in m, inout w, dest, valid);
+            if is_invalid(o.out) {
+                return o.out;
+            }
+            let value = slice_elem(inout b, handle, start, y, stride, lane);
+            return self.option_close(inout b, inout w, in o, value);
         }
         Value { id: invalid() }
+    }
+
+    // `seq_option` up to the `Some` edge's load (#2654): kept as words,
+    // the `None` edge jumping to the join with its tag and a zero; in
+    // memory, the storage, the `None` edge's tag (and on the optimize
+    // path its payload words zeroed). An invalid `out` when the result is
+    // a home the walk builds elsewhere.
+    fn option_open(
+        inout self,
+        inout b: Builder,
+        in m: Module,
+        inout w: Words,
+        dest: u64,
+        present: Value
+    ) -> OptionEdges eff [Ffi[Cranelift]] {
+        let size = w.next();
+        let some_tag = w.next();
+        let none_tag = w.next();
+        let payload = w.next();
+        let end = w.next();
+        let store = w.next();
+        let words = w.next();
+        let none = create_block(inout b);
+        let some = create_block(inout b);
+        let done = create_block(inout b);
+        let mut o = OptionEdges {
+            out: Value { id: invalid() },
+            some_tag: some_tag,
+            payload: payload,
+            end: end,
+            size: size,
+            store: store,
+            words: words,
+            done: done,
+            joined: ChunkSeq::new[u32](),
+        };
+        if words != 0 {
+            o.joined.push(append_block_param(inout b, done, ty_i64()).id);
+            o.joined.push(append_block_param(inout b, done, ty_i64()).id);
+            ins_brif0(inout b, present, some, none);
+            switch_to_block(inout b, none);
+            let tag = ins_iconst(inout b, ty_i64(), wrapping_i64(none_tag));
+            let zero = ins_iconst(inout b, ty_i64(), 0);
+            let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            args.push(tag.id);
+            args.push(zero.id);
+            ins_jump(inout b, done, in args.as_slice());
+            switch_to_block(inout b, some);
+            o.out = zero;
+            return o;
+        }
+        if has_call(in self.homes, dest) {
+            return o;
+        }
+        let out = self.storage(inout b, in m, size);
+        ins_brif0(inout b, present, some, none);
+        switch_to_block(inout b, none);
+        let tag = ins_iconst(inout b, ty_i64(), wrapping_i64(none_tag));
+        ins_store(inout b, PLAIN, tag, out, 0);
+        if self.optimize {
+            let mut off = widen_u64(WORD_BYTES);
+            loop {
+                if off >= size {
+                    break;
+                }
+                let zero = ins_iconst(inout b, ty_i64(), 0);
+                ins_store(inout b, PLAIN, zero, out, wrapping_i32(off));
+                off = wrapping_add(off, widen_u64(WORD_BYTES));
+            }
+        }
+        let empty: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        ins_jump(inout b, done, in empty.as_slice());
+        switch_to_block(inout b, some);
+        o.out = out;
+        o
+    }
+
+    // The rest of `seq_option` from the `Some` edge's loaded `value`: the
+    // join's words defined (each coerced to its kind), then the walk's
+    // zero; or the `Some` tag and payload stored, and the storage.
+    fn option_close(
+        inout self,
+        inout b: Builder,
+        inout w: Words,
+        in o: OptionEdges,
+        value: Value
+    ) -> Value eff [Ffi[Cranelift]] {
+        if o.words != 0 {
+            let tag = ins_iconst(inout b, ty_i64(), wrapping_i64(o.some_tag));
+            let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            args.push(tag.id);
+            args.push(value.id);
+            ins_jump(inout b, o.done, in args.as_slice());
+            switch_to_block(inout b, o.done);
+            let zero = ins_iconst(inout b, ty_i64(), 0);
+            for k in 0..o.words {
+                let index = w.next();
+                let word_kind = w.next();
+                let raw = Value { id: at32(in o.joined, k) };
+                let v = body_coerce(inout b, raw, word_kind, self.optimize);
+                let ok = self.values.try_set(index, v.id);
+                def_var(inout b, var_at(in self.registers, index), v);
+            }
+            return zero;
+        }
+        let out = o.out;
+        let tag = ins_iconst(inout b, ty_i64(), wrapping_i64(o.some_tag));
+        ins_store(inout b, PLAIN, tag, out, 0);
+        if self.optimize {
+            let mut off = widen_u64(WORD_BYTES);
+            loop {
+                if off >= o.size {
+                    break;
+                }
+                if off < o.payload || off >= o.end {
+                    let zero = ins_iconst(inout b, ty_i64(), 0);
+                    ins_store(inout b, PLAIN, zero, out, wrapping_i32(off));
+                }
+                off = wrapping_add(off, widen_u64(WORD_BYTES));
+            }
+        }
+        let slot = ins_iadd_imm(inout b, out, wrapping_i64(o.payload));
+        let stored = body_coerce(inout b, value, o.store, self.optimize);
+        ins_store(inout b, PLAIN, stored, slot, 0);
+        let empty: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        ins_jump(inout b, o.done, in empty.as_slice());
+        switch_to_block(inout b, o.done);
+        out
     }
 
     // One instruction (`ir_graph_at`'s instruction loop): its operands
@@ -2163,7 +2352,7 @@ impl Body {
             }
             ins_load(inout b, lane_type(flane), PLAIN, ptr, 0)
         } else if kind == INST_SEQ {
-            let v = self.seq(inout b, in m, inout w, x, y);
+            let v = self.seq(inout b, in m, inout w, x, y, dest);
             if is_invalid(v) {
                 return false;
             }

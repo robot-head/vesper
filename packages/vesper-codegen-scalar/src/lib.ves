@@ -355,6 +355,12 @@ copy struct Ops {
     seq_str_as_bytes: u32,
     seq_slice_len: u32,
     seq_slice_get: u32,
+    // `try_byte_at` and `try_get`, whose `Option` results the body hook
+    // builds (#2654), and that enum's variant names
+    seq_str_try_byte_at: u32,
+    seq_try_get: u32,
+    some_: u32,
+    none_: u32,
 }
 
 fn mark(inout table: ChunkSeq[u32], symbol: u32, flag: u32) {
@@ -518,6 +524,10 @@ fn ops_new(inout names: Names, inout tables: Tables) -> Ops {
         seq_str_as_bytes: intern(inout names, in "Str(AsBytes)"),
         seq_slice_len: intern(inout names, in "SliceLen"),
         seq_slice_get: intern(inout names, in "SliceGet"),
+        seq_str_try_byte_at: intern(inout names, in "Str(TryByteAt)"),
+        seq_try_get: intern(inout names, in "TryGet"),
+        some_: intern(inout names, in "Some"),
+        none_: intern(inout names, in "None"),
         amp: intern(inout names, in "&"),
         pipe: intern(inout names, in "|"),
         caret: intern(inout names, in "^"),
