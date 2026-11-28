@@ -1,0 +1,16 @@
+// Functions main never reaches stay out of the executable; exits 27.
+fn small(x: u64) -> u64 {
+    wrapping_mul(x, 3)
+}
+
+fn unused(x: u64) -> u64 {
+    wrapping_add(small(x), wrapping_add(small(x), wrapping_add(small(x), small(x))))
+}
+
+pub fn spare(x: u64) -> u64 {
+    wrapping_add(unused(x), small(x))
+}
+
+pub fn main() -> u64 {
+    wrapping_add(small(4), small(5))
+}

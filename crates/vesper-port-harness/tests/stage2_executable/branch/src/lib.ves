@@ -1,0 +1,16 @@
+// An if/else chain over a signed integer; exits 37.
+fn classify(x: i64) -> i64 {
+    if x == 0 {
+        10
+    } else if x == 1 {
+        20
+    } else if x > 100 {
+        7
+    } else {
+        3
+    }
+}
+
+pub fn main() -> i64 {
+    wrapping_add(wrapping_add(classify(0), classify(1)), classify(500))
+}

@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 "@vesper/ast" = { version = "^0.1", path = "../vesper-ast" }
+"@vesper/check-collect" = { version = "^0.1", path = "../vesper-check-collect" }
 "@vesper/check-data" = { version = "^0.1", path = "../vesper-check-data" }
 "@vesper/check-names-packages" = { version = "^0.1", path = "../vesper-check-names-packages" }
 "@vesper/ffi-lowering" = { version = "^0.1", path = "../vesper-ffi-lowering" }
