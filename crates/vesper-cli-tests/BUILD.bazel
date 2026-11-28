@@ -27,6 +27,7 @@ vesper_crate(
     ],
     test_data_by_target = {
         "test/imported_source_tests": [
+            "//:cli_imported_source_data",
             # @vesper/prism-h3 depends on @vesper/prism-bytes.
             "//crates/vesper-prism:files",
             "//crates/vesper-prism-h3:files",
@@ -36,6 +37,7 @@ vesper_crate(
         # Option methods from @vesper-std/core (#2026), so testing
         # sort/src/unstable.ves resolves sort's manifest and its dependencies.
         "test/test_runner_cli": [
+            "//:cli_test_runner_data",
             "//crates/vesper-crucible:files",
             "//crates/vesper-lean-syntax:files",
             "//crates/vesper-simpulse:files",
