@@ -51,8 +51,49 @@ pub fn verify_run(in _packed: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[HybridCommands
     refused(in "verify --extract")
 }
 
-pub fn lsp_serve() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+// The LSP loop's engine seam: no session starts, and `error` is the
+// refusal.
+const LSP_START_FAILED: u64 = 1;
+const LSP_EXIT_FAILED: u64 = 3;
+const LSP_READ_END: i64 = 0;
+const LSP_WRITE_FAILED: u64 = 1;
+const LSP_NO_TIMER: i64 = -1;
+
+pub fn lsp_engine_start() -> u64 eff [Ffi[HybridCommands]] {
+    LSP_START_FAILED
+}
+
+pub fn lsp_engine_frame(in _body: Slice[u8]) -> u64 eff [Ffi[HybridCommands]] {
+    0
+}
+
+pub fn lsp_engine_tick() -> u64 eff [Ffi[HybridCommands]] {
+    0
+}
+
+pub fn lsp_engine_take(inout _buf: Slice[u8]) -> u64 eff [Ffi[HybridCommands]] {
+    0
+}
+
+pub fn lsp_engine_exit() -> u64 eff [Ffi[HybridCommands]] {
+    LSP_EXIT_FAILED
+}
+
+// The refusal.
+pub fn lsp_engine_error_text() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
     refused(in "lsp")
+}
+
+pub fn lsp_engine_read(inout _buf: Slice[u8], _wait_ms: i64) -> i64 eff [Ffi[HybridCommands]] {
+    LSP_READ_END
+}
+
+pub fn lsp_engine_write(in _buf: Slice[u8]) -> u64 eff [Ffi[HybridCommands]] {
+    LSP_WRITE_FAILED
+}
+
+pub fn lsp_engine_deadline() -> i64 eff [Ffi[HybridCommands]] {
+    LSP_NO_TIMER
 }
 
 // `vesper <command>` is not in this build: its engine is still Rust.

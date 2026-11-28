@@ -1455,7 +1455,7 @@ fn lib_ws(in state: S, lib: u64, name: u32) -> u64 {
     NONE64
 }
 
-fn find_gs(in state: S, name: u32) -> u64 {
+pub fn find_gs(in state: S, name: u32) -> u64 {
     for i in 0.. state.gen_structs.len() {
         if state.gs(i).name == name {
             return i;
@@ -1464,7 +1464,7 @@ fn find_gs(in state: S, name: u32) -> u64 {
     NONE64
 }
 
-fn find_ge(in state: S, name: u32) -> u64 {
+pub fn find_ge(in state: S, name: u32) -> u64 {
     for i in 0.. state.gen_enums.len() {
         if state.ge(i).name == name {
             return i;
@@ -1473,7 +1473,7 @@ fn find_ge(in state: S, name: u32) -> u64 {
     NONE64
 }
 
-fn find_gh(in state: S, name: u32) -> u64 {
+pub fn find_gh(in state: S, name: u32) -> u64 {
     for i in 0.. state.gen_handles.len() {
         if state.gh(i).name == name {
             return i;
@@ -2000,7 +2000,7 @@ fn sort_by_name(in state: S, inout xs: ChunkSeq[u32]) {
 }
 
 // Generated struct (Ok only), enum and handle names, each table sorted.
-fn sorted_struct_rows(in state: S) -> ChunkSeq[u32] {
+pub fn sorted_struct_rows(in state: S) -> ChunkSeq[u32] {
     let mut names = ChunkSeq::new[u32]();
     for i in 0.. state.gen_structs.len() {
         let adt = state.gs(i);
@@ -2012,7 +2012,7 @@ fn sorted_struct_rows(in state: S) -> ChunkSeq[u32] {
     names
 }
 
-fn sorted_enum_names(in state: S) -> ChunkSeq[u32] {
+pub fn sorted_enum_names(in state: S) -> ChunkSeq[u32] {
     let mut names = ChunkSeq::new[u32]();
     for i in 0.. state.gen_enums.len() {
         names.push(state.ge(i).name);
@@ -2021,7 +2021,7 @@ fn sorted_enum_names(in state: S) -> ChunkSeq[u32] {
     names
 }
 
-fn sorted_handle_names(in state: S) -> ChunkSeq[u32] {
+pub fn sorted_handle_names(in state: S) -> ChunkSeq[u32] {
     let mut names = ChunkSeq::new[u32]();
     for i in 0.. state.gen_handles.len() {
         names.push(state.gh(i).name);
@@ -2255,7 +2255,7 @@ pub fn append(inout state: S, pass2: bool, in insts: ChunkSeq[Inst], in lens: Ch
 }
 
 // Function rows sorted by symbol.
-fn sort_funs(in state: S, inout xs: ChunkSeq[u32]) {
+pub fn sort_funs(in state: S, inout xs: ChunkSeq[u32]) {
     let n = xs.len();
     for i in 1..n {
         let key = u32_at(in xs, i);

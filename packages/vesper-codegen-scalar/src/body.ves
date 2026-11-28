@@ -117,6 +117,10 @@ const SEQ_VIEW_WORD: u64 = 6;
 const SEQ_LAST: u64 = 7;
 // The words a small `Option` is kept as: its tag and its payload.
 const OPTION_WORDS: u64 = 2;
+// `try_byte_at` and a slice's `try_get` (#2654): their `Option` built
+// by `seq_option`.
+const SEQ_TRY_BYTE_AT: u64 = 16;
+const SEQ_TRY_GET: u64 = 17;
 // A string literal (`Codegen::string_literal`): its byte count, then its
 // bytes packed little-endian into words.
 const SEQ_LITERAL: u64 = 8;
@@ -465,7 +469,12 @@ impl Gen {
         if n.kind == TyKind::Named && n.n == 1 && n.name == k.slice {
             return self.body_product_lane(d);
         }
-        if n.kind != TyKind::Named || n.n != 0 {
+        // An instance of a generic struct or enum, such as `Secret[u64]`
+        // or `Option[i64]` (#2654), kept in memory when its layout is one.
+        if n.kind == TyKind::Named && n.n != 0 {
+            return self.body_product_lane(d);
+        }
+        if n.kind != TyKind::Named {
             return 0;
         }
         if n.name == k.f32_ {
@@ -1654,6 +1663,31 @@ impl Gen {
         true
     }
 
+    // Whether the function being planned has a struct or enum it knows
+    // nothing of the words of (#2654): a call's result, or one joined at a
+    // block parameter. The walk coerces a narrow field read from such
+    // storage once more where it is used, which the plan does not model.
+    fn body_opaque_products(inout self, in h: Header) -> bool {
+        let f = self.program.function(self.fi);
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            let pa = self.body_params_at(row.ha);
+            for k in 0..self.program.op(pa) {
+                let v = self.body_value(in h, self.program.op(add(inc(pa), k)));
+                if v != NONE64 && self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT {
+                    return true;
+                }
+            }
+            for ii in 0..row.ic {
+                let x = self.program.inst(add(row.i0, ii));
+                if x.op == Op::Call && self.body_lane(x.ty) == LANE_PRODUCT {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     // The function named `name` (place-ir row index), or NONE64.
     fn body_function(in self, name: u32) -> u64 {
         for k in 0..self.program.fn_count() {
@@ -2274,7 +2308,8 @@ impl Gen {
         }
         let ty = default_type(inout self.ctx.types, i.ty);
         let post = self.body_kind(ty);
-        // A small enum kept as words is only made by a call (#2581).
+        // A small enum kept as words is only made by a call (#2581) or a
+        // sequence operation's `Option` (#2654).
         let kept = self.body_words(in h, dest);
         if post == NONE64
             || (self.body_lane(i.ty) == 0 && !(kept != 0 && (i.op == Op::Call || i.op == Op::Seq)))
@@ -2430,6 +2465,9 @@ impl Gen {
                 if !ok {
                     return false;
                 }
+                if self.body_kind(i.ty) != 0 && self.body_opaque_products(in h) {
+                    return false;
+                }
                 kind = INST_READ_FIELD;
                 extra.push(k);
                 extra.push(res_lane);
@@ -2506,6 +2544,9 @@ impl Gen {
             }
             self.layouts.reset(mark);
             if !found {
+                return false;
+            }
+            if self.body_kind(i.ty) != 0 && self.body_opaque_products(in h) {
                 return false;
             }
             kind = INST_PROJECT;
@@ -2592,6 +2633,17 @@ impl Gen {
                 {
                     return false;
                 }
+                // A struct or enum result (#2654): its size, which the
+                // caller's storage for it takes (0 for a scalar result).
+                if kind == INST_CALL {
+                    extra.push(
+                        if self.body_lane(i.ty) == LANE_PRODUCT {
+                            self.body_product_size(i.ty)
+                        } else {
+                            0
+                        }
+                    );
+                }
                 // The result's words (`Codegen::scalar_call_words`): each
                 // word value and the kind it is coerced to.
                 if kind == INST_WORDS_CALL {
@@ -2609,7 +2661,8 @@ impl Gen {
         } else {
             return false;
         }
-        // A kept enum is only made by a call and returned: any other
+        // A kept enum is only made by a call or an `Option` result of a
+        // sequence operation (`body_option`) and returned: any other
         // instruction that names one is left to the walk.
         if kept != 0 && kind != INST_WORDS_CALL && kind != INST_SEQ {
             return false;
@@ -2624,7 +2677,11 @@ impl Gen {
         // A sequence operation reads its view and may make one
         // (`body_seq`).
         if kind != INST_DATA && kind != INST_WORDS_CALL && kind != INST_SEQ {
-            if self.body_lane(i.ty) == LANE_PRODUCT && kind != INST_READ && kind != INST_READ_COPY {
+            if self.body_lane(i.ty) == LANE_PRODUCT
+                && kind != INST_READ
+                && kind != INST_READ_COPY
+                && kind != INST_CALL
+            {
                 return false;
             }
             if kind != INST_PROJECT
@@ -2776,6 +2833,21 @@ impl Gen {
                 inout extra
             );
         }
+        if text && n == 2 && label == ops_s.seq_str_try_byte_at {
+            extra.push(SEQ_TRY_BYTE_AT);
+            return self.body_option(in h, i, self.ctx.world.k.u8_, inout extra);
+        }
+        if slice && n == 2 && label == ops_s.seq_try_get {
+            let (stride, lane) = self.body_elem(receiver);
+            if stride == 0 {
+                return false;
+            }
+            extra.push(SEQ_TRY_GET);
+            extra.push(stride);
+            extra.push(lane);
+            let elem = default_type(inout self.ctx.types, self.ctx.types.arg(receiver, 0));
+            return self.body_option(in h, i, self.ctx.types.node(elem).name, inout extra);
+        }
         false
     }
 
@@ -2811,6 +2883,89 @@ impl Gen {
             return (0, 0);
         }
         (stride, lane)
+    }
+
+    // `seq_option`'s `Option` of the element named `elem_name` (a plain
+    // scalar) that instruction `i` makes (#2654): its size, `Some` and
+    // `None` tags, payload offset, the end of the payload's store (for the
+    // optimize path's zeroing of the other words), the kind the payload
+    // store coerces to, then the words it is kept as (0, or each word
+    // value and its kind). False for any other result.
+    fn body_option(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        elem_name: u32,
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        let dest = self.body_value(in h, widen_u64(i.dest));
+        let kept = self.body_words(in h, dest);
+        let d = default_type(inout self.ctx.types, i.ty);
+        let node = self.ctx.types.node(d);
+        if node.kind != TyKind::Named || node.n != 1 {
+            return false;
+        }
+        let elem = default_type(inout self.ctx.types, self.ctx.types.arg(d, 0));
+        let en = self.ctx.types.node(elem);
+        let lane = self.body_lane(elem);
+        if en.kind != TyKind::Named || en.n != 0 || en.name != elem_name {
+            return false;
+        }
+        if kept != 0 && (kept != OPTION_WORDS || lane != LANE_I64) {
+            return false;
+        }
+        if kept == 0 && self.body_lane(d) != LANE_PRODUCT {
+            return false;
+        }
+        let mark = self.layouts.mark();
+        let l = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            d
+        );
+        if l == NONE32 || self.layouts.node(l).kind != L_ENUM {
+            self.layouts.reset(mark);
+            return false;
+        }
+        let some = self.body_variant(l, self.ops.option_some);
+        let none = self.body_variant(l, self.ops.option_none);
+        let ln = self.layouts.node(l);
+        let size = widen_u64(ln.size);
+        let mut payload = NONE64;
+        if some != NONE64 {
+            let v = self.layouts.lvariant(add(widen_u64(ln.a), some));
+            if v.fc != 0 {
+                payload = wrapping_u64(widen_i64(self.layouts.lfield(widen_u64(v.fa)).offset));
+            }
+        }
+        self.layouts.reset(mark);
+        if none == NONE64 || payload == NONE64 {
+            return false;
+        }
+        // An `f32` payload store writes only the low half of its word.
+        let end = if elem_name == self.ctx.world.k.f32_ {
+            payload
+        } else {
+            add(payload, self.body_product_size(elem))
+        };
+        extra.push(size);
+        extra.push(some);
+        extra.push(none);
+        extra.push(payload);
+        extra.push(end);
+        extra.push(self.body_kind(elem));
+        extra.push(kept);
+        for k in 0..kept {
+            let word = self.body_word(in h, dest, k);
+            if word == NONE64 {
+                return false;
+            }
+            extra.push(word);
+            extra.push(self.body_kind(n32(u64_at(in h.vty, word))));
+        }
+        true
     }
 
     // A slice's `last` (#2653), whose `Option` result the optimize path
@@ -2951,15 +3106,17 @@ impl Gen {
             for k in 0..n {
                 let v = self.body_value(in h, self.program.op(add(add(ta, 2), k)));
                 let param = self.body_block_param(in h, trow.ha, k);
-                if v == NONE64
-                    || param == NONE64
-                    || self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT
-                    || self.body_words(in h, v) != 0
-                {
+                if v == NONE64 || param == NONE64 || self.body_words(in h, v) != 0 {
+                    return false;
+                }
+                // A product joined at a block parameter passes its pointer
+                // (#2654); a `Never` one would need fresh storage.
+                let d = self.body_default(n32(u64_at(in h.vty, v)), n32(u64_at(in h.vty, param)));
+                if d == LANE_PRODUCT {
                     return false;
                 }
                 o.push(v);
-                o.push(self.body_default(n32(u64_at(in h.vty, v)), n32(u64_at(in h.vty, param))));
+                o.push(d);
             }
             return true;
         }
@@ -3218,12 +3375,10 @@ impl Gen {
             graph_words.push(np);
             for k in 0..np {
                 let v = self.body_value(in h, self.program.op(add(inc(pa), k)));
-                // A product joined at a block parameter has a home of its
-                // own (`aggregates::plan`), left to the walk.
-                if v == NONE64
-                    || self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT
-                    || self.body_words(in h, v) != 0
-                {
+                // A product joined at a block parameter is its pointer
+                // (#2654); on the optimize path it has a home of its own
+                // (`aggregates::plan`), which the walk's request declines.
+                if v == NONE64 || self.body_words(in h, v) != 0 {
                     return false;
                 }
                 graph_words.push(v);

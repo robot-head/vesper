@@ -50,7 +50,8 @@ const MORE_ROOTS_TASK: u64 = 8;
 /// The bits above a callee word's function id: its call flags.
 const CALL_FLAGS: u64 = codegen_swap::body::FAIL_CALL
     | codegen_swap::body::STATUS_CALL
-    | codegen_swap::body::WORDS_CALL;
+    | codegen_swap::body::WORDS_CALL
+    | codegen_swap::body::SRET_CALL;
 /// The target the library objects are built for.
 const TRIPLE: &str = "x86_64-unknown-linux-gnu";
 /// Every n-th corpus world by default.

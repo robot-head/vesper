@@ -2534,6 +2534,77 @@ fn vesper_scalar_bodies_product_patterns_and_enums() {
     });
 }
 
+/// #2654 slice 2: an instance of a generic struct, a struct joined at a
+/// block parameter, and direct calls whose struct or enum result is
+/// written through the storage the caller passes (`SRET_CALL`).
+const SCALARS_6X: &str = "
+copy struct Sealed[T] {
+    value: T
+}
+copy struct Pt {
+    x: i64,
+    y: i64,
+}
+copy enum Side {
+    Left,
+    Right(i64)
+}
+fn reveal(s: Sealed[u64]) -> u64 {
+    let Sealed { value } = s;
+    value
+}
+fn hide(v: u64) -> Sealed[u64] {
+    Sealed { value: v }
+}
+fn corner(c: bool, a: i64) -> Pt {
+    let p = if c { Pt { x: a, y: 0 } } else { Pt { x: 0, y: a } };
+    p
+}
+fn side(n: i64) -> Side {
+    if n > 0 { Right(n) } else { Left }
+}
+fn weigh(n: i64) -> i64 {
+    let p = corner(n > 2, n);
+    match side(n) {
+        Left => p.y,
+        Right(k) => wrapping_add(k, p.x),
+    }
+}
+fn main() -> i64 {
+    let s = hide(41);
+    let r = if reveal(s) == 41 { 1 } else { 0 };
+    wrapping_add(wrapping_add(weigh(5), weigh(-3)), r)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_generic_products_joins_and_struct_calls() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6X);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the #2654 slice 2 program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6x", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6x: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 4 } else { 8 };
+        assert!(
+            emitted >= min_emitted,
+            "#2654 slice 2 functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
 /// `inout` arguments to `fail_only` callees (#2614), next to struct results
 /// of `fail_only` functions built in the result pointer, with checked arithmetic, a partial division and a call of
 /// another `fail_only` function raising through the failure record, whose
@@ -2644,6 +2715,81 @@ fn vesper_inout_arguments_to_fail_only_callees_match() {
 /// `SRET_FAIL_SOURCE`'s four struct results, both settings, both
 /// comparisons of a JIT-running host.
 const MIN_FAIL_SRET: u64 = 16;
+
+// #2654 slice 3: the `Option` results of `try_byte_at` and a slice's
+// `try_get`, kept as words or built in memory (`seq_option`).
+const SCALARS_6Y: &str = "
+fn first(in s: Str) -> Option[u8] {
+    s.try_byte_at(0)
+}
+fn byte_or(in s: Str, i: u64, d: u64) -> u64 {
+    let o = s.try_byte_at(i);
+    match o {
+        Option::Some(b) => widen_u64(b),
+        Option::None => d,
+    }
+}
+fn pick(in xs: Slice[u64], i: u64) -> Option[u64] {
+    xs.try_get(i)
+}
+fn small_or(in xs: Slice[u16], i: u64) -> u64 {
+    let o = xs.try_get(i);
+    match o {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 99,
+    }
+}
+fn unwrap_or(o: Option[u64], d: u64) -> u64 {
+    match o {
+        Option::Some(v) => v,
+        Option::None => d,
+    }
+}
+fn main() -> i64 {
+    let s: String = \"hello\";
+    let mut w: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    w.push(7);
+    w.push(11);
+    let mut h: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    h.push(300);
+    let a = match first(in s.as_str()) {
+        Option::Some(b) => widen_u64(b),
+        Option::None => 0,
+    };
+    let b = byte_or(in s.as_str(), 4, 1) ^ byte_or(in s.as_str(), 9, 2);
+    let c = unwrap_or(pick(in w.as_slice(), 1), 3) ^ unwrap_or(pick(in w.as_slice(), 5), 4);
+    let d = small_or(in h.as_slice(), 0) ^ small_or(in h.as_slice(), 1);
+    wrapping_i64(a ^ b ^ c ^ d)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_try_byte_at_and_try_get_options() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6Y);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the #2654 slice 3 program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6y", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6y: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 4 } else { 8 };
+        assert!(
+            emitted >= min_emitted,
+            "#2654 slice 3 functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
 
 /// Generic function instances (#2715), lent with their types substituted:
 /// type parameters at scalar arguments (`i64`, `u8`, `bool`, `f64`) and at

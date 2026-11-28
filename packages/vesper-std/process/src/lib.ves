@@ -254,6 +254,11 @@ pub fn env(inout c: ProcCommand, in key: Str, in value: Str) eff [Ffi[StdProcess
     edit(inout c, in key.as_bytes(), in value.as_bytes(), 1);
 }
 
+// `env` with a value that need not be UTF-8 (a path the host gave).
+pub fn env_bytes(inout c: ProcCommand, in key: Str, in value: Slice[u8]) eff [Ffi[StdProcess]] {
+    edit(inout c, in key.as_bytes(), in value, 1);
+}
+
 // Leave `key` out of the child's environment.
 pub fn env_remove(inout c: ProcCommand, in key: Str) eff [Ffi[StdProcess]] {
     edit(inout c, in key.as_bytes(), in "".as_bytes(), 0);

@@ -4,8 +4,9 @@
 // frame, answers a body the envelope refuses, drops `$/cancelRequest` and
 // client responses, runs the request and notification gates of the session
 // and answers their refusals, and hands every frame that passes them to
-// the `LspEngine` import, the checked-document engine seam, whose frames it
-// writes. The engine is the Rust session until the checker runs in Vesper.
+// the checked-document engine seam (`lsp_engine_*` of
+// @vesper/driver-engines, crates/vesper-hybrid/src/lsp_engine.rs), whose
+// frames it writes. The engine is the Rust session until the checker runs in Vesper.
 //
 // The loop is single-threaded: each frame is handled before the next is
 // read, so a cancellation only ever names an answered request (which the
@@ -15,9 +16,13 @@
 use @vesper/lsp::{
     Env, Envelope, Gate, Id, Le, LimitWord, NO_TOKEN, Perr, Plimits, Cursor, decoded, encode_frame,
     gate_new, gate_note, gate_request, new_doc, parse_envelope, perr_name, read_frame, read_limits,
-    refusal, refusal_code, refusal_message, Refusal
+    refusal, refusal_code, refusal_message, Refusal, default_limits
 };
 use @vesper/serde::Doc;
+use @vesper/driver-engines::{
+    lsp_engine_deadline, lsp_engine_error_text, lsp_engine_exit, lsp_engine_frame, lsp_engine_read,
+    lsp_engine_start, lsp_engine_take, lsp_engine_tick, lsp_engine_write
+};
 
 // Where the client stream starts in the input: after the limits.
 const STREAM_AT: u64 = LimitWord::Count * Le::WordBytes;
@@ -31,6 +36,9 @@ const STATE_SHUTDOWN: u64 = 2;
 const ENGINE_CONTINUE: u64 = 0;
 const ENGINE_CLEAN: u64 = 1;
 const ENGINE_UNCLEAN: u64 = 2;
+
+// `lsp_engine_start`'s answer for a session that started.
+const ENGINE_STARTED: u64 = 0;
 
 // `lsp_engine_read`'s answers besides a byte count, and the wait that has
 // no limit.
@@ -239,25 +247,25 @@ fn refuse_note(inout s: Server, r: Refusal, limits: Plimits) -> Next {
 }
 
 // Hand a frame to the engine and write what it answered.
-fn engine(inout s: Server, in body: Slice[u8]) -> Next eff [Ffi[LspEngine]] {
-    let n = LspEngine::lsp_engine_frame(in body);
+fn engine(inout s: Server, in body: Slice[u8]) -> Next eff [Ffi[HybridCommands]] {
+    let n = lsp_engine_frame(in body);
     answered(inout s, n)
 }
 
 // Run the timers that fired and write what they answered.
-fn tick(inout s: Server) -> Next eff [Ffi[LspEngine]] {
-    let n = LspEngine::lsp_engine_tick();
+fn tick(inout s: Server) -> Next eff [Ffi[HybridCommands]] {
+    let n = lsp_engine_tick();
     answered(inout s, n)
 }
 
 // Copy the engine's `n` bytes of frames out and act on how it ended.
-fn answered(inout s: Server, n: u64) -> Next eff [Ffi[LspEngine]] {
+fn answered(inout s: Server, n: u64) -> Next eff [Ffi[HybridCommands]] {
     if n > 0 {
         let at = s.out.len();
         s.out.resize(wrapping_add(at, n), 0);
-        let _copied = LspEngine::lsp_engine_take(inout s.out[at..s.out.len()]);
+        let _copied = lsp_engine_take(inout s.out[at..s.out.len()]);
     }
-    let exit = LspEngine::lsp_engine_exit();
+    let exit = lsp_engine_exit();
     if exit == ENGINE_CONTINUE {
         return Next::NextGo;
     }
@@ -272,11 +280,9 @@ fn answered(inout s: Server, n: u64) -> Next eff [Ffi[LspEngine]] {
 }
 
 // Append the host's error text to the loop's.
-fn host_error(inout s: Server) eff [Ffi[LspEngine]] {
-    let at = s.error.len();
-    let len = LspEngine::lsp_engine_error(inout s.error[at..at]);
-    s.error.resize(wrapping_add(at, len), 0);
-    let _copied = LspEngine::lsp_engine_error(inout s.error[at..s.error.len()]);
+fn host_error(inout s: Server) eff [Ffi[HybridCommands]] {
+    let text = lsp_engine_error_text();
+    s.error.extend(in text[0..text.len()]);
 }
 
 fn method_is(in m: Slice[u8], in name: Str) -> bool {
@@ -298,7 +304,7 @@ fn frame(
     inout doc: Doc,
     in body: Slice[u8],
     limits: Plimits
-) -> Next eff [Ffi[LspEngine]] {
+) -> Next eff [Ffi[HybridCommands]] {
     let parsed = parse_step(inout doc, in body, limits);
     let env = parsed.env;
     if !parsed.ok {
@@ -384,7 +390,7 @@ pub fn serve(
     limits: Plimits,
     inout out: ChunkSeq[u8],
     inout error: ChunkSeq[u8]
-) -> bool eff [Ffi[LspEngine]] {
+) -> bool eff [Ffi[HybridCommands]] {
     let mut s = Server {
         out: ChunkSeq::new(),
         error: ChunkSeq::new(),
@@ -431,12 +437,12 @@ copy enum Fill {
 }
 
 // Wait for more client bytes, at most until the engine's next timer.
-fn fill(inout s: Server, inout pending: ChunkSeq[u8]) -> Fill eff [Ffi[LspEngine]] {
-    let deadline = LspEngine::lsp_engine_deadline();
+fn fill(inout s: Server, inout pending: ChunkSeq[u8]) -> Fill eff [Ffi[HybridCommands]] {
+    let deadline = lsp_engine_deadline();
     let wait = if deadline < 0 { WAIT_FOREVER } else { deadline };
     let at = pending.len();
     pending.resize(wrapping_add(at, READ_CHUNK), 0);
-    let n = LspEngine::lsp_engine_read(inout pending[at..pending.len()], wait);
+    let n = lsp_engine_read(inout pending[at..pending.len()], wait);
     if n > READ_END {
         pending.truncate(wrapping_add(at, wrapping_u64(n)));
         return Fill::FillMore;
@@ -453,11 +459,11 @@ fn fill(inout s: Server, inout pending: ChunkSeq[u8]) -> Fill eff [Ffi[LspEngine
 }
 
 // Write the frames the loop has produced to the client.
-fn flush(inout s: Server) -> bool eff [Ffi[LspEngine]] {
+fn flush(inout s: Server) -> bool eff [Ffi[HybridCommands]] {
     if s.out.len() == 0 {
         return true;
     }
-    let written = LspEngine::lsp_engine_write(in s.out[0..s.out.len()]);
+    let written = lsp_engine_write(in s.out[0..s.out.len()]);
     s.out.truncate(0);
     if written == WRITE_OK {
         return true;
@@ -471,7 +477,7 @@ fn flush(inout s: Server) -> bool eff [Ffi[LspEngine]] {
 // A frame is read only once its bytes are all in (`read_frame` reports a
 // partial one as truncated, and the client's later bytes never turn an
 // error into success), so chunking does not change what the client sees.
-pub fn serve_live(limits: Plimits, inout error: ChunkSeq[u8]) -> bool eff [Ffi[LspEngine]] {
+pub fn serve_live(limits: Plimits, inout error: ChunkSeq[u8]) -> bool eff [Ffi[HybridCommands]] {
     let mut s = Server {
         out: ChunkSeq::new(),
         error: ChunkSeq::new(),
@@ -586,7 +592,7 @@ fn tail_word(in bytes: Slice[u8], k: u64) -> u64 {
 // Task "server": the input is the limits, then the client byte stream. The
 // result is `OUTCOME_OK` or `OUTCOME_ERR`, the frames written and the error
 // text (each a length word, then eight bytes per word).
-pub fn lsp_server_run(in input: Str) -> ChunkSeq[u64] eff [Ffi[LspEngine]] {
+pub fn lsp_server_run(in input: Str) -> ChunkSeq[u64] eff [Ffi[HybridCommands]] {
     let bytes = input.as_bytes();
     let limits = read_limits(in bytes, 0);
     let mut out: ChunkSeq[u8] = ChunkSeq::new();
@@ -600,9 +606,20 @@ pub fn lsp_server_run(in input: Str) -> ChunkSeq[u64] eff [Ffi[LspEngine]] {
     words
 }
 
+// `vesper lsp`: start the engine, then serve the client on stdin and
+// stdout. The error text when the server stops with an error.
+pub fn serve_stdio(inout error: ChunkSeq[u8]) -> bool eff [Ffi[HybridCommands]] {
+    if lsp_engine_start() != ENGINE_STARTED {
+        let text = lsp_engine_error_text();
+        error.extend(in text[0..text.len()]);
+        return false;
+    }
+    serve_live(default_limits(), inout error)
+}
+
 // Task "server live": the input is the limits; the client is the host's.
 // The result is `OUTCOME_OK` or `OUTCOME_ERR`, then the error text.
-pub fn lsp_server_live(in input: Str) -> ChunkSeq[u64] eff [Ffi[LspEngine]] {
+pub fn lsp_server_live(in input: Str) -> ChunkSeq[u64] eff [Ffi[HybridCommands]] {
     let limits = read_limits(in input.as_bytes(), 0);
     let mut error: ChunkSeq[u8] = ChunkSeq::new();
     let ok = serve_live(limits, inout error);

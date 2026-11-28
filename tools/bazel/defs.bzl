@@ -170,7 +170,8 @@ def vesper_crate(
       test_exec_properties: target name to remote execution platform properties.
       test_shards: target name to shard count; the test must implement Bazel sharding.
       test_path_binaries: target name to binary labels needed at runtime.
-        Defaults to every binary of the package plus extra_test_path_binaries.
+        Defaults to every binary of the package plus extra_test_path_binaries
+        for integration tests, and to none for `<name>_unit_test`.
       extra_test_path_binaries: binaries of other packages that every
         integration test without a test_path_binaries entry finds on PATH
         (the root package's `vesper-<tool>` binaries, SH0 lane 2).
@@ -362,6 +363,7 @@ def vesper_crate(
         if lib["test"]:
             wrapped_test(
                 name + "_unit_test",
+                path_binaries = test_path_binaries.get(name + "_unit_test", []),
                 crate = ":" + name,
                 deps = dev,
                 **common

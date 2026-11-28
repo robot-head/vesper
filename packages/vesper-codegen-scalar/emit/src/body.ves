@@ -126,6 +126,8 @@ const SEQ_BYTE_AT: u64 = 4;
 const SEQ_GET: u64 = 5;
 const SEQ_VIEW_WORD: u64 = 6;
 const SEQ_LAST: u64 = 7;
+const SEQ_TRY_BYTE_AT: u64 = 16;
+const SEQ_TRY_GET: u64 = 17;
 const SEQ_LITERAL: u64 = 8;
 // The bits of a literal byte, and the bytes of a literal word.
 const BYTE_BITS: u64 = 8;
@@ -153,6 +155,8 @@ const STRIDE_QUARTER: u64 = 4;
 // A struct or tuple destructured (#2654): the pattern's nodes follow.
 const INST_BIND_FIELDS: u64 = 72;
 const CALLEE_ID_MASK: u64 = 4294967295;
+// `codegen_swap::body::SRET_CALL` (#2654).
+const SRET_CALL: u64 = 34359738368;
 // A `Fail` handler (#2657): its handled body and clauses as nested graphs.
 const INST_HANDLE: u64 = 60;
 // `codegen_swap::body::NESTED_CALLS_SHIFT` (#2657): the callee count word
@@ -432,6 +436,33 @@ fn wide_const(inout b: Builder, lo: u64, hi: u64) -> Value eff [Ffi[Cranelift]] 
 
 fn is_wide_kind(kind: u64) -> bool {
     kind == KIND_WIDE_I128 || kind == KIND_WIDE_U128
+}
+
+// `seq_load_elem` of a register element at `addr`, `stride` bytes wide.
+fn load_elem(inout b: Builder, addr: Value, stride: u64, lane: u64) -> Value eff [Ffi[Cranelift]] {
+    if stride == STRIDE_BYTE {
+        ins_uload8(inout b, ty_i64(), PLAIN, addr, 0)
+    } else if stride == STRIDE_HALF {
+        ins_uload16(inout b, ty_i64(), PLAIN, addr, 0)
+    } else if stride == STRIDE_QUARTER {
+        ins_uload32(inout b, PLAIN, addr, 0)
+    } else {
+        ins_load(inout b, lane_type(lane), PLAIN, addr, 0)
+    }
+}
+
+// `seq_option`'s state between its `None` and `Some` edges (#2654).
+struct OptionEdges {
+    out: Value,
+    some_tag: u64,
+    payload: u64,
+    end: u64,
+    size: u64,
+    store: u64,
+    words: u64,
+    done: Block,
+    // the join's tag and payload parameters, kept as words
+    joined: ChunkSeq[u32],
 }
 
 // Full `Codegen::coerce` including `I64 <-> I128` widening/narrowing.
@@ -1548,7 +1579,8 @@ impl Body {
         inout m: Module,
         inout w: Words,
         x: Value,
-        y: Value
+        y: Value,
+        dest: u64
     ) -> Value eff [Ffi[Cranelift]] {
         let form = w.next();
         if form == SEQ_LITERAL {
@@ -1614,17 +1646,167 @@ impl Body {
                 return Value { id: invalid() };
             }
             let addr = self.seq_elem_addr(inout b, handle, start, y, stride);
-            return if stride == STRIDE_BYTE {
-                ins_uload8(inout b, ty_i64(), PLAIN, addr, 0)
-            } else if stride == STRIDE_HALF {
-                ins_uload16(inout b, ty_i64(), PLAIN, addr, 0)
-            } else if stride == STRIDE_QUARTER {
-                ins_uload32(inout b, PLAIN, addr, 0)
-            } else {
-                ins_load(inout b, lane_type(lane), PLAIN, addr, 0)
-            };
+            return load_elem(inout b, addr, stride, lane);
+        }
+        if form == SEQ_TRY_BYTE_AT {
+            // `str_op`'s `try_byte_at` (#2654): the bound check, then
+            // `seq_option` around `str_byte`.
+            let len = ins_load(inout b, ty_i64(), PLAIN, x, STR_LEN);
+            let valid = ins_icmp(inout b, cc_ult(), y, len);
+            let o = self.option_open(inout b, in m, inout w, dest, valid);
+            if is_invalid(o.out) {
+                return o.out;
+            }
+            let data = ins_load(inout b, ty_i64(), PLAIN, x, STR_DATA);
+            let at = ins_iadd(inout b, data, y);
+            let value = ins_uload8(inout b, ty_i64(), PLAIN, at, 0);
+            return self.option_close(inout b, inout w, in o, value);
+        }
+        if form == SEQ_TRY_GET {
+            // `seq_op`'s `try_get` of a slice (#2654): its view, the bound
+            // check, then `seq_option` around `seq_elem_addr` and
+            // `seq_load_elem`.
+            let stride = w.next();
+            let lane = w.next();
+            let (handle, start, len) = self.seq_view(inout b, x);
+            let valid = ins_icmp(inout b, cc_ult(), y, len);
+            let o = self.option_open(inout b, in m, inout w, dest, valid);
+            if is_invalid(o.out) {
+                return o.out;
+            }
+            let addr = self.seq_elem_addr(inout b, handle, start, y, stride);
+            let value = load_elem(inout b, addr, stride, lane);
+            return self.option_close(inout b, inout w, in o, value);
         }
         Value { id: invalid() }
+    }
+
+    // `seq_option` up to the `Some` edge's load (#2654): kept as words,
+    // the `None` edge jumping to the join with its tag and a zero; in
+    // memory, the storage, the `None` edge's tag (and on the optimize
+    // path its payload words zeroed). An invalid `out` when the result is
+    // a home the walk builds elsewhere.
+    fn option_open(
+        inout self,
+        inout b: Builder,
+        in m: Module,
+        inout w: Words,
+        dest: u64,
+        present: Value
+    ) -> OptionEdges eff [Ffi[Cranelift]] {
+        let size = w.next();
+        let some_tag = w.next();
+        let none_tag = w.next();
+        let payload = w.next();
+        let end = w.next();
+        let store = w.next();
+        let words = w.next();
+        let none = create_block(inout b);
+        let some = create_block(inout b);
+        let done = create_block(inout b);
+        let mut o = OptionEdges {
+            out: Value { id: invalid() },
+            some_tag: some_tag,
+            payload: payload,
+            end: end,
+            size: size,
+            store: store,
+            words: words,
+            done: done,
+            joined: ChunkSeq::new[u32](),
+        };
+        if words != 0 {
+            o.joined.push(append_block_param(inout b, done, ty_i64()).id);
+            o.joined.push(append_block_param(inout b, done, ty_i64()).id);
+            ins_brif0(inout b, present, some, none);
+            switch_to_block(inout b, none);
+            let tag = ins_iconst(inout b, ty_i64(), wrapping_i64(none_tag));
+            let zero = ins_iconst(inout b, ty_i64(), 0);
+            let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            args.push(tag.id);
+            args.push(zero.id);
+            ins_jump(inout b, done, in args.as_slice());
+            switch_to_block(inout b, some);
+            o.out = zero;
+            return o;
+        }
+        if has_call(in self.homes, dest) {
+            return o;
+        }
+        let out = self.storage(inout b, in m, size);
+        ins_brif0(inout b, present, some, none);
+        switch_to_block(inout b, none);
+        let tag = ins_iconst(inout b, ty_i64(), wrapping_i64(none_tag));
+        ins_store(inout b, PLAIN, tag, out, 0);
+        if self.optimize {
+            let mut off = widen_u64(WORD_BYTES);
+            loop {
+                if off >= size {
+                    break;
+                }
+                let zero = ins_iconst(inout b, ty_i64(), 0);
+                ins_store(inout b, PLAIN, zero, out, wrapping_i32(off));
+                off = wrapping_add(off, widen_u64(WORD_BYTES));
+            }
+        }
+        let empty: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        ins_jump(inout b, done, in empty.as_slice());
+        switch_to_block(inout b, some);
+        o.out = out;
+        o
+    }
+
+    // The rest of `seq_option` from the `Some` edge's loaded `value`: the
+    // join's words defined (each coerced to its kind), then the walk's
+    // zero; or the `Some` tag and payload stored, and the storage.
+    fn option_close(
+        inout self,
+        inout b: Builder,
+        inout w: Words,
+        in o: OptionEdges,
+        value: Value
+    ) -> Value eff [Ffi[Cranelift]] {
+        if o.words != 0 {
+            let tag = ins_iconst(inout b, ty_i64(), wrapping_i64(o.some_tag));
+            let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            args.push(tag.id);
+            args.push(value.id);
+            ins_jump(inout b, o.done, in args.as_slice());
+            switch_to_block(inout b, o.done);
+            let zero = ins_iconst(inout b, ty_i64(), 0);
+            for k in 0..o.words {
+                let index = w.next();
+                let word_kind = w.next();
+                let raw = Value { id: at32(in o.joined, k) };
+                let v = body_coerce(inout b, raw, word_kind, self.optimize);
+                let ok = self.values.try_set(index, v.id);
+                def_var(inout b, var_at(in self.registers, index), v);
+            }
+            return zero;
+        }
+        let out = o.out;
+        let tag = ins_iconst(inout b, ty_i64(), wrapping_i64(o.some_tag));
+        ins_store(inout b, PLAIN, tag, out, 0);
+        if self.optimize {
+            let mut off = widen_u64(WORD_BYTES);
+            loop {
+                if off >= o.size {
+                    break;
+                }
+                if off < o.payload || off >= o.end {
+                    let zero = ins_iconst(inout b, ty_i64(), 0);
+                    ins_store(inout b, PLAIN, zero, out, wrapping_i32(off));
+                }
+                off = wrapping_add(off, widen_u64(WORD_BYTES));
+            }
+        }
+        let slot = ins_iadd_imm(inout b, out, wrapping_i64(o.payload));
+        let stored = body_coerce(inout b, value, o.store, self.optimize);
+        ins_store(inout b, PLAIN, stored, slot, 0);
+        let empty: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        ins_jump(inout b, o.done, in empty.as_slice());
+        switch_to_block(inout b, o.done);
+        out
     }
 
     // `seq_view`: a slice view's handle, start and length, the handle
@@ -1884,9 +2066,33 @@ impl Body {
                 args.push(body_operand(inout b, tv, read, self.optimize).id);
             }
             if !fails {
+                // A struct or enum result (#2654) is written through the
+                // storage passed first: the caller's own result pointer
+                // when it is the result's home, else a fresh slot (zeroed
+                // only on the unoptimized path, `call_function_into`).
+                let size = w.next();
+                if (size != 0) != ((word & SRET_CALL) != 0) {
+                    return false;
+                }
+                let mut out = Value { id: invalid() };
+                if size != 0 {
+                    out = if self.sret != invalid() && has_call(in self.homes, dest) {
+                        Value { id: self.sret }
+                    } else {
+                        self.storage(inout b, in m, size)
+                    };
+                    let mut with_out: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                    with_out.push(out.id);
+                    with_out.extend(in args.as_slice());
+                    args = with_out;
+                }
                 let fun = import_function(inout b, inout m, callee);
                 let _ = ins_call(inout b, fun, in args.as_slice());
-                inst_result(inout b, 0)
+                if size != 0 {
+                    out
+                } else {
+                    inst_result(inout b, 0)
+                }
             } else {
                 let status_call = (word & STATUS_CALL) != 0;
                 let size = w.next();
@@ -2478,7 +2684,7 @@ impl Body {
             }
             ins_load(inout b, lane_type(flane), PLAIN, ptr, 0)
         } else if kind == INST_SEQ {
-            let v = self.seq(inout b, inout m, inout w, x, y);
+            let v = self.seq(inout b, inout m, inout w, x, y, dest);
             if is_invalid(v) {
                 return false;
             }
@@ -2487,17 +2693,23 @@ impl Body {
             let local = w.next();
             let size = w.next();
             let from = self.use_local(inout b, local);
-            let to = self.storage(inout b, in m, size);
-            let mut off: u64 = 0;
-            loop {
-                if off >= size {
-                    break;
+            // The one read of a local whose storage is the result's home
+            // (#2654, `aggregates::plan`) yields that storage.
+            if self.sret != invalid() && has_call(in self.homes, dest) {
+                from
+            } else {
+                let to = self.storage(inout b, in m, size);
+                let mut off: u64 = 0;
+                loop {
+                    if off >= size {
+                        break;
+                    }
+                    let word = ins_load(inout b, ty_i64(), PLAIN, from, wrapping_i32(off));
+                    ins_store(inout b, PLAIN, word, to, wrapping_i32(off));
+                    off = wrapping_add(off, widen_u64(WORD_BYTES));
                 }
-                let word = ins_load(inout b, ty_i64(), PLAIN, from, wrapping_i32(off));
-                ins_store(inout b, PLAIN, word, to, wrapping_i32(off));
-                off = wrapping_add(off, widen_u64(WORD_BYTES));
+                to
             }
-            to
         } else if kind == INST_HANDLE {
             let out = self.handle(inout b, inout m, inout w);
             if is_invalid(out) {

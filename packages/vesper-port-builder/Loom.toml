@@ -9,6 +9,8 @@ license = "MIT OR Apache-2.0"
 capability_ceiling = ["Fail", "Alloc", "Ffi"]
 
 [dependencies]
+"@vesper/check-data" = { version = "^0.1", path = "../vesper-check-data" }
+"@vesper/codegen-export" = { version = "^0.1", path = "../vesper-codegen-export" }
 "@vesper/export-build" = { version = "^0.1", path = "../vesper-export-build" }
 "@vesper/native-lib" = { version = "^0.1", path = "../vesper-native-lib" }
 "@vesper-std/env" = { version = "^0.1", path = "../vesper-std/env" }
