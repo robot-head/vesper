@@ -139,6 +139,8 @@ const STRIDE_QUARTER: u64 = 4;
 // A struct or tuple destructured (#2654): the pattern's nodes follow.
 const INST_BIND_FIELDS: u64 = 72;
 const CALLEE_ID_MASK: u64 = 4294967295;
+// `codegen_swap::body::SRET_CALL` (#2654).
+const SRET_CALL: u64 = 34359738368;
 const INST_ICONST: u64 = 16;
 const INST_F64CONST: u64 = 17;
 const INST_DATA: u64 = 32;
@@ -1568,9 +1570,33 @@ impl Body {
                 args.push(body_operand(inout b, tv, read, self.optimize).id);
             }
             if !fails {
+                // A struct or enum result (#2654) is written through the
+                // storage passed first: the caller's own result pointer
+                // when it is the result's home, else a fresh slot (zeroed
+                // only on the unoptimized path, `call_function_into`).
+                let size = w.next();
+                if (size != 0) != ((word & SRET_CALL) != 0) {
+                    return false;
+                }
+                let mut out = Value { id: invalid() };
+                if size != 0 {
+                    out = if self.sret != invalid() && has_call(in self.homes, dest) {
+                        Value { id: self.sret }
+                    } else {
+                        self.storage(inout b, in m, size)
+                    };
+                    let mut with_out: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                    with_out.push(out.id);
+                    with_out.extend(in args.as_slice());
+                    args = with_out;
+                }
                 let fun = import_function(inout b, inout m, callee);
                 let _ = ins_call(inout b, fun, in args.as_slice());
-                inst_result(inout b, 0)
+                if size != 0 {
+                    out
+                } else {
+                    inst_result(inout b, 0)
+                }
             } else {
                 let status_call = (word & STATUS_CALL) != 0;
                 let size = w.next();
@@ -2146,17 +2172,23 @@ impl Body {
             let local = w.next();
             let size = w.next();
             let from = self.use_local(inout b, local);
-            let to = self.storage(inout b, in m, size);
-            let mut off: u64 = 0;
-            loop {
-                if off >= size {
-                    break;
+            // The one read of a local whose storage is the result's home
+            // (#2654, `aggregates::plan`) yields that storage.
+            if self.sret != invalid() && has_call(in self.homes, dest) {
+                from
+            } else {
+                let to = self.storage(inout b, in m, size);
+                let mut off: u64 = 0;
+                loop {
+                    if off >= size {
+                        break;
+                    }
+                    let word = ins_load(inout b, ty_i64(), PLAIN, from, wrapping_i32(off));
+                    ins_store(inout b, PLAIN, word, to, wrapping_i32(off));
+                    off = wrapping_add(off, widen_u64(WORD_BYTES));
                 }
-                let word = ins_load(inout b, ty_i64(), PLAIN, from, wrapping_i32(off));
-                ins_store(inout b, PLAIN, word, to, wrapping_i32(off));
-                off = wrapping_add(off, widen_u64(WORD_BYTES));
+                to
             }
-            to
         } else {
             return false;
         };

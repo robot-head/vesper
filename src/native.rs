@@ -4120,11 +4120,20 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .is_some_and(|shape| {
                     self.abi.of(&key).result_words == Some(shape.words.len() as u32)
                 });
+        // A struct or enum result written through the result pointer
+        // (#2654): the caller passes storage that needs no zeroing on the
+        // optimize path (`aggregates::plain_data`).
+        let result_type = crate::numeric::default_type(&f.result);
+        let sret_result = !fails
+            && self.abi.of(&key).result_words.is_none()
+            && !contains_function(self.world, &result_type)
+            && Layout::of(self.world, &result_type).is_ok_and(|l| l.aggregate())
+            && aggregates::plain_data(self.world, &result_type);
         if specialized_function(self.world, &f)
             || fail_only(self.world, &f) != fails
             || crate::fip::uses_caller_slot(self.world, &f)
             || function_value_instance(self.world, source)
-            || !(scalar_type(&f.result) || words_result)
+            || !(scalar_type(&f.result) || words_result || sret_result)
             || !f.params.iter().all(|p| scalar_type(&p.ty))
         {
             return None;
@@ -4148,6 +4157,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         let id = u64::from(self.ids.get(&key)?.as_u32());
         Some(if words_result {
             id | crate::codegen_swap::body::WORDS_CALL
+        } else if sret_result {
+            id | crate::codegen_swap::body::SRET_CALL
         } else if !fails {
             id
         } else if abi.status {
