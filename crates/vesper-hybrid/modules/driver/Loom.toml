@@ -38,3 +38,5 @@ capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdProcess]", "Ffi[Std
 # `--package` validation for `vesper emit --emit interface` (#2339, #1893)
 # and the package load's manifest decode and version match (#1986 slice 2b).
 "@vesper/loom-calculus" = { version = "^0.1", path = "../../../vesper-loom-calculus/vesper" }
+# The package load's `.vsys` library names (#2760).
+"@vesper/vsys" = { version = "^0.1", path = "../../../../packages/vesper-vsys" }

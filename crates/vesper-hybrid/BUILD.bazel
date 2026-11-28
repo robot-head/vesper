@@ -202,7 +202,7 @@ vesper_hybrid(
         # front-end passes (#1893) the parse module, the front end v2, the
         # AST and @vesper-std/toml's Debug text; the wasm and eBPF builds
         # (#1895) those backends and wit-component; the package load
-        # (#1986) the package assembler; driver-commands' `vesper
+        # (#1986) the package assembler and @vesper/vsys; driver-commands' `vesper
         # proof-audit` @vesper/proof-audit and `vesper verify SOURCE
         # --format` @vesper/verify and @vesper/lean-syntax (#1341, #1996);
         # `vesper lsp` @vesper/lsp-server and @vesper/lsp (#1828).
@@ -232,6 +232,7 @@ vesper_hybrid(
             "//:std_toml_package",
             "//:verified_codegen_package",
             "//:verify_package",
+            "//:vsys_package",
             "//:wasm_backend_package",
             "//:wit_component_package",
             # `vesper fmt`'s formatter (#1996 part 3d).

@@ -3101,8 +3101,8 @@ impl Renamer<'_> {
 
 /// The Rust pieces the Vesper driver's package loader still calls (#1986
 /// slice 2): it reads and decodes the package graph itself
-/// (modules/driver/src/load.ves) and asks for its settings (`LoadBegin`) and
-/// the `.vsys` type names (`VsysNames`) here.
+/// (modules/driver/src/load.ves) and asks for its settings (`LoadBegin`)
+/// here.
 pub mod driver_host {
     use super::*;
 
@@ -3134,25 +3134,6 @@ pub mod driver_host {
     /// with a larger source to the Rust loader.
     pub fn max_source_bytes() -> usize {
         crate::parser::ParseLimits::default().max_source_bytes
-    }
-
-    /// The `.vsys` library `text` for target `VSYS_TARGETS[target]`
-    /// (`@TARGET@` and `@ABI@` filled in): whether it links statically and
-    /// the type names it declares (extern types, wire structs, enums, as
-    /// [`PackageVsys::type_names`] lists them), or `None` when it does not
-    /// parse.
-    pub fn vsys_names(target: usize, text: &str) -> Option<(bool, Vec<String>)> {
-        let t = VSYS_TARGETS.get(target)?;
-        let source = text.replace("@TARGET@", t.triple).replace("@ABI@", t.abi);
-        let d = vesper_ffi::sys::parse(&source, vesper_ffi::sys::Limits::default()).ok()?;
-        let names = d
-            .extern_types()
-            .iter()
-            .map(|t| t.name().to_owned())
-            .chain(d.wire_structs().iter().map(|w| w.name().to_owned()))
-            .chain(d.enums().iter().map(|e| e.name().to_owned()))
-            .collect();
-        Some((d.link().mode() == vesper_ffi::sys::LinkMode::Static, names))
     }
 }
 
