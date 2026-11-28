@@ -6,6 +6,9 @@ load("//tools/bazel:defs.bzl", "vesper_crate")
 # `vesper-<tool>` binaries beside it, and start it in the repository root,
 # where they ran as root integration tests (`//:files`).
 vesper_crate(
+    # doc_links_cli, doc_navigation_cli and macro_preview_cli include root
+    # fixtures that the self-host checker corpus also walks.
+    extra_integration_compile_data = ["//:cli_test_sources"],
     extra_test_data = [
         "//:files",
         # attestation_cli and publish_cli sign with the Loom trust fixtures;

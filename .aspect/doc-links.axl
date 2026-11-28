@@ -19,7 +19,7 @@ def _equal(actual, expected, message):
         fail("%s: expected %r, got %r" % (message, expected, actual))
 
 def _fixture(ctx, root, name):
-    return ctx.std.fs.read_to_string(root + "/crates/vesper-cli-tests/tests/fixtures/doc_links/" + name + ".ves")
+    return ctx.std.fs.read_to_string(root + "/tests/fixtures/doc_links/" + name + ".ves")
 
 def _span(source, span):
     data = bytes(source)
