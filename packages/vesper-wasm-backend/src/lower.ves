@@ -23,7 +23,6 @@ use self::plan::{
     contains32, instance_key, instance_name, prefixed_key, tvars_new
 };
 use self::tables::{alloc_code, stage2_heap_mark, stage2_heap_reset};
-use self::scans::{copy_within_op};
 
 const VT_I32: u8 = 127;
 const VT_I64: u8 = 126;
@@ -5039,10 +5038,6 @@ impl L {
         if self.ctx.names.spells(label, in "CopyFrom { total: true }".as_bytes()) {
             return wrapping_u8(SQ_TRY_COPY_FROM);
         }
-        let within = self.copy_within_code(label);
-        if within != 0 {
-            return within;
-        }
         for k in 0..24 {
             let mut spelled = ChunkSeq::new[u8]();
             append_text(inout spelled, "Wide(Wide { bytes: ");
@@ -5368,6 +5363,35 @@ impl L {
         self.cur_fn.code.set(dest);
     }
 
+    // `==` (`!=` when `is_ne`) of byte views or strings, one a view.
+    fn view_eq(
+        inout self,
+        lhs: u32,
+        lhs_ty: u32,
+        rhs: u32,
+        rhs_ty: u32,
+        is_ne: bool
+    ) -> u32 eff [Fail[WErr]] {
+        if self.stride(lhs_ty) != 1 || self.stride(rhs_ty) != 1 {
+            Fail::raise(werr(K_UNSUPPORTED, U_GENERIC_OPERATION, 235));
+        }
+        let (lhs_addr, lhs_len) = self.parts(lhs, lhs_ty);
+        let (rhs_addr, rhs_len) = self.parts(rhs, rhs_ty);
+        let bytes_eq_idx = self.bytes_eq();
+        let result = self.local();
+        self.cur_fn.code.get(lhs_addr);
+        self.cur_fn.code.get(lhs_len);
+        self.cur_fn.code.get(rhs_addr);
+        self.cur_fn.code.get(rhs_len);
+        self.cur_fn.code.call(bytes_eq_idx);
+        if is_ne {
+            self.cur_fn.code.op(OP_I64_EQZ);
+            self.cur_fn.code.op(OP_I64_EXTEND_I32_U);
+        }
+        self.cur_fn.code.set(result);
+        result
+    }
+
     fn seq(inout self, at: u64, ty: u32, dest_val: u64) eff [Fail[WErr]] {
         let instr = self.ctx.ir.program.inst(at);
         let args_at = instr.a;
@@ -5640,8 +5664,6 @@ impl L {
                 seq_op == SQ_TRY_COPY_FROM,
                 dest_val
             );
-        } else if copy_within_op(seq_op) {
-            self.copy_within_seq(args_at, base, n, stride, seq_op, dest_val);
         } else if seq_op == SQ_STR_PUSH_CHAR {
             let ch = self.seq_val(args_at, 1);
             let dest = self.dest(dest_val);
