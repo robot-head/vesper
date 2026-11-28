@@ -1,10 +1,13 @@
 // `vesper lsp`: the stdio LSP server, @vesper/lsp-server's loop over the
-// Rust session behind its engine seam (#1828 part 15c).
+// Rust session behind its engine seam (#1828 part 15c); the loop reads and
+// writes the client itself (part 16a).
 use @vesper/lsp-server::{serve_stdio};
 use @vesper/driver::{Args};
 use super::{PrintFailed, fail};
 
-pub fn run_lsp(in _args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
+pub fn run_lsp(
+    in _args: Args
+) -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[HybridCommands], Fail[PrintFailed]] {
     let mut err: ChunkSeq[u8] = ChunkSeq::new();
     if serve_stdio(inout err) {
         return 0;

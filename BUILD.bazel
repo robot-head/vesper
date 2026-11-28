@@ -963,6 +963,7 @@ vesper_crate(
             "packages/vesper-driver-engines/**",
             "packages/vesper-lsp-server/**",
             "packages/vesper-memo/**",
+            "packages/vesper-std/**",
         ]) + [
             "//crates/vesper-serde:files",
             "//crates/vesper-span:files",
@@ -2323,6 +2324,8 @@ vesper_package(
     deps = [
         ":driver_engines_package",
         ":lsp_package",
+        ":std_fs_package",
+        ":std_process_package",
         "//crates/vesper-serde:port_package",
     ],
 )

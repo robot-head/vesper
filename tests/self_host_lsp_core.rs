@@ -37,6 +37,7 @@
 
 #[path = "common/check_harness.rs"]
 mod check_harness;
+mod std_io_support;
 
 use check_harness::*;
 use serde_json::{Value, json};
@@ -3861,17 +3862,6 @@ struct HostEngine {
     frames: Vec<u8>,
     exit: vesper::lsp::EngineExit,
     error: Vec<u8>,
-    /// The live loop's client: the chunks `lsp_engine_read` hands over in
-    /// turn, and every frame `lsp_engine_write` wrote.
-    input: std::collections::VecDeque<Vec<u8>>,
-    written: Vec<u8>,
-    /// Whether every other read waits out its deadline instead (with a
-    /// deadline of 0), so the loop ticks the engine between chunks.
-    waits: bool,
-    waited: bool,
-    /// An empty chunk is a pause: reads wait out their deadlines (sleeping
-    /// for it) until `PAUSE` has passed, then the next chunk comes.
-    paused: Option<std::time::Instant>,
 }
 
 thread_local! {
@@ -3887,12 +3877,6 @@ const ENGINE_FAILED: u64 = 3;
 
 /// `hc_lsp_engine_start`'s answer for a session that started.
 const ENGINE_STARTED: u64 = 0;
-
-/// `lsp_engine_read`'s answers besides a byte count.
-const READ_END: i64 = 0;
-const READ_WAITED: i64 = -1;
-/// `lsp_engine_write`'s answer for a write that went through.
-const WRITE_OK: u64 = 0;
 
 fn with_engine<T>(f: impl FnOnce(&mut HostEngine) -> T) -> T {
     HOST_ENGINE.with(|cell| f(cell.borrow_mut().as_mut().expect("an engine")))
@@ -3947,46 +3931,6 @@ unsafe extern "C" fn lsp_engine_error(buf: *mut u8, len: usize) -> u64 {
     with_engine(|h| unsafe { copy_out(&h.error, buf, len) })
 }
 
-/// # Safety
-/// `buf` is a writable slice of `len` bytes.
-unsafe extern "C" fn lsp_engine_read(buf: *mut u8, len: usize, wait_ms: i64) -> i64 {
-    with_engine(|h| {
-        if h.waits && !h.waited {
-            h.waited = true;
-            return READ_WAITED;
-        }
-        h.waited = false;
-        if h.input.front().is_some_and(Vec::is_empty) {
-            let since = *h.paused.get_or_insert_with(std::time::Instant::now);
-            if since.elapsed() < PAUSE {
-                let wait = u64::try_from(wait_ms).map_or(PAUSE, std::time::Duration::from_millis);
-                std::thread::sleep(wait.min(PAUSE));
-                return READ_WAITED;
-            }
-            h.paused = None;
-            h.input.pop_front();
-        }
-        let Some(mut chunk) = h.input.pop_front() else {
-            return READ_END;
-        };
-        if chunk.len() > len {
-            h.input.push_front(chunk.split_off(len));
-        }
-        // SAFETY: `buf` holds `len >= chunk.len()` bytes.
-        unsafe { std::ptr::copy_nonoverlapping(chunk.as_ptr(), buf, chunk.len()) };
-        chunk.len() as i64
-    })
-}
-
-/// # Safety
-/// `buf` is a readable slice of `len` bytes.
-unsafe extern "C" fn lsp_engine_write(buf: *const u8, len: usize) -> u64 {
-    // SAFETY: the `.vsys` contract lends the frames.
-    let data = unsafe { std::slice::from_raw_parts(buf, len) };
-    with_engine(|h| h.written.extend_from_slice(data));
-    WRITE_OK
-}
-
 /// A command engine of `HybridCommands` that the LSP loop never calls.
 extern "C" fn not_the_loop() -> u64 {
     panic!("the LSP loop called a command engine")
@@ -3998,7 +3942,7 @@ extern "C" fn lsp_engine_start() -> u64 {
 }
 
 extern "C" fn lsp_engine_deadline() -> i64 {
-    with_engine(|h| if h.waits { 0 } else { h.engine.deadline() })
+    with_engine(|h| h.engine.deadline())
 }
 
 extern "C" fn lsp_engine_tick() -> u64 {
@@ -4045,8 +3989,6 @@ fn server_function(name: &str) -> Entry {
         ("hc_lsp_engine_take", lsp_engine_take as *const u8),
         ("hc_lsp_engine_exit", lsp_engine_exit as *const u8),
         ("hc_lsp_engine_error", lsp_engine_error as *const u8),
-        ("hc_lsp_engine_read", lsp_engine_read as *const u8),
-        ("hc_lsp_engine_write", lsp_engine_write as *const u8),
         ("hc_lsp_engine_deadline", lsp_engine_deadline as *const u8),
         ("hc_lsp_engine_tick", lsp_engine_tick as *const u8),
     ];
@@ -4062,6 +4004,10 @@ fn server_function(name: &str) -> Entry {
         .map(|name| format!("hc_{name}"))
         .filter(|name| !symbols.iter().any(|(bound, _)| bound == name))
         .collect();
+    // The client's streams go through @vesper-std/fs and process (part
+    // 16a), bound to the C library's own functions.
+    let std = std_io_support::symbols();
+    symbols.extend(std.iter().copied());
     symbols.extend(
         others
             .iter()
@@ -4087,7 +4033,7 @@ fn rust_server(stream: &[u8]) -> (Vec<u8>, Result<(), String>) {
 
 /// The Vesper loop over `stream`, with a fresh Rust session behind it.
 fn vesper_server(stream: &[u8]) -> (Vec<u8>, Result<(), String>) {
-    host_engine(Default::default(), false);
+    host_engine();
     let mut input = Vec::new();
     limit_words(&mut input, ProtocolLimits::default());
     input.extend_from_slice(stream);
@@ -4105,17 +4051,12 @@ fn vesper_server(stream: &[u8]) -> (Vec<u8>, Result<(), String>) {
     (out, result)
 }
 
-/// Install a fresh Rust session as the host engine, with `input` as the
-/// live loop's client.
-fn host_engine(input: std::collections::VecDeque<Vec<u8>>, waits: bool) {
-    host_engine_with(server_config(), input, waits);
+/// Install a fresh Rust session as the host engine.
+fn host_engine() {
+    host_engine_with(server_config());
 }
 
-fn host_engine_with(
-    config: vesper::lsp::LensConfig,
-    input: std::collections::VecDeque<Vec<u8>>,
-    waits: bool,
-) {
+fn host_engine_with(config: vesper::lsp::LensConfig) {
     let engine = vesper::lsp::Engine::new(config).unwrap();
     HOST_ENGINE.with(|cell| {
         *cell.borrow_mut() = Some(HostEngine {
@@ -4123,26 +4064,76 @@ fn host_engine_with(
             frames: Vec::new(),
             exit: vesper::lsp::EngineExit::Continue,
             error: Vec::new(),
-            input,
-            written: Vec::new(),
-            waits,
-            waited: false,
-            paused: None,
         })
     });
 }
 
-/// The live Vesper loop over `stream`, read in `chunk`-byte pieces (every
-/// other read waiting out a deadline when `waits`).
-fn vesper_live(stream: &[u8], chunk: usize, waits: bool) -> (Vec<u8>, Result<(), String>) {
-    host_engine(stream.chunks(chunk).map(<[u8]>::to_vec).collect(), waits);
+/// The most the live loop reads at a time in the differentials: a pipe's
+/// buffer, as `vesper lsp` reads.
+const LIVE_READ_MAX: usize = 65536;
+
+/// A pipe end as the live loop's `Client` names it: a descriptor, or a
+/// `HANDLE` on Windows.
+#[cfg(unix)]
+fn raw_stream(end: &impl std::os::fd::AsRawFd) -> u64 {
+    end.as_raw_fd() as u64
+}
+
+#[cfg(windows)]
+fn raw_stream(end: &impl std::os::windows::io::AsRawHandle) -> u64 {
+    end.as_raw_handle() as u64
+}
+
+/// The live Vesper loop as its client: `parts` go down a pipe, an empty
+/// part a pause of `PAUSE`, and the loop reads them in `chunk`-byte reads
+/// (every other read waiting out a deadline of 0 instead when `ticks`),
+/// writing its frames to another pipe. The frames and the result.
+fn vesper_client(parts: Vec<Vec<u8>>, chunk: usize, ticks: bool) -> (Vec<u8>, Result<(), String>) {
+    // Compile the loop first, so a pause starts once it is reading.
+    let entry = live_entry();
+    let (input_rd, mut input_wr) = std::io::pipe().unwrap();
+    let (mut output_rd, output_wr) = std::io::pipe().unwrap();
+    let feeder = std::thread::spawn(move || {
+        for part in parts {
+            if part.is_empty() {
+                std::thread::sleep(PAUSE);
+            } else if std::io::Write::write_all(&mut input_wr, &part).is_err() {
+                // The loop stopped reading.
+                return;
+            }
+        }
+    });
+    let drain = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        std::io::Read::read_to_end(&mut output_rd, &mut out).unwrap();
+        out
+    });
     let mut input = Vec::new();
     limit_words(&mut input, ProtocolLimits::default());
-    let words = live_entry().words(&input);
-    let out = HOST_ENGINE.with(|cell| cell.borrow_mut().take().unwrap().written);
+    for word in [
+        raw_stream(&input_rd),
+        raw_stream(&output_wr),
+        chunk.min(LIVE_READ_MAX) as u64,
+        u64::from(ticks),
+    ] {
+        input.extend_from_slice(&word.to_le_bytes());
+    }
+    let words = entry.words(&input);
+    HOST_ENGINE.with(|cell| *cell.borrow_mut() = None);
+    drop(input_rd);
+    drop(output_wr);
+    feeder.join().unwrap();
+    let out = drain.join().unwrap();
     let error = unpack_text(&words[1..]);
     let result = if words[0] == 0 { Ok(()) } else { Err(error) };
     (out, result)
+}
+
+/// The live Vesper loop over `stream`, read in `chunk`-byte pieces (every
+/// other read waiting out a deadline of 0 instead when `ticks`).
+fn vesper_live(stream: &[u8], chunk: usize, ticks: bool) -> (Vec<u8>, Result<(), String>) {
+    host_engine();
+    vesper_client(vec![stream.to_vec()], chunk, ticks)
 }
 
 /// How long a pause in a timed session lasts: far past its debounce delay
@@ -4526,7 +4517,7 @@ fn server_loop_matches_rust() {
 /// Chunk sizes the live loop's client is read in: byte by byte, inside a
 /// header, across frames, and whole.
 /// The read size the live loop's speed is measured at (a pipe's buffer).
-const LIVE_SPEED_CHUNK: usize = 65536;
+const LIVE_SPEED_CHUNK: usize = LIVE_READ_MAX;
 
 const LIVE_CHUNKS: [usize; 5] = [1, 5, 64, 4096, usize::MAX];
 
@@ -4578,16 +4569,8 @@ fn live_loop_runs_timers() {
         &mut rust_out,
         timed_config(),
     );
-    host_engine_with(timed_config(), parts.into(), false);
-    let mut input = Vec::new();
-    limit_words(&mut input, ProtocolLimits::default());
-    let words = live_entry().words(&input);
-    let vesper_out = HOST_ENGINE.with(|cell| cell.borrow_mut().take().unwrap().written);
-    let vesper_result = if words[0] == 0 {
-        Ok(())
-    } else {
-        Err(unpack_text(&words[1..]))
-    };
+    host_engine_with(timed_config());
+    let (vesper_out, vesper_result) = vesper_client(parts, LIVE_READ_MAX, false);
     // A run's wall time is the one field that differs between runs.
     let messages = |out: &[u8]| -> Vec<Value> {
         let mut cursor = std::io::Cursor::new(out);
