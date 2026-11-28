@@ -4508,8 +4508,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         )
     }
     /// Whether the walk lowers graph `body`'s sequence and string
-    /// operations with no drops, fused `try_get` matches or hoisted
-    /// header reads (#2653): true for a graph with none.
+    /// operations with no drops, element view matches or hoisted header
+    /// reads (#2653): true for a graph with none. A `try_get` fused with
+    /// its `match` is planned by the body hook unless the world has
+    /// element views, whose binds name the element in place.
     fn seq_body_plain(&self, body: &crate::ir::FunctionIr) -> bool {
         use crate::ir::Op;
         let has_seq = body
@@ -4517,21 +4519,31 @@ impl<M: Module> Codegen<'_, '_, M> {
             .iter()
             .flat_map(|b| &b.instructions)
             .any(|i| matches!(i.op, Op::Seq { .. }));
+        // A sequence value with no sequence op (#2750), such as a `sink`
+        // parameter moved into a product, can still own a drop.
+        let seq_values = body
+            .params
+            .iter()
+            .map(|p| &p.ty)
+            .chain(body.locals.values())
+            .chain(body.values.values())
+            .any(crate::seq::is_seq_type);
+        // A sequence a call returns, even with no sequence op, is such a
+        // value and may be a temporary.
+        if !has_seq && !seq_values {
+            return true;
+        }
         // The graph `ir_graph_at` lowers: small enums kept as words.
         let join = self.own_scalar_join(body);
         let scalar_graph = self.scalar_graph(body, join.as_ref());
         let graph = scalar_graph.as_ref().map_or(body, |s| &s.f);
-        if !has_seq {
-            // A sequence a call returns may still be a temporary.
-            return !self.drops_enabled() || self.seq_temporaries_plain(graph);
-        }
         let drops = self.drops_enabled()
             && (!crate::fip::replace_drops(self.world, graph, None).is_empty()
                 || !self.seq_temporaries_plain(graph)
                 || !crate::fip::fail_exit_drops(self.world, graph).is_empty());
         !drops
             && self.seq_slots_plain(graph)
-            && seq_native::fused_reads(graph).is_empty()
+            && (self.world.element_views.is_empty() || seq_native::fused_reads(graph).is_empty())
             && self.entry_views(body).is_some()
     }
     /// Whether the body hook drops the temporaries of graph `f`

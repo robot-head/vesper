@@ -233,10 +233,6 @@ fn declarations(module: &dyn Module) -> Result<Vec<Declared>, String> {
     Ok(out)
 }
 
-fn module_has_data(module: &dyn Module) -> bool {
-    module.declarations().get_data_objects().next().is_some()
-}
-
 /// The recording `body` hook: notes the request and declines.
 fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     if lent.op != codegen_swap::body::FUNCTION {
@@ -277,10 +273,10 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
             r.refused = Some(format!("{function}: a body request without its callees"));
             return;
         };
-        // The module's signatures carry no result pointer, so a struct
-        // result stays with the walk.
-        if sret != codegen_swap::body::NO_VALUE {
-            r.refused = Some(format!("{function}: returns through a result pointer"));
+        // @vesper/native-lib passes the frame's result (#2653) but builds
+        // no value in it, so a struct result with homes stays with the walk.
+        if sret != codegen_swap::body::NO_VALUE && !homes.is_empty() {
+            r.refused = Some(format!("{function}: builds values in its result"));
             return;
         }
         // @vesper/native-lib binds each parameter to its block parameter,
@@ -312,10 +308,6 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
         // words, each after its count.
         let homes = homes.len() + 1 + pointers.len() + 1 + 1;
         let callees = callees.to_vec();
-        if module_has_data(&*lent.module) {
-            r.refused = Some("the module declares data".into());
-            return;
-        }
         // The walk declares and defines the instances in the same order,
         // so the n-th definition is function n.
         let func = r.defined.len() as u64;
