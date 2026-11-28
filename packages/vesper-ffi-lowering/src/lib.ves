@@ -2956,10 +2956,13 @@ pub const BODY_CALL_DIRECT: u64 = 1;
 pub const BODY_PARAM_SCALAR: u64 = 0;
 pub const BODY_PARAM_BOOL: u64 = 1;
 pub const BODY_PARAM_HANDLE: u64 = 2;
+pub const BODY_PARAM_SLICE: u64 = 3;
 pub const BODY_RESULT_UNIT: u64 = 0;
 pub const BODY_RESULT_SCALAR: u64 = 1;
 // The bit of a scalar word above its width: whether it is signed.
 const BODY_SIGNED: u64 = 256;
+// A scalar word's bits.
+const BODY_BITS_MASK: u64 = 255;
 const BITS_8: u64 = 8;
 const BITS_16: u64 = 16;
 const BITS_32: u64 = 32;
@@ -2995,6 +2998,22 @@ fn body_scalar(code: u8) -> u64 {
     };
     let signed = code == SC_I8 || code == SC_I16 || code == SC_I32 || code == SC_I64;
     if signed { bits | BODY_SIGNED } else { bits }
+}
+
+// The bytes of one element of slice parameter `p` of library row `lib`
+// (`Pointee::size`): its scalar's, or its wire struct's size.
+fn element_bytes(in state: S, lib: u64, p: Par) -> u64 {
+    if !p.elem_is_struct {
+        return (body_scalar(p.elem_scalar) & BODY_BITS_MASK) / BITS_8;
+    }
+    let lib_row = state.lib(lib);
+    for i in 0..lib_row.wire_count {
+        let ws = state.ws(add(lib_row.wire_start, i));
+        if ws.name == p.type_name {
+            return ws.size;
+        }
+    }
+    0
 }
 
 // The library row of effect `eff_name` (`Ffi$Lib`), or NONE64.
@@ -3069,6 +3088,9 @@ pub fn body_call(inout state: S, eff_name: u32, op: u32, inout words: ChunkSeq[u
         } else if p.tag == P_HANDLE && !is_mapping(in state, lib, p.type_name) {
             words.push(BODY_PARAM_HANDLE);
             words.push(0);
+        } else if p.tag == P_SLICE {
+            words.push(BODY_PARAM_SLICE);
+            words.push(element_bytes(in state, lib, p));
         } else {
             plain = false;
         }

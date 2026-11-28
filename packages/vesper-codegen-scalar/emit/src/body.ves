@@ -413,6 +413,9 @@ const FOREIGN_PARAM_HANDLE: u64 = 2;
 const FOREIGN_SOURCE_HANDLE_IN: u64 = 2;
 const FOREIGN_SOURCE_HANDLE_INOUT: u64 = 3;
 const FOREIGN_SOURCE_HANDLE_TEMP: u64 = 4;
+const FOREIGN_PARAM_SLICE: u64 = 3;
+const FOREIGN_SOURCE_SLICE_LOCAL: u64 = 5;
+const FOREIGN_SOURCE_SLICE_TEMP: u64 = 6;
 const FOREIGN_RESULT_SCALAR: u64 = 1;
 const FOREIGN_BITS_MASK: u64 = 255;
 const FOREIGN_SIGNED: u64 = 256;
@@ -1362,7 +1365,36 @@ impl Body {
         let mut ti: u64 = 0;
         for k in 0..nargs {
             let source = w.next();
-            let value = if source == FOREIGN_SOURCE_HANDLE_TEMP {
+            let value = if source == FOREIGN_SOURCE_SLICE_LOCAL
+                || source == FOREIGN_SOURCE_SLICE_TEMP
+            {
+                // `foreign_view`: `expr` copies the view first.
+                let from = if source == FOREIGN_SOURCE_SLICE_LOCAL {
+                    let l = w.next();
+                    if l >= self.locals.len() {
+                        return Value { id: invalid() };
+                    }
+                    self.use_local(inout b, l)
+                } else {
+                    if ti >= temps.len() {
+                        return Value { id: invalid() };
+                    }
+                    let t = Var { id: at32(in temps, ti) };
+                    ti = wrapping_add(ti, 1);
+                    use_var(inout b, t)
+                };
+                let copy = self.storage(inout b, in m, widen_u64(VIEW_BYTES));
+                let mut offset: u64 = 0;
+                loop {
+                    if offset >= widen_u64(VIEW_BYTES) {
+                        break;
+                    }
+                    let word = ins_load(inout b, ty_i64(), PLAIN, from, wrapping_i32(offset));
+                    ins_store(inout b, PLAIN, word, copy, wrapping_i32(offset));
+                    offset = wrapping_add(offset, WORD_BYTES_64);
+                }
+                copy
+            } else if source == FOREIGN_SOURCE_HANDLE_TEMP {
                 // `expr` of a `sink` handle's temporary copies it too; the
                 // call loads the word from the copy.
                 if ti >= temps.len() {
@@ -1411,7 +1443,23 @@ impl Body {
             };
             let form = w.next();
             let scalar = w.next();
-            if form == FOREIGN_PARAM_HANDLE {
+            if form == FOREIGN_PARAM_SLICE {
+                // `(data + start * stride, len)`, a zeroed word's address
+                // when the sequence has no data.
+                let handle = ins_load(inout b, ty_i64(), PLAIN, value, VIEW_HANDLE);
+                let start = ins_load(inout b, ty_i64(), PLAIN, value, VIEW_START);
+                let len = ins_load(inout b, ty_i64(), PLAIN, value, VIEW_LEN);
+                let data = ins_load(inout b, ty_i64(), PLAIN, handle, HEADER_DATA);
+                let offset = ins_imul_imm(inout b, start, wrapping_i64(scalar));
+                let lent = ins_iadd(inout b, data, offset);
+                let dummy = self.zeroed_word(inout b, in m);
+                let empty = ins_icmp_imm(inout b, cc_eq(), data, 0);
+                let view = ins_select(inout b, empty, dummy, lent);
+                sig_param_ext(inout m, sig, module_pointer_type(in m), ext_none());
+                sig_param_ext(inout m, sig, ty_i64(), ext_none());
+                args.push(view.id);
+                args.push(len.id);
+            } else if form == FOREIGN_PARAM_HANDLE {
                 // `ParameterType::Handle`: the word, as a C pointer.
                 sig_param_ext(inout m, sig, module_pointer_type(in m), ext_none());
                 args.push(value.id);
@@ -1450,6 +1498,15 @@ impl Body {
         } else {
             ins_iconst(inout b, ty_i64(), 0)
         }
+    }
+
+    // A zeroed word's address (`Codegen::alloc` of a word, on either path).
+    fn zeroed_word(inout self, inout b: Builder, in m: Module) -> Value eff [Ffi[Cranelift]] {
+        let slot = create_stack_slot(inout b, WORD_BYTES, SLOT_ALIGN_SHIFT);
+        let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+        let zero = ins_iconst(inout b, ty_i64(), 0);
+        ins_store(inout b, PLAIN, zero, ptr, 0);
+        ptr
     }
 
     // A struct's own storage, of at least a word: `Codegen::alloc_uninit`
