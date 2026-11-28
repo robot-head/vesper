@@ -1,11 +1,18 @@
+//! Chroma's Tier 1 semantic facts (design §43), gathered read-only from the
+//! parser's AST and the checker's outputs. Shared by `vesper tool-facts
+//! chroma` (src/tool_facts/chroma.rs, which serializes them for `vesper
+//! highlight` and `vesper shot`) and the browser tour (src/browser_tour.rs,
+//! which highlights in place). Each includer puts the AST and checker names
+//! and the fact records (`vesper_highlight`'s, or a serializable mirror) in
+//! scope as `super::`.
 use super::{
-    Expr, ExprKind, Function, Item, Module, Pass, Pattern, PatternKind, Statement, Type, ValueMode,
-    World, substitute,
+    CheckedSource, EffectFact, Expr, ExprKind, FieldLeafFact, Function, HoverEntry, Item,
+    LinearBindingFact, Module, Pass, Pattern, PatternKind, SemanticFacts, Statement, Type,
+    ValueMode, World, substitute,
 };
 use std::{collections::BTreeMap, ops::Range};
-use vesper_highlight::{EffectFact, FieldLeafFact, HoverEntry, LinearBindingFact, SemanticFacts};
 
-pub(super) fn collect_facts(source: &str, checked: &super::CheckedSource) -> SemanticFacts {
+pub(super) fn collect_facts(source: &str, checked: &CheckedSource) -> SemanticFacts {
     let parsed = checked.parsed();
     let mut collector = Collector {
         src: source,
