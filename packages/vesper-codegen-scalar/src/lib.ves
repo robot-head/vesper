@@ -589,6 +589,9 @@ pub struct Gen {
     bound_error: u64,
     handle_row: u64,
     handle_base: u64,
+    // The fused `try_get` reads of the function `body` plans
+    // (`body_fused_reads`), `FUSED_WORDS` words each.
+    fused: ChunkSeq[u64],
     // Each function's records in `plan`: plan[plan_from[fi]..plan_to[fi]].
     plan_from: ChunkSeq[u64],
     plan_to: ChunkSeq[u64],
@@ -1514,6 +1517,7 @@ fn read_gen_with(in bytes: Slice[u8], facts: bool) -> Gen {
         bound_error: NO_LOCAL,
         handle_row: 0,
         handle_base: 0,
+        fused: ChunkSeq::new[u64](),
         plan_from: ChunkSeq::new[u64](),
         plan_to: ChunkSeq::new[u64]()
     }
