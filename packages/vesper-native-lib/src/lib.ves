@@ -65,7 +65,7 @@ use @vesper/place-ir::{read_program};
 use @vesper/native-walk::{native_walk_call_words_bytes};
 use @vesper/native-walk::frame::{graph_plain};
 use @vesper/library-ir::{Status as IrStatus, library_walk_calls_input};
-use self::declare::{Declared, declare_library, declared_new, exports_new};
+use self::declare::{Declared, declare_executable, declare_library, declared_new, exports_new};
 
 // The answer's status words.
 const OK: u64 = 0;
@@ -505,6 +505,22 @@ fn push_dec(inout out: ChunkSeq[u8], value: u64) {
 
 // The library object of one request (see the top of this file).
 pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    object_of(in req, false)
+}
+
+// An executable's object (slice 4e, #2752), as `vesper build` compiles
+// one (`object_with_options`, `compile_entry` with an object entry): the
+// request is a library request whose one export is the entry under the
+// symbol `main`, whose calls input's first task is the entry (no library
+// flag), and which ends after the calls input. Every instance is defined
+// as for a library, the entry exported and the rest local; there are no
+// 128-bit entries or v2 glue. The C runtime's `main` is the entry, which
+// the host links with `cc <object> -o <path> -lm`.
+pub fn executable_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    object_of(in req, true)
+}
+
+fn object_of(in req: Slice[u8], executable: bool) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
     let mut r = Reader { pos: 0, bad: false };
     let triple = r.bytes(in req);
     let flags = r.bytes(in req);
@@ -535,7 +551,11 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
         return failure(in MALFORMED.as_bytes());
     }
     let mut d = declared_new();
-    let declare_err = declare_library(inout m, in calls.as_slice(), in exports, inout d);
+    let declare_err = if executable {
+        declare_executable(inout m, in calls.as_slice(), in exports, inout d)
+    } else {
+        declare_library(inout m, in calls.as_slice(), in exports, inout d)
+    };
     if declare_err.len() != 0 {
         module_free(m);
         return failure(in declare_err.as_slice());
@@ -558,17 +578,19 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
             return failure(in err.as_slice());
         }
     }
-    // `compile_exports` after the walk: the 128-bit export entries, then
-    // a v2 library's runtime glue.
-    let err = self::exports::define_wide_entries(inout m, in req, inout r, in d, in exports);
-    if err.len() != 0 {
-        module_free(m);
-        return failure(in err.as_slice());
-    }
-    let err = self::exports::define_v2_glue(inout m, in req, inout r);
-    if err.len() != 0 {
-        module_free(m);
-        return failure(in err.as_slice());
+    if !executable {
+        // `compile_exports` after the walk: the 128-bit export entries, then
+        // a v2 library's runtime glue.
+        let err = self::exports::define_wide_entries(inout m, in req, inout r, in d, in exports);
+        if err.len() != 0 {
+            module_free(m);
+            return failure(in err.as_slice());
+        }
+        let err = self::exports::define_v2_glue(inout m, in req, inout r);
+        if err.len() != 0 {
+            module_free(m);
+            return failure(in err.as_slice());
+        }
     }
     let clif = module_clif(in m);
     match module_finish(m) {
