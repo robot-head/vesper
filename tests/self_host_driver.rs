@@ -1202,7 +1202,24 @@ fn windows_lld_link_candidates_match_rust() {
 
 #[test]
 fn vsys_target_os_matches_rust() {
-    use vesper::packages::{VSYS_TARGETS, driver_host};
+    use vesper::packages::VSYS_TARGETS;
+
+    // `packages::load_for_target`'s source-directory OS and whether the
+    // build is the WASI component's.
+    let target_os = |target: Option<&str>| -> (&'static str, bool) {
+        let wasi = target == Some(vesper::wasm_backend::TARGET);
+        let os = if wasi {
+            "wasip2"
+        } else if let Some(triple) = target {
+            VSYS_TARGETS
+                .iter()
+                .find(|v| v.triple == triple)
+                .map_or(std::env::consts::OS, |v| v.os)
+        } else {
+            std::env::consts::OS
+        };
+        (os, wasi)
+    };
 
     let entry = driver().entry("vsys_target_os_words", true);
     let host_os = std::env::consts::OS;
@@ -1237,7 +1254,7 @@ fn vsys_target_os_matches_rust() {
         let got_abi = String::from_utf8(unpack(&words, &mut at)).unwrap();
         assert_eq!(at, words.len());
 
-        let (want_os, want_wasi) = driver_host::target_os(target);
+        let (want_os, want_wasi) = target_os(target);
         assert_eq!(
             (got_os.as_str(), got_wasi),
             (want_os, want_wasi),

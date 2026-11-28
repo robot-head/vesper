@@ -404,7 +404,8 @@ fn load_input(
         if err.len() != 0 {
             return error(in err.as_slice());
         }
-        load_package(inout s, in input.as_slice())
+        let target = value(in o, slot_target());
+        load_package(inout s, in input.as_slice(), has(in o, slot_target()), in target.as_slice())
     } else {
         let failed = handle Fail[IoError] in {
             source = read_path(in input.as_slice());
@@ -435,8 +436,13 @@ fn load_input(
 // (load.ves, #1986 slice 2), or else the Rust loader reads it and, when it
 // hands the graph over (as the session's text), the driver assembles it
 // (assemble.ves, #1986).
-fn load_package(inout s: Session, in input: Slice[u8]) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
-    match read_graph(inout s, in input, os() == os_windows()) {
+fn load_package(
+    inout s: Session,
+    in input: Slice[u8],
+    has_target: bool,
+    in target: Slice[u8]
+) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    match read_graph(inout s, in input, has_target, in target, os() == os_windows()) {
         Option::Some(graph) => {
             let words = assembled_words(in graph.as_slice());
             return HybridDriver::hd_assembled(inout s, in words.as_slice());
