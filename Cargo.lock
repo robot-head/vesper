@@ -6919,7 +6919,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "vesper",
  "vesper-beacon-seed",
  "vesper-bench-pmu",
  "vesper-bench-seed",
@@ -6939,7 +6938,6 @@ dependencies = [
  "vesper-semver-seed",
  "vesper-serde-seed",
  "vesper-simd-seed",
- "vesper-span-seed",
 ]
 
 [[package]]

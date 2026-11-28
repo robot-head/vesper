@@ -88,8 +88,6 @@ name = "vesper-traceparent"
 path = "src/bin/vesper-traceparent.rs"
 
 [dependencies]
-# Compiler services (checking, native batches, interfaces, proof replay).
-vesper = { path = "../.." }
 blake3 = "1.8"
 # `vesper bench` loads the machine code the compiler built for a kernel into
 # a JIT module of its own (src/native_kernel.rs, #2670).
@@ -128,7 +126,6 @@ vesper-crucible = { path = "../vesper-crucible/seed", package = "vesper-crucible
 # closure, so their Rust can flip before Stage 2.
 vesper-simd = { path = "../vesper-simd/seed", package = "vesper-simd-seed" }
 vesper-highlight = { path = "../vesper-highlight/seed", package = "vesper-highlight-seed", features = ["shot"] }
-vesper-span = { path = "../vesper-span/seed", package = "vesper-span-seed" }
 vesper-migrate = { path = "../vesper-migrate" }
 # The compiler's build links the frozen Rust seed copy of vesper-loom-trust (#1412).
 vesper-loom-trust = { path = "../vesper-loom-trust/seed", package = "vesper-loom-trust-seed" }
