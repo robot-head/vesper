@@ -4,12 +4,15 @@
 //! (`native_export::compile_source`).
 //!
 //! The Rust build runs with a recording `body` hook: for every function the
-//! walk would hand to Vesper it records the request (location flag,
-//! parameter count, direct callees), then declines, so the Rust walk emits
-//! the object. The driver plans each body with @vesper/codegen-scalar over
-//! the calls input's program and takes the status flag from the instance's
-//! ABI itself (slice 3a); a function without a Rust-side body plan keeps
-//! the library out of the comparison. A recording `export_plans` hook keeps the calls input of
+//! walk would hand to Vesper it notes the function and the source-locations
+//! word, then declines, so the Rust walk emits the object. The driver
+//! plans each body with @vesper/codegen-scalar over the walk's program and
+//! takes the status flag from the instance's ABI itself (slice 3a); it
+//! names each body's direct callees with @vesper/native-walk over the
+//! calls input of the walk's program, takes the flags from the library
+//! task and the instance's row, and checks the body hook's plain gate
+//! (slice 3e). A function without a Rust-side body plan keeps the library
+//! out of the comparison. A recording `export_plans` hook keeps the calls input of
 //! the library's first lowering, from which the driver makes the instances
 //! and their declarations itself (slice 2a-2a); the request names only the
 //! exports' symbols, read from the lent module. The request built from
@@ -67,8 +70,6 @@ const WORD_BYTES: usize = 8;
 /// (packages/vesper-codegen-calls/src/data.ves).
 const LIBRARY_TASK: u64 = 4;
 const MORE_ROOTS_TASK: u64 = 8;
-/// A definition's constant-time flag (packages/vesper-native-lib).
-const CONST_TIME_FLAG: u64 = 2;
 /// The library objects the passes must change.
 const MIN_CHANGED_BY_PASSES: usize = 2;
 /// The CLIF passes that the objects with the passes off are built without.
@@ -152,11 +153,6 @@ struct Defined {
     /// The instance key (the function's name: a plain library has no
     /// generic instances).
     key: String,
-    optimize: bool,
-    /// A `ConstTime` function, whose cold paths stay in place.
-    const_time: bool,
-    locations: u64,
-    callees: Vec<u64>,
 }
 
 /// What the recording hook saw during one Rust build.
@@ -170,8 +166,14 @@ struct Record {
     /// functions it has a body plan for.
     program: Option<(Vec<u8>, HashSet<String>)>,
     /// The calls input of the library's first lowering, which the
-    /// `export_plans` hook saw.
+    /// `export_plans` hook saw, and its library tasks.
     calls: Option<Vec<u8>>,
+    tasks: Vec<(String, u64)>,
+    /// The calls input of the program the walk emits from, which the
+    /// driver plans bodies and names callees from.
+    walk_calls: Option<Vec<u8>>,
+    /// The definitions' source-locations word (the same for every one).
+    locations: Option<u64>,
     /// The library's interface: its 128-bit entries and v2 glue.
     interface: Option<LibraryInterface>,
 }
@@ -247,12 +249,6 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     let world = lent.world;
     let program = lent.program;
     let declared = declarations(&*lent.module);
-    // `native.rs` also reads the capabilities of a function's closures;
-    // a plain library has none.
-    let const_time = world.functions.get(&function).is_some_and(|f| {
-        vesper::capability_effects::capabilities(&f.effects)
-            .contains(&vesper::capability_effects::Capability::ConstTime)
-    });
     RECORD.with(|cell| {
         let mut r = cell.borrow_mut();
         if r.refused.is_some() {
@@ -267,6 +263,14 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
         }
         if r.program.is_none() {
             r.program = Some(walk_program(world, program));
+            let tasks = r.tasks.clone();
+            match codegen_calls_words::calls_input_flags_wide(world, program, &tasks) {
+                Some(i) => r.walk_calls = Some(i),
+                None => {
+                    r.refused = Some("the walk's program has no calls input".into());
+                    return;
+                }
+            }
         }
         // The driver plans each body itself (slice 3a of #2349); a function
         // without a plan stays with the walk.
@@ -312,14 +316,14 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
         // The walk declares and defines the instances in the same order,
         // so the n-th definition is function n.
         let func = r.defined.len() as u64;
+        if *r.locations.get_or_insert(args[1]) != args[1] {
+            r.refused = Some(format!("{function}: another source-locations word"));
+            return;
+        }
         debug_assert_eq!(args.len(), 6 + np + callees.len() + homes);
         r.defined.push(Defined {
             func,
             key: function,
-            optimize: lent.optimize,
-            const_time,
-            locations: args[1],
-            callees,
         });
     });
     Ok(false)
@@ -352,13 +356,11 @@ fn record_calls(
     roots: &[&str],
     optimize: bool,
 ) -> Option<vesper::native::EntryPlans> {
-    let input = codegen_calls_words::calls_input_flags_wide(
-        world,
-        program,
-        &library_tasks(roots, optimize),
-    );
+    let tasks = library_tasks(roots, optimize);
+    let input = codegen_calls_words::calls_input_flags_wide(world, program, &tasks);
     RECORD.with(|cell| {
         let mut r = cell.borrow_mut();
+        r.tasks = tasks;
         match input {
             Some(i) => r.calls = Some(i),
             None => r.refused = Some("the program has no calls input".into()),
@@ -386,6 +388,7 @@ fn request(r: &Record) -> Vec<u8> {
     q.bytes(FLAGS.as_bytes());
     q.bytes(MODULE_NAME.as_bytes());
     q.word(1);
+    q.word(r.locations.unwrap_or_default());
     let wide: Vec<&ExportedFunction> = r
         .interface
         .as_ref()
@@ -410,15 +413,7 @@ fn request(r: &Record) -> Vec<u8> {
         q.bytes(symbol.as_bytes());
     }
     q.bytes(r.calls.as_deref().unwrap_or_default());
-    q.bytes(r.program.as_ref().map_or(&[][..], |(p, _)| p));
-    q.word(r.defined.len() as u64);
-    for d in &r.defined {
-        q.word(d.func);
-        q.word(u64::from(d.optimize) | if d.const_time { CONST_TIME_FLAG } else { 0 });
-        q.word(d.locations);
-        q.word(d.callees.len() as u64);
-        d.callees.iter().for_each(|&c| q.word(c));
-    }
+    q.bytes(r.walk_calls.as_deref().unwrap_or_default());
     q.word(wide.len() as u64);
     for f in wide {
         let inner = r

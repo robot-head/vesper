@@ -19,21 +19,25 @@
 // plans each body (@vesper/codegen-scalar over the walk's program) and
 // takes its status from the instance's ABI.
 // Slice 2a-4 runs the CLIF passes of an optimized definition, and outlines
-// its cold paths into helpers.
+// its cold paths into helpers. Slice 3e defines every instance itself: it
+// names each body's direct callees (@vesper/native-walk's call words over
+// the walk's program), takes its flags from the library task and its row,
+// and refuses an instance the body hook's plain gate would not hand over
+// (@vesper/native-walk's `frame_plan` and `graph_plain`).
 //
 // Request (little-endian words; a string is its length, then its bytes):
 //
 //     triple, flags, module name, keep CLIF (0 or 1),
+//     source locations (1 when instructions carry them),
 //     n exports, each: instance key, symbol,
 //     the calls input (a string: @vesper/codegen-calls' input, whose
 //         first library task names the exports as its roots),
-//     the walk's program (a string: @vesper/check-data's context and
-//         @vesper/place-ir's program after optimize, inline, drop
+//     the walk's calls input (a string: the same input over the walk's
+//         program, the place-ir program after optimize, inline, drop
 //         elaboration and hoisting, which the bodies are planned from),
-//     n definitions, each: instance index, flags (OPTIMIZE_FLAG,
-//         CONST_TIME_FLAG), source locations, n callees, callee
-//         instance indexes (or NO_CALLEE),
 //     then the 128-bit export entries and the v2 section (exports.ves).
+//
+// Every instance is defined, in instance order.
 //
 // Slice 2a-2b (#2642) adds what `compile_exports` defines after the walk:
 // the `define_wide_entry` adapters and a v2 library's runtime glue.
@@ -57,6 +61,8 @@ use @vesper/codegen-scalar::{codegen_scalar_body_plan_prefix};
 use @vesper/codegen-calls::data::{calls_input_round_trip};
 use @vesper/check-data::input::{Reader as IrReader, read_ctx};
 use @vesper/place-ir::{read_program};
+use @vesper/native-walk::{native_walk_call_words_bytes};
+use @vesper/native-walk::frame::{graph_plain};
 use self::declare::{Declared, declare_library, declared_new, exports_new};
 
 // The answer's status words.
@@ -79,15 +85,19 @@ const CALLEE_INDEX_MASK: u64 = 4294967295;
 const NO_VALUE: u64 = 18446744073709551615;
 pub const MALFORMED: Str = "malformed native-lib request";
 pub const UNKNOWN_FUNCTION: Str = "a definition names an unknown function";
+const NOT_PLAIN: Str = "the body hook's plain gate refuses a definition: ";
+const NO_CALL_WORDS: Str = "the walk's program has no call words for a definition: ";
 const NO_BUILDER: Str = "the function builder could not be made";
 const DECLINED_BODY: Str = "the body hook declined a definition: ";
 const DEFINE_FAILED: Str = "defining a function failed";
 const PASS_FAILED: Str = "a CLIF pass failed on a definition: ";
 const STEP_NOT_PORTED: Str = "a native_clif_opt step is not ported";
-// A definition's flags word: optimized (the word the body hook takes),
-// and constant-time (no cold outlining).
-const OPTIMIZE_FLAG: u64 = 1;
-const CONST_TIME_FLAG: u64 = 2;
+// @vesper/native-walk's call words of a task the Rust compile refuses
+// (calls.ves `REFUSED`).
+const CALLS_REFUSED: u64 = 18446744073709551615;
+// An instance's call words entry: its index and call count, before the
+// words.
+const CALL_HEADER_WORDS: u64 = 2;
 // The function words carry no pointer type (`function_words`'s 0).
 const NO_POINTER_TYPE: u32 = 0;
 // A program function with no body plan.
@@ -161,21 +171,33 @@ pub fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
 // frame), then the body. Empty on success, else the error.
 fn define_one(
     inout m: Module,
-    in req: Slice[u8],
-    inout r: Reader,
+    index: u64,
+    locations: u64,
     in d: Declared,
-    in plans: Plans
+    in plans: Plans,
+    in calls: CallWords
 ) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let index = r.word(in req);
-    let flags = r.word(in req);
-    let optimize = flags & OPTIMIZE_FLAG;
-    let const_time = flags & CONST_TIME_FLAG != 0;
-    let locations = r.word(in req);
-    let nc = r.word(in req);
+    let optimize = if d.optimize { SET } else { 0 };
+    let const_time = at64(in d.const_time, index) == SET;
+    if at64(in d.plain, index) != SET || !plans.graph_plain(index) {
+        err.extend(in NOT_PLAIN.as_bytes());
+        push_dec(inout err, index);
+        return err;
+    }
+    let call_at = match calls.at.try_get(index) {
+        Option::Some(v) => v,
+        Option::None => NO_PLAN,
+    };
+    if call_at == NO_PLAN {
+        err.extend(in NO_CALL_WORDS.as_bytes());
+        push_dec(inout err, index);
+        return err;
+    }
+    let nc = at64(in calls.words, call_at);
     let mut callees: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for _ in 0..nc {
-        let c = r.word(in req);
+    for j in 0..nc {
+        let c = at64(in calls.words, wrapping_add(wrapping_add(call_at, 1), j));
         callees.push(
             if c == NO_CALLEE {
                 NO_CALLEE
@@ -183,10 +205,6 @@ fn define_one(
                 at64(in d.ids, c & CALLEE_INDEX_MASK) | (c & ~CALLEE_INDEX_MASK)
             }
         );
-    }
-    if r.bad {
-        err.extend(in MALFORMED.as_bytes());
-        return err;
     }
     let id = at64(in d.ids, index);
     let sig = at64(in d.sigs, index);
@@ -354,6 +372,45 @@ fn optimize_function(inout b: Builder, in m: Module) -> ChunkSeq[u8] eff [Ffi[Cr
 pub struct Plans {
     words: ChunkSeq[u64],
     at: ChunkSeq[u64],
+    // per instance: the graph half of the plain gate (`graph_plain` of its
+    // function's graph; 0 when the program has no graph for it)
+    graph: ChunkSeq[u64],
+}
+
+impl Plans {
+    fn graph_plain(in self, index: u64) -> bool {
+        at64(in self.graph, index) == SET
+    }
+}
+
+// The direct callee words of each instance (@vesper/native-walk's
+// `native_walk_call_words_bytes` over the walk's calls input, the first
+// task's block): `words[at[i]]` is instance `i`'s call count, its words
+// follow; `NO_PLAN` when the block names no entry for it.
+pub struct CallWords {
+    words: ChunkSeq[u64],
+    at: ChunkSeq[u64],
+}
+
+fn call_words_of(in walk: Slice[u8], count: u64) -> CallWords {
+    let words = native_walk_call_words_bytes(in walk);
+    let mut at: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    at.resize(count, NO_PLAN);
+    let n = at64(in words, 0);
+    if words.len() == 0 || n == CALLS_REFUSED {
+        return CallWords { words: words, at: at };
+    }
+    let mut k: u64 = 1;
+    for _ in 0..n {
+        if wrapping_add(k, CALL_HEADER_WORDS) > words.len() {
+            break;
+        }
+        let index = at64(in words, k);
+        let calls = at64(in words, wrapping_add(k, 1));
+        let ok = at.try_set(index, wrapping_add(k, 1));
+        k = wrapping_add(wrapping_add(k, CALL_HEADER_WORDS), calls);
+    }
+    CallWords { words: words, at: at }
 }
 
 fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
@@ -381,6 +438,7 @@ fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
     let c = read_ctx(inout r, in program);
     let p = read_program(inout r, in program, in c);
     let mut at: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut graph: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let count = d.name_at.len();
     for i in 0..count {
         let start = at64(in d.name_at, i);
@@ -391,18 +449,21 @@ fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
         };
         let sym = c.names.lookup(in d.names[start..end]);
         let mut plan = NO_PLAN;
+        let mut plain: u64 = 0;
         for j in 0..p.fn_count() {
             if p.function(j).name == sym {
                 plan = match by_row.try_get(j) {
                     Option::Some(v) => v,
                     Option::None => NO_PLAN,
                 };
+                plain = if graph_plain(in p, j) { SET } else { 0 };
                 break;
             }
         }
         at.push(plan);
+        graph.push(plain);
     }
-    Plans { words: words, at: at }
+    Plans { words: words, at: at, graph: graph }
 }
 
 fn push_dec(inout out: ChunkSeq[u8], value: u64) {
@@ -419,6 +480,7 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
     let flags = r.bytes(in req);
     let name = r.bytes(in req);
     let keep = r.word(in req) == SET;
+    let locations = r.word(in req);
     if r.bad {
         return failure(in MALFORMED.as_bytes());
     }
@@ -454,13 +516,10 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
         return failure(in MALFORMED.as_bytes());
     }
     let plans = plans_of(in walk.as_slice(), in d);
-    let nd = r.word(in req);
-    if r.bad {
-        module_free(m);
-        return failure(in MALFORMED.as_bytes());
-    }
-    for _ in 0..nd {
-        let err = define_one(inout m, in req, inout r, in d, in plans);
+    let count = d.ids.len();
+    let callees = call_words_of(in walk.as_slice(), count);
+    for index in 0..count {
+        let err = define_one(inout m, index, locations, in d, in plans, in callees);
         if err.len() != 0 {
             module_free(m);
             return failure(in err.as_slice());

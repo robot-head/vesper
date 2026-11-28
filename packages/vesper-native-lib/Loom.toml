@@ -20,4 +20,5 @@ capability_ceiling = ["Fail", "Alloc", "Ffi"]
 "@vesper/place-ir" = { version = "^0.1", path = "../vesper-place-ir" }
 "@vesper/native-clif-opt" = { version = "^0.1", path = "../vesper-native-clif-opt" }
 "@vesper/native-vectorize" = { version = "^0.1", path = "../vesper-native-vectorize" }
+"@vesper/native-walk" = { version = "^0.1", path = "../vesper-codegen-walk" }
 "@vesper/native-cold-outline" = { version = "^0.1", path = "../vesper-native-cold-outline" }
