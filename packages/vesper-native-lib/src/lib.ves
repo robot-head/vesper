@@ -54,6 +54,7 @@ use @vesper/native-clif-opt::{STEP_MERGE_TAILS, is_ported, pass_steps, run_steps
 use @vesper/native-vectorize::{vectorize_script};
 use @vesper/native-cold-outline::{outline_script};
 use @vesper/codegen-scalar::{codegen_scalar_body_plan_prefix};
+use @vesper/codegen-calls::data::{calls_input_round_trip};
 use @vesper/check-data::input::{Reader as IrReader, read_ctx};
 use @vesper/place-ir::{read_program};
 use self::declare::{Declared, declare_library, declared_new, exports_new};
@@ -492,4 +493,11 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
             failure(in message.as_slice())
         }
     }
+}
+
+// A calls input read and written back by @vesper/codegen-calls' writers
+// (slice 3d of #2349): the differential's check that a calls input Vesper
+// writes builds the same object as the Rust-encoded one.
+pub fn calls_round_trip(in calls: Slice[u8]) -> ChunkSeq[u8] {
+    calls_input_round_trip(in calls)
 }

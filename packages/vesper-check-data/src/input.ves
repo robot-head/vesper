@@ -314,3 +314,79 @@ pub fn extend_ctx(inout reader: Reader, in bytes: Slice[u8], inout ctx: Ctx) {
     read_types(inout reader, in bytes, inout ctx.types, in ctx.nmap, inout ctx.tmap);
     read_world(inout reader, in bytes, inout ctx.world, in ctx.nmap, in ctx.tmap);
 }
+
+// The world section as `read_world` reads it (bootstrap switch slice 3d,
+// #2659), for a context whose names and types are written in symbol and
+// type-id order (@vesper/place-ir's `put_names` and `put_types`), so a
+// symbol or type id is written as it is.
+pub fn put_world(in world: World, inout o: ChunkSeq[u64]) {
+    o.push(if world.box_active { 1 } else { 0 });
+    o.push(world.adts.len());
+    for i in 0..world.adts.len() {
+        let adt = match world.adts.try_get(i) {
+            Option::Some(a) => a,
+            Option::None => break,
+        };
+        o.push(widen_u64(adt.name));
+        o.push(widen_u64(adt.mode));
+        o.push(widen_u64(adt.gn));
+        for j in 0..widen_u64(adt.gn) {
+            let g = match world.generics.try_get(wrapping_add(widen_u64(adt.ga), j)) {
+                Option::Some(g) => g,
+                Option::None => Generic { name: 0, bound: 0, row: false },
+            };
+            o.push(widen_u64(g.name));
+            o.push(widen_u64(g.bound));
+            o.push(if g.row { 1 } else { 0 });
+        }
+        o.push(if adt.is_enum { 1 } else { 0 });
+        o.push(widen_u64(adt.tile));
+        o.push(if adt.span_zero { 1 } else { 0 });
+        o.push(widen_u64(adt.vn));
+        for j in 0..widen_u64(adt.vn) {
+            let v = match world.variants.try_get(wrapping_add(widen_u64(adt.va), j)) {
+                Option::Some(v) => v,
+                Option::None => Variant { name: 0, fa: 0, fc: 0, named: false },
+            };
+            o.push(widen_u64(v.name));
+            o.push(if v.named { 1 } else { 0 });
+            o.push(widen_u64(v.fc));
+            for k in 0..widen_u64(v.fc) {
+                let f = match world.fields.try_get(wrapping_add(widen_u64(v.fa), k)) {
+                    Option::Some(f) => f,
+                    Option::None => Field { name: 0, ty: 0, modality: 0 },
+                };
+                o.push(widen_u64(f.name));
+                o.push(widen_u64(f.ty));
+                o.push(widen_u64(f.modality));
+            }
+        }
+    }
+    o.push(world.effects.len());
+    for i in 0..world.effects.len() {
+        let e = match world.effects.try_get(i) {
+            Option::Some(e) => e,
+            Option::None => EffectRow { name: 0, linear: false },
+        };
+        o.push(widen_u64(e.name));
+        o.push(if e.linear { 1 } else { 0 });
+    }
+    put_spans(in world.expr_types, true, inout o);
+    put_spans(in world.partial_ops, false, inout o);
+    put_spans(in world.overflow_ops, false, inout o);
+}
+
+fn put_spans(in rows: ChunkSeq[SpanRow], typed: bool, inout o: ChunkSeq[u64]) {
+    o.push(rows.len());
+    for i in 0..rows.len() {
+        let row = match rows.try_get(i) {
+            Option::Some(r) => r,
+            Option::None => SpanRow { start: 0, end: 0, ty: 0 },
+        };
+        o.push(row.start);
+        o.push(row.end);
+        if typed {
+            o.push(widen_u64(row.ty));
+        }
+    }
+}
