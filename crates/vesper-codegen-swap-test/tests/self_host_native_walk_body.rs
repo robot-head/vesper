@@ -79,6 +79,9 @@ struct Plan {
 
 thread_local! {
     static PLAN: RefCell<Option<Plan>> = const { RefCell::new(None) };
+    /// The functions emitted from Vesper on this thread: unlike
+    /// `EMITTED`, tests running beside it do not add to it.
+    static EMITTED_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Functions emitted from Vesper, and functions the Rust walk kept
@@ -195,6 +198,7 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     match answer {
         HANDLED => {
             EMITTED.fetch_add(1, Ordering::Relaxed);
+            EMITTED_HERE.with(|n| n.set(n.get() + 1));
             if sret != codegen_swap::body::NO_VALUE {
                 if sret >> codegen_swap::body::RESULT_WORDS_SHIFT == 0 {
                     SRET.fetch_add(1, Ordering::Relaxed);
@@ -3015,9 +3019,15 @@ fn vesper_chunk_seq_bodies_match() {
 const MIN_CHUNK_SEQ_EMITTED: u64 = 44;
 
 /// Sequence drop slots (#2653): `ChunkSeq` locals bound from calls, freed
-/// when bound again and at each return, left empty when moved out.
+/// when bound again and at each return, left empty when moved out; and
+/// temporary sequences, freed after the call that borrows them or where
+/// they are discarded.
 const SEQ_DROPS: &str = "
 fn fresh(n: u64) -> ChunkSeq[u64] {
+    // Recursive, so the optimizer keeps the calls to it.
+    if n > 1000 {
+        return fresh(wrapping_sub(n, 1000));
+    }
     let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
     s.push(n);
     s.push(wrapping_add(n, 1));
@@ -3055,9 +3065,23 @@ fn unused(n: u64) -> u64 {
     let s: ChunkSeq[u8] = ChunkSeq::new[u8]();
     wrapping_mul(n, 3)
 }
+fn count_of(in s: ChunkSeq[u64]) -> u64 {
+    s.len()
+}
+fn temp_len(n: u64) -> u64 {
+    count_of(in fresh(n))
+}
+fn temp_pair(n: u64) -> u64 {
+    wrapping_add(count_of(in fresh(n)), count_of(in fresh(wrapping_add(n, 1))))
+}
+fn discarded(n: u64) -> u64 {
+    fresh(n);
+    wrapping_add(n, 1)
+}
 fn main() -> i64 {
     let h = handed(4);
-    let total = sized(3) ^ longer(1, 2) ^ longer(5, 2) ^ rebound(7) ^ unused(9) ^ h.len();
+    let total = sized(3) ^ longer(1, 2) ^ longer(5, 2) ^ rebound(7) ^ unused(9) ^ h.len()
+        ^ temp_len(2) ^ temp_pair(5) ^ discarded(6);
     handle Fail[RuntimeError] in {
         wrapping_i64(total ^ first_of(11))
     } with {
@@ -3074,9 +3098,9 @@ fn vesper_seq_drop_slots_match() {
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let checked = vesper::check::check(&parsed.module);
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
-        let before = EMITTED.load(Ordering::Relaxed);
+        let before = EMITTED_HERE.with(std::cell::Cell::get);
         let total = both("seq_drops", &checked.world, true);
-        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        let emitted = EMITTED_HERE.with(std::cell::Cell::get) - before;
         eprintln!(
             "seq_drops: {}; {emitted} functions emitted from Vesper",
             total.summary()
@@ -3098,4 +3122,4 @@ fn vesper_seq_drop_slots_match() {
 
 /// `SEQ_DROPS`'s functions emitted from Vesper, both settings, both
 /// comparisons of a JIT-running host.
-const MIN_SEQ_DROPS_EMITTED: u64 = 28;
+const MIN_SEQ_DROPS_EMITTED: u64 = 22;
