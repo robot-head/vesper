@@ -81,7 +81,7 @@ use cranelift_codegen::ir;
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -520,20 +520,12 @@ pub fn body_instance() -> Option<Instance> {
 thread_local! {
     /// The instance of the body request being lent (see [`body_instance`]).
     static LENT_INSTANCE: RefCell<Option<Instance>> = const { RefCell::new(None) };
-    /// The generic instances lent to the `body` hook (#2715), for the
-    /// program they come from: each kept while that program is emitted,
-    /// so a hook that caches plans by a program's address sees one
-    /// address per instance.
-    static INSTANCES: RefCell<(ProgramKey, HashMap<String, Instance>)> =
-        RefCell::new(((0, 0, 0), HashMap::new()));
 }
 
-/// A generic instance lent as its own program, and its name.
+/// A generic instance lent as its own program, and its name. The program
+/// is made for the one request, so a hook must not cache its plan by the
+/// program's address (a later request's program may reuse it).
 pub type Instance = (Rc<Program>, String);
-
-/// Identifies a program for [`INSTANCES`]: its address, function count and
-/// instruction count (a later compile may reuse the address).
-type ProgramKey = (usize, usize, usize);
 
 /// Function `function` of `program` instantiated at `generics`, with its
 /// direct callees, and the instance's name (see [`body_request`]).
@@ -542,44 +534,22 @@ fn instance_program(
     function: &str,
     generics: &BTreeMap<String, Type>,
 ) -> Option<Instance> {
-    let instructions = program
-        .functions
-        .values()
-        .flat_map(|f| &f.blocks)
-        .map(|b| b.instructions.len())
-        .sum();
-    let key = (
-        std::ptr::from_ref(program) as usize,
-        program.functions.len(),
-        instructions,
-    );
     let name = crate::verified_codegen::mono::instance_name(function, generics);
-    INSTANCES.with(|cell| {
-        let mut cache = cell.borrow_mut();
-        if cache.0 != key {
-            *cache = (key, HashMap::new());
+    let source = program.functions.get(function)?;
+    let mut graph = crate::verified_codegen::mono::instantiate(source, name.clone(), generics);
+    // The bounds name the type parameters the instance substituted away
+    // (native lowering never reads them).
+    graph.bounds.clear();
+    let mut functions = BTreeMap::new();
+    for i in graph.blocks.iter().flat_map(|b| &b.instructions) {
+        if let Op::Call { callee, .. } = &i.op
+            && let Some(f) = program.functions.get(callee)
+        {
+            functions.insert(callee.clone(), f.clone());
         }
-        if let Some(found) = cache.1.get(&name) {
-            return Some(found.clone());
-        }
-        let source = program.functions.get(function)?;
-        let mut graph = crate::verified_codegen::mono::instantiate(source, name.clone(), generics);
-        // The bounds name the type parameters the instance substituted
-        // away (native lowering never reads them).
-        graph.bounds.clear();
-        let mut functions = BTreeMap::new();
-        for i in graph.blocks.iter().flat_map(|b| &b.instructions) {
-            if let Op::Call { callee, .. } = &i.op
-                && let Some(f) = program.functions.get(callee)
-            {
-                functions.insert(callee.clone(), f.clone());
-            }
-        }
-        functions.insert(name.clone(), graph);
-        let found = (Rc::new(Program { functions }), name.clone());
-        cache.1.insert(name, found.clone());
-        Some(found)
-    })
+    }
+    functions.insert(name.clone(), graph);
+    Some((Rc::new(Program { functions }), name))
 }
 
 /// A family request: `None` when no hook is in effect or it declined (the
