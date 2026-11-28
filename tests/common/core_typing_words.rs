@@ -599,6 +599,42 @@ pub fn rust_types(w: &World, checked: &[(usize, usize)]) -> String {
     out
 }
 
+/// Each checked function's span and the `R type` result Vesper wrote for
+/// it (`Checker::results`).
+pub fn vesper_results(text: &str) -> Vec<((usize, usize), String)> {
+    let mut out = vec![];
+    let mut current = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("F ") {
+            let mut parts = rest.split(' ').map(|p| p.parse::<usize>().unwrap());
+            current = Some((parts.next().unwrap(), parts.next().unwrap()));
+        } else if let Some(ty) = line.strip_prefix("R ") {
+            out.push((current.take().unwrap(), ty.to_string()));
+        }
+    }
+    out
+}
+
+/// The Rust checker's result for each function span in `spans`
+/// (`World::function_results`, keyed by the function's span), as `vesper_results` writes it.
+pub fn rust_results(w: &World, spans: &[(usize, usize)]) -> Vec<((usize, usize), String)> {
+    let by_span: BTreeMap<(usize, usize), &String> = w
+        .functions
+        .iter()
+        .map(|(name, f)| ((f.span.start, f.span.end), name))
+        .collect();
+    spans
+        .iter()
+        .map(|span| {
+            let ty = by_span
+                .get(span)
+                .and_then(|name| w.function_results.get(*name))
+                .map_or_else(|| "none".to_string(), |t| format!("{t:?}"));
+            (*span, ty)
+        })
+        .collect()
+}
+
 /// Vesper's text: `F start end` then `T start end type` rows in insertion
 /// order (a later row for a span replaces an earlier one, as
 /// `types.insert` does), `S start end` for a skipped function and `D code
@@ -636,6 +672,8 @@ pub fn vesper_types(text: &str) -> (String, Vec<(usize, usize)>, usize) {
             }
             "S" => skipped += 1,
             "D" => out.push_str(&format!("{line}\n")),
+            // A checked function's result: `vesper_results`.
+            "R" => {}
             _ => panic!("unexpected line {line}"),
         }
     }
