@@ -280,7 +280,14 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
             r.refused = Some(format!("{function}: returns through a result pointer"));
             return;
         }
-        let homes = homes.len();
+        // @vesper/native-lib binds each parameter to its block parameter,
+        // so an `inout` scalar read through its address stays with the walk.
+        let pointers = codegen_swap::body::pointers(args).unwrap_or_default();
+        if pointers.iter().any(|p| *p != codegen_swap::body::NO_VALUE) {
+            r.refused = Some(format!("{function}: an inout scalar parameter"));
+            return;
+        }
+        let homes = homes.len() + 1 + pointers.len();
         let callees = callees.to_vec();
         if module_has_data(&*lent.module) {
             r.refused = Some("the module declares data".into());

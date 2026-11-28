@@ -4051,7 +4051,8 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// The callee of an `Op::Call` that `call_function_into` lowers to one
     /// `call` of an imported function and nothing else (part 6b of the
     /// body hook, #2094): a compiled-once, pure, non-generic function of
-    /// scalar `in` parameters and a scalar result, with no status word,
+    /// scalar `in` parameters (or, for a pure callee, `inout` scalars
+    /// borrowed from whole locals, #2563) and a scalar result, with no status word,
     /// register result, caller slot or trace flag, not a reserved builtin,
     /// constant table or `dyn` stub. A `fail_only` callee (#2425) takes a
     /// failure record after its arguments: its word carries
@@ -4064,6 +4065,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         args: &[crate::ir::Argument],
         capability: Option<&str>,
         types: &[Type],
+        locals: &BTreeMap<String, Type>,
     ) -> Option<u64> {
         let source = self.world.functions.get(callee)?;
         let fails = fail_only(self.world, source);
@@ -4080,9 +4082,25 @@ impl<M: Module> Codegen<'_, '_, M> {
             || crate::arrays::table_function(callee).is_some()
             || self.world.dyn_objects.stubs.contains_key(callee)
             || args.len() != source.params.len()
-            || args.iter().any(|a| a.pass != Pass::In)
         {
             return None;
+        }
+        // A pure callee may borrow scalar locals `inout` (#2563): each
+        // such argument is a whole local, passed by its address (a scratch
+        // word for a register) and loaded back after the call.
+        for (a, p) in args.iter().zip(&source.params) {
+            let whole_local = a.place.as_ref().is_some_and(|place| {
+                place.path.is_empty()
+                    && locals.get(&place.root).is_some_and(|t| {
+                        Layout::of(self.world, &crate::numeric::default_type(t))
+                            .is_ok_and(|l| !l.aggregate())
+                    })
+            });
+            match (a.pass, p.pass) {
+                (Pass::In, Pass::In) => {}
+                (Pass::Inout, Pass::Inout) if !fails && whole_local => {}
+                _ => return None,
+            }
         }
         let scalar_type = |t: &Type| {
             !crate::seq::is_seq_type(t)
@@ -4164,7 +4182,6 @@ impl<M: Module> Codegen<'_, '_, M> {
             && self.trace_fail.is_none()
             && self.caller_slot.is_none()
             && frame.function_args.is_empty()
-            && self.pointers.is_empty()
             // A `fail_only` frame's capabilities are its failure exits
             // (#2425): the record pointer goes in the request after the
             // parameters.
@@ -4216,7 +4233,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     capability,
                     types,
                 } => Some(
-                    self.plain_call(callee, args, capability.as_deref(), types)
+                    self.plain_call(callee, args, capability.as_deref(), types, &body.locals)
                         .unwrap_or(crate::codegen_swap::body::NO_CALLEE),
                 ),
                 _ => None,
@@ -4275,6 +4292,19 @@ impl<M: Module> Codegen<'_, '_, M> {
         });
         args.push(result_homes.len() as u64);
         args.extend(result_homes);
+        // Each parameter's address variable: an `inout` scalar is loaded
+        // at entry and stored through its address at every definition
+        // (`Codegen::use_var`, `def_homes`); any other parameter has none.
+        args.push(f.params.len() as u64);
+        for p in &f.params {
+            let address = self
+                .vars
+                .get(&p.name)
+                .and_then(|var| self.pointers.get(&var.as_u32()));
+            args.push(address.map_or(crate::codegen_swap::body::NO_VALUE, |a| {
+                u64::from(a.as_u32())
+            }));
+        }
         crate::codegen_swap::body_request(
             &mut self.b,
             &mut *self.m,
