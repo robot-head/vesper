@@ -11,6 +11,7 @@ use self::exprs::{
     Arg, Ck, Ex, actual_arg, error, expect_type, expr, expr_expected, is_named, named, note, record
 };
 use self::methods::{is_seq_or_slice, peek_type, view_base};
+use self::opfacts::{mark_partial};
 
 const NONE32: u32 = 4294967295;
 
@@ -841,6 +842,9 @@ fn slice_io(inout ck: Ck, ex: Ex, family: u8, expected: u32) -> u32 {
         if !(is_named(in ck, elem_ty, shape.elem) && ck.ctx.types.node(elem_ty).n == 0) {
             error(inout ck, "E1402", ex.start, ex.end);
         }
+    }
+    if family == F_LOAD || family == F_STORE {
+        mark_partial(inout ck.facts, ex.start, ex.end);
     }
     if store {
         ck.ctx.types.unit

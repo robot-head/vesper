@@ -19,6 +19,7 @@ use self::exprs::{
 use self::relations::{compatible, infer, item, lit_of, mk_lit};
 use self::ints::{Lit, default_of, fits, int_bits, int_unsigned};
 use self::floats::{float_to_integer};
+use self::opfacts::{mark_narrow, mark_partial};
 
 const NONE32: u32 = 4294967295;
 
@@ -452,7 +453,10 @@ pub fn string_method(inout ck: Ck, ex: Ex, callee: Ex) -> Typed {
     if ck.skip {
         return typed_as(hole);
     }
-    // Fallible operations raise `IndexOutOfBounds` (lane 8's effects).
+    // `byte_at` raises `IndexOutOfBounds`.
+    if op == OP_BYTE_AT {
+        mark_partial(inout ck.facts, ex.start, ex.end);
+    }
     let result = if op == OP_LEN {
         named(inout ck, known.u64_)
     } else if op == OP_BYTE_AT {
@@ -650,6 +654,20 @@ fn seq_resolve(in ck: Ck, method: u32, seq: bool, operands: u32) -> SeqOp {
         return seq_op(SEQ_FILL_RANGE, false);
     }
     op
+}
+
+// `SeqOp::fallible`.
+fn seq_fallible(op: SeqOp) -> bool {
+    let c = op.code;
+    c == SEQ_GET
+        || c == SEQ_SET
+        || (!op.total
+            && (c == SEQ_COPY_FROM
+                || c == SEQ_COPY_WITHIN
+                || c == SEQ_MAKE_ASCII_LOWERCASE
+                || c == SEQ_FILL_RANGE
+                || c == SEQ_EXTEND_FROM_WITHIN
+                || c == SEQ_WIDE))
 }
 
 fn seq_arity(op: SeqOp) -> u32 {
@@ -982,7 +1000,10 @@ pub fn seq_method(inout ck: Ck, ex: Ex, callee: Ex) -> Typed {
             return typed_as(hole);
         }
     }
-    // Fallible operations raise `IndexOutOfBounds` (lane 8's effects).
+    // Fallible operations raise `IndexOutOfBounds` (`SeqOp::fallible`).
+    if seq_fallible(op) {
+        mark_partial(inout ck.facts, ex.start, ex.end);
+    }
     let total_bool = op.total
         && (c == SEQ_COPY_FROM
             || c == SEQ_COPY_WITHIN
@@ -1171,6 +1192,7 @@ pub fn index_expr(inout ck: Ck, ex: Ex) -> u32 {
         return hole;
     }
     arg_of_type(inout ck, ex.z, u64_ty);
+    mark_partial(inout ck.facts, ex.start, ex.end);
     elem_ty
 }
 
@@ -1200,6 +1222,7 @@ pub fn seq_finish(inout ck: Ck, ex: Ex) -> u32 {
             error(inout ck, "E1525", arg_ex.start, arg_ex.end);
         }
     }
+    mark_partial(inout ck.facts, ex.start, ex.end);
     ck.ctx.types.unit
 }
 
@@ -1400,6 +1423,9 @@ pub fn conversion_call(inout ck: Ck, ex: Ex, conv: Conv) -> u32 {
     // A failing `narrow_k` raises `Fail[ArithOverflow]` (lane 8's effects).
     if conv.family == CONV_WIDEN && !widens_to(in ck, node.name, conv.to) {
         error(inout ck, "E0200", arg_ex.start, arg_ex.end);
+    }
+    if conv.family == CONV_NARROW && !widens_to(in ck, node.name, conv.to) {
+        mark_narrow(inout ck.facts, ex.start, ex.end, conv.to);
     }
     to_ty
 }
