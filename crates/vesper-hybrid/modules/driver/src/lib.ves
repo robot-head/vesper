@@ -78,6 +78,8 @@ use @vesper/check-collect::{decls_bytes};
 // hd_step group 2 (#1893): the front-end passes in Vesper.
 use self::front::{FrontParse, parse_front, cst_text};
 use self::interface::{interface_json};
+// `vesper emit --format ir` in Vesper (#1894).
+use self::ir::{IrStatus, emit_ir_json};
 // The checked world the driver holds (#2024).
 use self::world::{
     world_of, function, is_none, param_count, has_effects, main_result, interface_stream
@@ -1407,22 +1409,7 @@ fn emit(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDrive
         return emit_text(inout s, in o, step_emit_hir(), in "".as_bytes());
     }
     if is(in o, slot_format(), in "ir") {
-        let mut flags: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        if o.optimize {
-            flags.push(emit_optimize());
-        } else {
-            flags.push(0);
-        }
-        let r = step_with(inout s, step_emit_ir(), in flags.as_slice());
-        if is_failure(r) {
-            return pass_failed(in s, r);
-        }
-        let payload = text(in s);
-        if r == emit_ir_encoded() {
-            let rendered = place_ir_json_bytes(in payload.as_slice());
-            return write_output(inout s, in o, in rendered.as_slice());
-        }
-        return write_output(inout s, in o, in payload.as_slice());
+        return emit_ir(inout s, in o);
     }
     if is(in o, slot_format(), in "lean") {
         return emit_text(inout s, in o, step_emit_lean(), in "".as_bytes());
@@ -1450,15 +1437,78 @@ fn emit(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDrive
     error(in m.as_slice())
 }
 
-// `EmitIr`'s flag bit (`EMIT_OPTIMIZE` in src/driver/native.rs): run the IR optimizer.
+// `EmitIr`'s flag bits (`EMIT_*` in src/driver/native.rs): run the IR
+// optimizer; hand over the lowering input when the session can encode it.
 fn emit_optimize() -> u8 {
     1
 }
 
-// `EmitIr`'s return code when `text(in s)` holds `ir_words::program_json_input`
-// for `@vesper/place-ir::place_ir_json_bytes` (0 = Rust fallback JSON).
+fn emit_vesper_lower() -> u8 {
+    2
+}
+
+// `EmitIr`'s return codes (`EMIT_IR_*` in src/driver/native.rs) beside the
+// Rust fallback JSON (0): `text(in s)` holds `ir_words::program_json_input`
+// for `@vesper/place-ir::place_ir_json_bytes`, or the lowering input of
+// `emit_ir_json` (ir.ves).
 fn emit_ir_encoded() -> i64 {
     1
+}
+
+fn emit_ir_lower_input() -> i64 {
+    2
+}
+
+// `vesper emit --format ir` (#1894): the lowering, the optimizer and the
+// JSON in Vesper over the session's encoded world (ir.ves); a program
+// `emit_ir_json` does not finish, or a world the session cannot encode,
+// is the session's own pass.
+fn emit_ir(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    let optimize: u8 = if o.optimize { emit_optimize() } else { 0 };
+    let mut flags: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    flags.push(optimize | emit_vesper_lower());
+    let r = step_with(inout s, step_emit_ir(), in flags.as_slice());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    if r == emit_ir_lower_input() {
+        let input = text(in s);
+        let (status, json) = emit_ir_json(in input.as_slice(), o.optimize);
+        if status == IrStatus::Ok {
+            return write_output(inout s, in o, in json.as_slice());
+        }
+        return emit_ir_rust(inout s, in o, optimize);
+    }
+    emit_ir_written(inout s, in o, r)
+}
+
+// The session's own `EmitIr` pass, with flag bits `flag`.
+fn emit_ir_rust(
+    inout s: Session,
+    in o: Options,
+    flag: u8
+) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    let mut flags: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    flags.push(flag);
+    let r = step_with(inout s, step_emit_ir(), in flags.as_slice());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    emit_ir_written(inout s, in o, r)
+}
+
+// The session's `EmitIr` text for return code `r`, rendered and written.
+fn emit_ir_written(
+    inout s: Session,
+    in o: Options,
+    r: i64
+) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    let payload = text(in s);
+    if r == emit_ir_encoded() {
+        let rendered = place_ir_json_bytes(in payload.as_slice());
+        return write_output(inout s, in o, in rendered.as_slice());
+    }
+    write_output(inout s, in o, in payload.as_slice())
 }
 
 // An `emit` pass's text, to `-o <path>` or stdout (`write_output`).

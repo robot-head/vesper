@@ -2147,6 +2147,36 @@ vesper_package(
     deps = [":check_data_package"],
 )
 
+# The Place IR lowering and the library IR pipeline, for the hybrid
+# driver's `vesper emit --format ir` (#1894).
+vesper_package(
+    name = "place_ir_lower_package",
+    srcs = glob(["packages/vesper-place-ir-lower/src/**/*.ves"]),
+    manifest = "packages/vesper-place-ir-lower/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":place_ir_package",
+    ],
+)
+
+vesper_package(
+    name = "library_ir_package",
+    srcs = glob(["packages/vesper-library-ir/src/**/*.ves"]),
+    manifest = "packages/vesper-library-ir/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":bounds_hoist_package",
+        ":check_data_package",
+        ":check_layout_package",
+        ":codegen_calls_package",
+        ":ir_inline_package",
+        ":ir_opt_package",
+        ":ir_opt_policy_package",
+        ":place_ir_package",
+    ],
+)
+
 # The e-graph and the optimizers for the hybrid compiler's ir_opt (SH3
 # lane 9, #1248) and optimize (SH3 lane 10, #1249) modules.
 vesper_package(

@@ -6,9 +6,11 @@
 
 use super::*;
 
-/// `EmitIr`'s flag bit: run the IR optimizer (`emit_optimize` in
-/// modules/driver/src/lib.ves).
+/// `EmitIr`'s flag bits (`emit_*` in modules/driver/src/lib.ves): run the
+/// IR optimizer; hand the Vesper driver the lowering input instead of a
+/// program when the world encodes (#1894).
 const EMIT_OPTIMIZE: u8 = 1;
+const EMIT_VESPER_LOWER: u8 = 2;
 
 // The ops of a native code request, `NativeObject`'s and `EmitClif`'s
 // argument `[op, has_policy, policy..]` (`native_*` in
@@ -86,16 +88,26 @@ impl Session {
             }
             Step::EmitIr => {
                 // Return codes for `emit_ir` in `modules/driver/src/lib.ves`:
-                // 1 when `self.text` holds `ir_words::program_json_input` for
+                // 2 when `self.text` holds the lowering input of
+                // `emit_ir_json` (modules/driver/src/ir.ves), 1 when it holds
+                // `ir_words::program_json_input` for
                 // `@vesper/place-ir::place_ir_json_bytes`, 0 for the Rust
                 // `serde_json` fallback (unencodable >64-bit literal types).
                 const EMIT_IR_FALLBACK: i64 = 0;
                 const EMIT_IR_ENCODED: i64 = 1;
-                // The flag byte: optimize, as the driver decided.
+                const EMIT_IR_LOWER_INPUT: i64 = 2;
+                // The flag byte: optimize, as the driver decided, and
+                // whether the driver lowers.
                 let [flag] = *arg else {
                     return Err("driver: bad emit request".into());
                 };
                 let checked = self.checked()?;
+                if flag & EMIT_VESPER_LOWER != 0
+                    && let Some(input) = crate::vesper_hybrid::driver_ir_lower_input(&checked.world)
+                {
+                    self.text = input;
+                    return Ok(EMIT_IR_LOWER_INPUT);
+                }
                 let mut program = ir::lower(checked);
                 if flag & EMIT_OPTIMIZE != 0 {
                     // The native path's optimizer, which the hybrid swaps

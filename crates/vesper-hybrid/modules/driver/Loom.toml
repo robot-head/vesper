@@ -42,3 +42,9 @@ capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdProcess]", "Ffi[Std
 # `--package` validation for `vesper emit --emit interface` (#2339, #1893)
 # and the package load's manifest decode and version match (#1986 slice 2b).
 "@vesper/loom-calculus" = { version = "^0.1", path = "../../../vesper-loom-calculus/vesper" }
+# `vesper emit --format ir`'s lowering and optimizer in Vesper (#1894).
+"@vesper/check-data" = { version = "^0.1", path = "../../../../packages/vesper-check-data" }
+"@vesper/place-ir-lower" = { version = "^0.1", path = "../../../../packages/vesper-place-ir-lower" }
+"@vesper/ir-opt" = { version = "^0.1", path = "../../../../packages/vesper-ir-opt" }
+"@vesper/ir-opt-policy" = { version = "^0.1", path = "../../../../packages/vesper-ir-opt-policy" }
+"@vesper/library-ir" = { version = "^0.1", path = "../../../../packages/vesper-library-ir" }

@@ -205,20 +205,30 @@ vesper_hybrid(
         # (#1986) the package assembler; driver-commands' `vesper
         # proof-audit` @vesper/proof-audit and `vesper verify SOURCE
         # --format` @vesper/verify and @vesper/lean-syntax (#1341, #1996);
-        # `vesper lsp` @vesper/lsp-server and @vesper/lsp (#1828).
+        # `vesper lsp` @vesper/lsp-server and @vesper/lsp (#1828); `vesper
+        # emit --format ir` the Place IR lowering, the IR optimizer and the
+        # library IR pipeline's token threading (#1894).
         "hybrid_driver": [
             ":hybrid_parse_package",
             "//:ast_package",
+            "//:bounds_hoist_package",
             "//:check_collect_package",
             "//:check_data_package",
             "//:check_layout_package",
             "//:check_names_packages_package",
+            "//:codegen_calls_package",
             "//:driver_commands_package",
             "//:driver_package",
             "//:ebpf_backend_package",
+            "//:egraph_package",
             "//:front_package",
+            "//:ir_inline_package",
+            "//:ir_opt_package",
+            "//:ir_opt_policy_package",
+            "//:library_ir_package",
             "//:lsp_package",
             "//:lsp_server_package",
+            "//:place_ir_lower_package",
             "//:place_ir_package",
             "//:proof_audit_package",
             "//:std_arena_package",
