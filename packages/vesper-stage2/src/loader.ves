@@ -4,6 +4,7 @@
 
 use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset};
 use @vesper/check-names-packages::{resolve_sugar_imports_bytes};
+use @vesper/preludes::{strings_source};
 use @vesper/sugar::driver::{
     BootstrapSugarOutput, FREE_NAME_WORDS, Imports, PackageSugarBinding, PackageSugarDefinition,
     SugarDeclarationSpan, SugarImportSpan, expand_bootstrap_module, expand_module,
@@ -1103,7 +1104,20 @@ fn collect_mod_files(
     }
 }
 
-fn pkg_src_dir(in pkg_dir: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+// A package's source directory for target OS `os` (src/packages.rs): for
+// wasm32-wasip2 (`os` empty) `src-wasip2` when it has a root module, for a
+// native OS `src-<os>` when it exists, else `src`.
+fn pkg_src_dir(in pkg_dir: Slice[u8], in os: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    if os.len() != 0 {
+        let mut name = ChunkSeq::new[u8]();
+        name.extend(in "src-".as_bytes());
+        name.extend(in os);
+        let os_dir = join_path(in pkg_dir, in name.as_slice());
+        return match try_list_dir(in os_dir.as_slice()) {
+            Option::Some(_) => os_dir,
+            Option::None => join_path(in pkg_dir, in "src".as_bytes()),
+        };
+    }
     let wasi_dir = join_path(in pkg_dir, in "src-wasip2".as_bytes());
     let wasi_lib = join_path(in wasi_dir.as_slice(), in "lib.ves".as_bytes());
     match try_read_file(in wasi_lib.as_slice()) {
@@ -1131,7 +1145,8 @@ fn scan_pkg_submods(
     in pkgs: ChunkSeq[PkgNode],
     inout base_off: u64,
     inout files: ChunkSeq[FileEntry],
-    inout mods: ChunkSeq[ModEntry]
+    inout mods: ChunkSeq[ModEntry],
+    in os: Slice[u8]
 ) eff [Ffi[StdFs]] {
     let mut pos: u64 = 0;
     loop {
@@ -1188,7 +1203,7 @@ fn scan_pkg_submods(
                                 },
                                 Option::None => ChunkSeq::new[u8](),
                             };
-                            let sdir = pkg_src_dir(in pdir.as_slice());
+                            let sdir = pkg_src_dir(in pdir.as_slice(), in os);
                             let mut rel = ChunkSeq::new[u8]();
                             rel.extend(in src[m0..m1]);
                             rel.extend(in ".ves".as_bytes());
@@ -1442,10 +1457,14 @@ fn push_swar(inout out: ChunkSeq[u8], in suf: Str) {
 }
 
 fn push_popcount(inout out: ChunkSeq[u8], kind_idx: u64, in bits_expr: Str) {
+    push_popcount_bytes(inout out, kind_idx, in bits_expr.as_bytes());
+}
+
+fn push_popcount_bytes(inout out: ChunkSeq[u8], kind_idx: u64, in bits_expr: Slice[u8]) {
     let wide = kind_bits_of(kind_idx) == 128;
     if wide {
         out.extend(in "let w: u128 = ".as_bytes());
-        out.extend(in bits_expr.as_bytes());
+        out.extend(in bits_expr);
         out.extend(in "; let v0lo: u64 = wrapping_u64(w); ".as_bytes());
         push_swar(inout out, in "lo");
         out.extend(in "let v0hi: u64 = wrapping_u64(w >> 64); ".as_bytes());
@@ -1453,23 +1472,35 @@ fn push_popcount(inout out: ChunkSeq[u8], kind_idx: u64, in bits_expr: Str) {
         out.extend(in "let c: u32 = wrapping_add(clo, chi); ".as_bytes());
     } else {
         out.extend(in "let v0: u64 = widen_u64(".as_bytes());
-        out.extend(in bits_expr.as_bytes());
+        out.extend(in bits_expr);
         out.extend(in "); ".as_bytes());
         push_swar(inout out, in "");
     }
 }
 
-fn push_pattern_let(inout out: ChunkSeq[u8], ki: u64) {
-    let un = kind_unsigned_name(ki);
-    out.extend(in "let pat: ".as_bytes());
-    out.extend(in un.as_bytes());
+// The operand's bit pattern in the unsigned kind of the same width
+// (src/integer_widths.rs `bit_source`'s `pattern`).
+fn push_pattern(inout out: ChunkSeq[u8], ki: u64) {
     if kind_is_signed(ki) {
-        out.extend(in " = wrapping_".as_bytes());
-        out.extend(in un.as_bytes());
-        out.extend(in "(x); ".as_bytes());
+        out.extend(in "wrapping_".as_bytes());
+        out.extend(in kind_unsigned_name(ki).as_bytes());
+        out.extend(in "(x)".as_bytes());
     } else {
-        out.extend(in " = x; ".as_bytes());
+        out.extend(in "x".as_bytes());
     }
+}
+
+// `let p: <un> = <pattern>; `, with `mut` when `mutable`.
+fn push_pattern_let(inout out: ChunkSeq[u8], ki: u64, mutable: bool) {
+    out.extend(in "let ".as_bytes());
+    if mutable {
+        out.extend(in "mut ".as_bytes());
+    }
+    out.extend(in "p: ".as_bytes());
+    out.extend(in kind_unsigned_name(ki).as_bytes());
+    out.extend(in " = ".as_bytes());
+    push_pattern(inout out, ki);
+    out.extend(in "; ".as_bytes());
 }
 
 fn emit_bit_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
@@ -1509,31 +1540,29 @@ fn emit_bit_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
     }
     out.extend(in " { ".as_bytes());
     if fam == 0 {
-        push_pattern_let(inout out, ki);
-        out.extend(in "let mut lp: ".as_bytes());
-        out.extend(in un.as_bytes());
-        out.extend(in " = pat; ".as_bytes());
+        push_pattern_let(inout out, ki, true);
         let mut s: u64 = 1;
         loop {
             if s >= bits {
                 break;
             }
-            out.extend(in "lp = lp | (lp >> ".as_bytes());
+            out.extend(in "p = p | (p >> ".as_bytes());
             push_dec(inout out, s);
             out.extend(in "); ".as_bytes());
             s = wrapping_mul(s, 2);
         }
-        push_popcount(inout out, ki, in "lp");
+        push_popcount(inout out, ki, in "p");
         out.extend(in "let width: u32 = ".as_bytes());
         push_dec(inout out, bits);
         out.extend(in "; wrapping_sub(width, c)".as_bytes());
     } else if fam == 1 {
-        push_pattern_let(inout out, ki);
-        push_popcount(inout out, ki, in "~pat & wrapping_sub(pat, 1)");
+        push_pattern_let(inout out, ki, false);
+        push_popcount(inout out, ki, in "~p & wrapping_sub(p, 1)");
         out.extend(in "c".as_bytes());
     } else if fam == 2 {
-        push_pattern_let(inout out, ki);
-        push_popcount(inout out, ki, in "pat");
+        let mut pattern = ChunkSeq::new[u8]();
+        push_pattern(inout pattern, ki);
+        push_popcount_bytes(inout out, ki, in pattern.as_slice());
         out.extend(in "c".as_bytes());
     } else if fam == 3 {
         out.extend(in "let zero: ".as_bytes());
@@ -1547,18 +1576,16 @@ fn emit_bit_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
         out.extend(in "let s: u32 = n & ".as_bytes());
         push_dec(inout out, wrapping_sub(bits, 1));
         out.extend(in "; if s == 0 { x } else { ".as_bytes());
-        push_pattern_let(inout out, ki);
+        push_pattern_let(inout out, ki, false);
         out.extend(in "let one: ".as_bytes());
         out.extend(in un.as_bytes());
         out.extend(in " = 1; let keep: ".as_bytes());
         out.extend(in un.as_bytes());
         out.extend(in " = wrapping_sub(rotate_right(one, s), one); let r: ".as_bytes());
         out.extend(in un.as_bytes());
-        out.extend(in " = rotate_right(pat, s) & keep; ".as_bytes());
+        out.extend(in " = rotate_right(p, s) & keep; ".as_bytes());
         if signed {
-            out.extend(in "let zero: ".as_bytes());
-            out.extend(in k.as_bytes());
-            out.extend(in " = 0; if x < zero { wrapping_".as_bytes());
+            out.extend(in "if x < 0 { wrapping_".as_bytes());
             out.extend(in k.as_bytes());
             out.extend(in "(r | ~keep) } else { wrapping_".as_bytes());
             out.extend(in k.as_bytes());
@@ -1603,18 +1630,16 @@ fn emit_checked_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
             in "if b > a { Option::None } else { Option::Some(wrapping_sub(a, b)) }".as_bytes()
         );
     } else if (fam == 6 || fam == 7) && signed {
-        out.extend(in "let zero: ".as_bytes());
-        out.extend(in k.as_bytes());
-        out.extend(in " = 0; let s: ".as_bytes());
+        out.extend(in "let s: ".as_bytes());
         out.extend(in k.as_bytes());
         if fam == 6 {
             out.extend(
-                in " = wrapping_add(a, b); if (a < zero) == (b < zero) && (s < zero) != (a < zero) { Option::None } else { Option::Some(s) }"
+                in " = wrapping_add(a, b); if (a < 0) == (b < 0) && (s < 0) != (a < 0) { Option::None } else { Option::Some(s) }"
                     .as_bytes()
             );
         } else {
             out.extend(
-                in " = wrapping_sub(a, b); if (a < zero) != (b < zero) && (s < zero) != (a < zero) { Option::None } else { Option::Some(s) }"
+                in " = wrapping_sub(a, b); if (a < 0) != (b < 0) && (s < 0) != (a < 0) { Option::None } else { Option::Some(s) }"
                     .as_bytes()
             );
         }
@@ -1633,9 +1658,7 @@ fn emit_checked_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
         out.extend(in k.as_bytes());
         out.extend(in "(p)) }".as_bytes());
     } else if !signed && bits == 128 {
-        out.extend(in "let zero: ".as_bytes());
-        out.extend(in k.as_bytes());
-        out.extend(in " = 0; if a == zero { Option::Some(zero) } else { let p: ".as_bytes());
+        out.extend(in "if a == 0 { Option::Some(a) } else { let p: ".as_bytes());
         out.extend(in k.as_bytes());
         out.extend(
             in " = wrapping_mul(a, b); if p / a != b { Option::None } else { Option::Some(p) } }"
@@ -1643,7 +1666,7 @@ fn emit_checked_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
         );
     } else if signed && bits == 128 {
         out.extend(
-            in "let zero: i128 = 0; let uzero: u128 = 0; let ua: u128 = if a < zero { wrapping_u128(wrapping_sub(zero, a)) } else { wrapping_u128(a) }; let ub: u128 = if b < zero { wrapping_u128(wrapping_sub(zero, b)) } else { wrapping_u128(b) }; if ua == uzero { Option::Some(zero) } else { let p: u128 = wrapping_mul(ua, ub); let one: u128 = 1; let limit: u128 = rotate_right(one, 1); if p / ua != ub { Option::None } else if (a < zero) != (b < zero) { if p > limit { Option::None } else { Option::Some(wrapping_i128(wrapping_sub(uzero, p))) } } else if p >= limit { Option::None } else { Option::Some(wrapping_i128(p)) } }"
+            in "let zero: i128 = 0; let uzero: u128 = 0; let ua: u128 = if a < 0 { wrapping_u128(wrapping_sub(zero, a)) } else { wrapping_u128(a) }; let ub: u128 = if b < 0 { wrapping_u128(wrapping_sub(zero, b)) } else { wrapping_u128(b) }; if ua == 0 { Option::Some(zero) } else { let p: u128 = wrapping_mul(ua, ub); let one: u128 = 1; let limit: u128 = rotate_right(one, 1); if p / ua != ub { Option::None } else if (a < 0) != (b < 0) { if p > limit { Option::None } else { Option::Some(wrapping_i128(wrapping_sub(uzero, p))) } } else if p >= limit { Option::None } else { Option::Some(wrapping_i128(p)) } }"
                 .as_bytes()
         );
     } else if !signed {
@@ -1657,7 +1680,7 @@ fn emit_checked_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
         out.extend(in "let zero: ".as_bytes());
         out.extend(in k.as_bytes());
         out.extend(
-            in " = 0; let ua: u64 = if a < zero { wrapping_u64(wrapping_sub(zero, a)) } else { wrapping_u64(a) }; let ub: u64 = if b < zero { wrapping_u64(wrapping_sub(zero, b)) } else { wrapping_u64(b) }; let (lo, hi) = mul_wide(ua, ub); let limit: u64 = 9223372036854775807; if hi != 0 { Option::None } else if (a < zero) != (b < zero) { if lo > wrapping_add(limit, 1) { Option::None } else { Option::Some(wrapping_"
+            in " = 0; let ua: u64 = if a < 0 { wrapping_u64(wrapping_sub(zero, a)) } else { wrapping_u64(a) }; let ub: u64 = if b < 0 { wrapping_u64(wrapping_sub(zero, b)) } else { wrapping_u64(b) }; let (lo, hi) = mul_wide(ua, ub); let limit: u64 = 9223372036854775807; if hi != 0 { Option::None } else if (a < 0) != (b < 0) { if lo > wrapping_add(limit, 1) { Option::None } else { Option::Some(wrapping_"
                 .as_bytes()
         );
         out.extend(in k.as_bytes());
@@ -1718,32 +1741,18 @@ fn append_extra_intrinsics(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8])
         need.push(false);
         skip.push(false);
     }
-    // Pre-mark the 11 functions of preludes/intrinsics.ves (always in `$string_prelude.ves`).
-    // fam 6 (checked_add): u64=3 (75), u128=5 (77); fam 7 (checked_sub): u64=3 (87)
-    // fam 8 (checked_mul): u64=3 (99), u128=5 (101)
-    // fam 3 (wrapping_neg): i64=9 (45)
-    // fam 4 (wrapping_shl): u32=2 (50), u64=3 (51)
-    // fam 5 (wrapping_shr): u32=2 (62), u64=3 (63)
-    // fam 1 (trailing_zeros): u64=3 (15)
-    let _ = skip.try_set(15, true);
-    let _ = skip.try_set(45, true);
-    let _ = skip.try_set(50, true);
-    let _ = skip.try_set(51, true);
-    let _ = skip.try_set(62, true);
-    let _ = skip.try_set(63, true);
-    let _ = skip.try_set(75, true);
-    let _ = skip.try_set(77, true);
-    let _ = skip.try_set(87, true);
-    let _ = skip.try_set(99, true);
-    let _ = skip.try_set(101, true);
-
     for mi in 0..mods.len() {
         match mods.try_get(mi) {
             Option::Some(m) => scan_mod_intrinsics(in m.text.as_slice(), inout need, inout skip),
             Option::None => {},
         }
     }
-    // 64-bit `checked_mul_k` (usize=100, i64=105, isize=106) calls `mul_wide`.
+    // 64-bit `checked_mul_k` (u64=99, usize=100, i64=105, isize=106) calls
+    // `mul_wide`.
+    let need_mul_u64 = match need.try_get(99) {
+        Option::Some(v) => v,
+        Option::None => false,
+    };
     let need_mul_usize = match need.try_get(100) {
         Option::Some(v) => v,
         Option::None => false,
@@ -1756,7 +1765,7 @@ fn append_extra_intrinsics(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8])
         Option::Some(v) => v,
         Option::None => false,
     };
-    if need_mul_usize || need_mul_i64 || need_mul_isize {
+    if need_mul_u64 || need_mul_usize || need_mul_i64 || need_mul_isize {
         let _ = need.try_set(108, true);
     }
     let need_mw = match need.try_get(108) {
@@ -1939,24 +1948,110 @@ fn scan_option_methods(
 // The Rust checker's option prelude (src/option_methods.rs): an
 // `impl Option[T]` block with the methods no module defines itself, added
 // when a module calls one of those.
-// `preludes/str_chars.ves` (`Str::next_char`), when a module calls
-// `next_char` and none defines it: the part of the string prelude the
-// Rust loader adds for it (`strings::needs_prelude`).
-fn append_str_chars(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8]) {
-    let mut used = false;
+// The string prelude's methods (src/strings.rs `PRELUDE_NAMES`): a
+// mention of one brings the prelude in.
+fn is_string_prelude_method(in tok: Slice[u8]) -> bool {
+    eq_bytes(in tok, in "is_char_boundary".as_bytes())
+        || eq_bytes(in tok, in "next_char".as_bytes())
+        || eq_bytes(in tok, in "char_at".as_bytes())
+        || eq_bytes(in tok, in "char_count".as_bytes())
+        || eq_bytes(in tok, in "concat".as_bytes())
+        || eq_bytes(in tok, in "from_utf8".as_bytes())
+}
+
+// The string prelude's static functions after `String::`
+// (src/strings.rs `PRELUDE_PATHS`).
+fn is_string_prelude_static(in tok: Slice[u8]) -> bool {
+    eq_bytes(in tok, in "new".as_bytes())
+        || eq_bytes(in tok, in "with_capacity".as_bytes())
+        || eq_bytes(in tok, in "from_utf8".as_bytes())
+}
+
+// The byte of `:`.
+fn colon_byte() -> u8 {
+    58
+}
+
+// Whether the code of `src` (not its comments or string literals) needs
+// the string prelude, as src/strings.rs `needs_prelude` decides: a
+// parameter of type `Str` (`: Str`), a path to one of the prelude's
+// static functions or a mention of one of its methods, other than where
+// a `fn` defines it.
+fn needs_string_prelude(in src: Slice[u8]) -> bool {
+    let n = src.len();
+    let mut pos: u64 = 0;
+    let mut after_fn = false;
+    let mut after_string = false;
+    let mut colons: u64 = 0;
+    loop {
+        if pos >= n {
+            break;
+        }
+        let (next_p, skipped) = next_code_byte(in src, pos);
+        if skipped != 0 {
+            after_fn = false;
+            after_string = false;
+            colons = 0;
+            pos = next_p;
+            continue;
+        }
+        let b = byte_at(in src, pos);
+        if b == 47 && wrapping_add(pos, 1) < n && byte_at(in src, wrapping_add(pos, 1)) == 42 {
+            pos = block_comment_end(in src, pos);
+            continue;
+        }
+        if is_ident_byte(b) {
+            let start = pos;
+            loop {
+                if pos >= n || !is_ident_byte(byte_at(in src, pos)) {
+                    break;
+                }
+                pos = wrapping_add(pos, 1);
+            }
+            let tok = src[start..pos];
+            if !after_fn && is_string_prelude_method(in tok) {
+                return true;
+            }
+            if after_string && colons == 2 && is_string_prelude_static(in tok) {
+                return true;
+            }
+            if colons == 1 && eq_bytes(in tok, in "Str".as_bytes()) {
+                return true;
+            }
+            after_fn = eq_bytes(in tok, in "fn".as_bytes());
+            after_string = eq_bytes(in tok, in "String".as_bytes());
+            colons = 0;
+            continue;
+        }
+        pos = wrapping_add(pos, 1);
+        if b == 32 || b == 9 || b == 10 || b == 13 {
+            continue;
+        }
+        if b == colon_byte() {
+            colons = wrapping_add(colons, 1);
+            after_fn = false;
+            continue;
+        }
+        after_fn = false;
+        after_string = false;
+        colons = 0;
+    }
+    false
+}
+
+// The string prelude (@vesper/preludes `strings_source`, the Rust
+// checker's src/strings.rs `PRELUDE`), when a module needs it.
+fn append_string_prelude(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8]) {
     for mi in 0..mods.len() {
         match mods.try_get(mi) {
             Option::Some(m) => {
-                if contains_word(in m.text.as_slice(), "fn next_char") {
+                if needs_string_prelude(in m.text.as_slice()) {
+                    out.extend(in strings_source().as_bytes());
                     return;
                 }
-                used = used || contains_word(in m.text.as_slice(), "next_char");
             },
             Option::None => {},
         }
-    }
-    if used {
-        out.extend(in include_str("preludes/str_chars.ves").as_bytes());
     }
 }
 
@@ -2174,6 +2269,15 @@ pub fn package_graph_vsys_paths(
 }
 
 pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    load_package_graph_bytes_for(in root_dir, in "".as_bytes())
+}
+
+// The package graph of `root_dir` for target OS `os` (`linux`, `macos`,
+// `windows`), or for wasm32-wasip2 when `os` is empty.
+pub fn load_package_graph_bytes_for(
+    in root_dir: Slice[u8],
+    in os: Slice[u8]
+) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
     let mut pkgs = ChunkSeq::new[PkgNode]();
     match load_pkg_graph(in root_dir, inout pkgs) {
         Option::Some(_) => {},
@@ -2193,7 +2297,7 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
             },
             Option::None => ChunkSeq::new[u8](),
         };
-        let src_dir = pkg_src_dir(in dir.as_slice());
+        let src_dir = pkg_src_dir(in dir.as_slice(), in os);
         let lib_p = join_path(in src_dir.as_slice(), in "lib.ves".as_bytes());
         let main_p = join_path(in src_dir.as_slice(), in "main.ves".as_bytes());
         let root_segs = ChunkSeq::new[ChunkSeq[u8]]();
@@ -2253,7 +2357,14 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
             },
             Option::None => ChunkSeq::new[u8](),
         };
-        scan_pkg_submods(in mtext.as_slice(), in pkgs, inout base_off, inout files, inout mods);
+        scan_pkg_submods(
+            in mtext.as_slice(),
+            in pkgs,
+            inout base_off,
+            inout files,
+            inout mods,
+            in os
+        );
         scan_idx = wrapping_add(scan_idx, 1);
     }
     let mut sp_segs = ChunkSeq::new[ChunkSeq[u8]]();
@@ -2261,11 +2372,11 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
     sp_seg.extend(in "intrinsics".as_bytes());
     sp_segs.push(sink sp_seg);
     let mut sp_src = ChunkSeq::new[u8]();
-    sp_src.extend(in include_str("preludes/string.ves").as_bytes());
-    sp_src.extend(in include_str("preludes/intrinsics.ves").as_bytes());
-    append_option_methods(in mods, inout sp_src);
-    append_str_chars(in mods, inout sp_src);
+    // The Rust checker's order (src/check.rs `World::collect`): the width
+    // intrinsics, the string prelude, then the option methods.
     append_extra_intrinsics(in mods, inout sp_src);
+    append_string_prelude(in mods, inout sp_src);
+    append_option_methods(in mods, inout sp_src);
     collect_mod_files(
         0,
         in "".as_bytes(),

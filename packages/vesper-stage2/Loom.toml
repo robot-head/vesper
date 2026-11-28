@@ -11,6 +11,7 @@ license = "MIT OR Apache-2.0"
 "@vesper/check-core-typing" = { version = "^0.1", path = "../vesper-check-core-typing" }
 "@vesper/place-ir" = { version = "^0.1", path = "../vesper-place-ir" }
 "@vesper/place-ir-lower" = { version = "^0.1", path = "../vesper-place-ir-lower" }
+"@vesper/preludes" = { version = "^0.1", path = "../vesper-preludes" }
 "@vesper/wasm-backend" = { version = "^0.1", path = "../vesper-wasm-backend" }
 "@vesper/wit-component" = { version = "^0.1", path = "../vesper-wit-component" }
 "@vesper-std/arena" = { version = "^0.1", path = "../vesper-std/arena" }

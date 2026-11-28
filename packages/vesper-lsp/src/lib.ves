@@ -22,7 +22,7 @@ pub use self::commands::{
 pub use self::envelope::{Env, Envelope, Id, NO_TOKEN, decoded, new_doc, parse_envelope};
 pub use self::encode::encode_frame;
 pub use self::frame::{Body, Cursor, read_frame};
-pub use self::limits::{Le, LimitWord, Perr, Plimits, hard, perr_name, read_limits};
+pub use self::limits::{Le, LimitWord, Perr, Plimits, default_limits, hard, perr_name, read_limits};
 pub use self::numbers::{U64_MAX_LAST_DIGIT, U64_MAX_TENTH, number_out_of_range};
 
 // A `read_frame` step's status.

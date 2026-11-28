@@ -6,10 +6,10 @@
 //! file is byte-identical, differs, or was declined (with why).
 //!
 //! An output the builder writes must never differ. The interface and
-//! binding of [`MIN_EXPORTS`] libraries must come out identical. Objects
-//! decline until Stage 2 builds @vesper/native-lib's request itself
-//! (slices 3b to 3d of #2659), so [`MIN_OBJECTS`] is the progress meter:
-//! raise it as they land.
+//! binding of [`MIN_EXPORTS`] libraries must come out identical. The port
+//! builder makes @vesper/native-lib's request itself (slice 3g of #2659,
+//! #2733); [`MIN_OBJECTS`] is the progress meter for the objects: raise it
+//! as more of them come out identical.
 //!
 //! Inputs: [`stage2::BUILDER_ENV`] (the composed component, from
 //! `//:vesper-port-builder.wasm`), the wasmtime CLI ([`stage2::wasmtime`])
@@ -30,7 +30,7 @@ use vesper_port_harness::stage2;
 /// Libraries whose interface and binding must be identical.
 const MIN_EXPORTS: usize = 52;
 /// Libraries whose object must be identical.
-const MIN_OBJECTS: usize = 0;
+const MIN_OBJECTS: usize = 2;
 /// The `.vsys` target every library is built for (an explicit triple with
 /// no extra CPU features, so objects do not depend on the machine).
 const TRIPLE: &str = "x86_64-unknown-linux-gnu";
@@ -49,9 +49,10 @@ const EXPORT_DECLINES: &[&str] = &[
 /// Why @vesper/port-builder declines the object (`OBJECT_*`).
 const OBJECT_DECLINES: &[&str] = &[
     "",
-    "Stage 2 does not build native-lib's request yet",
+    "Stage 2's front end made no calls input",
     "native-lib answered with an error",
     "the interface was declined",
+    "native-lib ran out of Stage 2's memory",
 ];
 
 fn repo() -> PathBuf {
@@ -252,9 +253,10 @@ fn stage2_port_builder_matches_rust() {
             exports >= MIN_EXPORTS,
             "only {exports} interfaces and bindings identical"
         );
-        // MIN_OBJECTS is 0 until the first object lands.
-        #[allow(clippy::absurd_extreme_comparisons)]
-        let objects_met = object.same >= MIN_OBJECTS;
-        assert!(objects_met, "only {} objects identical", object.same);
+        assert!(
+            object.same >= MIN_OBJECTS,
+            "only {} objects identical",
+            object.same
+        );
     }
 }

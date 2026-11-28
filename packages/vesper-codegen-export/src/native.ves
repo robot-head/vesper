@@ -1,0 +1,154 @@
+// The parts of @vesper/native-lib's request that come from the library
+// interface (bootstrap switch slice 3g, #2733): what
+// crates/vesper-codegen-swap-test/tests/self_host_native_lib.rs `request`
+// reads off `LibraryInterface`, so the Stage 2 port builder can ask
+// native-lib for a port's object with no Rust half.
+//
+// - the roots of the library task: the functions' names in byte order,
+//   one per line (`native_export::object` sorts them);
+// - the exports: each function's name (its instance key) and symbol;
+// - the 128-bit export entries (`native_export::needs_wide_entry`);
+// - whether the library takes the v2 runtime glue.
+//
+// The request's strings are a length word and their bytes; its words are
+// little-endian.
+use self::iface::{FnRow, Iface, K_SCALAR, P_INOUT, read_iface};
+
+const I128: Str = "i128";
+const U128: Str = "u128";
+const NEWLINE: u8 = 10;
+const WORD_BYTES: u64 = 8;
+
+pub struct NativeExports {
+    // the library task's roots, one per line
+    roots: ChunkSeq[u8],
+    // n exports, each: instance key, symbol
+    exports: ChunkSeq[u8],
+    // n wide entries, each: export symbol, result pointer, wide result,
+    // failure record, n params, each: pointer, loaded (0 or 1 each)
+    wide: ChunkSeq[u8],
+    // whether the library uses export ABI v2 or later
+    v2: bool,
+}
+
+fn put_word(inout out: ChunkSeq[u8], v: u64) {
+    let at = out.len();
+    out.resize(wrapping_add(at, WORD_BYTES), 0);
+    let ok = out.try_write_u64_le(at, v);
+}
+
+fn put_flag(inout out: ChunkSeq[u8], b: bool) {
+    put_word(inout out, if b { 1 } else { 0 });
+}
+
+fn put_name(in i: Iface, inout out: ChunkSeq[u8], sym: u32) {
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    i.names.write(sym, inout text);
+    put_word(inout out, text.len());
+    out.extend(in text.as_slice());
+}
+
+// `native_export::wide_by_pointer`: `i128` or `u128`, which the export
+// ABI passes through a pointer to its two words.
+fn wide_by_pointer(in i: Iface, t: u32) -> bool {
+    let n = i.node(t);
+    n.kind == K_SCALAR
+        && (i.names.spells(n.name, in I128.as_bytes())
+            || i.names.spells(n.name, in U128.as_bytes()))
+}
+
+// A by-value 128-bit parameter: `wide_by_pointer` and not `inout`.
+fn wide_param(in i: Iface, f: FnRow, k: u64) -> bool {
+    let p = i.param(wrapping_add(f.p0, k));
+    i.pass(p) != P_INOUT && wide_by_pointer(in i, p.ty)
+}
+
+// `native_export::needs_wide_entry`.
+fn needs_wide_entry(in i: Iface, f: FnRow) -> bool {
+    if wide_by_pointer(in i, f.result) {
+        return true;
+    }
+    for k in 0..f.pn {
+        if wide_param(in i, f, k) {
+            return true;
+        }
+    }
+    false
+}
+
+// Whether name `a` sorts before name `b` by their bytes.
+fn name_before(in i: Iface, a: u32, b: u32) -> bool {
+    let na = i.names.size(a);
+    let nb = i.names.size(b);
+    let n = if na < nb { na } else { nb };
+    for k in 0..n {
+        let x = i.names.byte(a, k);
+        let y = i.names.byte(b, k);
+        if x != y {
+            return x < y;
+        }
+    }
+    na < nb
+}
+
+// The library task's roots: the functions' names in byte order.
+fn roots_of(in i: Iface) -> ChunkSeq[u8] {
+    let mut order: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..i.fns.len() {
+        let name = i.func(k).name;
+        let mut at = order.len();
+        order.push(name);
+        loop {
+            if at == 0 {
+                break;
+            }
+            let before = order.try_get(wrapping_sub(at, 1)).unwrap_or(0);
+            if !name_before(in i, name, before) {
+                break;
+            }
+            let ok1 = order.try_set(at, before);
+            let ok2 = order.try_set(wrapping_sub(at, 1), name);
+            at = wrapping_sub(at, 1);
+        }
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for k in 0..order.len() {
+        if k != 0 {
+            out.push(NEWLINE);
+        }
+        i.names.write(order.try_get(k).unwrap_or(0), inout out);
+    }
+    out
+}
+
+// The request's pieces for the interface in the words of
+// tests/self_host_codegen_export/words.rs (`binding_input_of_plan`).
+pub fn native_exports(in input: Slice[u8]) -> NativeExports {
+    let i = read_iface(in input);
+    let mut exports: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut wide: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut wide_count: u64 = 0;
+    put_word(inout exports, i.fns.len());
+    for k in 0..i.fns.len() {
+        let f = i.func(k);
+        put_name(in i, inout exports, f.name);
+        put_name(in i, inout exports, f.symbol);
+        if !needs_wide_entry(in i, f) {
+            continue;
+        }
+        wide_count = wrapping_add(wide_count, 1);
+        put_name(in i, inout wide, f.symbol);
+        put_flag(inout wide, f.result_pointer);
+        put_flag(inout wide, wide_by_pointer(in i, f.result));
+        put_flag(inout wide, f.fail != 0);
+        put_word(inout wide, f.pn);
+        for j in 0..f.pn {
+            put_flag(inout wide, i.param(wrapping_add(f.p0, j)).pointer);
+            put_flag(inout wide, wide_param(in i, f, j));
+        }
+    }
+    let mut counted: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_word(inout counted, wide_count);
+    counted.extend(in wide.as_slice());
+    NativeExports { roots: roots_of(in i), exports: exports, wide: counted, v2: i.is_v2() }
+}

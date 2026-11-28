@@ -10,8 +10,7 @@ copy enum Engine {
     Test,
     Doc,
     Lint,
-    Verify,
-    Lsp
+    Verify
 }
 
 // `vesper forge <check|expand|lean>` after argument parsing
@@ -91,10 +90,56 @@ pub fn verify_run(in packed: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[HybridCommands]
     take_error(Engine::Verify, n)
 }
 
-// `vesper lsp` over stdin and stdout (`src/lsp.rs::serve`).
-pub fn lsp_serve() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
-    let n = HybridCommands::hc_lsp_serve();
-    take_error(Engine::Lsp, n)
+// The LSP loop's engine seam (@vesper/lsp-server, #1828 part 15): see
+// the `hc_lsp_engine_*` functions of commands-linux.vsys.
+pub fn lsp_engine_start() -> u64 eff [Ffi[HybridCommands]] {
+    HybridCommands::hc_lsp_engine_start()
+}
+
+pub fn lsp_engine_frame(in body: Slice[u8]) -> u64 eff [Ffi[HybridCommands]] {
+    HybridCommands::hc_lsp_engine_frame(in body)
+}
+
+pub fn lsp_engine_tick() -> u64 eff [Ffi[HybridCommands]] {
+    HybridCommands::hc_lsp_engine_tick()
+}
+
+pub fn lsp_engine_take(inout buf: Slice[u8]) -> u64 eff [Ffi[HybridCommands]] {
+    HybridCommands::hc_lsp_engine_take(inout buf)
+}
+
+pub fn lsp_engine_exit() -> u64 eff [Ffi[HybridCommands]] {
+    HybridCommands::hc_lsp_engine_exit()
+}
+
+// The last error's text, copied out (a second copy when it grew).
+pub fn lsp_engine_error_text() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let n = HybridCommands::hc_lsp_engine_error(inout err.as_slice_mut());
+    if n == 0 {
+        return err;
+    }
+    err.resize(n, 0);
+    let actual = HybridCommands::hc_lsp_engine_error(inout err.as_slice_mut());
+    if actual > err.len() {
+        err.resize(actual, 0);
+        let _got = HybridCommands::hc_lsp_engine_error(inout err.as_slice_mut());
+    } else {
+        err.truncate(actual);
+    }
+    err
+}
+
+pub fn lsp_engine_read(inout buf: Slice[u8], wait_ms: i64) -> i64 eff [Ffi[HybridCommands]] {
+    HybridCommands::hc_lsp_engine_read(inout buf, wait_ms)
+}
+
+pub fn lsp_engine_write(in buf: Slice[u8]) -> u64 eff [Ffi[HybridCommands]] {
+    HybridCommands::hc_lsp_engine_write(in buf)
+}
+
+pub fn lsp_engine_deadline() -> i64 eff [Ffi[HybridCommands]] {
+    HybridCommands::hc_lsp_engine_deadline()
 }
 
 // The error an engine call stored, `n` bytes long (none when `n` is 0),
@@ -123,6 +168,5 @@ fn copy_error(engine: Engine, inout err: ChunkSeq[u8]) -> u64 eff [Ffi[HybridCom
         Engine::Doc => HybridCommands::hc_doc_err(inout err.as_slice_mut()),
         Engine::Lint => HybridCommands::hc_lint_err(inout err.as_slice_mut()),
         Engine::Verify => HybridCommands::hc_verify_err(inout err.as_slice_mut()),
-        Engine::Lsp => HybridCommands::hc_lsp_err(inout err.as_slice_mut()),
     }
 }

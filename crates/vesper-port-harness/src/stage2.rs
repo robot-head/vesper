@@ -29,6 +29,9 @@ const GUEST_ROOT: &str = "/w";
 /// The status file's tags (packages/vesper-port-builder/src/lib.ves).
 const TAG_EXPORT: &str = "export";
 const TAG_OBJECT: &str = "object";
+/// The object reason of a run that trapped in native-lib
+/// (`OBJECT_TRAPPED` of @vesper/port-builder).
+pub const OBJECT_TRAPPED: u64 = 4;
 /// A decline reason of 0: the files were written.
 const BUILT: u64 = 0;
 
@@ -123,10 +126,20 @@ pub fn build(r: &Request<'_>) -> Result<Outcome, String> {
     if let Some(types) = r.rust_types {
         command.args(["--rust-types", types]);
     }
-    crate::run(&mut command, r.wasmtime)?;
-    let text =
-        std::fs::read_to_string(&status).map_err(|e| format!("{}: {e}", status.display()))?;
-    parse_status(&text).ok_or_else(|| format!("{}: malformed status {text:?}", status.display()))
+    let ran = crate::run(&mut command, r.wasmtime);
+    let text = std::fs::read_to_string(&status);
+    match (ran, text) {
+        (Ok(()), Ok(text)) => parse_status(&text)
+            .ok_or_else(|| format!("{}: malformed status {text:?}", status.display())),
+        (Ok(()), Err(e)) => Err(format!("{}: {e}", status.display())),
+        // A run that trapped while building the object (Stage 2's memory
+        // ran out in native-lib) leaves a status naming that: the exports
+        // stand, and the object is declined.
+        (Err(e), Ok(text)) => parse_status(&text)
+            .filter(|o| o.object == OBJECT_TRAPPED)
+            .ok_or(e),
+        (Err(e), Err(_)) => Err(e),
+    }
 }
 
 /// The status file's two reasons.
