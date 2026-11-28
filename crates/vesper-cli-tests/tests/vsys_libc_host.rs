@@ -3,7 +3,9 @@
 //! the linker binds it in a `vesper build` executable (SH6 lane 13, #1408,
 //! gap G5). A library that cannot be loaded is refused.
 #![cfg(unix)]
-use std::{fs, path::PathBuf, process::Command};
+mod support;
+
+use std::{fs, path::PathBuf};
 
 struct Temp(PathBuf);
 
@@ -47,7 +49,7 @@ fn package(tag: &str, link: &str) -> Temp {
 }
 
 fn vesper(command: &str, t: &Temp) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_vesper"))
+    support::vesper()
         .arg(command)
         .arg(t.0.join("app"))
         .current_dir(&t.0)

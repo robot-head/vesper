@@ -1,8 +1,10 @@
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Output,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -67,7 +69,7 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_vesper"))
+        support::vesper()
             .current_dir(&self.0)
             .args(args)
             .output()

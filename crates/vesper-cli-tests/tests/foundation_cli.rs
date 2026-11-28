@@ -1,15 +1,14 @@
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
     path::PathBuf,
-    process::{Command, Output},
+    process::Output,
     sync::atomic::{AtomicU64, Ordering},
 };
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_vesper"))
-        .args(args)
-        .output()
-        .unwrap()
+    support::vesper().args(args).output().unwrap()
 }
 fn report(out: &Output) -> Value {
     serde_json::from_slice(&out.stdout)

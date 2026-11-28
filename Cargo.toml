@@ -117,6 +117,8 @@ members = [
     "crates/vesper-cranelift-sys",
     "crates/vesper-cranelift-component",
     "crates/vesper-stage2-gate",
+    # The CLI tests, run against the shipped compiler (#2743).
+    "crates/vesper-cli-tests",
     # The SH4 codegen swap harness (#1275): its own crate, because the root
     # package cannot depend on the shim (the shim's tests depend on it).
     "crates/vesper-codegen-swap-test",

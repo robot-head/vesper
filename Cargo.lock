@@ -5803,6 +5803,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-cli-tests"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde_json",
+]
+
+[[package]]
 name = "vesper-codegen-numeric-test"
 version = "0.1.0"
 dependencies = [
