@@ -78,7 +78,7 @@ pub fn sugar_policy_exports_valid(
 /// Load, assemble, and collect declarations of a Loom package from `root_dir`
 /// via `@vesper-std/fs`, returning `(module_count, fn_count, adt_count, diagnostic_bytes)`.
 pub fn stage2_collect_dir(in root_dir: Str) -> (u64, u64, u64, u64) eff [Ffi[StdFs]] {
-    let encoded = match load_package_graph_bytes(in root_dir.as_bytes()) {
+    let encoded = match load_graph_compact(in root_dir.as_bytes()) {
         Option::Some(b) => b,
         Option::None => {
             return (0, 0, 0, 0);
@@ -269,6 +269,46 @@ fn write_policy_diagnostic(problem: PolicyFailure, inout msg: ChunkSeq[u8]) {
     }
 }
 
+// Room kept below the loader's scratch for the encoded package graph, and
+// the slack its copy's sequence header and rounding may take.
+const LOAD_KEEP_BYTES: u64 = 268435456;
+const LOAD_KEEP_SLACK: u64 = 65536;
+
+// `load_package_graph_bytes` with the loader's scratch freed: the encoded
+// graph is copied into a hole reserved below the scratch and the heap is
+// reset to the copy's end, so only the graph outlives the load. Under a
+// host without Stage 2's heap, or when the graph does not fit the hole, the
+// graph is returned where the loader left it.
+fn load_graph_compact(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    if stage2_heap_mark() == 0 {
+        return load_package_graph_bytes(in root_dir);
+    }
+    let mut hole = ChunkSeq::new[u8]();
+    hole.reserve(LOAD_KEEP_BYTES);
+    let scratch = stage2_heap_mark();
+    let keep = wrapping_sub(scratch, LOAD_KEEP_BYTES);
+    let encoded = match load_package_graph_bytes(in root_dir) {
+        Option::Some(b) => b,
+        Option::None => {
+            return Option::None;
+        },
+    };
+    if wrapping_add(encoded.len(), LOAD_KEEP_SLACK) > LOAD_KEEP_BYTES {
+        return Option::Some(encoded);
+    }
+    let s_load = stage2_heap_swap(keep);
+    let mut copied = ChunkSeq::with_capacity[u8](encoded.len());
+    copied.extend(in encoded.as_slice());
+    let keep_after = stage2_heap_mark();
+    let _ = stage2_heap_swap(s_load);
+    if keep_after > scratch {
+        return Option::Some(encoded);
+    }
+    // Nothing past the copy is live: the rest of the hole is reused.
+    stage2_heap_reset(keep_after);
+    Option::Some(copied)
+}
+
 fn move_front_to_perm(
     sink ir_ast0: IrAst,
     sink names0: Names,
@@ -315,7 +355,7 @@ pub fn stage2_lower_dir(
     in root_dir: Slice[u8],
     inout err: ChunkSeq[u8]
 ) -> Option[Lowered] eff [Ffi[StdFs]] {
-    let encoded = match load_package_graph_bytes(in root_dir) {
+    let encoded = match load_graph_compact(in root_dir) {
         Option::Some(b) => b,
         Option::None => {
             err.extend(in "load_package_graph".as_bytes());
@@ -407,7 +447,7 @@ fn stage2_compile_dir_impl(
     let mut stage_log = ChunkSeq::new[u8]();
     stage_log.reserve(4096);
     write_stage(want_syms, in out_wasm, in "load_package_graph", inout stage_log);
-    let encoded = match load_package_graph_bytes(in root_dir.as_bytes()) {
+    let encoded = match load_graph_compact(in root_dir.as_bytes()) {
         Option::Some(b) => b,
         Option::None => {
             let mut d = ChunkSeq::new[u8]();
