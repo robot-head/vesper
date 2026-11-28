@@ -17,6 +17,7 @@ use @vesper/check-data::util::{n32, u32_at, u64_at, w};
 use @vesper/check-data::world::{World};
 use @vesper/place-ir::codes::{Lit};
 use @vesper/place-ir-lower::ast::{Ast, Ex};
+use self::ast_lower::{SEQ_EQ_PASS_SHIFT};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
@@ -347,10 +348,13 @@ pub fn lower_table_reads(inout a: Ast, inout names: Names, in types: Types, in w
 
 const X_BINARY: u8 = 8;
 const X_FIELD: u8 = 5;
+// The callee bits of a `.eq` node's `x`, below SEQ_EQ_PASS_SHIFT.
+const SEQ_EQ_CALLEE_MASK: u64 = 72057594037927935;
 
 // Restores `recv.eq(arg)` on a sequence receiver, which ast_lower writes
-// as `==` keeping the call's callee (`Ex.x` = callee + 1) and argument pass
-// (`Ex.n`): Rust's checker lowers it as the method (`SeqOp::BytesEq`).
+// as `==` keeping the call's callee (`Ex.x` low bits = callee + 1) and
+// argument pass (above SEQ_EQ_PASS_SHIFT): Rust's checker lowers it as the
+// method (`SeqOp::BytesEq`).
 pub fn restore_seq_eq(inout a: Ast, in types: Types, in world: World) {
     for id in 0..a.exs.len() {
         let e = match a.exs.try_get(id) {
@@ -360,7 +364,8 @@ pub fn restore_seq_eq(inout a: Ast, in types: Types, in world: World) {
         if e.kind != X_BINARY || e.x == 0 {
             continue;
         }
-        let callee = wrapping_sub(e.x, 1);
+        let pass = wrapping_shr_u64(e.x, SEQ_EQ_PASS_SHIFT);
+        let callee = wrapping_sub(e.x & SEQ_EQ_CALLEE_MASK, 1);
         let field = match a.exs.try_get(callee) {
             Option::Some(c) => c,
             Option::None => continue,
@@ -381,7 +386,7 @@ pub fn restore_seq_eq(inout a: Ast, in types: Types, in world: World) {
             continue;
         }
         let start = a.xs.len();
-        a.xs.push(e.n);
+        a.xs.push(pass);
         a.xs.push(e.c);
         let _ = a.exs.try_set(
             id,

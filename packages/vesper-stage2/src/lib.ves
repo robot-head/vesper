@@ -2,7 +2,7 @@
 
 use @vesper/check-data::input::{Ctx};
 use @vesper/check-data::names::{Names, names_new};
-use @vesper/check-data::types::{TyPass, Types, types_new};
+use @vesper/check-data::types::{TyKind, TyPass, Types, types_new};
 use @vesper/check-data::util::{
     add, inc, n32, push_decimal, stage2_heap_mark, stage2_heap_reset, stage2_heap_swap, u32_at,
     u64_at, w
@@ -31,6 +31,7 @@ use self::traits::{
     DynOut, MonoPlan, copy_dyn_out, copy_plan, dyn_out, dyn_out_new, mono_plan, mono_plan_new
 };
 use self::facts::{record_failure_ops};
+use self::handler_rows::{infer_handler_rows};
 use self::tables::{lower_table_reads, restore_seq_eq};
 pub use self::ffi::{ForeignSource, foreign_source};
 use self::ffi::{
@@ -477,6 +478,15 @@ pub fn stage2_lower_dir_with(
     }
     // Native lowering reads the operations that may fail.
     let (names, types, world) = record_failure_ops(in ir_ast, sink names, sink types, sink world);
+    // Each handler's outgoing row, from the effects its body and clauses use.
+    let (names, types) = infer_handler_rows(
+        inout ir_ast,
+        sink names,
+        sink types,
+        in world,
+        in call_rows,
+        in call_pairs
+    );
     // Pass 2 of the foreign check: one operation per slice-length vector.
     let mut names = names;
     let mut types = types;
@@ -492,14 +502,34 @@ pub fn stage2_lower_dir_with(
         tmap: ChunkSeq::new[u32](),
         nmap: ChunkSeq::new[u32]()
     };
+    let top_fns = ir_ast.fns.len();
     let mut low = l_new(sink c, sink ir_ast);
     lower_all(inout low);
+    rows_of_nested(inout low, top_fns);
     Option::Some(Lowered {
         low: low,
         call_rows: call_rows,
         call_pairs: call_pairs,
         dyn_out: dyn_out
     })
+}
+
+// Stage 2's function rows hold a row id, which the calls input writes as
+// a Row type; the lowering gives the closures and handler functions it
+// adds (from index `top_fns` on) their row's type: take its row.
+fn rows_of_nested(inout low: L, top_fns: u64) {
+    for fi in top_fns..low.ast.fns.len() {
+        match low.ast.fns.try_get(fi) {
+            Option::Some(f) => {
+                if low.ctx.types.kind(f.effects) == TyKind::Row {
+                    let mut g = f;
+                    g.effects = low.ctx.types.node(f.effects).r2;
+                    let _set = low.ast.fns.try_set(fi, g);
+                }
+            },
+            Option::None => {},
+        }
+    }
 }
 
 // Collects and lowers `mods` through the trait frontend (traits.ves): a

@@ -1,0 +1,818 @@
+// The outgoing effect row of every handler (`Hd.outgoing`), as Rust's
+// checker infers it in `handle` (src/check.rs): the effects its handled
+// body observes, less its own capability, then its return and operation
+// clauses', deduplicated and sorted by (name, label). Native lowering gives
+// the handler body function this row. Runs after facts.ves, whose partial
+// and overflowing operations observe `Fail` too.
+
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{
+    EffNode, TyKind, Types, Vars, push_wide_decimal, substitute, vars_new
+};
+use @vesper/check-data::util::{n32, u32_at, u64_at, w};
+use @vesper/check-data::world::{World};
+use @vesper/place-ir-lower::ast::{Ast, Cl, Ex, FnR, Hd};
+use @vesper/wasm-backend::ir::{CallRow, Pair};
+use self::facts::{children};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+
+const X_NAME: u8 = 2;
+const X_FIELD: u8 = 5;
+const X_CALL: u8 = 11;
+const X_TRY: u8 = 12;
+const X_CLOSURE: u8 = 21;
+const X_HANDLE: u8 = 22;
+
+// A call's argument list: (pass, expression) per argument.
+const CALL_ARG_STRIDE: u64 = 2;
+
+const CAP_PREFIX: Str = "$cap";
+const FNCAP_PREFIX: Str = "$fncap:";
+const FAIL: Str = "Fail";
+const RUNTIME_ERROR: Str = "RuntimeError";
+const ARITH_OVERFLOW: Str = "ArithOverflow";
+const RESULT: Str = "Result";
+const OPTION_ARITY_RESULT: u64 = 2;
+// Built-in capability effects constrain callees, not callers: they are
+// never observed (`capability_effects::is_capability_effect`).
+const CAPABILITY_EFFECTS: Str = " ConstTime Realtime DetFloat ConstDenorm Isa ";
+
+// An effect instance: label symbol + 1 (0 = none), name, and arguments
+// args[a..a+n].
+copy struct Inst {
+    label: u32,
+    name: u32,
+    a: u64,
+    n: u64,
+}
+
+// An observation frame: the closure depth it observes at and where its
+// instances start in `obs`.
+copy struct Frame {
+    depth: u64,
+    start: u64,
+}
+
+// A user label and the capability label it stands for (`cap_aliases`).
+copy struct Alias {
+    user: u32,
+    cap: u32,
+}
+
+copy struct HdRow {
+    hd: u64,
+    row: u32,
+}
+
+struct Hw {
+    names: Names,
+    types: Types,
+    args: ChunkSeq[u32],
+    caps: ChunkSeq[Inst],
+    aliases: ChunkSeq[Alias],
+    obs: ChunkSeq[Inst],
+    frames: ChunkSeq[Frame],
+    depth: u64,
+    rows: ChunkSeq[HdRow],
+    fail: u32,
+    runtime_error: u32,
+    arith_overflow: u32,
+    result: u32,
+    text_a: ChunkSeq[u8],
+    text_b: ChunkSeq[u8],
+}
+
+fn ex(in a: Ast, id: u64) -> Option[Ex] {
+    if id == NONE64 {
+        return Option::None;
+    }
+    a.exs.try_get(id)
+}
+
+fn call_arg(in a: Ast, e: Ex, i: u64) -> u64 {
+    u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, CALL_ARG_STRIDE), 1)))
+}
+
+fn find_fn(in a: Ast, name: u32) -> Option[FnR] {
+    if w(name) < a.fn_by_key.len() {
+        let idx = u32_at(in a.fn_by_key, w(name));
+        if idx != 0 {
+            return a.fns.try_get(wrapping_sub(w(idx), 1));
+        }
+    }
+    Option::None
+}
+
+fn arg_at(in hw: Hw, inst: Inst, i: u64) -> u32 {
+    u32_at(in hw.args, wrapping_add(inst.a, i))
+}
+
+fn same_inst(in hw: Hw, x: Inst, y: Inst) -> bool {
+    if x.name != y.name || x.label != y.label || x.n != y.n {
+        return false;
+    }
+    for i in 0..x.n {
+        if arg_at(in hw, x, i) != arg_at(in hw, y, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether every argument is concrete (`numeric::instance_key` is Some).
+fn concrete(in hw: Hw, inst: Inst) -> bool {
+    if inst.n == 0 {
+        return false;
+    }
+    for i in 0..inst.n {
+        if open_type(in hw.types, arg_at(in hw, inst, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn open_type(in types: Types, ty: u32) -> bool {
+    if ty == NONE32 {
+        return true;
+    }
+    let k = types.kind(ty);
+    if k == TyKind::Infer || k == TyKind::Row || k == TyKind::Fn {
+        return true;
+    }
+    if k == TyKind::Named || k == TyKind::Tuple {
+        for i in 0..types.arity(ty) {
+            if open_type(in types, types.arg(ty, i)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn same_args(in hw: Hw, x: Inst, y: Inst) -> bool {
+    if x.n != y.n {
+        return false;
+    }
+    for i in 0..x.n {
+        if arg_at(in hw, x, i) != arg_at(in hw, y, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_capability_effect(inout hw: Hw, name: u32) -> bool {
+    hw.text_a.clear();
+    hw.text_a.push(32);
+    hw.names.write(name, inout hw.text_a);
+    hw.text_a.push(32);
+    let hay = CAPABILITY_EFFECTS.as_bytes();
+    let n = hw.text_a.len();
+    if n > hay.len() {
+        return false;
+    }
+    for start in 0..wrapping_add(wrapping_sub(hay.len(), n), 1) {
+        let mut all = true;
+        for j in 0..n {
+            let x = match hay.try_get(wrapping_add(start, j)) {
+                Option::Some(b) => b,
+                Option::None => 0,
+            };
+            let y = match hw.text_a.try_get(j) {
+                Option::Some(b) => b,
+                Option::None => 0,
+            };
+            if x != y {
+                all = false;
+                break;
+            }
+        }
+        if all {
+            return true;
+        }
+    }
+    false
+}
+
+// The capability a request resolves to (`active_effect`): the innermost
+// with its name (and label, through the aliases), preferring one with
+// exactly its arguments when they are concrete; else NONE64.
+fn active_cap(in hw: Hw, req: Inst) -> u64 {
+    let mut label = req.label;
+    if label != 0 {
+        for i in 0..hw.aliases.len() {
+            match hw.aliases.try_get(wrapping_sub(wrapping_sub(hw.aliases.len(), 1), i)) {
+                Option::Some(al) => {
+                    if al.user == label {
+                        label = al.cap;
+                        break;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+    }
+    let typed = label == 0 && concrete(in hw, req);
+    let mut first = NONE64;
+    for k in 0..hw.caps.len() {
+        let ci = wrapping_sub(wrapping_sub(hw.caps.len(), 1), k);
+        match hw.caps.try_get(ci) {
+            Option::Some(c) => {
+                if c.name == req.name && (label == 0 || c.label == label) {
+                    if !typed {
+                        return ci;
+                    }
+                    if first == NONE64 {
+                        first = ci;
+                    }
+                    if same_args(in hw, c, req) {
+                        return ci;
+                    }
+                }
+            },
+            Option::None => {},
+        }
+    }
+    first
+}
+
+fn observing(in hw: Hw) -> bool {
+    match hw.frames.last() {
+        Option::Some(f) => f.depth == hw.depth,
+        Option::None => false,
+    }
+}
+
+fn observe_inst(inout hw: Hw, inst: Inst) {
+    if !observing(in hw) {
+        return;
+    }
+    let start = match hw.frames.last() {
+        Option::Some(f) => f.start,
+        Option::None => return,
+    };
+    for i in start..hw.obs.len() {
+        match hw.obs.try_get(i) {
+            Option::Some(o) => {
+                if same_inst(in hw, o, inst) {
+                    return;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    hw.obs.push(inst);
+}
+
+// `require_effect`: observes the resolved capability, or the request.
+fn require(inout hw: Hw, req: Inst) {
+    if !observing(in hw) || is_capability_effect(inout hw, req.name) {
+        return;
+    }
+    let ci = active_cap(in hw, req);
+    let seen = if ci == NONE64 {
+        req
+    } else {
+        match hw.caps.try_get(ci) {
+            Option::Some(c) => c,
+            Option::None => req,
+        }
+    };
+    observe_inst(inout hw, seen);
+}
+
+fn new_inst(inout hw: Hw, label: u32, name: u32, in tys: ChunkSeq[u32]) -> Inst {
+    let a = hw.args.len();
+    for i in 0..tys.len() {
+        hw.args.push(u32_at(in tys, i));
+    }
+    Inst { label: label, name: name, a: a, n: tys.len() }
+}
+
+fn fail_of(inout hw: Hw, ty: u32) -> Inst {
+    let mut tys = ChunkSeq::new[u32]();
+    tys.push(ty);
+    let fail = hw.fail;
+    new_inst(inout hw, 0, fail, in tys)
+}
+
+// The call vars recorded for the call at (s0, s1).
+fn call_vars(in rows: ChunkSeq[CallRow], in pairs: ChunkSeq[Pair], s0: u64, s1: u64) -> Vars {
+    let mut vars = vars_new();
+    let mut lo: u64 = 0;
+    let mut hi = rows.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
+        let r = match rows.try_get(mid) {
+            Option::Some(r) => r,
+            Option::None => break,
+        };
+        if r.s0 < s0 || (r.s0 == s0 && r.s1 < s1) {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    match rows.try_get(lo) {
+        Option::Some(r) => {
+            if r.s0 == s0 && r.s1 == s1 {
+                for k in 0..r.vn {
+                    match pairs.try_get(wrapping_add(r.v0, k)) {
+                        Option::Some(p) => vars.set(p.name, p.ty),
+                        Option::None => {},
+                    }
+                }
+            }
+        },
+        Option::None => {},
+    }
+    vars
+}
+
+// Requires each instance of row `row_id`, its arguments substituted.
+fn require_row(inout hw: Hw, row_id: u32, in vars: Vars) {
+    let row = hw.types.row(row_id);
+    for i in 0..w(row.n) {
+        let eff = hw.types.effect_at(wrapping_add(w(row.a), i));
+        let mut tys = ChunkSeq::new[u32]();
+        for j in 0..w(eff.n) {
+            let t = u32_at(in hw.types.items, wrapping_add(w(eff.a), j));
+            tys.push(substitute(inout hw.types, t, in vars));
+        }
+        let inst = new_inst(inout hw, eff.label, eff.name, in tys);
+        require(inout hw, inst);
+    }
+}
+
+// Whether `label` (symbol + 1) names a capability in scope.
+fn cap_by_label(in hw: Hw, label: u32) -> u64 {
+    let mut target = label;
+    for i in 0..hw.aliases.len() {
+        match hw.aliases.try_get(wrapping_sub(wrapping_sub(hw.aliases.len(), 1), i)) {
+            Option::Some(al) => {
+                if al.user == label {
+                    target = al.cap;
+                    break;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    for k in 0..hw.caps.len() {
+        let ci = wrapping_sub(wrapping_sub(hw.caps.len(), 1), k);
+        match hw.caps.try_get(ci) {
+            Option::Some(c) => {
+                if c.label == target {
+                    return ci;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    NONE64
+}
+
+fn walk(
+    inout hw: Hw,
+    in a: Ast,
+    in world: World,
+    in rows: ChunkSeq[CallRow],
+    in pairs: ChunkSeq[Pair],
+    eid: u64
+) {
+    let e = match ex(in a, eid) {
+        Option::Some(e) => e,
+        Option::None => return,
+    };
+    if e.kind == X_HANDLE {
+        handler(inout hw, in a, in world, in rows, in pairs, e);
+        return;
+    }
+    if e.kind == X_CLOSURE {
+        hw.depth = wrapping_add(hw.depth, 1);
+        walk(inout hw, in a, in world, in rows, in pairs, e.c);
+        hw.depth = wrapping_sub(hw.depth, 1);
+        return;
+    }
+    let mut kids = ChunkSeq::new[u64]();
+    children(in a, e, inout kids);
+    // A labeled capability's operation (`label.op(..)`) reads no receiver.
+    let mut cap_op = NONE64;
+    if e.kind == X_CALL {
+        match ex(in a, e.a) {
+            Option::Some(ce) => {
+                if ce.kind == X_FIELD {
+                    match ex(in a, ce.a) {
+                        Option::Some(base) => {
+                            if base.kind == X_NAME && find_fn(in a, n32(base.a)).is_none() {
+                                cap_op = cap_by_label(in hw, wrapping_add(n32(base.a), 1));
+                            }
+                        },
+                        Option::None => {},
+                    }
+                }
+            },
+            Option::None => {},
+        }
+    }
+    for i in 0..kids.len() {
+        let k = u64_at(in kids, i);
+        if i == 0 && e.kind == X_CALL && cap_op != NONE64 {
+            continue;
+        }
+        walk(inout hw, in a, in world, in rows, in pairs, k);
+    }
+    if !observing(in hw) {
+        return;
+    }
+    if e.kind == X_CALL {
+        if cap_op != NONE64 {
+            match hw.caps.try_get(cap_op) {
+                Option::Some(c) => require(inout hw, c),
+                Option::None => {},
+            }
+        } else {
+            call_effects(inout hw, in a, in world, in rows, in pairs, e);
+        }
+    } else if e.kind == X_TRY {
+        match ex(in a, e.a) {
+            Option::Some(op) => {
+                let t = world.expr_type(op.s0, op.s1);
+                if t != NONE32
+                    && hw.types.kind(t) == TyKind::Named
+                    && hw.types.name(t) == hw.result
+                    && hw.types.arity(t) == OPTION_ARITY_RESULT
+                {
+                    let err = hw.types.arg(t, 1);
+                    let inst = fail_of(inout hw, err);
+                    require(inout hw, inst);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    if world.is_partial(e.s0, e.s1) {
+        let rt = hw.types.named0(hw.runtime_error);
+        let inst = fail_of(inout hw, rt);
+        require(inout hw, inst);
+    }
+    if world.may_overflow(e.s0, e.s1) {
+        let ot = hw.types.named0(hw.arith_overflow);
+        let inst = fail_of(inout hw, ot);
+        require(inout hw, inst);
+    }
+}
+
+fn call_effects(
+    inout hw: Hw,
+    in a: Ast,
+    in world: World,
+    in rows: ChunkSeq[CallRow],
+    in pairs: ChunkSeq[Pair],
+    e: Ex
+) {
+    let ce = match ex(in a, e.a) {
+        Option::Some(c) => c,
+        Option::None => return,
+    };
+    if ce.kind == X_NAME {
+        match find_fn(in a, n32(ce.a)) {
+            Option::Some(f) => {
+                let vars = call_vars(in rows, in pairs, e.s0, e.s1);
+                require_row(inout hw, f.effects, in vars);
+                return;
+            },
+            Option::None => {},
+        }
+    }
+    // A value call: the callee's function type's row.
+    let t = world.expr_type(ce.s0, ce.s1);
+    if t != NONE32 && hw.types.kind(t) == TyKind::Fn {
+        let row = hw.types.node(t).r2;
+        let vars = vars_new();
+        require_row(inout hw, row, in vars);
+    }
+}
+
+fn label_of(inout hw: Hw, in prefix: Str, in key: ChunkSeq[u8], index: u64) -> u32 {
+    hw.text_b.clear();
+    hw.text_b.extend(in prefix.as_bytes());
+    hw.text_b.extend(in key.as_slice());
+    if index != NONE64 {
+        push_wide_decimal(inout hw.text_b, 0, index);
+    }
+    hw.names.intern(in hw.text_b.as_slice())
+}
+
+fn handler(
+    inout hw: Hw,
+    in a: Ast,
+    in world: World,
+    in rows: ChunkSeq[CallRow],
+    in pairs: ChunkSeq[Pair],
+    e: Ex
+) {
+    let h = match a.hds.try_get(e.a) {
+        Option::Some(h) => h,
+        Option::None => return,
+    };
+    if h.has_state {
+        walk(inout hw, in a, in world, in rows, in pairs, h.state_expr);
+    }
+    let mut key = ChunkSeq::new[u8]();
+    push_wide_decimal(inout key, 0, e.s0);
+    let cap_sym = label_of(inout hw, in CAP_PREFIX, in key, NONE64);
+    let cap_label = wrapping_add(cap_sym, 1);
+    let mut tys = ChunkSeq::new[u32]();
+    for i in 0..h.arg_ty_count {
+        tys.push(n32(u64_at(in a.xs, wrapping_add(h.arg_ty_start, i))));
+    }
+    let cap = new_inst(inout hw, cap_label, h.eff_name, in tys);
+    let saved_aliases = hw.aliases.len();
+    if h.label != 0 {
+        hw.aliases.push(Alias { user: h.label, cap: cap_label });
+    }
+    hw.caps.push(cap);
+    let start = hw.obs.len();
+    hw.frames.push(Frame { depth: hw.depth, start: start });
+    walk(inout hw, in a, in world, in rows, in pairs, h.body);
+    let _f = hw.frames.pop();
+    let _c = hw.caps.pop();
+    hw.aliases.truncate(saved_aliases);
+    // The body's observations less the handler's own capability.
+    let mut out = ChunkSeq::new[Inst]();
+    for i in start..hw.obs.len() {
+        match hw.obs.try_get(i) {
+            Option::Some(o) => {
+                if o.label != cap_label {
+                    out.push(o);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    hw.obs.truncate(start);
+    // The return clause, then each operation clause.
+    for ci in 0..wrapping_add(h.op_count, 1) {
+        match a.cls.try_get(wrapping_add(h.return_clause, ci)) {
+            Option::Some(cl) => {
+                let cs = hw.obs.len();
+                hw.frames.push(Frame { depth: hw.depth, start: cs });
+                walk(inout hw, in a, in world, in rows, in pairs, cl.body);
+                let _cf = hw.frames.pop();
+                for i in cs..hw.obs.len() {
+                    match hw.obs.try_get(i) {
+                        Option::Some(o) => {
+                            let mut dup = false;
+                            for j in 0..out.len() {
+                                match out.try_get(j) {
+                                    Option::Some(p) => {
+                                        if same_inst(in hw, p, o) {
+                                            dup = true;
+                                        }
+                                    },
+                                    Option::None => {},
+                                }
+                            }
+                            if !dup {
+                                out.push(o);
+                            }
+                        },
+                        Option::None => {},
+                    }
+                }
+                hw.obs.truncate(cs);
+            },
+            Option::None => {},
+        }
+    }
+    sort_insts(inout hw, inout out);
+    let mut effs = ChunkSeq::new[EffNode]();
+    let mut eargs = ChunkSeq::new[u32]();
+    for i in 0..out.len() {
+        match out.try_get(i) {
+            Option::Some(o) => {
+                let ea = n32(eargs.len());
+                for j in 0..o.n {
+                    eargs.push(arg_at(in hw, o, j));
+                }
+                effs.push(EffNode { label: o.label, name: o.name, a: ea, n: n32(o.n) });
+            },
+            Option::None => {},
+        }
+    }
+    // `Hd.outgoing` is the row's type, as the lowering reads it.
+    let row = hw.types.mk_row(in effs, in eargs, 0);
+    let row_ty = hw.types.row_type(row);
+    hw.rows.push(HdRow { hd: e.a, row: row_ty });
+    // A nested handler's row is observed where it stands.
+    for i in 0..out.len() {
+        match out.try_get(i) {
+            Option::Some(o) => observe_inst(inout hw, o),
+            Option::None => {},
+        }
+    }
+}
+
+// (name, label) text order, no label before any label; stable.
+fn inst_before(inout hw: Hw, x: Inst, y: Inst) -> bool {
+    let c = cmp_sym(inout hw, x.name, y.name);
+    if c != 0 {
+        return c < 0;
+    }
+    if x.label == y.label {
+        return false;
+    }
+    if x.label == 0 {
+        return true;
+    }
+    if y.label == 0 {
+        return false;
+    }
+    cmp_sym(inout hw, wrapping_sub(x.label, 1), wrapping_sub(y.label, 1)) < 0
+}
+
+fn cmp_sym(inout hw: Hw, x: u32, y: u32) -> i64 {
+    if x == y {
+        return 0;
+    }
+    hw.text_a.clear();
+    hw.text_b.clear();
+    hw.names.write(x, inout hw.text_a);
+    hw.names.write(y, inout hw.text_b);
+    let n = if hw.text_a.len() < hw.text_b.len() {
+        hw.text_a.len()
+    } else {
+        hw.text_b.len()
+    };
+    for i in 0..n {
+        let p = match hw.text_a.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        let q = match hw.text_b.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        if p != q {
+            return if p < q { -1 } else { 1 };
+        }
+    }
+    if hw.text_a.len() < hw.text_b.len() {
+        -1
+    } else if hw.text_a.len() > hw.text_b.len() {
+        1
+    } else {
+        0
+    }
+}
+
+fn sort_insts(inout hw: Hw, inout xs: ChunkSeq[Inst]) {
+    for i in 1..xs.len() {
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let x = match xs.try_get(wrapping_sub(j, 1)) {
+                Option::Some(v) => v,
+                Option::None => break,
+            };
+            let y = match xs.try_get(j) {
+                Option::Some(v) => v,
+                Option::None => break,
+            };
+            if !inst_before(inout hw, y, x) {
+                break;
+            }
+            let _a = xs.try_set(wrapping_sub(j, 1), y);
+            let _b = xs.try_set(j, x);
+            j = wrapping_sub(j, 1);
+        }
+    }
+}
+
+fn has_handler(in a: Ast, eid: u64) -> bool {
+    let e = match ex(in a, eid) {
+        Option::Some(e) => e,
+        Option::None => return false,
+    };
+    if e.kind == X_HANDLE {
+        return true;
+    }
+    let mut kids = ChunkSeq::new[u64]();
+    children(in a, e, inout kids);
+    for i in 0..kids.len() {
+        if has_handler(in a, u64_at(in kids, i)) {
+            return true;
+        }
+    }
+    false
+}
+
+// Writes `Hd.outgoing` for every handler of `a`.
+pub fn infer_handler_rows(
+    inout a: Ast,
+    sink names: Names,
+    sink types: Types,
+    in world: World,
+    in call_rows: ChunkSeq[CallRow],
+    in call_pairs: ChunkSeq[Pair]
+) -> (Names, Types) {
+    let mut nm = names;
+    let fail = nm.intern(in FAIL.as_bytes());
+    let runtime_error = nm.intern(in RUNTIME_ERROR.as_bytes());
+    let arith_overflow = nm.intern(in ARITH_OVERFLOW.as_bytes());
+    let result = nm.intern(in RESULT.as_bytes());
+    let mut hw = Hw {
+        names: nm,
+        types: types,
+        args: ChunkSeq::new[u32](),
+        caps: ChunkSeq::new[Inst](),
+        aliases: ChunkSeq::new[Alias](),
+        obs: ChunkSeq::new[Inst](),
+        frames: ChunkSeq::new[Frame](),
+        depth: 0,
+        rows: ChunkSeq::new[HdRow](),
+        fail: fail,
+        runtime_error: runtime_error,
+        arith_overflow: arith_overflow,
+        result: result,
+        text_a: ChunkSeq::new[u8](),
+        text_b: ChunkSeq::new[u8]()
+    };
+    let mut key = ChunkSeq::new[u8]();
+    for fi in 0..a.fns.len() {
+        let f = match a.fns.try_get(fi) {
+            Option::Some(f) => f,
+            Option::None => continue,
+        };
+        if !f.has_body || f.body == NONE64 || !has_handler(in a, f.body) {
+            continue;
+        }
+        hw.caps.clear();
+        hw.aliases.clear();
+        hw.obs.clear();
+        hw.frames.clear();
+        hw.args.clear();
+        hw.depth = 0;
+        // The function's own capabilities (`$fncap:<name>:<i>`).
+        key.clear();
+        hw.names.write(f.name, inout key);
+        key.push(58);
+        let row = hw.types.row(f.effects);
+        for i in 0..w(row.n) {
+            let eff = hw.types.effect_at(wrapping_add(w(row.a), i));
+            let label = wrapping_add(label_of(inout hw, in FNCAP_PREFIX, in key, i), 1);
+            let mut tys = ChunkSeq::new[u32]();
+            for j in 0..w(eff.n) {
+                tys.push(u32_at(in hw.types.items, wrapping_add(w(eff.a), j)));
+            }
+            let cap = new_inst(inout hw, label, eff.name, in tys);
+            hw.caps.push(cap);
+            if eff.label != 0 {
+                hw.aliases.push(Alias { user: eff.label, cap: label });
+            }
+        }
+        walk(inout hw, in a, in world, in call_rows, in call_pairs, f.body);
+    }
+    for i in 0..hw.rows.len() {
+        match hw.rows.try_get(i) {
+            Option::Some(r) => {
+                match a.hds.try_get(r.hd) {
+                    Option::Some(h) => {
+                        let mut h2 = h;
+                        h2.outgoing = r.row;
+                        let _ = a.hds.try_set(r.hd, h2);
+                    },
+                    Option::None => {},
+                }
+            },
+            Option::None => {},
+        }
+    }
+    let Hw {
+        names: names_out,
+        types: types_out,
+        args: _args,
+        caps: _caps,
+        aliases: _aliases,
+        obs: _obs,
+        frames: _frames,
+        depth: _depth,
+        rows: _rows,
+        fail: _fail,
+        runtime_error: _runtime_error,
+        arith_overflow: _arith_overflow,
+        result: _result,
+        text_a: _text_a,
+        text_b: _text_b
+    } = hw;
+    (names_out, types_out)
+}

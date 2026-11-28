@@ -27,6 +27,8 @@ const X_FIELD: u8 = 5;
 const X_INDEX: u8 = 6;
 const X_UNARY: u8 = 7;
 const X_BINARY: u8 = 8;
+// Where a `.eq` node's argument pass sits in its `x` (tables.ves).
+pub const SEQ_EQ_PASS_SHIFT: u32 = 56;
 const X_ASSIGN: u8 = 9;
 const X_BLOCK: u8 = 10;
 const X_CALL: u8 = 11;
@@ -572,9 +574,11 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
                             Option::None => (0, 0),
                         };
                         // The `.eq` call's callee and argument pass stay on
-                        // the node (`x` = callee + 1, `n` = pass): native
-                        // lowering restores a sequence receiver's call
-                        // (`SeqOp::BytesEq`, tables.ves `restore_seq_eq`).
+                        // the node, in `x` alone (callee + 1, the pass above
+                        // bit SEQ_EQ_PASS_SHIFT): other passes read `n` of
+                        // every node. Native lowering restores a sequence
+                        // receiver's call (`SeqOp::BytesEq`, tables.ves
+                        // `restore_seq_eq`).
                         let idx = lc.ir.exs.len();
                         lc.ir.exs.push(Ex {
                             kind: X_BINARY,
@@ -583,9 +587,9 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
                             a: eop,
                             b: ce.a,
                             c: rhs,
-                            n: pass,
+                            n: 0,
                             m: 0,
-                            x: wrapping_add(callee, 1)
+                            x: wrapping_add(callee, 1) | wrapping_shl_u64(pass, SEQ_EQ_PASS_SHIFT)
                         });
                         return idx;
                     }
@@ -856,7 +860,9 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
         lc.ir.pool_count = wrapping_add(lc.ir.pool_count, 1);
         let empty_es = ChunkSeq::new[EffNode]();
         let empty_ea = ChunkSeq::new[u32]();
-        let empty_row = lc.types.mk_row(in empty_es, in empty_ea, 0);
+        // `Hd.outgoing` is a Row type; handler_rows.ves fills it in.
+        let empty_id = lc.types.mk_row(in empty_es, in empty_ea, 0);
+        let empty_row = lc.types.row_type(empty_id);
         let hidx = lc.ir.hds.len();
         lc.ir.hds.push(Hd {
             pool: pool,

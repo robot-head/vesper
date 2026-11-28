@@ -81,10 +81,10 @@ const DECLINES: &[&str] = &[
 /// The functions Stage 2 must lower as Rust does today. The rest differ
 /// where Stage 2's checker records less than Rust's: overflow and partial
 /// operations (`fallible`) and the unit type of statements.
-const MIN_SAME_FUNCTIONS: usize = 67;
+const MIN_SAME_FUNCTIONS: usize = 71;
 
 /// The port functions Stage 2 must lower as Rust does today.
-const MIN_SAME_PORT_FUNCTIONS: usize = 20260;
+const MIN_SAME_PORT_FUNCTIONS: usize = 20301;
 
 /// Set to print the Rust and Stage 2 bodies of each function that differs.
 const SHOW_DIFFS: &str = "VESPER_STAGE2_CALLS_DIFFS";
@@ -350,6 +350,13 @@ pub fn triple(i: u64, b: u64, v: u64) -> (bool, u64, u64) { if i > b { (true, v,
 pub fn first(k: u64) -> u64 { let mut j: u64 = 0; loop { if j >= k { break 0; } j = wrapping_add(j, 1); } }",
         &["bounds", "count", "count2", "done", "first", "pick", "pick2", "pick3", "triple"],
     ),
+    // A handler's outgoing row: what its body and clauses use, less its
+    // own capability.
+    (
+        "handlers",
+        "pub fn quot(v: u64, d: u64) -> u64 eff [Fail[ArithOverflow]] { handle Fail[RuntimeError] in { v / d + 1 } with { return q => q, raise(e, k) => 0, } }",
+        &["quot"],
+    ),
     (
         "floats",
         "pub fn lerp(a: f64, b: f64, t: f64) -> f64 { a + (b - a) * t }
@@ -544,9 +551,23 @@ fn compare(
     let rust_fns = functions(&readers.dump.text(&rust));
     let stage2_fns = functions(&readers.dump.text(&written));
     let mut missing = vec![];
+    // Nothing names a nested function but its span order, which Stage 2's
+    // module order changes: one whose body some unmatched nested function
+    // of Stage 2's has is the same function.
+    let nested = |n: &str| NESTED.iter().any(|p| n.contains(p));
+    let mut spare: Vec<&Vec<String>> = stage2_fns
+        .iter()
+        .filter(|(n, b)| nested(n) && !rust_fns.get(*n).is_some_and(|r| same_body(r, b)))
+        .map(|(_, b)| b)
+        .collect();
     for (name, body) in &rust_fns {
         match stage2_fns.get(name) {
             Some(b) if same_body(body, b) => t.same_fns += 1,
+            Some(_) if nested(name) && spare.iter().any(|b| same_body(body, b)) => {
+                let at = spare.iter().position(|b| same_body(body, b)).unwrap();
+                spare.swap_remove(at);
+                t.same_fns += 1;
+            }
             Some(b) => {
                 if std::env::var_os(SHOW_DIFFS).is_some() {
                     eprintln!(
