@@ -258,7 +258,15 @@ fn vsys_accepts_what_rust_accepts_under_mutation() {
             }
         }
     }
-    eprintln!("{cases} near misses, {rejected} rejected by both, {} diffs", diffs.len());
+    eprintln!(
+        "{cases} near misses, {rejected} rejected by both, {} diffs",
+        diffs.len()
+    );
     assert!(cases > 1000, "expected > 1000 near misses, got {cases}");
-    assert!(diffs.is_empty(), "{} diffs; first:\n{}", diffs.len(), diffs[0]);
+    assert!(
+        diffs.is_empty(),
+        "{} diffs; first:\n{}",
+        diffs.len(),
+        diffs[0]
+    );
 }
