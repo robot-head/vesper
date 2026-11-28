@@ -13,8 +13,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const LOCAL: &str = include_str!("fixtures/doc_links/local.ves");
-const EXCLUSIONS: &str = include_str!("fixtures/doc_links/exclusions.ves");
+const LOCAL: &str = include_str!("../../../tests/fixtures/doc_links/local.ves");
+const EXCLUSIONS: &str = include_str!("../../../tests/fixtures/doc_links/exclusions.ves");
 const EXPECTED: &[&str] = &[
     "Tx",
     "close",
@@ -294,27 +294,27 @@ fn actual_lexical_exclusions_cannot_smuggle_references_or_html() {
 fn actual_unknown_ambiguous_and_unsupported_links_fail_before_output_creation() {
     for (source, code, raw) in [
         (
-            include_str!("fixtures/doc_links/unknown.ves"),
+            include_str!("../../../tests/fixtures/doc_links/unknown.ves"),
             "unknown",
             "[missing]",
         ),
         (
-            include_str!("fixtures/doc_links/ambiguous.ves"),
+            include_str!("../../../tests/fixtures/doc_links/ambiguous.ves"),
             "ambiguous",
             "[Channel]",
         ),
         (
-            include_str!("fixtures/doc_links/unsupported_self.ves"),
+            include_str!("../../../tests/fixtures/doc_links/unsupported_self.ves"),
             "unsupported",
             "[Self::commit]",
         ),
         (
-            include_str!("fixtures/doc_links/unsupported_package.ves"),
+            include_str!("../../../tests/fixtures/doc_links/unsupported_package.ves"),
             "unsupported",
             "[@local/tx::commit]",
         ),
         (
-            include_str!("fixtures/doc_links/unsupported_generic.ves"),
+            include_str!("../../../tests/fixtures/doc_links/unsupported_generic.ves"),
             "unsupported",
             "[Box[u64]]",
         ),

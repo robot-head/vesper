@@ -2440,6 +2440,18 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# Root sources the CLI tests in //crates/vesper-cli-tests compile in with
+# `include_str!` (#2743): fixtures they share with root corpus tests.
+filegroup(
+    name = "cli_test_sources",
+    srcs = glob([
+        "tests/fixtures/doc_links/**",
+        "tests/fixtures/doc_navigation/**",
+        "tests/fixtures/macro_preview/**",
+    ]),
+    visibility = ["//crates/vesper-cli-tests:__pkg__"],
+)
+
 filegroup(
     name = "website",
     srcs = glob(["website/**"]),

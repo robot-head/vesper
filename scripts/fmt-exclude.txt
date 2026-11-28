@@ -7,16 +7,16 @@ tests/fixtures/stylus/macro.ves
 # forge_cli asserts the original text `fn helper() -> i64 { 42 }`.
 tests/fixtures/source_macros/global_helper.ves
 # Doc-navigation tests look up exact source substrings.
-crates/vesper-cli-tests/tests/fixtures/doc_navigation/local.ves
-crates/vesper-cli-tests/tests/fixtures/doc_navigation/exclusions.ves
-crates/vesper-cli-tests/tests/fixtures/doc_navigation/collisions.ves
+tests/fixtures/doc_navigation/local.ves
+tests/fixtures/doc_navigation/exclusions.ves
+tests/fixtures/doc_navigation/collisions.ves
 # vesper-sim-session's warp tests rewrite exact one-line declarations.
 crates/vesper-sim-session/fixtures/warp.ves
 
 # Deliberately invalid or outside the supported macro profile.
 tests/fixtures/stylus/opaque.ves
 tests/fixtures/stylus/recovery.ves
-crates/vesper-cli-tests/tests/fixtures/macro_preview/malformed.ves
+tests/fixtures/macro_preview/malformed.ves
 tests/fixtures/source_macro_parameters/duplicate_names.ves
 tests/fixtures/source_macro_parameters/projected.ves
 
