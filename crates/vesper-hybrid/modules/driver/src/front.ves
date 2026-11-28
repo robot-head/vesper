@@ -5,13 +5,22 @@
 // still run there. Inputs these do not cover go to the session's own
 // `Parse` and `EmitCst` passes (crates/vesper-hybrid/src/driver.rs): a
 // package, `--include-tests` (the test-block parse), a source over the
-// byte budget, and a parse with diagnostics (the session expands source
-// sugar and reports them).
+// byte budget, and a parse with diagnostics in a source with sugar (the
+// session expands it). The syntax errors of a source with none are
+// reported here too (`parse_front`).
 use @vesper/hybrid-parse::{parse_words};
 use @vesper/ast::lower::{lower_source};
-use @vesper/front::lex::{max_source_bytes, token_end};
+use @vesper/front::{Tokens};
+use @vesper/front::diag::{diags_new};
+use @vesper/front::lex::{
+    lex_sugar_with_limits, max_diagnostics, max_source_bytes, max_tokens, token_end
+};
+use @vesper/front::parse::{hard_depth};
+use @vesper/front::source_macro::{macro_limits_default, parse_macro_surface_tokens};
 use @vesper-std/fmt::{fmt, write_str, write_u64};
 use @vesper-std/toml::debug::{put_debug_str};
+use @vesper/sugar::driver::{expand_words, imports_none};
+use @vesper/diagnostics::{prepare_check, terminal, Caps, Failure, Sizes, Totals};
 
 fn word_at(in w: ChunkSeq[u64], i: u64) -> u64 {
     match w.try_get(i) {
@@ -25,24 +34,6 @@ fn word_at(in w: ChunkSeq[u64], i: u64) -> u64 {
 fn diagnostic_count(in w: ChunkSeq[u64]) -> u64 {
     let events = word_at(in w, 1);
     word_at(in w, wrapping_add(events, 2))
-}
-
-// The `parse_words` stream of a standalone source whose parse has no
-// diagnostics, for the session's `Parse` (`hd_parsed`); `None` when the
-// session's pass must run instead.
-pub fn parse_clean(in source: Slice[u8]) -> Option[ChunkSeq[u64]] {
-    if source.len() > max_source_bytes() {
-        return Option::None;
-    }
-    let text = match String::from_utf8(in source) {
-        Option::Some(t) => t,
-        Option::None => return Option::None,
-    };
-    let words = parse_words(in text);
-    if diagnostic_count(in words) != 0 {
-        return Option::None;
-    }
-    Option::Some(words)
 }
 
 fn u32_at(in s: ChunkSeq[u32], i: u64) -> u64 {
@@ -108,10 +99,22 @@ fn put_token_text(inout out: ChunkSeq[u8], in src: Slice[u8], start: u64, end: u
     put_debug_str(inout out, in t.as_slice(), 0, t.len());
 }
 
-// `format!("{syntax:#?}\n")` of the concrete syntax tree of a standalone
-// source whose parse has no diagnostics (`--emit cst`); `None` when the
-// session's pass must run instead.
-pub fn cst_text(in source: Slice[u8]) -> Option[ChunkSeq[u8]] {
+// `--emit cst` for a standalone source (driver/front.rs `EmitCst`): the
+// core parse's tree when it has no diagnostics; else the surface parse's
+// (`parse_surface_with_limits(source, ParseLimits::default())`) when that
+// lexes and has none; else the core parse's diagnostics, reported as
+// `cli()`'s `diagnostics` prints them, then the core parse's tree.
+pub struct CstOut {
+    // The diagnostics to print first, in `emit_report`'s layout (empty
+    // when there are none).
+    report: ChunkSeq[u8],
+    // `format!("{syntax:#?}\n")` of the tree.
+    text: ChunkSeq[u8]
+}
+
+// `None` when the session's pass must run instead: a source over the byte
+// budget, or diagnostics the `@vesper/diagnostics` port refuses to render.
+pub fn cst_text(in source: Slice[u8], in file: Slice[u8], json: bool) -> Option[CstOut] {
     if source.len() > max_source_bytes() {
         return Option::None;
     }
@@ -120,10 +123,74 @@ pub fn cst_text(in source: Slice[u8]) -> Option[ChunkSeq[u8]] {
         Option::None => return Option::None,
     };
     let l = lower_source(in text);
-    if l.p.d.code.len() != 0 {
+    if l.p.d.code.len() == 0 {
+        return Option::Some(CstOut {
+            report: ChunkSeq::new[u8](),
+            text: tree_text(in l.p.ev, in l.p.t, in source)
+        });
+    }
+    match surface_tree(in source) {
+        Option::Some(tree) => return Option::Some(CstOut {
+            report: ChunkSeq::new[u8](),
+            text: tree
+        }),
+        Option::None => (),
+    }
+    let words = parse_words(in text);
+    let fields = syntax_fields(in words);
+    let report = match report_of(in text, in file, in fields, json) {
+        Option::Some(r) => r,
+        Option::None => return Option::None,
+    };
+    Option::Some(CstOut { report: report, text: tree_text(in l.p.ev, in l.p.t, in source) })
+}
+
+// `ParseLimits::default()`'s expression macro limits
+// (`surface_macro_limits`: `macro_source::Limits::HARD`'s byte and token
+// budgets under the lexer's defaults).
+const SURFACE_MACRO_BYTES: u64 = 1048576;
+const SURFACE_MACRO_TOKENS: u64 = 65536;
+
+// The tree text of the surface parse with no diagnostics, else `None`.
+fn surface_tree(in source: Slice[u8]) -> Option[ChunkSeq[u8]] {
+    let mut diags = diags_new();
+    let lexed = lex_sugar_with_limits(
+        in source,
+        inout diags,
+        max_source_bytes(),
+        max_tokens(),
+        max_diagnostics()
+    );
+    if lexed.rejected {
         return Option::None;
     }
-    let ev = l.p.ev;
+    let mut lim = macro_limits_default();
+    lim.max_source_bytes = SURFACE_MACRO_BYTES;
+    lim.max_tokens = SURFACE_MACRO_TOKENS;
+    // `parse_surface_with_limits` parses test blocks.
+    let p = parse_macro_surface_tokens(
+        in source,
+        lexed,
+        diags,
+        max_diagnostics(),
+        hard_depth(),
+        true,
+        lim
+    );
+    if p.d.code.len() != 0 {
+        return Option::None;
+    }
+    Option::Some(tree_text(in p.ev, in p.t, in source))
+}
+
+// CST builder events (`P.ev`): a node finish, and the first node start
+// (`NODE_START` plus the kind); anything below is a token index.
+const EVENT_FINISH: u64 = 4294967295;
+const NODE_START: u64 = 2147483648;
+const NEWLINE: u8 = 10;
+
+// `format!("{syntax:#?}\n")` of the tree the events build over `source`.
+fn tree_text(in ev: ChunkSeq[u32], in t: Tokens, in source: Slice[u8]) -> ChunkSeq[u8] {
     let n = ev.len();
     // Each node's end: the end of the last token before its finish.
     let mut ends: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -132,17 +199,17 @@ pub fn cst_text(in source: Slice[u8]) -> Option[ChunkSeq[u8]] {
     let mut at: u64 = 0;
     for i in 0..n {
         let e = u32_at(in ev, i);
-        if e == 4294967295 {
+        if e == EVENT_FINISH {
             let depth = open.len();
             if depth != 0 {
                 let k = word_at(in open, wrapping_sub(depth, 1));
                 ends.try_set(k, at);
                 open.truncate(wrapping_sub(depth, 1));
             }
-        } else if e >= 2147483648 {
+        } else if e >= NODE_START {
             open.push(i);
         } else {
-            at = token_end(in l.p.t, e);
+            at = token_end(in t, e);
         }
     }
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -150,24 +217,467 @@ pub fn cst_text(in source: Slice[u8]) -> Option[ChunkSeq[u8]] {
     at = 0;
     for i in 0..n {
         let e = u32_at(in ev, i);
-        if e == 4294967295 {
+        if e == EVENT_FINISH {
             level = wrapping_sub(level, 1);
-        } else if e >= 2147483648 {
+        } else if e >= NODE_START {
             indent(inout out, level);
-            put_head(inout out, wrapping_sub(e, 2147483648), at, word_at(in ends, i));
-            out.push(10);
+            put_head(inout out, wrapping_sub(e, NODE_START), at, word_at(in ends, i));
+            out.push(NEWLINE);
             level = wrapping_add(level, 1);
         } else {
-            let start = u32_at(in l.p.t.start, e);
-            let end = token_end(in l.p.t, e);
+            let start = u32_at(in t.start, e);
+            let end = token_end(in t, e);
             indent(inout out, level);
-            put_head(inout out, u8_at(in l.p.t.kind, e), start, end);
+            put_head(inout out, u8_at(in t.kind, e), start, end);
             put_token_text(inout out, in source, start, end);
-            out.push(10);
+            out.push(NEWLINE);
             at = end;
         }
     }
     // `{:#?}` ends each line with a newline; `cli()` adds one more.
-    out.push(10);
-    Option::Some(out)
+    out.push(NEWLINE);
+    out
+}
+
+// The driver's own parse of a standalone source (`parse_front`).
+pub enum FrontParse {
+    // No diagnostics: the `parse_words` stream, for the session's `Parse`
+    // (`hd_parsed`).
+    ParsedClean(ChunkSeq[u64]),
+    // Syntax errors in a source with no sugar to expand: their count and
+    // the report `ReportSyntax` would leave in the session's text, for
+    // `emit_report`.
+    SyntaxErrors(u64, ChunkSeq[u8]),
+    // The sugar expansion's diagnostic: its report, for `emit_report`, and
+    // the `Parse` pass's error message (`<code>: <message>`).
+    ExpansionError(ChunkSeq[u8], ChunkSeq[u8]),
+    // The session's `Parse` runs instead.
+    ParseDeclined
+}
+
+// `parse_compiler_input(source, false)` of src/forge_frontend/sugar.rs
+// for a standalone source, with `ReportSyntax`'s report when the parse has
+// diagnostics (crates/vesper-hybrid/src/driver/front.rs) and the `Parse`
+// pass's when the sugar expansion fails. The session keeps what the
+// driver does not cover: a source over the byte budget, a source whose
+// sugar expands (the session expands it again and parses the expansion),
+// and a report the `@vesper/diagnostics` port refuses (the session's
+// renderer prints the raw diagnostics with its own reason).
+pub fn parse_front(in source: ChunkSeq[u8], in file: Slice[u8], json: bool) -> FrontParse {
+    let bytes = source.as_slice();
+    if bytes.len() > max_source_bytes() {
+        return FrontParse::ParseDeclined;
+    }
+    let text = match String::from_utf8(in bytes) {
+        Option::Some(t) => t,
+        Option::None => return FrontParse::ParseDeclined,
+    };
+    let words = parse_words(in text);
+    let count = diagnostic_count(in words);
+    if count == 0 {
+        return FrontParse::ParsedClean(words);
+    }
+    // `expand_sugar_for_execution(source, false)`: `Ok(None)` keeps the
+    // parse's own diagnostics, and `Err` reports the expansion's.
+    let expanded = expand_words(in source, in imports_none(), false);
+    let outcome = word_at(in expanded, 0);
+    if outcome == SUGAR_NONE {
+        let fields = syntax_fields(in words);
+        return match report_of(in text, in file, in fields, json) {
+            Option::Some(report) => FrontParse::SyntaxErrors(count, report),
+            Option::None => FrontParse::ParseDeclined,
+        };
+    }
+    if outcome != SUGAR_ERROR {
+        return FrontParse::ParseDeclined;
+    }
+    let fields = expansion_fields(in expanded);
+    let message = expansion_message(in expanded);
+    match report_of(in text, in file, in fields, json) {
+        Option::Some(report) => FrontParse::ExpansionError(report, message),
+        Option::None => FrontParse::ParseDeclined,
+    }
+}
+
+// The diagnostics report of `fields` (`push_diag_fields` of
+// driver/front.rs after their count): `--json`'s stream, or the terminal
+// rendering as one chunk, in `emit_report`'s layout; `None` when the
+// `@vesper/diagnostics` port refuses to render.
+fn report_of(
+    in text: Str,
+    in file: Slice[u8],
+    in fields: ChunkSeq[u8],
+    json: bool
+) -> Option[ChunkSeq[u8]] {
+    let mut report: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if json {
+        report.push(DIAG_JSON_SINGLE);
+        // No sugar map segments.
+        put_u64_le(inout report, 0);
+        report.extend(in fields.as_slice());
+        return Option::Some(report);
+    }
+    let name = match String::from_utf8(in file) {
+        Option::Some(n) => n,
+        Option::None => return Option::None,
+    };
+    let rendered = match terminal_report(in text, in name, in fields.as_slice()) {
+        Option::Some(r) => r,
+        Option::None => return Option::None,
+    };
+    report.push(DIAG_TEXT_STREAM);
+    // One chunk: the source's rendered diagnostics.
+    put_u64_le(inout report, 1);
+    report.push(DIAG_CHUNK_LITERAL);
+    put_u64_le(inout report, rendered.len());
+    report.extend(in rendered.as_slice());
+    Option::Some(report)
+}
+
+// `expand_words`' first word: no sugar, or the expansion's diagnostic.
+const SUGAR_NONE: u64 = 0;
+const SUGAR_ERROR: u64 = 2;
+
+// The report tags of driver/front.rs (`emit_report` in lib.ves reads them).
+const DIAG_JSON_SINGLE: u8 = 0;
+const DIAG_TEXT_STREAM: u8 = 2;
+const DIAG_CHUNK_LITERAL: u8 = 0;
+
+const WORD_BYTES: u64 = 8;
+const BYTE_BITS: u64 = 8;
+const BYTE_MASK: u64 = 255;
+// A byte index's word (`>> WORD_SHIFT`) and its byte in the word
+// (`& WORD_MASK`).
+const WORD_SHIFT: u32 = 3;
+const WORD_MASK: u64 = 7;
+
+// The parser's diagnostic codes, by their number in `parse_words`
+// (`E0001`..`E0003`), are `CODE_PREFIX` and the number's digit.
+const CODE_PREFIX: Str = "E000";
+const DIGIT_ZERO: u64 = 48;
+
+// A diagnostic's words in `parse_words` before its text: code, start, end,
+// length.
+const DIAG_HEAD_WORDS: u64 = 4;
+// The words before the first diagnostic past the events: the format, the
+// event count and the diagnostic count.
+const STREAM_HEAD_WORDS: u64 = 3;
+// `terminal`'s `color` for `Prepared::terminal` (no colors).
+const COLOR_OFF: u64 = 0;
+
+fn put_u64_le(inout out: ChunkSeq[u8], v: u64) {
+    for i in 0..WORD_BYTES {
+        let shift = wrapping_u32(wrapping_mul(i, BYTE_BITS));
+        out.push(wrapping_u8(wrapping_shr_u64(v, shift) & BYTE_MASK));
+    }
+}
+
+// Byte `i` of a packed text that starts at word `at`.
+fn packed_byte(in w: ChunkSeq[u64], at: u64, i: u64) -> u8 {
+    let word = word_at(in w, wrapping_add(at, wrapping_shr_u64(i, WORD_SHIFT)));
+    let shift = wrapping_u32(wrapping_mul(i & WORD_MASK, BYTE_BITS));
+    wrapping_u8(wrapping_shr_u64(word, shift) & BYTE_MASK)
+}
+
+// A parser diagnostic of a `parse_words` stream.
+copy struct SyntaxDiag {
+    code: u64,
+    start: u64,
+    end: u64,
+    len: u64,
+    // The word its message's packed bytes start at.
+    text: u64
+}
+
+// The first word of the diagnostics in a `parse_words` stream.
+fn first_diagnostic(in w: ChunkSeq[u64]) -> u64 {
+    wrapping_add(word_at(in w, 1), STREAM_HEAD_WORDS)
+}
+
+fn syntax_diag(in w: ChunkSeq[u64], at: u64) -> SyntaxDiag {
+    SyntaxDiag {
+        code: word_at(in w, at),
+        start: word_at(in w, wrapping_add(at, 1)),
+        end: word_at(in w, wrapping_add(at, 2)),
+        len: word_at(in w, wrapping_add(at, 3)),
+        text: wrapping_add(at, DIAG_HEAD_WORDS)
+    }
+}
+
+// The words a diagnostic takes in the stream: its head and its text's.
+fn syntax_diag_words(d: SyntaxDiag) -> u64 {
+    wrapping_add(DIAG_HEAD_WORDS, wrapping_shr_u64(wrapping_add(d.len, WORD_MASK), WORD_SHIFT))
+}
+
+// `push_diag_fields` of driver/front.rs over every parser diagnostic,
+// after their count: a parser diagnostic has no related labels and no
+// help.
+fn syntax_fields(in w: ChunkSeq[u64]) -> ChunkSeq[u8] {
+    let count = diagnostic_count(in w);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_u64_le(inout out, count);
+    let mut at = first_diagnostic(in w);
+    for _ in 0..count {
+        let d = syntax_diag(in w, at);
+        put_u64_le(inout out, wrapping_add(CODE_PREFIX.len(), 1));
+        out.extend(in CODE_PREFIX.as_bytes());
+        out.push(wrapping_u8(wrapping_add(DIGIT_ZERO, d.code)));
+        put_u64_le(inout out, d.len);
+        for i in 0..d.len {
+            out.push(packed_byte(in w, d.text, i));
+        }
+        put_u64_le(inout out, d.start);
+        put_u64_le(inout out, d.end);
+        // No related labels, no help.
+        put_u64_le(inout out, 0);
+        put_u64_le(inout out, 0);
+        at = wrapping_add(at, syntax_diag_words(d));
+    }
+    out
+}
+
+// A text of `expand_words` at word `at` (its length, then a byte a word);
+// `at` moves past it.
+fn put_word_text(inout out: ChunkSeq[u8], in w: ChunkSeq[u64], inout at: u64) {
+    let len = word_at(in w, at);
+    at = wrapping_add(at, 1);
+    put_u64_le(inout out, len);
+    for i in 0..len {
+        out.push(wrapping_u8(word_at(in w, wrapping_add(at, i)) & BYTE_MASK));
+    }
+    at = wrapping_add(at, len);
+}
+
+fn next_word(in w: ChunkSeq[u64], inout at: u64) -> u64 {
+    let v = word_at(in w, at);
+    at = wrapping_add(at, 1);
+    v
+}
+
+// `push_diag_fields` of the expansion's one diagnostic in `expand_words`'
+// failure (code, message, span, then each related label's span and
+// text), after its count; it has no help.
+fn expansion_fields(in w: ChunkSeq[u64]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_u64_le(inout out, 1);
+    let mut at: u64 = 1;
+    put_word_text(inout out, in w, inout at);
+    put_word_text(inout out, in w, inout at);
+    put_u64_le(inout out, next_word(in w, inout at));
+    put_u64_le(inout out, next_word(in w, inout at));
+    let labels = next_word(in w, inout at);
+    put_u64_le(inout out, labels);
+    for _ in 0..labels {
+        put_u64_le(inout out, next_word(in w, inout at));
+        put_u64_le(inout out, next_word(in w, inout at));
+        put_word_text(inout out, in w, inout at);
+    }
+    // No help.
+    put_u64_le(inout out, 0);
+    out
+}
+
+// The `Parse` pass's error for the expansion's diagnostic:
+// `<code>: <message>`.
+fn expansion_message(in w: ChunkSeq[u64]) -> ChunkSeq[u8] {
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut at: u64 = 1;
+    put_word_text(inout text, in w, inout at);
+    put_word_text(inout text, in w, inout at);
+    // `text` holds both with their lengths; drop the lengths.
+    let b = text.as_slice();
+    let code_at = WORD_BYTES;
+    let code_len = b.try_read_u64_le(0).unwrap_or(0);
+    let message_at = wrapping_add(code_at, code_len);
+    let message_len = b.try_read_u64_le(message_at).unwrap_or(0);
+    let message_start = wrapping_add(message_at, WORD_BYTES);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in b[code_at..message_at]);
+    out.extend(in ": ".as_bytes());
+    out.extend(in b[message_start..wrapping_add(message_start, message_len)]);
+    out
+}
+
+// `vesper_diagnostics::Limits::HARD` (`vesper_span::Limits::HARD` and the
+// name budget), the limits `cli()`'s renderer prepares under.
+const HARD_SOURCE_BYTES: u64 = 1048576;
+const HARD_LINES: u64 = 262145;
+const HARD_METADATA_BYTES: u64 = 16777216;
+const HARD_WORK: u64 = 67108864;
+const HARD_EDITS: u64 = 4096;
+const HARD_OUTPUT_BYTES: u64 = 2097152;
+const HARD_DIAGNOSTICS: u64 = 4096;
+const HARD_LABELS: u64 = 16384;
+const HARD_FIXES: u64 = 4096;
+const HARD_TEXT_BYTES: u64 = 2097152;
+const HARD_NAME_BYTES: u64 = 4096;
+
+// `size_of` of the Rust records the terminal budgets charge, on the 64-bit
+// hosts the hybrid builds for: vesper_span::DiagnosticData and Label,
+// serde_json::Value, and ariadne 0.5.1's Line and
+// Label<(&str, Range<usize>)>.
+const SIZE_DIAGNOSTIC: u64 = 128;
+const SIZE_LABEL: u64 = 48;
+const SIZE_VALUE: u64 = 32;
+const SIZE_LINE: u64 = 32;
+const SIZE_REPORT_LABEL: u64 = 72;
+
+fn hard_caps() -> Caps {
+    Caps {
+        max_source_bytes: narrow_usize(HARD_SOURCE_BYTES),
+        max_lines: narrow_usize(HARD_LINES),
+        max_metadata_bytes: narrow_usize(HARD_METADATA_BYTES),
+        max_work: narrow_usize(HARD_WORK),
+        max_edits: narrow_usize(HARD_EDITS),
+        max_output_bytes: narrow_usize(HARD_OUTPUT_BYTES),
+        max_diagnostics: narrow_usize(HARD_DIAGNOSTICS),
+        max_labels: narrow_usize(HARD_LABELS),
+        max_fixes: narrow_usize(HARD_FIXES),
+        max_text_bytes: narrow_usize(HARD_TEXT_BYTES),
+        max_name_bytes: narrow_usize(HARD_NAME_BYTES)
+    }
+}
+
+fn record_sizes() -> Sizes {
+    Sizes {
+        diagnostic: narrow_usize(SIZE_DIAGNOSTIC),
+        label: narrow_usize(SIZE_LABEL),
+        value: narrow_usize(SIZE_VALUE),
+        line: narrow_usize(SIZE_LINE),
+        report_label: narrow_usize(SIZE_REPORT_LABEL)
+    }
+}
+
+fn totals_ok(t: Totals) -> Option[Totals] {
+    Option::Some(t)
+}
+
+fn totals_refused(f: Failure) -> Option[Totals] {
+    Option::None
+}
+
+fn rendered_ok(sink text: ChunkSeq[u8]) -> Option[ChunkSeq[u8]] {
+    Option::Some(text)
+}
+
+fn rendered_refused(f: Failure) -> Option[ChunkSeq[u8]] {
+    Option::None
+}
+
+copy struct Reader {
+    pos: u64
+}
+
+fn read_u64(in b: Slice[u8], inout r: Reader) -> u64 {
+    let v = b.try_read_u64_le(r.pos).unwrap_or(0);
+    r.pos = wrapping_add(r.pos, WORD_BYTES);
+    v
+}
+
+// A text in a byte stream: its start and length.
+copy struct FieldText {
+    at: u64,
+    len: u64
+}
+
+fn text_end(t: FieldText) -> u64 {
+    wrapping_add(t.at, t.len)
+}
+
+// A length-prefixed text of `b`; `r` moves past it.
+fn read_text(in b: Slice[u8], inout r: Reader) -> FieldText {
+    let len = read_u64(in b, inout r);
+    let at = r.pos;
+    r.pos = wrapping_add(at, len);
+    FieldText { at: at, len: len }
+}
+
+// `vesper_diagnostics::prepare(..).terminal(file)` of `cli()`'s renderer
+// over `fields`, through the port's `prepare_check` and `terminal`; `None`
+// when the port refuses (the session renders instead, with the raw
+// fallback's reason). `prepare_check` passing implies every check of
+// `LineIndex::new` and `Diagnostics::new` for a source within
+// `HARD_SOURCE_BYTES`.
+fn terminal_report(in text: Str, in file: Str, in fields: Slice[u8]) -> Option[ChunkSeq[u8]] {
+    // `prepare_check`'s input: seven words per diagnostic and three per
+    // related label. The model: five words per diagnostic and three per
+    // label, the primary label first with no message, and the pool of the
+    // diagnostics' texts.
+    let mut input: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut model: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut pool: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut r = Reader { pos: 0 };
+    let count = read_u64(in fields, inout r);
+    for _ in 0..count {
+        let code = read_text(in fields, inout r);
+        let message = read_text(in fields, inout r);
+        let start = read_u64(in fields, inout r);
+        let end = read_u64(in fields, inout r);
+        let related = read_u64(in fields, inout r);
+        let mut labels: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut label_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for _ in 0..related {
+            labels.push(read_u64(in fields, inout r));
+            labels.push(read_u64(in fields, inout r));
+            let label = read_text(in fields, inout r);
+            labels.push(label.len);
+            label_text.extend(in fields[label.at..text_end(label)]);
+        }
+        let has_help = read_u64(in fields, inout r);
+        let help = if has_help != 0 {
+            read_text(in fields, inout r)
+        } else {
+            FieldText { at: 0, len: 0 }
+        };
+        input.push(code.len);
+        input.push(message.len);
+        input.push(has_help);
+        input.push(help.len);
+        input.push(related);
+        input.push(start);
+        input.push(end);
+        input.extend(in labels.as_slice());
+        model.push(code.len);
+        model.push(message.len);
+        model.push(has_help);
+        model.push(help.len);
+        model.push(wrapping_add(related, 1));
+        model.push(start);
+        model.push(end);
+        model.push(0);
+        model.extend(in labels.as_slice());
+        pool.extend(in fields[code.at..text_end(code)]);
+        pool.extend(in fields[message.at..text_end(message)]);
+        pool.extend(in fields[help.at..text_end(help)]);
+        pool.extend(in label_text.as_slice());
+    }
+    let caps = hard_caps();
+    let sizes = record_sizes();
+    let totals = handle Fail[Failure] in {
+        totals_ok(prepare_check(in text, in input.as_slice(), count, in caps, in sizes))
+    } with {
+        return v => v,
+        raise(f, resume) => totals_refused(f),
+    };
+    let t = match totals {
+        Option::Some(t) => t,
+        Option::None => return Option::None,
+    };
+    handle Fail[Failure] in {
+        rendered_ok(terminal(
+            in text,
+            in model.as_slice(),
+            count,
+            in pool.as_slice(),
+            in file,
+            in caps,
+            in sizes,
+            t.labels,
+            t.text,
+            COLOR_OFF
+        ))
+    } with {
+        return v => v,
+        raise(f, resume) => rendered_refused(f),
+    }
 }
