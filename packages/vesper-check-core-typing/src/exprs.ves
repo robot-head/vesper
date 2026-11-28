@@ -23,7 +23,7 @@ use @vesper/check-data::world::{
     mode_of, set_by_symbol
 };
 use @vesper/check-data::input::{Ctx, Reader};
-use self::ints::{Lit, default_fits, default_of, fits, lit_max};
+use self::ints::{Lit, above_i128, default_fits, default_of, fits, lit_max, small_lit};
 use self::relations::{
     compatible, infer, item, join_types, lit_of, mk_lit, refine_annotation, unresolved
 };
@@ -154,6 +154,9 @@ const SEQ_FINISH: Str = "ChunkSeq::finish";
 // The fip prelude's box constructors (`fip::BOX_NEW`, `BOX_NEW_IN_CALLER`).
 const BOX_NEW: Str = "Box::new";
 const BOX_NEW_IN_CALLER: Str = "Box::new_in_caller";
+// The prefix of a `dyn` parameter's hidden type parameter
+// (`dyn_trait::DYN_GENERIC`).
+const DYN_GENERIC: Str = "__dyn__";
 const PLACE_PRIMITIVE_OPERANDS: u32 = 2;
 
 // The length of `::` in an `Eff::op` name.
@@ -181,6 +184,8 @@ const LIT_INT: u8 = 0;
 const LIT_FLOAT: u8 = 1;
 const LIT_BOOL: u8 = 2;
 const LIT_WIDE_INT: u8 = 3;
+// An integer literal past u64::MAX in magnitude: sign, low and high words.
+const E_WIDE_INT: u8 = 26;
 const LIT_TYPED_INT: u8 = 4;
 const LIT_STRING: u8 = 5;
 // An extra type row (`Ck::extra_rows`): start, end, type.
@@ -237,6 +242,8 @@ pub copy struct Ex {
     z: u32,
     neg: bool,
     mag: u64,
+    // An integer literal's magnitude high word (`E_WIDE_INT`).
+    hi: u64,
 }
 
 pub copy struct Stmt {
@@ -270,6 +277,7 @@ pub copy struct PatX {
     lit_kind: u8,
     neg: bool,
     mag: u64,
+    hi: u64,
 }
 
 pub copy struct FnSig {
@@ -426,6 +434,9 @@ pub struct Ck {
     // and the join of every `return` value so far (NONE32 for `Never`).
     fn_result: u32,
     returned: u32,
+    // The checked body's result (`Checker::results`): the declared result
+    // refined by the body's type, or NONE32.
+    fn_actual: u32,
     // Diagnostics of the function being checked, and whether it has an
     // open literal binding (`LiteralTyping::open`).
     errors: u64,
@@ -524,6 +535,7 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
         static_text: false,
         fn_result: NONE32,
         returned: NONE32,
+        fn_actual: NONE32,
         errors: 0,
         open_literal: false,
         lt_open: ChunkSeq::new[u32](),
@@ -541,8 +553,16 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
     let range = ck.ctx.names.intern(in "Range".as_bytes());
     ck.range_sym = range;
     // Pattern 0, the wildcard, has no extras.
-    ck.pat_extras
-        .push(PatX { start: 0, end: 0, name: 0, qualifier: 0, lit_kind: 0, neg: false, mag: 0 });
+    ck.pat_extras.push(PatX {
+        start: 0,
+        end: 0,
+        name: 0,
+        qualifier: 0,
+        lit_kind: 0,
+        neg: false,
+        mag: 0,
+        hi: 0
+    });
     ck
 }
 
@@ -569,7 +589,8 @@ impl Ck {
                 y: 0,
                 z: NONE32,
                 neg: false,
-                mag: 0
+                mag: 0,
+                hi: 0
             },
         }
     }
@@ -584,7 +605,8 @@ impl Ck {
                 qualifier: 0,
                 lit_kind: 0,
                 neg: false,
-                mag: 0
+                mag: 0,
+                hi: 0
             },
         }
     }
@@ -676,7 +698,8 @@ fn blank(kind: u8, start: u64, end: u64) -> Ex {
         y: 0,
         z: NONE32,
         neg: false,
-        mag: 0
+        mag: 0,
+        hi: 0
     }
 }
 
@@ -692,7 +715,8 @@ fn read_xpat(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) -> u32 {
         qualifier: 0,
         lit_kind: 0,
         neg: false,
-        mag: 0
+        mag: 0,
+        hi: 0
     };
     let mut short_name: u32 = 0;
     let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -701,9 +725,13 @@ fn read_xpat(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) -> u32 {
         extra.name = sym(in ck.ctx, reader.word(in bytes));
     } else if kind == P_LIT {
         extra.lit_kind = wrapping_u8(reader.word(in bytes));
-        if extra.lit_kind == LIT_INT {
+        if extra.lit_kind == LIT_INT || extra.lit_kind == LIT_WIDE_INT {
             extra.neg = reader.word(in bytes) != 0;
             extra.mag = reader.word(in bytes);
+            if extra.lit_kind == LIT_WIDE_INT {
+                extra.lit_kind = LIT_INT;
+                extra.hi = reader.word(in bytes);
+            }
         } else if extra.lit_kind == LIT_TYPED_INT {
             extra.name = sym(in ck.ctx, reader.word(in bytes));
         }
@@ -741,9 +769,13 @@ fn read_expr(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) -> u32 {
     let start = reader.word(in bytes);
     let end = reader.word(in bytes);
     let mut ex = blank(kind, start, end);
-    if kind == E_INT {
+    if kind == E_INT || kind == E_WIDE_INT {
         ex.neg = reader.word(in bytes) != 0;
         ex.mag = reader.word(in bytes);
+        if kind == E_WIDE_INT {
+            ex.kind = E_INT;
+            ex.hi = reader.word(in bytes);
+        }
     } else if kind == E_BOOL {
         ex.x = n32(reader.word(in bytes));
     } else if kind == E_NAME {
@@ -1185,6 +1217,14 @@ fn foreign(in ck: Ck, ty: u32) -> bool {
         if name == known.tiled_seq || name == known.dyn_ {
             return true;
         }
+        let object = boxed_object(in ck, ty);
+        if object != NONE32 {
+            // A boxed trait object (`Box[dyn Trait[args]]`, §7.3) is typed
+            // as a value; only its trait's arguments can be foreign. Other
+            // `dyn` types (parameters, hidden generics) are not ported.
+            let trait_ty = item(in ck.ctx.types, w(ck.ctx.types.node(object).a));
+            return foreign(in ck, trait_ty);
+        }
     }
     if node.kind == TyKind::Named || node.kind == TyKind::Tuple || node.kind == TyKind::Fn {
         for i in 0..w(node.n) {
@@ -1194,6 +1234,39 @@ fn foreign(in ck: Ck, ty: u32) -> bool {
         }
     }
     false
+}
+
+// `dyn_trait::is_object`: `dyn Trait[args]`.
+fn is_object(in ck: Ck, ty: u32) -> bool {
+    let node = ck.ctx.types.node(ty);
+    node.kind == TyKind::Named && node.name == ck.ctx.world.k.dyn_ && node.n == 1
+}
+
+// `dyn_trait::boxed_object`: the object type of `Box[dyn Trait[args]]`, or
+// NONE32.
+fn boxed_object(in ck: Ck, ty: u32) -> u32 {
+    let node = ck.ctx.types.node(ty);
+    if node.kind != TyKind::Named || node.name != ck.ctx.world.k.box_ || node.n != 1 {
+        return NONE32;
+    }
+    let payload = item(in ck.ctx.types, w(node.a));
+    if is_object(in ck, payload) {
+        payload
+    } else {
+        NONE32
+    }
+}
+
+// `dyn_trait::is_dyn_generic` of an argumentless named type: a `dyn`
+// parameter's hidden type parameter.
+fn is_dyn_generic(inout ck: Ck, ty: u32) -> bool {
+    let node = ck.ctx.types.node(ty);
+    if node.kind != TyKind::Named || node.n != 0 {
+        return false;
+    }
+    let mut text = ChunkSeq::new[u8]();
+    ck.ctx.names.write(node.name, inout text);
+    starts_with(in text, DYN_GENERIC)
 }
 
 pub fn note(inout ck: Ck, ty: u32) {
@@ -1419,8 +1492,12 @@ pub fn expr_expected(inout ck: Ck, e: u32, expected: u32) -> u32 {
 }
 
 fn int_literal(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
-    let value = Lit { neg: ex.neg, mag: ex.mag };
+    let value = Lit { neg: ex.neg, mag: ex.mag, hi: ex.hi };
     let known = ck.ctx.world.k;
+    if above_i128(value) {
+        // `Literal::WideInt`: only `u128` holds it.
+        return named(inout ck, known.u128_);
+    }
     let kind = int_kind(in ck, expected);
     if kind != NONE32 {
         if !fits(known, kind, value) {
@@ -2423,7 +2500,7 @@ fn literal_use(inout ck: Ck, e: u32, bound: Bind, expected: u32) -> u32 {
     if integer_named(in ck, expected) {
         expected
     } else {
-        mk_lit(inout ck.ctx.types, Lit { neg: false, mag: 0 })
+        mk_lit(inout ck.ctx.types, small_lit(false, 0))
     }
 }
 
@@ -2552,17 +2629,18 @@ fn bind_mode(inout ck: Ck, pat_id: u32, ty: u32, pass: u8) {
         let lit_ty = if pat.kind == P_LIT && extra.lit_kind == LIT_TYPED_INT {
             named(inout ck, extra.name)
         } else if pat.kind == P_LIT && extra.lit_kind == LIT_INT {
-            mk_lit(inout ck.ctx.types, Lit { neg: extra.neg, mag: extra.mag })
+            let value = Lit { neg: extra.neg, mag: extra.mag, hi: extra.hi };
+            if above_i128(value) {
+                named(inout ck, known.u128_)
+            } else {
+                mk_lit(inout ck.ctx.types, value)
+            }
         } else if pat.kind == P_LIT && extra.lit_kind == LIT_FLOAT {
             if is_named(in ck, ty, known.f32_) {
                 ty
             } else {
                 named(inout ck, known.f64_)
             }
-        } else if pat.kind == P_LIT && extra.lit_kind == LIT_WIDE_INT {
-            // An integer past `u64::MAX` in magnitude: not ported yet.
-            ck.skip = true;
-            named(inout ck, known.u128_)
         } else if pat.kind == P_LIT && extra.lit_kind == LIT_STRING {
             named(inout ck, known.string)
         } else {
@@ -4730,21 +4808,35 @@ fn box_call(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         error(inout ck, "E0308", arg_ex.start, arg_ex.end);
     }
     let inner_expected = if ex.m != 0 {
-        let t = u32_at(in ck.targs, w(ex.b));
-        note(inout ck, t);
-        t
+        u32_at(in ck.targs, w(ex.b))
     } else if is_named(in ck, expected, box_sym) && ck.ctx.types.node(expected).n == 1 {
         item(in ck.ctx.types, w(ck.ctx.types.node(expected).a))
     } else {
         hole
     };
-    note(inout ck, inner_expected);
+    // Boxing a trait object (§7.3): the box holds the concrete value.
+    let callee = ck.ex(ex.x);
+    let boxing_object = is_object(in ck, inner_expected) && is_qualified(in ck, callee.x, BOX_NEW);
+    let mut boxed_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    boxed_args.push(inner_expected);
+    let boxed = ck.ctx.types.named(box_sym, in boxed_args);
+    note(inout ck, if boxing_object { boxed } else { inner_expected });
     if ck.skip {
         return hole;
     }
-    let actual = expr_expected(inout ck, arg.expr, inner_expected);
+    let value_expected = if boxing_object { hole } else { inner_expected };
+    let actual = expr_expected(inout ck, arg.expr, value_expected);
     if ck.skip {
         return hole;
+    }
+    if boxing_object {
+        let concrete = default_type(inout ck.ctx.types, actual);
+        if is_object(in ck, concrete) || is_dyn_generic(inout ck, concrete) {
+            error(inout ck, "E0631", arg_ex.start, arg_ex.end);
+        } else if mode(inout ck, concrete) > TyMode::Affine {
+            error(inout ck, "E0205", arg_ex.start, arg_ex.end);
+        }
+        return boxed;
     }
     let inner = if inner_expected != hole {
         expect_type(inout ck, inner_expected, actual, arg_ex.start, arg_ex.end);
@@ -5275,6 +5367,7 @@ fn run_body(
     ck.frames.truncate(0);
     ck.observed.truncate(0);
     ck.lent_closure = NONE64;
+    ck.fn_actual = NONE32;
     if ck.skip {
         return;
     }
@@ -5290,11 +5383,13 @@ fn run_body(
         join(inout ck, body_actual, ck.returned, body_ex.start, body_ex.end)
     };
     expect_type(inout ck, sig.result, actual, body_ex.start, body_ex.end);
+    ck.fn_actual = refine_annotation(inout ck.ctx.types, sig.result, actual);
 }
 
 // `Checker::function_body` for the expression types: the parameters bound,
-// the body checked against the declared result. Writes `F start end` and a
-// `T start end type` row per recorded expression, or `S start end`.
+// the body checked against the declared result. Writes `F start end`, the
+// function's result `R type` (`Checker::results`) and a `T start end type`
+// row per recorded expression, or `S start end`.
 pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32, first: u32) {
     let sig_index = fn_index(in ck, fname);
     ck.current = sig_index;
@@ -5358,6 +5453,11 @@ pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32,
         put_u64(inout ck.out, end);
         ck.out.push(10);
         return;
+    }
+    if ck.fn_actual != NONE32 {
+        put(inout ck.out, "R ");
+        debug_type(in ck.ctx.types, in ck.ctx.names, ck.fn_actual, inout ck.out);
+        ck.out.push(10);
     }
     for e in w(first)..ck.exs.len() {
         let ty = u32_at(in ck.ex_types, e);

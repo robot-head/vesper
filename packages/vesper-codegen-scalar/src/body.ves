@@ -105,6 +105,9 @@ const SEQ_SAME: u64 = 2;
 const SEQ_AS_BYTES: u64 = 3;
 const SEQ_BYTE_AT: u64 = 4;
 const SEQ_GET: u64 = 5;
+// A slice view's header word (`seq_word`): read-only memory when the
+// view is a parameter read once at entry.
+const SEQ_VIEW_WORD: u64 = 6;
 // The header words (src/strings/native.rs, src/seq/native.rs): a
 // string's `{len, cap, data}`, a slice view's `{handle, start, len}`.
 const STR_LEN_OFFSET: u64 = 0;
@@ -2370,7 +2373,7 @@ impl Gen {
             return true;
         }
         if slice && n == 1 && label == ops_s.seq_slice_len {
-            extra.push(SEQ_WORD);
+            extra.push(SEQ_VIEW_WORD);
             extra.push(SLICE_LEN_OFFSET);
             return true;
         }

@@ -1,0 +1,111 @@
+// @vesper/library-ir: the IR pipeline `vesper build --lib` runs on a
+// library's first lowering (src/native_export.rs `library_program`) in
+// Vesper, for the Stage 2 bootstrap switch (slice 3, #2659, #2662).
+//
+// The input is a stage word (`LibraryStage`: where the pipeline stops), the
+// optimize flag, then @vesper/codegen-calls' calls input of the first
+// lowering: @vesper/check-data's names, types and world, @vesper/place-ir's
+// program section and the calls section. The steps, in Rust's order:
+//
+// - widths.ves: `lower_bit_builtin_calls` and `refine_wide_tuples`.
+// - optimized: `ir_opt::optimize` through the native policy
+//   (@vesper/ir-opt-policy's screen, @vesper/ir-opt's memory forwarding),
+//   then tokens.ves (`ir::thread_tokens`); unoptimized: `fip_reuse_pass`.
+// - optimized: the inliner (not ported here yet).
+// - `fip::elaborate_non_fip_drops`.
+// - optimized: bounds hoisting (@vesper/bounds-hoist).
+//
+// `@fip` reuse and drop elaboration do nothing in a world without the
+// `Box` prelude; a world with it is refused until they are ported. The
+// output is a status word (`S_*`), then, when it is `S_OK`, the program as
+// `put_program` words (names, types, program section), which
+// tests/common/ir_words.rs `decode_program` reads back.
+
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/place-ir::{put_program, read_program};
+use @vesper/codegen-calls::data::{read_calls};
+use @vesper/ir-opt::view::{type_classes};
+use @vesper/ir-opt::forward::{forward_program_kept};
+use @vesper/ir-opt-policy::screen::{screen_program};
+use self::widths::{lower_bit_builtin_calls, refine_wide_tuples};
+use self::tokens::{thread_tokens};
+
+// `LibraryStage`, in order: each stage includes the ones before it.
+pub enum Stage: _ {
+    Widths = 0,
+    Optimize = 1,
+    Inline = 2,
+    Drops = 3,
+    Hoist = 4,
+}
+
+// The output's status word. 1 to 3 are @vesper/ir-opt's: a read lacks
+// state evidence, egglog would refuse a block, a `slot_key` error.
+pub enum Status: _ {
+    Ok = 0,
+    // The world has the `Box` prelude: `@fip` reuse and drop elaboration
+    // are not ported yet.
+    FipActive = 16,
+    // An optimized build past the optimizer: the inliner is not wired yet.
+    Inline = 17,
+}
+
+// @vesper/ir-opt's status for a program it optimized.
+const OPT_OK: u8 = 0;
+
+// The harness's entry (crates/vesper-codegen-swap-test/tests/self_host_library_ir.rs
+// passes a `Str`).
+pub fn library_ir_text(in input: Str) -> ChunkSeq[u64] {
+    library_ir_words(in input.as_bytes())
+}
+
+fn refused(status: u64) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(status);
+    out
+}
+
+pub fn library_ir_words(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader { pos: 0 };
+    let stage = r.word(in b);
+    let optimize = r.word(in b) != 0;
+    let mut c = read_ctx(inout r, in b);
+    let mut p = read_program(inout r, in b, in c);
+    let calls = read_calls(inout r, in b, in c);
+    lower_bit_builtin_calls(inout p, in c.names, c.world.k, in calls);
+    refine_wide_tuples(inout p, inout c.types, c.world.k);
+    if stage >= Stage::Optimize {
+        if c.world.box_active {
+            return refused(Status::FipActive);
+        }
+        if optimize {
+            let cls = type_classes(in c.types, in c.names);
+            let (keep, kept) = screen_program(in p, in c.names, in cls);
+            if kept != 0 {
+                let n = p.insts.len();
+                let mut orig: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+                for k in 0..n {
+                    orig.push(k);
+                }
+                let (st, forwarded) = forward_program_kept(
+                    inout p,
+                    in c.names,
+                    in cls,
+                    inout orig,
+                    in keep
+                );
+                if st != OPT_OK {
+                    return refused(widen_u64(st));
+                }
+            }
+            thread_tokens(inout p, in c.names);
+            if stage >= Stage::Inline {
+                return refused(Status::Inline);
+            }
+        }
+    }
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(Status::Ok);
+    put_program(in p, in c.types, in c.names, inout out);
+    out
+}

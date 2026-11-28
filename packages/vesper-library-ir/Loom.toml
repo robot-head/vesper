@@ -1,0 +1,14 @@
+[package]
+name = "@vesper/library-ir"
+version = "0.1.0"
+edition = "2026"
+# The IR pipeline only computes: no I/O, clock or network (design §42.3).
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/check-data" = { version = "^0.1", path = "../vesper-check-data" }
+"@vesper/place-ir" = { version = "^0.1", path = "../vesper-place-ir" }
+"@vesper/codegen-calls" = { version = "^0.1", path = "../vesper-codegen-calls" }
+"@vesper/ir-opt" = { version = "^0.1", path = "../vesper-ir-opt" }
+"@vesper/ir-opt-policy" = { version = "^0.1", path = "../vesper-ir-opt-policy" }
+"@vesper/bounds-hoist" = { version = "^0.1", path = "../vesper-bounds-hoist" }

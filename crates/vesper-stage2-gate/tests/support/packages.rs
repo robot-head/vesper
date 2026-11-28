@@ -385,6 +385,13 @@ pub const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::Exact(1),
     ),
     (
+        "library-ir",
+        "@vesper/library-ir",
+        "packages/vesper-library-ir",
+        "library_ir_text(in \"\").len()",
+        CompilerExecCheck::NonZero,
+    ),
+    (
         "native-vectorize",
         "@vesper/native-vectorize",
         "packages/vesper-native-vectorize",

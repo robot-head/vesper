@@ -5,7 +5,7 @@
 
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{Types, TyPass};
-use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
 use @vesper/place-ir::{InstRow, Program, put_program, read_program};
 use self::fun::{Fun, add, inc, insert, n32, read_fun, u32_at, u64_at, u8_at, w};
 use self::encode::{POOL_GUARD, TypeCache, encode_fun, type_cache};
@@ -556,6 +556,15 @@ pub fn hoist_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let mut p = read_program(inout r, in b, in c);
+    let n = hoist_program(inout p, inout c);
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    put_program(in p, in c.types, in c.names, inout o);
+    o
+}
+
+// `bounds_hoist::run` on a program already in tables (the library IR
+// pipeline of @vesper/library-ir, #2662): how many loops it versioned.
+pub fn hoist_program(inout p: Program, inout c: Ctx) -> u64 {
     let s_bool = c.names.intern(in "bool".as_bytes());
     let u64_ty = c.types.named0(c.types.s_u64);
     let bool_ty = c.types.named0(s_bool);
@@ -565,10 +574,12 @@ pub fn hoist_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
         bool_ty: bool_ty,
         infer: c.types.infer,
     };
+    let mut versioned: u64 = 0;
     for fi in 0..p.fn_count() {
-        let n = hoist_function(inout p, inout c.types, inout c.names, inout cx, fi);
+        versioned = add(
+            versioned,
+            hoist_function(inout p, inout c.types, inout c.names, inout cx, fi)
+        );
     }
-    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    put_program(in p, in c.types, in c.names, inout o);
-    o
+    versioned
 }

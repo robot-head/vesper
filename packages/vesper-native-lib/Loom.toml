@@ -11,6 +11,7 @@ capability_ceiling = ["Fail", "Alloc", "Ffi"]
 "@vesper/codegen-export-glue" = { version = "^0.1", path = "../vesper-codegen-export/glue" }
 "@vesper/codegen-numeric" = { version = "^0.1", path = "../vesper-codegen-numeric" }
 "@vesper/codegen-scalar-emit" = { version = "^0.1", path = "../vesper-codegen-scalar/emit" }
+"@vesper/codegen-scalar" = { version = "^0.1", path = "../vesper-codegen-scalar" }
 "@vesper/codegen-seq-emit" = { version = "^0.1", path = "../vesper-codegen-seq/emit" }
 "@vesper/cranelift" = { version = "^0.1", path = "../vesper-cranelift" }
 "@vesper/check-data" = { version = "^0.1", path = "../vesper-check-data" }
