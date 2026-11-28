@@ -78,13 +78,8 @@ struct Plan {
 }
 
 thread_local! {
-    /// The plans of the last programs lent: the compile's program and the
-    /// generic instances it lends beside it (#2715).
-    static PLAN: RefCell<Vec<Plan>> = const { RefCell::new(Vec::new()) };
+    static PLAN: RefCell<Option<Plan>> = const { RefCell::new(None) };
 }
-
-/// How many programs' plans [`PLAN`] keeps.
-const PLANS_KEPT: usize = 16;
 
 /// Functions emitted from Vesper, and functions the Rust walk kept
 /// (unplanned).
@@ -156,27 +151,23 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     if lent.op != codegen_swap::body::FUNCTION {
         return Ok(false);
     }
-    // A generic instance (#2715) is planned from its own program.
+    // A generic instance (#2715) is planned from its own program, made
+    // for this request only (so its plan is not cached).
     let instance = codegen_swap::body_instance();
-    let (program, function): (&Program, &str) = match &instance {
-        Some((p, name)) => (p, name),
-        None => (lent.program, lent.site.function),
-    };
-    let words = PLAN.with(|cell| {
-        let mut plans = cell.borrow_mut();
-        let key = (program_key(program), lent.optimize);
-        let at = match plans.iter().position(|p| p.key == key) {
-            Some(at) => at,
-            None => {
-                if plans.len() == PLANS_KEPT {
-                    plans.remove(0);
-                }
-                plans.push(plan_of(lent.world, program, lent.optimize));
-                plans.len() - 1
+    let words = match &instance {
+        Some((program, name)) => plan_of(lent.world, program, lent.optimize)
+            .bodies
+            .remove(name),
+        None => PLAN.with(|cell| {
+            let mut cell = cell.borrow_mut();
+            let key = (program_key(lent.program), lent.optimize);
+            if cell.as_ref().is_none_or(|p| p.key != key) {
+                *cell = Some(plan_of(lent.world, lent.program, lent.optimize));
             }
-        };
-        plans[at].bodies.get(function).cloned()
-    });
+            let plan = cell.as_ref().expect("just planned");
+            plan.bodies.get(lent.site.function).cloned()
+        }),
+    };
     let Some(words) = words else {
         UNPLANNED.fetch_add(1, Ordering::Relaxed);
         return Ok(false);
@@ -286,7 +277,7 @@ fn runs(index: usize, case: &check_harness::Case) -> bool {
 fn both(name: &str, world: &vesper::check::World, run: bool) -> Diff {
     let mut total = Diff::default();
     for optimize in [true, false] {
-        PLAN.with(|p| p.borrow_mut().clear());
+        PLAN.with(|p| *p.borrow_mut() = None);
         total.add(compare(name, world, "main", hooks(), optimize, run));
     }
     total
@@ -946,8 +937,8 @@ fn vesper_scalar_bodies_part_6j() {
 /// arithmetic on narrow and word kinds raising `ArithOverflow`, partial `/`
 /// and `%` raising `RuntimeError`, and calls of other `fail_only` functions
 /// (one or two instances, an enum or an `i64` error), whose failures are
-/// raised again. Functions that `Fail::raise` themselves (`guard`, `code`)
-/// and the handlers stay on the Rust walk.
+/// raised again. Explicit `Fail::raise` (`guard`, `code`) is covered by
+/// `vesper_explicit_raises_match`.
 const FAILS: &str = "
 enum Oops {
     Small,
@@ -1172,6 +1163,129 @@ fn vesper_fail_handlers_match() {
         assert!(
             emitted >= min_emitted,
             "only {emitted} handler functions came from Vesper (expected {min_emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// Explicit `Fail::raise` (#2657): payload-free enum, one-word integer and
+/// enum-with-payload errors raised through the failure record (the
+/// diagnostics port's `add`), a struct error, and raises to a handler in
+/// the same function.
+const RAISES: &str = "
+copy enum Oops {
+    Small,
+    Big,
+}
+copy enum Res {
+    Source,
+    Lines,
+}
+copy enum Failure {
+    Limits,
+    Budget(Res),
+    Wide { at: u64, len: u64 },
+}
+copy struct Range {
+    lo: i64,
+    hi: i64,
+}
+fn guard(x: i64) -> i64 eff [Fail[Oops]] {
+    if x < 0 {
+        Fail::raise(Oops::Small);
+    }
+    if x > 100 {
+        Fail::raise(Oops::Big);
+    }
+    wrapping_mul(x, 2)
+}
+fn code(x: i64) -> i64 eff [Fail[i64]] {
+    if x > 9 {
+        Fail::raise(x);
+    }
+    wrapping_add(x, 1)
+}
+fn add(a: u64, b: u64, r: Res) -> u64 eff [Fail[Failure]] {
+    if a > wrapping_sub(18446744073709551615, b) {
+        Fail::raise(Failure::Budget(r));
+    }
+    wrapping_add(a, b)
+}
+fn span(at: u64, len: u64) -> u64 eff [Fail[Failure]] {
+    if len == 0 {
+        Fail::raise(Failure::Limits);
+    }
+    if at > 1000 {
+        Fail::raise(Failure::Wide { at: at, len: len });
+    }
+    wrapping_add(at, len)
+}
+fn ordered(lo: i64, hi: i64) -> i64 eff [Fail[Range]] {
+    if lo > hi {
+        Fail::raise(Range { lo: lo, hi: hi });
+    }
+    wrapping_sub(hi, lo)
+}
+fn caught(x: i64) -> i64 {
+    handle Fail[Oops] in {
+        if x < 0 {
+            Fail::raise(Oops::Small);
+        }
+        wrapping_add(x, 3)
+    } with {
+        return v => v,
+        raise(_, _) => -7,
+    }
+}
+fn caught_code(x: i64) -> i64 {
+    handle Fail[i64] in {
+        if x > 5 {
+            Fail::raise(wrapping_mul(x, 10));
+        }
+        x
+    } with {
+        return v => v,
+        raise(e, _) => wrapping_add(e, 1),
+    }
+}
+fn main() -> i64 {
+    let g = handle Fail[Oops] in { guard(-1) ^ guard(5) } with { return v => v, raise(_, _) => 11 };
+    let c = handle Fail[i64] in { code(3) ^ code(12) } with { return v => v, raise(e, _) => e };
+    let a = handle Fail[Failure] in { wrapping_i64(add(1, 2, Res::Lines) ^ add(18446744073709551615, 2, Res::Source)) } with {
+        return v => v,
+        raise(_, _) => 13,
+    };
+    let s = handle Fail[Failure] in { wrapping_i64(span(1, 2) ^ span(2000, 1)) } with {
+        return v => v,
+        raise(_, _) => 17,
+    };
+    let o = handle Fail[Range] in { ordered(1, 5) ^ ordered(5, 1) } with { return v => v, raise(_, _) => 19 };
+    g ^ c ^ a ^ s ^ o ^ caught(-1) ^ caught(4) ^ caught_code(2) ^ caught_code(9)
+}
+";
+
+#[test]
+fn vesper_explicit_raises_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(RAISES);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("raises", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "raises: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        // guard, code, add, span, ordered, caught and caught_code, in both
+        // builds (and again for the JIT runs off-cross).
+        let min_emitted = if cross() { 14 } else { 28 };
+        assert!(
+            emitted >= min_emitted,
+            "only {emitted} raising functions came from Vesper (expected {min_emitted})"
         );
         assert!(total.is_clean(), "{}", total.summary());
     });
@@ -2802,6 +2916,98 @@ fn vesper_scalar_bodies_try_byte_at_and_try_get_options() {
         assert!(
             emitted >= min_emitted,
             "#2654 slice 3 functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+// #2653: a slice's `try_get` fused with its block's `match`
+// (`seq_native::fused_reads`): the bounds check and element address in
+// variables, the arms' tests on the check and `Some(x)` loading the
+// element.
+const FUSED_TRY_GET: &str = "
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+fn word(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::None => 5,
+        Option::Some(v) => v,
+    }
+}
+fn has(in s: Slice[u32], i: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(_) => true,
+        _ => false,
+    }
+}
+fn half_or(in s: Slice[u16], i: u64, d: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(h) => wrapping_add(widen_u64(h), d),
+        _ => d,
+    }
+}
+fn real(in s: Slice[f64], i: u64) -> f64 {
+    match s.try_get(i) {
+        Option::Some(x) => x * 2.0,
+        Option::None => 0.5,
+    }
+}
+fn main() -> i64 {
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    bytes.push(7);
+    bytes.push(9);
+    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    words.push(11);
+    let mut quads: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    quads.push(3);
+    let mut halves: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    halves.push(300);
+    let mut reals: ChunkSeq[f64] = ChunkSeq::new[f64]();
+    reals.push(1.25);
+    let a = widen_u64(byte(in bytes.as_slice(), 1)) ^ widen_u64(byte(in bytes.as_slice(), 4));
+    let b = word(in words.as_slice(), 0) ^ word(in words.as_slice(), 2);
+    let c = if has(in quads.as_slice(), 0) && !has(in quads.as_slice(), 1) { 13 } else { 17 };
+    let d = half_or(in halves.as_slice(), 0, 1) ^ half_or(in halves.as_slice(), 3, 2);
+    let e = if real(in reals.as_slice(), 0) > real(in reals.as_slice(), 1) { 19 } else { 23 };
+    wrapping_i64(a ^ b ^ c ^ d ^ e)
+}
+";
+
+/// `FUSED_TRY_GET`'s five functions, both settings, both comparisons of
+/// a JIT-running host.
+const MIN_FUSED_TRY_GET: u64 = 20;
+
+#[test]
+fn vesper_fused_try_get_matches_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(FUSED_TRY_GET);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the fused try_get program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("fused_try_get", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "fused_try_get: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() {
+            MIN_FUSED_TRY_GET / 2
+        } else {
+            MIN_FUSED_TRY_GET
+        };
+        assert!(
+            emitted >= min_emitted,
+            "fused try_get functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
         );
         assert!(total.is_clean(), "{}", total.summary());
     });
