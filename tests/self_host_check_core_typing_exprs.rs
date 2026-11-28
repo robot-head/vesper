@@ -119,6 +119,32 @@ fn expression_types_match_rust() {
 /// refined by its body) is the one the Rust checker recorded in
 /// `World::function_results`.
 #[test]
+fn handler_effects_match_rust() {
+    let f = package().entry("core_typing_exprs", true);
+    let (mut total, mut bad) = (0, 0);
+    for c in corpus() {
+        let v = vesper_handler_effects(&f.text(&exprs_input(&c.world, &c.module)));
+        let spans: Vec<(usize, usize)> = v.iter().map(|(span, _)| *span).collect();
+        let r = rust_handler_effects(&c.world, &spans);
+        total += v.len();
+        for (a, b) in r.iter().zip(&v) {
+            if a != b {
+                bad += 1;
+                if bad <= 8 {
+                    eprintln!(
+                        "handlers: {} {:?}: rust {} vesper {}",
+                        c.name, a.0, a.1, b.1
+                    );
+                }
+            }
+        }
+    }
+    eprintln!("handlers: {bad} of {total} handler effects differ");
+    assert_eq!(bad, 0);
+    assert!(total > 0);
+}
+
+#[test]
 fn function_results_match_rust() {
     let f = package().entry("core_typing_exprs", true);
     let (mut total, mut bad) = (0, 0);

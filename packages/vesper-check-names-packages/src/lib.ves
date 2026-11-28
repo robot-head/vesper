@@ -34,8 +34,8 @@ use self::load::{
     effect_decl_at, fn_at, item_at, item_name, tr, variant_name
 };
 use self::resolve::{
-    ambiguous, group, is_foreign, local_of, lookup, name_of, no_key, overrides, reexports, shown,
-    use_module
+    ambiguous, group, is_foreign, is_generated, local_of, lookup, name_of, no_key, overrides,
+    reexports, shown, use_module
 };
 use self::rename::{assoc_decl_at, conf_at, effects, item, owner, trait_ref};
 
@@ -618,7 +618,14 @@ fn assemble_module_bytes(inout loader: St, in input: Slice[u8], module: u32) -> 
         model_use.scope_end = wrapping_add(model_use.scope_end, loader.shift);
         lowered.ast.model_uses.set(idx_from_raw[ModelUseNode](model_use_id), model_use);
     }
-    for i in 0..lowered.ast.m_public.len() {
+    // A generated prelude module's items are not the package's public API
+    // (Rust appends the preludes after `Module::public_items` is taken).
+    let listed = if is_generated(in loader, loader.cur_module) {
+        0
+    } else {
+        lowered.ast.m_public.len()
+    };
+    for i in 0..listed {
         let public_name = tr(inout loader, in lowered.ast, at32(in lowered.ast.m_public, i));
         match loader.names.get(public_name) {
             Option::Some(binding) => loader.public_out.push(lo(binding)),

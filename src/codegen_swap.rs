@@ -1304,9 +1304,21 @@ pub mod body {
     /// as words in registers (#2581, `FnAbi::result_words`).
     pub const WORDS_CALL: u64 = 1 << 34;
 
+    /// A callee word's flag for a callee that writes its struct or enum
+    /// result through a result pointer (#2654): the call passes fresh
+    /// storage (or the caller's own result pointer) before the arguments,
+    /// and the call's value is that storage.
+    pub const SRET_CALL: u64 = 1 << 35;
+
     /// [`FUNCTION`]'s leading flags, `status` and `locations`: the words
     /// before the parameter count.
     pub const FLAGS: usize = 2;
+
+    /// Where a [`FUNCTION`] request's callee count word carries the number
+    /// of callee words for the calls of the body's handlers' nested graphs
+    /// (#2657), which follow the body's own; the body's own count is
+    /// below it.
+    pub const NESTED_CALLS_SHIFT: u32 = 32;
 
     /// The callee words of a [`FUNCTION`] request's arguments (after the
     /// parameters and the callee count), or `None` when the arguments do
@@ -1319,6 +1331,22 @@ pub mod body {
     /// `None` when the arguments do not have that layout.
     pub fn layout(args: &[u64]) -> Option<(&[u64], u64, &[u64])> {
         full(args).map(|(callees, sret, homes, _, _)| (callees, sret, homes))
+    }
+
+    /// The callee words of the calls in a [`FUNCTION`] request's nested
+    /// handler graphs (#2657): at each `Op::Handle` of the body, in order,
+    /// those of its handled body, its `return` clause and its operation
+    /// clauses (with a nested handler's inside its graph's); `None` when
+    /// the arguments do not have that layout.
+    pub fn nested_callees(args: &[u64]) -> Option<&[u64]> {
+        let params = usize::try_from(*args.get(FLAGS)?).ok()?;
+        let count_at = FLAGS + 1 + params;
+        let word = *args.get(count_at)?;
+        let own = usize::try_from(word & u64::from(u32::MAX)).ok()?;
+        let nested = usize::try_from(word >> NESTED_CALLS_SHIFT).ok()?;
+        let at = count_at + 1 + own;
+        full(args)?;
+        args.get(at..at + nested)
     }
 
     /// A [`FUNCTION`] request's parameter address words (#2563), or `None`
@@ -1340,9 +1368,12 @@ pub mod body {
         let params = usize::try_from(*args.get(FLAGS)?).ok()?;
         // The parameter count, then the parameter variables.
         let count_at = FLAGS + 1 + params;
-        let count = usize::try_from(*args.get(count_at)?).ok()?;
-        let sret_at = count_at + 1 + count;
-        let callees = args.get(count_at + 1..sret_at)?;
+        // The body's own calls, then its nested graphs' (#2657).
+        let word = *args.get(count_at)?;
+        let own = usize::try_from(word & u64::from(u32::MAX)).ok()?;
+        let nested = usize::try_from(word >> NESTED_CALLS_SHIFT).ok()?;
+        let sret_at = count_at + 1 + own + nested;
+        let callees = args.get(count_at + 1..count_at + 1 + own)?;
         let sret = *args.get(sret_at)?;
         let homes = usize::try_from(*args.get(sret_at + 1)?).ok()?;
         let pointers_at = sret_at + 2 + homes;

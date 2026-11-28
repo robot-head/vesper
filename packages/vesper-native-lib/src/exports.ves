@@ -6,8 +6,8 @@
 //
 // Request, after the definitions (see the top of lib.ves):
 //
-//     n wide entries, each: export symbol, inner function index,
-//         result pointer, wide result, failure record (0 or 1 each),
+//     n wide entries, each: export symbol (one of the exports, whose
+//         instance is the inner function), result pointer, wide result, failure record (0 or 1 each),
 //         n params, each: pointer, loaded (0 or 1 each);
 //     v2 (0 or 1), and when 1: the sequence runtime's argument words
 //         (`codegen_swap::seq::runtime_args`), then the interface in the
@@ -23,7 +23,7 @@ use @vesper/codegen-export-glue::{F_BOX_COUNTER, F_BOX_FREE, F_SEQ_COUNTER, defi
 use @vesper/codegen-numeric::boxes::{define_box_runtime};
 use @vesper/codegen-seq-emit::{RUNTIME_ARGS, define_seq_runtime};
 use super::{MALFORMED, NO_CALLEE, Reader, SET, UNKNOWN_FUNCTION, at64};
-use super::declare::{Declared};
+use super::declare::{Declared, Exports};
 
 const WIDE_MISMATCH: Str = "': 128-bit export entry does not match the function's signature";
 const NO_ENTRY_BUILDER: Str = "the 128-bit export entry's builder could not be made";
@@ -60,17 +60,33 @@ fn module_failure(in m: Module, in fallback: Str) -> ChunkSeq[u8] eff [Ffi[Crane
     err
 }
 
+// The instance exported as export `e`, or `NO_CALLEE` (which `at64` reads
+// as `NO_CALLEE` from every table) when `e` is no
+// export (`none`, the exports' count) or no instance is exported as it.
+fn inner_of(in d: Declared, e: u64, none: u64) -> u64 {
+    if e == none {
+        return NO_CALLEE;
+    }
+    for i in 0..d.export.len() {
+        if at64(in d.export, i) == e {
+            return i;
+        }
+    }
+    NO_CALLEE
+}
+
 // Every 128-bit export entry of the request. Empty on success, else the
 // error.
 pub fn define_wide_entries(
     inout m: Module,
     in req: Slice[u8],
     inout r: Reader,
-    in d: Declared
+    in d: Declared,
+    in exports: Exports
 ) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
     let n = r.word(in req);
     for _ in 0..n {
-        let err = define_wide_entry(inout m, in req, inout r, in d);
+        let err = define_wide_entry(inout m, in req, inout r, in d, in exports);
         if err.len() != 0 {
             return err;
         }
@@ -90,10 +106,10 @@ fn define_wide_entry(
     inout m: Module,
     in req: Slice[u8],
     inout r: Reader,
-    in d: Declared
+    in d: Declared,
+    in exports: Exports
 ) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
     let symbol = r.bytes(in req);
-    let inner = r.word(in req);
     let result_pointer = r.word(in req) == SET;
     let wide_result = r.word(in req) == SET;
     let fail = r.word(in req) == SET;
@@ -110,6 +126,7 @@ fn define_wide_entry(
     if r.bad {
         return error_of(in MALFORMED);
     }
+    let inner = inner_of(in d, exports.find_symbol(in symbol.as_slice()), exports.count());
     let id = at64(in d.ids, inner);
     if id == NO_CALLEE {
         return error_of(in UNKNOWN_FUNCTION);
