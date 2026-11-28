@@ -256,9 +256,7 @@ pub(crate) use world::{driver_world, driver_world_begin};
 pub(crate) use ebpf_backend::{DRIVER_EBPF_FALLBACKS, DRIVER_EBPF_INPUTS, ebpf_build_input};
 pub(crate) use wasm_backend::{DRIVER_WASM_FALLBACKS, DRIVER_WASM_INPUTS, wasm_build_input};
 // And its verified builds (#1886).
-pub(crate) use verified_codegen::{
-    DRIVER_VERIFIED_FALLBACKS, DRIVER_VERIFIED_INPUTS, verified_build_input,
-};
+pub(crate) use verified_codegen::verified_build_input;
 
 /// Stops the process when a slot was already taken: nothing runs before
 /// the constructor, so the slots are empty.

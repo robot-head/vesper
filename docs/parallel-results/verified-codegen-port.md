@@ -466,6 +466,34 @@ function takes about 2 s per world.
 
 **Rust lines deleted:** 0. `coverage.rs` goes at the retirement.
 
+## #1895: the Vesper driver takes every verified build
+
+### What changed
+
+- The Vesper driver parses `--target` itself (`verified_target` in
+  `crates/vesper-hybrid/modules/driver/src/lib.ves`, a port of
+  `Target::from_triple` and `Target::host`) and reports its errors.
+- `VerifiedInput` (62) takes the target as `[arch, os]` and answers every
+  program: the code generator's input, or, when the swap is off or the
+  program does not encode, the artifact Rust's code generator built (as the
+  swap's build table already does). Compile errors come back as the step's
+  error.
+- The driver writes the ELF executable (and its `0o755` mode), or writes the
+  Mach-O object and links it with `--linker`, or writes the COFF object and
+  links it through the `WindowsLink` step, with `build_command`'s messages.
+- Rust's `VerifiedBuild` step (15) and `VESPER_HYBRID_DRIVER_VERIFIED` are
+  gone. The statistics line is now "driver built N verified executables in
+  Vesper (M built by Rust's code generator)".
+
+### Evidence (Linux x86_64, debug)
+
+| Check | Result |
+|---|---|
+| `hybrid_verified_builds_match_rust` (3 Linux targets, swap on vs off) | **0 of 1,608 differ** (333 built), 0.933x |
+| `driver_matches_the_default_compiler` with 6 new verified option sets (host, aarch64 Linux, failed write, refused target, Mach-O and COFF with a missing linker) | **0 of 1,755 differ** |
+
+**Rust lines deleted:** the `VerifiedBuild` arm.
+
 ## Left
 
 - Optional: compare the per-arch `encoding_listing` text.
