@@ -40,7 +40,7 @@ use @vesper/check-data::types::{TyKind, default_type};
 use @vesper/check-layout::{L_ENUM, L_PRODUCT, layout_of};
 use @vesper/codegen-aggregates::{short_name};
 use @vesper/place-ir::{FnRow, InstRow};
-use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
+use @vesper/place-ir::codes::{Lit, Op, Pat, PoolKind, Term};
 use super::{
     CONV_NARROW, FOP_ABS, FOP_CEIL, FOP_FLOOR, FOP_FMA, FOP_FROM_BITS_F32, FOP_FROM_BITS_F64,
     FOP_MAX, FOP_MIN, FOP_NEAREST_F32, FOP_NEAREST_F64, FOP_ROUND, FOP_SAT_BASE, FOP_SQRT,
@@ -102,6 +102,9 @@ pub const INST_WORDS_CALL: u64 = 56;
 // A sequence or string operation (`Op::Seq`, #2653): one of the `SEQ_*`
 // forms below, then its words.
 pub const INST_SEQ: u64 = 80;
+// An arm's `Bind` of a fused `try_get` (`seq_fused_bind`): the local
+// `Some(x)` binds (NO_LOCAL for none), then the element's stride and lane.
+pub const INST_BIND_FUSED: u64 = 81;
 // `INST_SEQ`'s forms: a header word loaded at an offset (`Str::len`,
 // `Slice::len`); the operand itself (`as_str`); a byte view of a string
 // (`as_bytes`); a checked byte (`byte_at`); a checked slice element
@@ -118,6 +121,14 @@ const SEQ_VIEW_WORD: u64 = 6;
 const SEQ_LAST: u64 = 7;
 // The words a small `Option` is kept as: its tag and its payload.
 const OPTION_WORDS: u64 = 2;
+// `try_byte_at` and a slice's `try_get` (#2654): their `Option` built
+// by `seq_option`.
+const SEQ_TRY_BYTE_AT: u64 = 16;
+const SEQ_TRY_GET: u64 = 17;
+// A slice's `try_get` fused with its block's `match`
+// (`seq_native::fused_reads`): no `Option`, only the bounds check and the
+// element address in two variables that the match's arms read.
+const SEQ_FUSED_TRY_GET: u64 = 18;
 // A string literal (`Codegen::string_literal`): its byte count, then its
 // bytes packed little-endian into words.
 const SEQ_LITERAL: u64 = 8;
@@ -285,6 +296,21 @@ const MATCH_WIDE: u64 = 5;
 // A struct or tuple pattern over a product (#2654, `pattern_condition`):
 // the arm's target, then the pattern's nodes.
 const MATCH_FIELDS: u64 = 16;
+// An arm of a match on a fused `try_get` (`seq_fused_condition`): its
+// payload is one of the `FUSED_*` outcomes below. The last arm that the
+// arms before it leave reachable jumps to its target with no test
+// (`seq_fused_exhaustive`), and the match then has no trap.
+const MATCH_FUSED: u64 = 6;
+const MATCH_JUMP: u64 = 7;
+const FUSED_SOME: u64 = 0;
+const FUSED_NONE: u64 = 1;
+const FUSED_ANY: u64 = 2;
+// The words of each fused read (`Gen::fused`): its value index, its
+// block, and its element's stride and lane once its `try_get` is planned.
+const FUSED_WORDS: u64 = 4;
+const FUSED_BLOCK: u64 = 1;
+const FUSED_STRIDE: u64 = 2;
+const FUSED_LANE: u64 = 3;
 
 // The nodes of a product pattern (#2654), in the walk's order: a leaf that
 // binds nothing (the condition `pattern_true`), a local bound to the value,
@@ -2358,7 +2384,8 @@ impl Gen {
         }
         let ty = default_type(inout self.ctx.types, i.ty);
         let post = self.body_kind(ty);
-        // A small enum kept as words is only made by a call (#2581).
+        // A small enum kept as words is only made by a call (#2581) or a
+        // sequence operation's `Option` (#2654).
         let kept = self.body_words(in h, dest);
         if post == NONE64
             || (self.body_lane(i.ty) == 0 && !(kept != 0 && (i.op == Op::Call || i.op == Op::Seq)))
@@ -2530,7 +2557,31 @@ impl Gen {
             }
             // pattern: kind, span start, span end, then a Bind's name
             let pat = self.program.op(inc(i.a));
-            if pat == Pat::Wild {
+            let fused = self.body_fused_at(u64_at(in ops, 0));
+            if fused != NONE64 {
+                // An arm's bind of a fused read (`seq_fused_bind`): `Some(x)`
+                // loads the element at the read's address into `x`.
+                kind = INST_BIND_FUSED;
+                let mut next: u64 = 0;
+                let mut bound: u64 = 0;
+                let stride = u64_at(in self.fused, add(fused, FUSED_STRIDE));
+                if self.body_fused_pattern(inc(i.a), inout next, inout bound) == NONE64
+                    || stride == 0
+                {
+                    return false;
+                }
+                if bound == NONE64 {
+                    extra.push(NO_LOCAL);
+                } else {
+                    let k = self.body_local(in h, bound);
+                    if k == NONE64 {
+                        return false;
+                    }
+                    extra.push(k);
+                }
+                extra.push(stride);
+                extra.push(u64_at(in self.fused, add(fused, FUSED_LANE)));
+            } else if pat == Pat::Wild {
                 extra.push(NO_LOCAL);
             } else if pat == Pat::Bind {
                 let k = self.body_local(in h, self.program.op(add(i.a, 4)));
@@ -2710,13 +2761,18 @@ impl Gen {
         } else {
             return false;
         }
-        // A kept enum is only made by a call and returned: any other
+        // A kept enum is only made by a call or an `Option` result of a
+        // sequence operation (`body_option`) and returned: any other
         // instruction that names one is left to the walk.
         if kept != 0 && kind != INST_WORDS_CALL && kind != INST_SEQ {
             return false;
         }
         for k in 0..ops.len() {
             if self.body_words(in h, u64_at(in ops, k)) != 0 {
+                return false;
+            }
+            // A fused read is only bound by its match's arms.
+            if kind != INST_BIND_FUSED && self.body_fused_at(u64_at(in ops, k)) != NONE64 {
                 return false;
             }
         }
@@ -2735,6 +2791,7 @@ impl Gen {
             if kind != INST_PROJECT
                 && kind != INST_BIND
                 && kind != INST_BIND_FIELDS
+                && kind != INST_BIND_FUSED
                 && kind != INST_CALL
             {
                 for k in 0..ops.len() {
@@ -2837,6 +2894,24 @@ impl Gen {
         let slice = node.kind == TyKind::Named && node.n == 1 && node.name == k.slice;
         let chunk = node.kind == TyKind::Named && node.n == 1 && node.name == k.chunk_seq;
         let ops_s = self.ops;
+        // A `try_get` fused with its block's `match`: the bounds check and
+        // the element address (`seq_fused_try_get`), its stride and lane
+        // kept for the arms' binds.
+        let fused = self.body_fused_at(dest);
+        if fused != NONE64 {
+            if !slice || n != 2 || label != ops_s.seq_try_get || kept != 0 {
+                return false;
+            }
+            let (stride, lane) = self.body_elem(receiver);
+            if stride == 0 {
+                return false;
+            }
+            set(inout self.fused, add(fused, FUSED_STRIDE), stride);
+            set(inout self.fused, add(fused, FUSED_LANE), lane);
+            extra.push(SEQ_FUSED_TRY_GET);
+            extra.push(stride);
+            return true;
+        }
         // An `Option` result kept as its tag and payload words (#2653).
         if slice && n == 1 && label == ops_s.seq_last {
             return self.body_seq_option(in h, i, dest, kept, receiver, inout extra);
@@ -2929,6 +3004,21 @@ impl Gen {
                 inout extra
             );
         }
+        if text && n == 2 && label == ops_s.seq_str_try_byte_at {
+            extra.push(SEQ_TRY_BYTE_AT);
+            return self.body_option(in h, i, self.ctx.world.k.u8_, inout extra);
+        }
+        if slice && n == 2 && label == ops_s.seq_try_get {
+            let (stride, lane) = self.body_elem(receiver);
+            if stride == 0 {
+                return false;
+            }
+            extra.push(SEQ_TRY_GET);
+            extra.push(stride);
+            extra.push(lane);
+            let elem = default_type(inout self.ctx.types, self.ctx.types.arg(receiver, 0));
+            return self.body_option(in h, i, self.ctx.types.node(elem).name, inout extra);
+        }
         false
     }
 
@@ -2964,6 +3054,89 @@ impl Gen {
             return (0, 0);
         }
         (stride, lane)
+    }
+
+    // `seq_option`'s `Option` of the element named `elem_name` (a plain
+    // scalar) that instruction `i` makes (#2654): its size, `Some` and
+    // `None` tags, payload offset, the end of the payload's store (for the
+    // optimize path's zeroing of the other words), the kind the payload
+    // store coerces to, then the words it is kept as (0, or each word
+    // value and its kind). False for any other result.
+    fn body_option(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        elem_name: u32,
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        let dest = self.body_value(in h, widen_u64(i.dest));
+        let kept = self.body_words(in h, dest);
+        let d = default_type(inout self.ctx.types, i.ty);
+        let node = self.ctx.types.node(d);
+        if node.kind != TyKind::Named || node.n != 1 {
+            return false;
+        }
+        let elem = default_type(inout self.ctx.types, self.ctx.types.arg(d, 0));
+        let en = self.ctx.types.node(elem);
+        let lane = self.body_lane(elem);
+        if en.kind != TyKind::Named || en.n != 0 || en.name != elem_name {
+            return false;
+        }
+        if kept != 0 && (kept != OPTION_WORDS || lane != LANE_I64) {
+            return false;
+        }
+        if kept == 0 && self.body_lane(d) != LANE_PRODUCT {
+            return false;
+        }
+        let mark = self.layouts.mark();
+        let l = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            d
+        );
+        if l == NONE32 || self.layouts.node(l).kind != L_ENUM {
+            self.layouts.reset(mark);
+            return false;
+        }
+        let some = self.body_variant(l, self.ops.option_some);
+        let none = self.body_variant(l, self.ops.option_none);
+        let ln = self.layouts.node(l);
+        let size = widen_u64(ln.size);
+        let mut payload = NONE64;
+        if some != NONE64 {
+            let v = self.layouts.lvariant(add(widen_u64(ln.a), some));
+            if v.fc != 0 {
+                payload = wrapping_u64(widen_i64(self.layouts.lfield(widen_u64(v.fa)).offset));
+            }
+        }
+        self.layouts.reset(mark);
+        if none == NONE64 || payload == NONE64 {
+            return false;
+        }
+        // An `f32` payload store writes only the low half of its word.
+        let end = if elem_name == self.ctx.world.k.f32_ {
+            payload
+        } else {
+            add(payload, self.body_product_size(elem))
+        };
+        extra.push(size);
+        extra.push(some);
+        extra.push(none);
+        extra.push(payload);
+        extra.push(end);
+        extra.push(self.body_kind(elem));
+        extra.push(kept);
+        for k in 0..kept {
+            let word = self.body_word(in h, dest, k);
+            if word == NONE64 {
+                return false;
+            }
+            extra.push(word);
+            extra.push(self.body_kind(n32(u64_at(in h.vty, word))));
+        }
+        true
     }
 
     // A slice's `last` (#2653), whose `Option` result the optimize path
@@ -3053,7 +3226,7 @@ impl Gen {
         let ta = row.ta;
         if row.term == Term::Return {
             let v = self.body_value(in h, self.program.op(ta));
-            if v == NONE64 {
+            if v == NONE64 || self.body_fused_at(v) != NONE64 {
                 return false;
             }
             // A small enum result returned as words (#2581): each word's
@@ -3104,7 +3277,11 @@ impl Gen {
             for k in 0..n {
                 let v = self.body_value(in h, self.program.op(add(add(ta, 2), k)));
                 let param = self.body_block_param(in h, trow.ha, k);
-                if v == NONE64 || param == NONE64 || self.body_words(in h, v) != 0 {
+                if v == NONE64
+                    || param == NONE64
+                    || self.body_words(in h, v) != 0
+                    || self.body_fused_at(v) != NONE64
+                {
                     return false;
                 }
                 // A product joined at a block parameter passes its pointer
@@ -3120,7 +3297,7 @@ impl Gen {
         }
         if row.term == Term::Branch {
             let c = self.body_value(in h, self.program.op(ta));
-            if c == NONE64 {
+            if c == NONE64 || self.body_fused_at(c) != NONE64 {
                 return false;
             }
             o.push(TERM_BRANCH);
@@ -3133,6 +3310,13 @@ impl Gen {
             let v = self.body_value(in h, self.program.op(ta));
             if v == NONE64 {
                 return false;
+            }
+            let fused = self.body_fused_at(v);
+            if fused != NONE64 {
+                if u64_at(in self.fused, add(fused, FUSED_BLOCK)) != bi {
+                    return false;
+                }
+                return self.body_fused_match(f, ta, v, inout o);
             }
             let vty = n32(u64_at(in h.vty, v));
             let vlane = self.body_lane(vty);
@@ -3230,6 +3414,53 @@ impl Gen {
             return true;
         }
         false
+    }
+
+    // The `match` on fused read `v` (`Terminator::Match` with
+    // `seq_fused_condition`): each arm's `MATCH_FUSED` outcome, until the
+    // arms seen cover both outcomes of the bounds check
+    // (`seq_fused_exhaustive`), whose last arm is a `MATCH_JUMP`.
+    fn body_fused_match(inout self, f: FnRow, ta: u64, v: u64, inout o: ChunkSeq[u64]) -> bool {
+        let narms = self.program.op(inc(ta));
+        let mut arms_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut emitted: u64 = 0;
+        let mut some = false;
+        let mut none = false;
+        let mut p = add(ta, 2);
+        for k in 0..narms {
+            let mut next: u64 = 0;
+            let mut bound: u64 = 0;
+            let outcome = self.body_fused_pattern(p, inout next, inout bound);
+            if outcome == NONE64 {
+                return false;
+            }
+            let target = self.program.op(next);
+            p = inc(next);
+            let trow = self.program.block(add(f.b0, target));
+            if self.program.op(self.body_params_at(trow.ha)) != 0 {
+                return false;
+            }
+            if outcome == FUSED_SOME {
+                some = true;
+            } else if outcome == FUSED_NONE {
+                none = true;
+            }
+            emitted = inc(emitted);
+            if outcome == FUSED_ANY || (some && none) {
+                arms_words.push(MATCH_JUMP);
+                arms_words.push(0);
+                arms_words.push(target);
+                break;
+            }
+            arms_words.push(MATCH_FUSED);
+            arms_words.push(outcome);
+            arms_words.push(target);
+        }
+        o.push(TERM_MATCH);
+        o.push(v);
+        o.push(emitted);
+        o.extend(in arms_words.as_slice());
+        true
     }
 
     // The locals that keep a home slot on the optimize path as well
@@ -3575,6 +3806,109 @@ impl Gen {
         true
     }
 
+    // `seq_native::fused_pattern` of the arm pattern at `p`: its
+    // `FUSED_*` outcome (`Some(x)` or `Some(_)`, `None`, `_`), or NONE64
+    // for any other pattern. `next` gets the word after the pattern, and
+    // `bound` the name `Some(x)` binds (NONE64 for none).
+    fn body_fused_pattern(inout self, p: u64, inout next: u64, inout bound: u64) -> u64 {
+        bound = NONE64;
+        let pkind = self.program.op(p);
+        if pkind == Pat::Wild {
+            next = add(p, PAT_WILD_WORDS);
+            return FUSED_ANY;
+        }
+        if pkind != Pat::Constructor {
+            return NONE64;
+        }
+        let name = short_name(
+            inout self.ctx.names,
+            n32(self.program.op(add(p, PAT_CTOR_NAME_OFFSET)))
+        );
+        let count = self.program.op(add(p, PAT_CTOR_COUNT_OFFSET));
+        if name == self.ops.option_none && count == 0 {
+            next = add(p, PAT_CTOR_WORDS);
+            return FUSED_NONE;
+        }
+        if name != self.ops.option_some || count != 1 {
+            return NONE64;
+        }
+        // The one (field, part) pair: the part after its field name.
+        let part = inc(add(p, PAT_CTOR_WORDS));
+        let part_kind = self.program.op(part);
+        if part_kind == Pat::Wild {
+            next = add(part, PAT_WILD_WORDS);
+        } else if part_kind == Pat::Bind {
+            bound = self.program.op(add(part, PAT_BIND_NAME_OFFSET));
+            next = add(part, PAT_BIND_WORDS);
+        } else {
+            return NONE64;
+        }
+        FUSED_SOME
+    }
+
+    // `seq_native::fused_reads` of `f`, into `self.fused`: each `try_get`
+    // that its own block's `match` consumes with fused arm patterns only.
+    // Its other uses are checked as the plan reaches them: a `Bind` with a
+    // fused pattern plans `INST_BIND_FUSED`, and any other use refuses
+    // the function, where the walk would not fuse the read.
+    fn body_fused_reads(inout self, in h: Header, f: FnRow) {
+        self.fused = ChunkSeq::new[u64]();
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            if row.term != Term::Match {
+                continue;
+            }
+            let v = self.program.op(row.ta);
+            let mut read = false;
+            for ii in 0..row.ic {
+                let i = self.program.inst(add(row.i0, ii));
+                if widen_u64(i.dest) == v && i.op == Op::Seq {
+                    let pool = self.program.pool_row(self.program.op(i.a));
+                    read = pool.kind == PoolKind::Seq && pool.label == self.ops.seq_try_get;
+                }
+            }
+            if !read {
+                continue;
+            }
+            let narms = self.program.op(inc(row.ta));
+            let mut p = add(row.ta, 2);
+            let mut all = true;
+            for k in 0..narms {
+                let mut next: u64 = 0;
+                let mut bound: u64 = 0;
+                if self.body_fused_pattern(p, inout next, inout bound) == NONE64 {
+                    all = false;
+                    break;
+                }
+                // the arm's target block
+                p = inc(next);
+            }
+            let x = self.body_value(in h, v);
+            if all && x != NONE64 {
+                self.fused.push(x);
+                self.fused.push(bi);
+                self.fused.push(0);
+                self.fused.push(0);
+            }
+        }
+    }
+
+    // The position in `self.fused` of value index `v`'s fused read, or
+    // NONE64 when `v` is not one.
+    fn body_fused_at(in self, v: u64) -> u64 {
+        let mut k: u64 = 0;
+        loop {
+            if k >= self.fused.len() {
+                break;
+            }
+            if u64_at(in self.fused, k) == v {
+                return k;
+            }
+            k = add(k, FUSED_WORDS);
+        }
+        NONE64
+    }
+
     // Each block's instructions and terminator, in the lowering order,
     // with the request's call index of each call (`slots`); false for an
     // instruction or terminator the plan does not carry.
@@ -3587,6 +3921,7 @@ impl Gen {
         inout block_words: ChunkSeq[u64]
     ) -> bool {
         let fi = self.fi;
+        self.body_fused_reads(in h, f);
         let l = layout(in self.program, f);
         let first = self.program.block(f.b0).i0;
         // The plan's record of each instruction, by its index in `f`.
