@@ -361,6 +361,62 @@ fn capability_only(f: &Function) -> bool {
 pub fn cyclic_blocks(f: &crate::ir::FunctionIr) -> BTreeSet<usize> {
     aggregates::cyclic_blocks(f)
 }
+/// The calls of the nested graphs of graph `f`'s handlers (#2657), as the
+/// body hook's request lists them after the body's own: at each
+/// `Op::Handle` in block and instruction order, the calls of its nested
+/// graphs (`handle_calls`).
+fn nested_calls<'a>(
+    program: &'a crate::ir::Program,
+    f: &'a crate::ir::FunctionIr,
+    out: &mut Vec<&'a crate::ir::Op>,
+) {
+    for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+        handle_calls(program, &inst.op, out);
+    }
+}
+/// The calls of the nested graphs of `op` when it is an `Op::Handle`: its
+/// handled body, its `return` clause and its operation clauses, in that
+/// order (the nested graphs the walk emits there, `ir::nested_name`), each
+/// graph's calls as `graph_calls` lists them.
+fn handle_calls<'a>(
+    program: &'a crate::ir::Program,
+    op: &'a crate::ir::Op,
+    out: &mut Vec<&'a crate::ir::Op>,
+) {
+    if let crate::ir::Op::Handle { expr, .. } = op
+        && let ExprKind::Handle { body, ret, ops, .. } = &expr.kind
+    {
+        let nested = std::iter::once(crate::ir::nested_name("handler_body", &body.span))
+            .chain(std::iter::once(crate::ir::nested_name(
+                "handler_clause",
+                &ret.body.span,
+            )))
+            .chain(
+                ops.iter()
+                    .map(|c| crate::ir::nested_name("handler_clause", &c.body.span)),
+            );
+        for name in nested {
+            if let Some(g) = program.functions.get(&name) {
+                graph_calls(program, g, out);
+            }
+        }
+    }
+}
+/// The calls of nested graph `f`: each `Op::Call` in block and instruction
+/// order, and at each `Op::Handle` its nested graphs' calls
+/// (`handle_calls`).
+fn graph_calls<'a>(
+    program: &'a crate::ir::Program,
+    f: &'a crate::ir::FunctionIr,
+    out: &mut Vec<&'a crate::ir::Op>,
+) {
+    for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+        match &inst.op {
+            op @ crate::ir::Op::Call { .. } => out.push(op),
+            op => handle_calls(program, op, out),
+        }
+    }
+}
 /// The locals and `in` parameters of `f` kept in Cranelift SSA variables
 /// instead of stack home slots (`#1023`, `#1330`, `#1509`).
 pub fn register_locals(
@@ -4299,14 +4355,25 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.b.def_var(var, record);
             args.push(u64::from(var.as_u32()));
         }
-        // Each `Op::Call` of the body, in instruction order: the callee's
-        // function id when the walk would emit it as a plain direct call
-        // (part 6b), else `codegen_swap::body::NO_CALLEE`.
-        let calls = body
+        // Each `Op::Call` of the body, in instruction order, then the calls
+        // of its handlers' nested graphs (`nested_calls`, #2657): the
+        // callee's function id when the walk would emit it as a plain
+        // direct call (part 6b), else `codegen_swap::body::NO_CALLEE`. The
+        // count word holds the body's own count and, above
+        // `NESTED_CALLS_SHIFT`, the nested count.
+        let mut graph_ops = body
             .blocks
             .iter()
             .flat_map(|b| &b.instructions)
-            .filter_map(|i| match &i.op {
+            .map(|inst| &inst.op)
+            .filter(|op| matches!(op, crate::ir::Op::Call { .. }))
+            .collect::<Vec<_>>();
+        let own = graph_ops.len();
+        nested_calls(self.program, body, &mut graph_ops);
+        let nested = graph_ops.len() - own;
+        let calls = graph_ops
+            .into_iter()
+            .filter_map(|op| match op {
                 crate::ir::Op::Call {
                     callee,
                     args,
@@ -4319,7 +4386,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        args.push(calls.len() as u64);
+        args.push(own as u64 | (nested as u64) << crate::codegen_swap::body::NESTED_CALLS_SHIFT);
         args.extend(calls);
         // The result pointer, and the values `aggregates::plan` builds in it
         // (by their index in the graph's values). Any other home (a field of

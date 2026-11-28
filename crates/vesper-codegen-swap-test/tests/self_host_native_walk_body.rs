@@ -27,6 +27,8 @@ mod aggregate_facts;
 mod check_harness;
 #[path = "../../../tests/common/check_words.rs"]
 mod check_words;
+#[path = "../../../tests/common/handler_facts.rs"]
+mod handler_facts;
 #[path = "../../../tests/common/ir_words.rs"]
 mod ir_words;
 
@@ -119,6 +121,9 @@ fn plan_of(world: &vesper::check::World, program: &Program, optimize: bool) -> P
     // (`aggregates::scalar_enums`, #2581), which the facts let the planner
     // rewrite.
     if let Some((mut input, _)) = ir_words::program_input(world, program) {
+        // What each handler's expression holds (#2657), before the
+        // optimize path's enum facts.
+        input.extend(handler_facts::facts(world, program));
         if optimize {
             input.extend(aggregate_facts::facts(world, program));
         }
@@ -1048,6 +1053,105 @@ fn vesper_fail_record_bodies_match() {
         assert!(
             emitted >= min_emitted,
             "only {emitted} failure-record functions came from Vesper (expected {min_emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// `Fail` handlers (#2657): a handled call to a fallible callee, checked
+/// arithmetic raising to a handler in the same function, clauses that
+/// capture parameters and locals, handlers in sequence and nested, a raise
+/// that passes an inner handler of another type, and an error bound in
+/// the `raise` clause.
+const HANDLERS: &str = "
+fn bump(x: u8) -> u8 eff [Fail[ArithOverflow]] {
+    x + 200
+}
+fn guarded(x: u8) -> u8 {
+    handle Fail[ArithOverflow] in {
+        bump(x)
+    } with {
+        return v => v,
+        raise(_, _) => 0,
+    }
+}
+fn local(x: u64) -> u64 {
+    handle Fail[ArithOverflow] in {
+        x * x * x
+    } with {
+        return v => wrapping_add(v, 1),
+        raise(_, _) => 7,
+    }
+}
+fn scaled(x: i64, k: i64) -> i64 {
+    let base = wrapping_mul(k, 2);
+    handle Fail[ArithOverflow] in {
+        x * k + base
+    } with {
+        return v => wrapping_mul(v, k),
+        raise(error, _) => base,
+    }
+}
+fn nested(x: i64) -> i64 {
+    handle Fail[RuntimeError] in {
+        let y = handle Fail[ArithOverflow] in {
+            x * 4611686018427387904
+        } with {
+            return v => v,
+            raise(_, _) => 5,
+        };
+        handle Fail[ArithOverflow] in {
+            y * 3
+        } with {
+            return v => wrapping_add(v, 1),
+            raise(_, _) => -1,
+        }
+    } with {
+        return v => v,
+        raise(_, _) => -2,
+    }
+}
+fn crossing(x: i64) -> i64 {
+    handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in {
+            x * 4611686018427387904 / x
+        } with {
+            return v => v,
+            raise(_, _) => 5,
+        }
+    } with {
+        return v => v,
+        raise(_, _) => -1,
+    }
+}
+fn main() -> i64 {
+    crossing(0) ^ crossing(1) ^ crossing(4) ^ widen_i64(guarded(10)) ^ widen_i64(guarded(100)) ^ wrapping_i64(local(5)) ^ scaled(2, 3)
+        ^ scaled(4611686018427387904, 3) ^ nested(0) ^ nested(1) ^ nested(200)
+}
+";
+
+#[test]
+fn vesper_fail_handlers_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(HANDLERS);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("handlers", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "handlers: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        // bump, guarded, local, scaled, nested, crossing and main, in both
+        // builds (and again for the JIT runs off-cross).
+        let min_emitted = if cross() { 14 } else { 28 };
+        assert!(
+            emitted >= min_emitted,
+            "only {emitted} handler functions came from Vesper (expected {min_emitted})"
         );
         assert!(total.is_clean(), "{}", total.summary());
     });
