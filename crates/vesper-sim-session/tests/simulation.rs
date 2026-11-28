@@ -1,10 +1,9 @@
 //! Real source programs, checked and executed on the reference evaluator under
 //! SimPulse. No test sleeps, opens sockets or reads the real clock.
 use serde_json::{Value as Json, json};
-use vesper::runtime::{Execution, Runtime, Value};
 use vesper_sim_session::{
-    ArgumentWrite, CheckedProgram, Outcome, Recording, RecoveredOwner, Report, RunResult, Scenario,
-    Session, SessionError, SourceEvent,
+    ArgumentWrite, CheckedProgram, Execution, Outcome, Recording, RecoveredOwner, Report,
+    RunResult, Scenario, Session, SessionError, SourceEvent, Type, Value,
 };
 use vesper_simpulse::{IoResult, TraceEvent};
 
@@ -13,33 +12,38 @@ const PIPELINE_SCENARIO: &str = include_str!("../fixtures/pipeline.json");
 
 #[test]
 fn actual_observed_resource_cannot_be_erased_by_json_encoding() {
-    use vesper::{
-        ast::Type,
-        check, parser,
-        runtime::resource_trace::{ResourceTraceConfig, ResourceTraceLimits, ResourceTraceStatus},
-    };
     let source = "linear struct Ticket{} copy struct Wrap{ticket:Ticket} fn make()->Wrap{Wrap{ticket:Ticket{}}}";
-    let parsed = parser::parse(source);
-    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-    let checked = check::check(&parsed.module);
-    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
-    let config =
-        ResourceTraceConfig::new(&checked.world, &["Ticket"], ResourceTraceLimits::default())
-            .unwrap();
-    let mut runtime = Runtime::new(&checked.world);
-    let observer = runtime.observe_resources(config).unwrap();
-    let tracked = runtime.run("make", vec![]).unwrap();
-    let report = observer.snapshot().unwrap();
-    assert_eq!(report.status(), ResourceTraceStatus::Completed);
-    assert_eq!(report.events().len(), 1);
-    assert_eq!(report.live().len(), 1);
-    let error = vesper_sim_session::value::encode(&checked.world, &Type::named("Wrap"), &tracked)
-        .unwrap_err();
+    let checked = program(source);
+    let ticket = |tracked| Value::Data {
+        ty: "Ticket".into(),
+        constructor: "Ticket".into(),
+        fields: Default::default(),
+        tracked,
+    };
+    let wrap = |tracked| Value::Data {
+        ty: "Wrap".into(),
+        constructor: "Wrap".into(),
+        fields: [("ticket".into(), ticket(tracked))].into(),
+        tracked: false,
+    };
+    // The resource tracer marks the observed `Ticket` inside the result.
+    let error =
+        vesper_sim_session::value::encode(checked.world(), &Type::named("Wrap"), &wrap(true))
+            .unwrap_err();
     assert!(error.contains("tracked resource identity"), "{error}");
-    let ordinary = Runtime::new(&checked.world).run("make", vec![]).unwrap();
+    let ordinary = run(&checked, "make");
+    assert_eq!(ordinary, wrap(false));
     assert!(
-        vesper_sim_session::value::encode(&checked.world, &Type::named("Wrap"), &ordinary).is_ok()
+        vesper_sim_session::value::encode(checked.world(), &Type::named("Wrap"), &ordinary).is_ok()
     );
+}
+
+/// Run an entry without external effects to completion.
+fn run(program: &CheckedProgram, entry: &str) -> Value {
+    match program.runtime().begin_external(entry, vec![]).unwrap() {
+        Execution::Complete(value) => value,
+        Execution::Suspended(s) => panic!("{entry} performed {:?}", s.request()),
+    }
 }
 
 fn program(source: &str) -> CheckedProgram {
@@ -262,7 +266,7 @@ fn script_mismatches_stop_before_resuming_and_return_a_usable_owner() {
         ty: "Result".into(),
         constructor: "Ok".into(),
         fields: [("0".into(), Value::UInt(5, 64))].into(),
-        resource_identity: None,
+        tracked: false,
     };
     let value = finish_by_hand(continuation.resume(ok).unwrap());
     assert!(value.to_string().contains("Report"), "{value}");
@@ -722,7 +726,7 @@ fn direct() -> Triple {
 #[test]
 fn nested_non_tail_handlers_and_inout_match_direct_evaluation() {
     let program = program(NESTED);
-    let direct = Runtime::new(program.world()).run("direct", vec![]).unwrap();
+    let direct = run(&program, "direct");
     let json = json!({
         "format": "vesper-sim-scenario", "version": 1, "seed": 11,
         "limits": { "max_operations_per_task": 8, "max_virtual_ns": 100, "max_dispatches": 16 },
@@ -745,12 +749,9 @@ fn nested_non_tail_handlers_and_inout_match_direct_evaluation() {
         report.outputs[0].1,
         json!({"asked": 40, "slot": 77, "after": 2})
     );
-    let direct_json = vesper_sim_session::value::encode(
-        program.world(),
-        &vesper::ast::Type::named("Triple"),
-        &direct,
-    )
-    .unwrap();
+    let direct_json =
+        vesper_sim_session::value::encode(program.world(), &Type::named("Triple"), &direct)
+            .unwrap();
     assert_eq!(report.outputs[0].1, direct_json);
     assert_eq!(report.virtual_ns, 6);
 }
