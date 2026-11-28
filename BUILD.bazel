@@ -1997,7 +1997,10 @@ vesper_package(
     srcs = glob(["packages/vesper-codegen-scalar/emit/src/**/*.ves"]),
     manifest = "packages/vesper-codegen-scalar/emit/Loom.toml",
     visibility = ["//visibility:public"],
-    deps = ["//packages/vesper-cranelift:cranelift_package"],
+    deps = [
+        ":codegen_seq_emit_package",
+        "//packages/vesper-cranelift:cranelift_package",
+    ],
 )
 
 vesper_package(

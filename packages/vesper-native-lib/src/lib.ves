@@ -331,6 +331,9 @@ fn define_one(
     }
     // No slice parameter is read once at entry (#2653).
     args.push(0);
+    // No sequence runtime words: a body that frees drop slots in an
+    // object without the runtime is declined (#2653).
+    args.push(0);
     args.extend(in plans.words[at..plan_end]);
     let answer = emit_body_words(args, inout b, inout m);
     if answer != HANDLED {

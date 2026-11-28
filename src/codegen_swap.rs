@@ -1330,7 +1330,7 @@ pub mod body {
     /// A [`FUNCTION`] request's callees, `sret` word and result homes, or
     /// `None` when the arguments do not have that layout.
     pub fn layout(args: &[u64]) -> Option<(&[u64], u64, &[u64])> {
-        full(args).map(|(callees, sret, homes, _, _)| (callees, sret, homes))
+        full(args).map(|(callees, sret, homes, _, _, _)| (callees, sret, homes))
     }
 
     /// The callee words of the calls in a [`FUNCTION`] request's nested
@@ -1352,19 +1352,25 @@ pub mod body {
     /// A [`FUNCTION`] request's parameter address words (#2563), or `None`
     /// when the arguments do not have that layout.
     pub fn pointers(args: &[u64]) -> Option<&[u64]> {
-        full(args).map(|(_, _, _, pointers, _)| pointers)
+        full(args).map(|(_, _, _, pointers, _, _)| pointers)
     }
     /// A [`FUNCTION`] request's entry views (#2653): for each slice
     /// parameter read once at entry, its index, its read count and the
     /// reads; `None` when the arguments do not have that layout.
     pub fn entry_views(args: &[u64]) -> Option<&[u64]> {
-        full(args).map(|(_, _, _, _, views)| views)
+        full(args).map(|(_, _, _, _, views, _)| views)
+    }
+
+    /// Whether a [`FUNCTION`] request carries the sequence runtime's
+    /// argument words (#2653): its body frees drop slots in an object.
+    pub fn defines_runtime(args: &[u64]) -> bool {
+        full(args).is_some_and(|(_, _, _, _, _, runtime)| !runtime.is_empty())
     }
 
     /// A [`FUNCTION`] request's callees, `sret` word, result homes,
-    /// parameter addresses and entry view words.
+    /// parameter addresses, entry view words and sequence runtime words.
     #[allow(clippy::type_complexity)]
-    fn full(args: &[u64]) -> Option<(&[u64], u64, &[u64], &[u64], &[u64])> {
+    fn full(args: &[u64]) -> Option<(&[u64], u64, &[u64], &[u64], &[u64], &[u64])> {
         let params = usize::try_from(*args.get(FLAGS)?).ok()?;
         // The parameter count, then the parameter variables.
         let count_at = FLAGS + 1 + params;
@@ -1389,12 +1395,16 @@ pub mod body {
             let reads = usize::try_from(*args.get(at + 1)?).ok()?;
             at += 2 + reads;
         }
-        (at == args.len()).then_some((
+        let view_words = args.get(views_at + 1..at)?;
+        // The sequence runtime's argument words, or none (#2653).
+        let runtime = usize::try_from(*args.get(at)?).ok()?;
+        (at + 1 + runtime == args.len()).then_some((
             callees,
             sret,
             result_homes,
             pointer_words,
-            &args[views_at + 1..],
+            view_words,
+            &args[at + 1..],
         ))
     }
 }

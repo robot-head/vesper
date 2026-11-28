@@ -4474,6 +4474,24 @@ impl<M: Module> Codegen<'_, '_, M> {
             args.push(reads.len() as u64);
             args.extend(reads);
         }
+        // The sequence runtime's argument words (#2653): the first free of
+        // a drop slot in an object defines the runtime there, as
+        // `seq_ensure_runtime_if_hosted` does.
+        let join = self.own_scalar_join(body);
+        let scalar_graph = self.scalar_graph(body, join.as_ref());
+        let graph = scalar_graph.as_ref().map_or(body, |s| &s.f);
+        if !crate::fip::seq_drop_plan(self.world, graph).is_empty()
+            && !self.seq_has_jit()
+            && self.m.target_config().pointer_type() == types::I64
+        {
+            let windows =
+                self.m.isa().triple().operating_system == target_lexicon::OperatingSystem::Windows;
+            let runtime = crate::codegen_swap::seq::runtime_args(windows);
+            args.push(runtime.len() as u64);
+            args.extend(runtime);
+        } else {
+            args.push(0);
+        }
         crate::codegen_swap::body_request(
             &mut self.b,
             &mut *self.m,
@@ -4516,9 +4534,36 @@ impl<M: Module> Codegen<'_, '_, M> {
                 || !crate::fip::temporary_drops(self.world, graph).is_empty()
                 || !crate::fip::fail_exit_drops(self.world, graph).is_empty());
         !drops
-            && crate::fip::seq_drop_plan(self.world, graph).is_empty()
+            && self.seq_slots_plain(graph)
             && (self.world.element_views.is_empty() || seq_native::fused_reads(graph).is_empty())
             && self.entry_views(body).is_some()
+    }
+    /// Whether the body hook emits the drop slots of graph `f`
+    /// (`fip::seq_drop_plan`, #2653): none, or one for each `ChunkSeq`
+    /// local of scalars that is not a parameter, in a hosted image (a
+    /// freestanding one has no allocator to free into). The hook frees
+    /// them as `seq_drop_free` does and refuses a graph whose uses of them
+    /// it does not carry.
+    fn seq_slots_plain(&self, f: &crate::ir::FunctionIr) -> bool {
+        let plan = crate::fip::seq_drop_plan(self.world, f);
+        if plan.is_empty() {
+            return true;
+        }
+        if !self.drops_enabled() {
+            return false;
+        }
+        let seqs = f
+            .locals
+            .iter()
+            .filter(|(name, ty)| {
+                crate::seq::is_seq_type(ty) && !f.params.iter().any(|p| &p.name == *name)
+            })
+            .collect::<Vec<_>>();
+        plan.len() == seqs.len()
+            && seqs.iter().all(|(name, ty)| {
+                plan.get(*name) == Some(&crate::fip::SeqDrop::Seq)
+                    && crate::seq::elem(ty).is_some_and(|e| !self.needs_drop(e))
+            })
     }
     /// The header hoists of graph `body` the body hook emits (#2653): on
     /// the optimize path, the slice and sequence parameters (#2750)

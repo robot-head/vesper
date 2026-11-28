@@ -75,6 +75,12 @@ pub const LOCAL_HOME: u64 = 4294967296;
 // The instruction kinds of the plan.
 pub const INST_PLANNED: u64 = 1;
 pub const INST_READ: u64 = 2;
+// A read of a drop slot moved out (`Op::Read` by value, #2653): as
+// `INST_READ`, then the slot is left empty (`seq_drop_moved`).
+pub const INST_READ_MOVED: u64 = 82;
+// A local's kind word bit: the local is a sequence drop slot
+// (`fip::seq_drop_plan`), freed when it is bound again and at each return.
+pub const DROP_SLOT: u64 = 262144;
 pub const INST_BIND: u64 = 3;
 pub const INST_WRITE: u64 = 4;
 pub const INST_CALL: u64 = 5;
@@ -2483,7 +2489,14 @@ impl Gen {
                     if read == NONE64 {
                         return false;
                     }
-                    kind = INST_READ;
+                    // A drop slot moved out is left empty (`seq_drop_moved`).
+                    kind = if self.program.op(add(i.a, 2)) == PASS_SINK
+                        && self.body_drop_bit(root) != 0
+                    {
+                        INST_READ_MOVED
+                    } else {
+                        INST_READ
+                    };
                     extra.push(k);
                     extra.push(read);
                 }
@@ -3389,6 +3402,137 @@ impl Gen {
         false
     }
 
+    // The sequence drop slots of `f` (`fip::seq_drop_plan`, #2653): its
+    // `ChunkSeq` locals that are not parameters, by name. False when the
+    // plan leaves them to the walk: a sequence parameter it owns (`sink`),
+    // or a use the plan refuses or this body plan does not carry yet (a
+    // slot written whole, bound from a borrow, destructured or by a match
+    // arm, a closure or handler, a raise or fallible call, which frees the
+    // slots on its failure exit, or an early `Exit`), or a sequence whose
+    // elements own memory.
+    fn body_drop_slots(inout self, f: FnRow, in h: Header, inout slots: ChunkSeq[u64]) -> bool {
+        for k in 0..h.lname.len() {
+            let name = u64_at(in h.lname, k);
+            let t = n32(u64_at(in h.lty, k));
+            if !self.body_seq_type(t) {
+                continue;
+            }
+            // Only sequences of scalars: freeing one frees no elements.
+            let seq = default_type(inout self.ctx.types, t);
+            if !self.body_register(self.ctx.types.arg(seq, 0)) {
+                return false;
+            }
+            let mut param = false;
+            for j in 0..h.params.len() {
+                if u64_at(in h.params, j) == name {
+                    param = true;
+                    if u64_at(in h.ppass, j) == PASS_SINK {
+                        return false;
+                    }
+                }
+            }
+            if !param {
+                slots.push(name);
+            }
+        }
+        if slots.len() == 0 {
+            return true;
+        }
+        if h.fails.len() != 0 {
+            return false;
+        }
+        // value id -> its defining instruction + 1
+        let mut defs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            for ii in 0..row.ic {
+                let x = add(row.i0, ii);
+                set(inout defs, widen_u64(self.program.inst(x).dest), inc(x));
+            }
+        }
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            for ii in 0..row.ic {
+                let i = self.program.inst(add(row.i0, ii));
+                if i.fallible != 0
+                    || i.op == Op::Closure
+                    || i.op == Op::Handle
+                    || i.op == Op::Exit
+                {
+                    return false;
+                }
+                for k in 0..slots.len() {
+                    let name = u64_at(in slots, k);
+                    if i.op == Op::Write
+                        && widen_u64(self.body_place_root(n32(self.program.op(i.a)))) == name
+                    {
+                        return false;
+                    }
+                    if i.op == Op::Read
+                        && self.program.op(i.a) == name
+                        && self.program.path(self.program.op(inc(i.a))).n != 0
+                    {
+                        return false;
+                    }
+                    if i.op == Op::Bind && self.body_binds(inc(i.a), name, 0) {
+                        // A plain `let` of an owned value.
+                        let value = self.program.op(i.a);
+                        let def = at(in defs, value);
+                        if self.program.op(inc(i.a)) != Pat::Bind || def == 0 {
+                            return false;
+                        }
+                        let d = self.program.inst(wrapping_sub(def, 1));
+                        if d.op == Op::Read && self.program.op(add(d.a, 2)) != PASS_SINK {
+                            return false;
+                        }
+                        if self.body_scrutinee(f, value) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            if row.term == Term::Match {
+                let narms = self.program.op(inc(row.ta));
+                let mut p = add(row.ta, 2);
+                for a in 0..narms {
+                    for k in 0..slots.len() {
+                        if self.body_binds(p, u64_at(in slots, k), 0) {
+                            return false;
+                        }
+                    }
+                    let end = self.body_pattern_end(p, NONE64, 0);
+                    if end == NONE64 {
+                        return false;
+                    }
+                    // the arm's target block
+                    p = inc(end);
+                }
+            }
+        }
+        true
+    }
+
+    // `DROP_SLOT` when local `name` is one of the function's drop slots.
+    fn body_drop_bit(in self, name: u64) -> u64 {
+        for k in 0..self.drops.len() {
+            if u64_at(in self.drops, k) == name {
+                return DROP_SLOT;
+            }
+        }
+        0
+    }
+
+    // Whether value `v` is some block's `match` scrutinee.
+    fn body_scrutinee(in self, f: FnRow, v: u64) -> bool {
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            if row.term == Term::Match && self.program.op(row.ta) == v {
+                return true;
+            }
+        }
+        false
+    }
+
     // The `match` on fused read `v` (`Terminator::Match` with
     // `seq_fused_condition`): each arm's `MATCH_FUSED` outcome, until the
     // arms seen cover both outcomes of the bounds check
@@ -3921,6 +4065,11 @@ impl Gen {
             return;
         }
         let mut graph_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut slots: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        if !self.body_drop_slots(f, in h, inout slots) {
+            return;
+        }
+        self.drops = slots;
         // `ir_graph_at`'s locals, in name order: a parameter has its
         // variable; every other local gets a zeroed one. Each has its kind.
         let homed = self.body_homed(f);
@@ -3968,7 +4117,7 @@ impl Gen {
             } else {
                 0
             };
-            graph_words.push(self.body_kind(t) | home);
+            graph_words.push(self.body_kind(t) | home | self.body_drop_bit(name));
         }
         // Each value's register.
         graph_words.push(h.vty.len());
