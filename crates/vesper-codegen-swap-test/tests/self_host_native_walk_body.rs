@@ -926,8 +926,8 @@ fn vesper_scalar_bodies_part_6j() {
 /// arithmetic on narrow and word kinds raising `ArithOverflow`, partial `/`
 /// and `%` raising `RuntimeError`, and calls of other `fail_only` functions
 /// (one or two instances, an enum or an `i64` error), whose failures are
-/// raised again. Functions that `Fail::raise` themselves (`guard`, `code`)
-/// and the handlers stay on the Rust walk.
+/// raised again. Explicit `Fail::raise` (`guard`, `code`) is covered by
+/// `vesper_explicit_raises_match`.
 const FAILS: &str = "
 enum Oops {
     Small,
@@ -1152,6 +1152,129 @@ fn vesper_fail_handlers_match() {
         assert!(
             emitted >= min_emitted,
             "only {emitted} handler functions came from Vesper (expected {min_emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// Explicit `Fail::raise` (#2657): payload-free enum, one-word integer and
+/// enum-with-payload errors raised through the failure record (the
+/// diagnostics port's `add`), a struct error, and raises to a handler in
+/// the same function.
+const RAISES: &str = "
+copy enum Oops {
+    Small,
+    Big,
+}
+copy enum Res {
+    Source,
+    Lines,
+}
+copy enum Failure {
+    Limits,
+    Budget(Res),
+    Wide { at: u64, len: u64 },
+}
+copy struct Range {
+    lo: i64,
+    hi: i64,
+}
+fn guard(x: i64) -> i64 eff [Fail[Oops]] {
+    if x < 0 {
+        Fail::raise(Oops::Small);
+    }
+    if x > 100 {
+        Fail::raise(Oops::Big);
+    }
+    wrapping_mul(x, 2)
+}
+fn code(x: i64) -> i64 eff [Fail[i64]] {
+    if x > 9 {
+        Fail::raise(x);
+    }
+    wrapping_add(x, 1)
+}
+fn add(a: u64, b: u64, r: Res) -> u64 eff [Fail[Failure]] {
+    if a > wrapping_sub(18446744073709551615, b) {
+        Fail::raise(Failure::Budget(r));
+    }
+    wrapping_add(a, b)
+}
+fn span(at: u64, len: u64) -> u64 eff [Fail[Failure]] {
+    if len == 0 {
+        Fail::raise(Failure::Limits);
+    }
+    if at > 1000 {
+        Fail::raise(Failure::Wide { at: at, len: len });
+    }
+    wrapping_add(at, len)
+}
+fn ordered(lo: i64, hi: i64) -> i64 eff [Fail[Range]] {
+    if lo > hi {
+        Fail::raise(Range { lo: lo, hi: hi });
+    }
+    wrapping_sub(hi, lo)
+}
+fn caught(x: i64) -> i64 {
+    handle Fail[Oops] in {
+        if x < 0 {
+            Fail::raise(Oops::Small);
+        }
+        wrapping_add(x, 3)
+    } with {
+        return v => v,
+        raise(_, _) => -7,
+    }
+}
+fn caught_code(x: i64) -> i64 {
+    handle Fail[i64] in {
+        if x > 5 {
+            Fail::raise(wrapping_mul(x, 10));
+        }
+        x
+    } with {
+        return v => v,
+        raise(e, _) => wrapping_add(e, 1),
+    }
+}
+fn main() -> i64 {
+    let g = handle Fail[Oops] in { guard(-1) ^ guard(5) } with { return v => v, raise(_, _) => 11 };
+    let c = handle Fail[i64] in { code(3) ^ code(12) } with { return v => v, raise(e, _) => e };
+    let a = handle Fail[Failure] in { wrapping_i64(add(1, 2, Res::Lines) ^ add(18446744073709551615, 2, Res::Source)) } with {
+        return v => v,
+        raise(_, _) => 13,
+    };
+    let s = handle Fail[Failure] in { wrapping_i64(span(1, 2) ^ span(2000, 1)) } with {
+        return v => v,
+        raise(_, _) => 17,
+    };
+    let o = handle Fail[Range] in { ordered(1, 5) ^ ordered(5, 1) } with { return v => v, raise(_, _) => 19 };
+    g ^ c ^ a ^ s ^ o ^ caught(-1) ^ caught(4) ^ caught_code(2) ^ caught_code(9)
+}
+";
+
+#[test]
+fn vesper_explicit_raises_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(RAISES);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("raises", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "raises: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        // guard, code, add, span, ordered, caught and caught_code, in both
+        // builds (and again for the JIT runs off-cross).
+        let min_emitted = if cross() { 14 } else { 28 };
+        assert!(
+            emitted >= min_emitted,
+            "only {emitted} raising functions came from Vesper (expected {min_emitted})"
         );
         assert!(total.is_clean(), "{}", total.summary());
     });

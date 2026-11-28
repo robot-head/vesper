@@ -345,6 +345,7 @@ copy struct Ops {
     isa: u32,
     // the failure-record raises (body.ves, #2425)
     fail_: u32,
+    fail_raise: u32,
     arith_overflow: u32,
     runtime_error: u32,
     division_by_zero: u32,
@@ -513,6 +514,7 @@ fn ops_new(inout names: Names, inout tables: Tables) -> Ops {
         det_float: intern(inout names, in "DetFloat"),
         isa: intern(inout names, in "Isa"),
         fail_: intern(inout names, in "Fail"),
+        fail_raise: intern(inout names, in "Fail::raise"),
         arith_overflow: intern(inout names, in "ArithOverflow"),
         runtime_error: intern(inout names, in "RuntimeError"),
         division_by_zero: intern(inout names, in "DivisionByZero"),
