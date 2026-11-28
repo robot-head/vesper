@@ -10,7 +10,8 @@
 // `calls_section` in tests/self_host_codegen_calls.rs:
 //
 //   world flags: 1 trace_active | 2 a ConstDenorm span
-//     (`capability_effects::const_denorm_spans` is not empty)
+//     (`capability_effects::const_denorm_spans` is not empty) | 4 element
+//     views (`World::element_views` is not empty)
 //   nf, nf x (name, fip, span start, end, ng, ng generic names,
 //             np, np x (name, pass, type), result type, effects (a Row
 //             type), body root expression + 1 or 0)
@@ -35,6 +36,7 @@ const NONE32: u32 = 4294967295;
 // The world flags word's bits.
 const WORLD_TRACE_ACTIVE: u64 = 1;
 const WORLD_CONST_DENORM: u64 = 2;
+const WORLD_ELEMENT_VIEWS: u64 = 4;
 // A task's flags word (`Task`).
 const TASK_OPTIMIZE: u64 = 1;
 const TASK_TRACE_HOST: u64 = 2;
@@ -123,6 +125,8 @@ pub struct Calls {
     // A `ConstDenorm` function or closure exists, so the native walk flushes
     // subnormals somewhere (`capability_effects::const_denorm_spans`).
     const_denorm: bool,
+    // The world has element views (`World::element_views` is not empty).
+    element_views: bool,
     fns: ChunkSeq[FnInfo],
     generics: ChunkSeq[u32],
     params: ChunkSeq[ParamInfo],
@@ -327,6 +331,7 @@ pub fn read_calls(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Cal
     let mut calls = Calls {
         trace_active: false,
         const_denorm: false,
+        element_views: false,
         fns: ChunkSeq::new[FnInfo](),
         generics: ChunkSeq::new[u32](),
         params: ChunkSeq::new[ParamInfo](),
@@ -346,6 +351,7 @@ pub fn read_calls(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Cal
     let world_flags = reader.word(in bytes);
     calls.trace_active = world_flags & WORLD_TRACE_ACTIVE != 0;
     calls.const_denorm = world_flags & WORLD_CONST_DENORM != 0;
+    calls.element_views = world_flags & WORLD_ELEMENT_VIEWS != 0;
     let fn_count = reader.word(in bytes);
     for i in 0..fn_count {
         let name = sym(in ctx, reader.word(in bytes));
@@ -529,6 +535,9 @@ pub fn put_calls(in calls: Calls, in t: Types, inout o: ChunkSeq[u64]) {
     }
     if calls.const_denorm {
         world_flags = world_flags | WORLD_CONST_DENORM;
+    }
+    if calls.element_views {
+        world_flags = world_flags | WORLD_ELEMENT_VIEWS;
     }
     o.push(world_flags);
     o.push(calls.fns.len());

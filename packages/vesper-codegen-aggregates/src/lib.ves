@@ -171,7 +171,14 @@ fn read_text(inout reader: Reader, in bytes: Slice[u8], inout names: Names) -> u
 }
 
 fn read_env(inout reader: Reader, in bytes: Slice[u8], inout names: Names, functions: u64) -> Env {
-    let mut e = Env {
+    let mut e = env_new(inout names);
+    read_env_facts(inout reader, in bytes, inout names, functions, inout e);
+    e
+}
+
+// An environment without facts (no functions, views or closures).
+fn env_new(inout names: Names) -> Env {
+    Env {
         ls: layouts_new(),
         lcache: ChunkSeq::new[u32](),
         fns: ChunkSeq::new[u32](),
@@ -202,7 +209,16 @@ fn read_env(inout reader: Reader, in bytes: Slice[u8], inout names: Names, funct
         ret: ChunkSeq::new[u8](),
         ca: ChunkSeq::new[u64](),
         cflag: ChunkSeq::new[u8](),
-    };
+    }
+}
+
+fn read_env_facts(
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout names: Names,
+    functions: u64,
+    inout e: Env
+) {
     let fn_count = reader.word(in bytes);
     for i in 0..fn_count {
         let name = read_text(inout reader, in bytes, inout names);
@@ -258,7 +274,6 @@ fn read_env(inout reader: Reader, in bytes: Slice[u8], inout names: Names, funct
             e.cflag.push(returns_words);
         }
     }
-    e
 }
 
 impl Env {
@@ -5651,6 +5666,20 @@ pub fn scalar_enum_rewrite(in input: Str) -> ChunkSeq[u64] {
 }
 
 // ----- the scalar-enum words of a program (the native walk's body hook) -------
+
+// The number of words `scalar_enums` keeps a value of type `ty` as
+// (`aggregates::enum_shape`'s `words`), 0 when the type has no shape: what
+// the facts of `scalar_enum_facts` compare a function's result words with.
+pub fn enum_shape_words(inout c: Ctx, ty: u32) -> u64 {
+    let mut e = env_new(inout c.names);
+    let mut sh = shapes_new();
+    let shape = enum_shape(inout e, inout c, inout sh, ty);
+    if shape == NONE32_64 {
+        0
+    } else {
+        sh.words(shape)
+    }
+}
 
 // What `scalar_enum_words` kept as words in each rewritten graph: for
 // program function `f`, value id `v` < `nv[f]` has its words
