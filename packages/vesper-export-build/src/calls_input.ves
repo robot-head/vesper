@@ -269,7 +269,12 @@ pub fn stage2_calls_input(
         Option::Some(s) => s,
         Option::None => {
             err.extend(in "foreign imports do not read".as_bytes());
-            return CallsInput { declined: CALLS_FRONT_END, err: err, bytes: ChunkSeq::new[u8]() };
+            return CallsInput {
+                declined: CALLS_FRONT_END,
+                err: err,
+                bytes: ChunkSeq::new[u8](),
+                det_float: false
+            };
         },
     };
     let mut lw = match stage2_lower_dir(in root_dir, in os, in sources, inout err) {
