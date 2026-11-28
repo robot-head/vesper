@@ -6,21 +6,27 @@
 //! fixture tests, which run Stage 2 builds of them with their Cranelift
 //! imports served by it and compare the objects with Rust-built ones.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// The repository root (Cargo runs tests in the crate directory, Bazel in
-/// the runfiles root).
+/// The checked-in WIT, relative to the repository.
+const WIT_PATH: &str = "crates/vesper-cranelift-component/wit/vcl.wit";
+
+/// The repository root: the nearest ancestor holding the checked-in WIT.
+/// Under Bazel `CARGO_MANIFEST_DIR` is `.` (tests start in their package
+/// directory in the runfiles tree), so the search starts from its absolute
+/// form.
 fn repo() -> PathBuf {
-    let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    [crate_dir.join("../.."), PathBuf::from(".")]
-        .into_iter()
-        .find(|d| d.join("packages/vesper-cranelift/cranelift.vsys").exists())
-        .expect("cannot find packages/vesper-cranelift")
+    let dir = std::path::absolute(env!("CARGO_MANIFEST_DIR"))
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    dir.ancestors()
+        .find(|d| d.join(WIT_PATH).is_file())
+        .map(Path::to_path_buf)
+        .expect("cannot find the repository root")
 }
 
 #[test]
 fn the_checked_in_wit_is_the_generated_one() {
-    let path = repo().join("crates/vesper-cranelift-component/wit/vcl.wit");
+    let path = repo().join(WIT_PATH);
     let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
     if std::env::var_os("VESPER_BLESS").is_some() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
