@@ -38,4 +38,7 @@ vesper_crate(
         "VESPER_PORT_OBJECT": "$(execpath :sim_vesper)",
         "VESPER_PORT_GENERATED_BINDING": "$(execpath :sim_vesper_binding)",
     },
+    # Sessions run the evaluator in `vesper sim-host` (src/machine.rs); the
+    # tests find `vesper` on PATH.
+    extra_test_path_binaries = ["//:bin/vesper"],
 )

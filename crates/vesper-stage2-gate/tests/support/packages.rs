@@ -448,7 +448,7 @@ pub const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
 /// (packages/vesper-stage2/src/vcl_decls.ves), and the Wasm backend lowers
 /// them to imports of `vesper:cranelift/vcl@0.1.0` (#2210). The fixed point
 /// only builds them: running one needs the Cranelift component composed in
-/// (crates/vesper-cranelift-component/tests/wasm_imports.rs).
+/// (crates/vesper-cranelift-sys/tests/support/stage2.rs).
 pub const STAGE2_CRANELIFT_PACKAGES: &[(&str, &str, &str, &str)] = &[
     (
         "codegen-base",
@@ -511,12 +511,20 @@ pub const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
         "Stage 1 front end, checked as one unit; bootstrap/stage1.lock (tests/stage2_seed_runner.rs)",
     ),
     (
+        "vesper-lsp-server",
+        "the `vesper lsp` loop over its native `LspEngine` import, the Rust session until the checker runs in Vesper (#1828 part 15a); its JIT differential is tests/self_host_lsp_core.rs `server_loop_matches_rust`, and a wasm32-wasip2 import comes with the routing in part 15c",
+    ),
+    (
         "vesper-driver-engines",
         "the command engines still in Rust (#1996), built under Stage 2 as a dependency of the @vesper/driver-commands probe in STAGE2_HOST_PACKAGES (src-wasip2 refuses each engine)",
     ),
     (
         "vesper-export-build",
-        "`vesper build --lib`'s interface and binding from Stage 2's front end (#2270) as a native executable beside the Rust CLI (tests/self_host_codegen_export.rs); it is @vesper/stage2 plus the export packages, built under Stage 2 as one program in bootstrap switch slice 3",
+        "`vesper build --lib`'s interface and binding from Stage 2's front end (#2270) as a native executable beside the Rust CLI (tests/self_host_codegen_export.rs); Stage 2 builds it inside @vesper/port-builder (//:vesper-port-builder.wasm, #2666)",
+    ),
+    (
+        "vesper-port-builder",
+        "`vesper build --lib` for the ports as one program: Stage 2 builds it into //:vesper-port-builder.wasm (tools/bazel/stage2_port_builder.bzl), composed with the Cranelift component and compared with the Rust CLI by crates/vesper-port-harness/tests/stage2_builder.rs (#2666)",
     ),
     (
         "vesper-stage2",
