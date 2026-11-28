@@ -2704,3 +2704,138 @@ fn vesper_inout_arguments_to_fail_only_callees_match() {
 /// `SRET_FAIL_SOURCE`'s four struct results, both settings, both
 /// comparisons of a JIT-running host.
 const MIN_FAIL_SRET: u64 = 16;
+
+/// ChunkSeq values (#2750): a sequence is its header's handle word, read
+/// through `len`, a checked element and `as_slice`, kept in a register or
+/// a home slot as the walk keeps it, passed `in` and `inout`.
+const CHUNK_SEQS: &str = "
+fn count(in s: ChunkSeq[u64]) -> u64 {
+    s.len()
+}
+fn count_plus(in s: ChunkSeq[u8], k: u64) -> u64 {
+    wrapping_add(s.len(), k)
+}
+fn word_at(in s: ChunkSeq[u64], i: u64) -> u64 eff [Fail[RuntimeError]] {
+    s[i]
+}
+fn small_at(in s: ChunkSeq[u8], in t: ChunkSeq[u32], i: u64) -> u64 eff [Fail[RuntimeError]] {
+    wrapping_add(widen_u64(s[i]), widen_u64(t[i]))
+}
+fn half_at(in s: ChunkSeq[u16], in z: ChunkSeq[i32], i: u64) -> i64 eff [Fail[RuntimeError]] {
+    wrapping_add(widen_i64(s[i]), widen_i64(z[i]))
+}
+fn float_at(in s: ChunkSeq[f64], i: u64) -> f64 eff [Fail[RuntimeError]] {
+    s[i] * 2.0
+}
+fn slice_len(in xs: Slice[u64]) -> u64 {
+    wrapping_mul(xs.len(), 3)
+}
+fn via_slice(in s: ChunkSeq[u64]) -> u64 {
+    slice_len(in s.as_slice())
+}
+fn inout_len(inout s: ChunkSeq[u64]) -> u64 {
+    s.len()
+}
+fn relay_len(in s: ChunkSeq[u64]) -> u64 {
+    wrapping_add(count(in s), 1)
+}
+fn pass_on(n: u64) -> ChunkSeq[u64] {
+    let t: ChunkSeq[u64] = made(n);
+    t
+}
+fn grow(inout s: ChunkSeq[u64], x: u64) {
+    s.push(x);
+}
+fn grow_twice(inout s: ChunkSeq[u32], x: u32) -> u64 {
+    s.push(x);
+    s.push(x);
+    s.len()
+}
+fn resize_to(inout s: ChunkSeq[u64], n: u64) {
+    if s.len() < n {
+        s.resize(n, 0);
+    }
+}
+fn set_at(inout s: ChunkSeq[u64], i: u64, x: u64) -> bool {
+    s.try_set(i, x)
+}
+fn put_at(inout s: ChunkSeq[u64], i: u64, x: u64) eff [Fail[RuntimeError]] {
+    s.set(i, x);
+}
+fn made(n: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    s.push(n);
+    s
+}
+fn main() -> i64 {
+    let mut w: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    w.push(7);
+    w.push(11);
+    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    b.push(200);
+    b.push(3);
+    let mut q: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    q.push(70000);
+    q.push(5);
+    let mut h: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    h.push(300);
+    h.push(40000);
+    let mut z: ChunkSeq[i32] = ChunkSeq::new[i32]();
+    z.push(-3);
+    z.push(9);
+    let mut f: ChunkSeq[f64] = ChunkSeq::new[f64]();
+    f.push(1.5);
+    f.push(-2.25);
+    grow(inout w, 13);
+    let g = grow_twice(inout q, 6);
+    resize_to(inout w, 6);
+    let ok = set_at(inout w, 4, 99);
+    let lens = count(in w) ^ count_plus(in b, 5) ^ via_slice(in w) ^ inout_len(inout w)
+        ^ relay_len(in w) ^ g ^ (if ok { 1 } else { 0 });
+    let m = pass_on(41);
+    handle Fail[RuntimeError] in {
+        put_at(inout w, 5, 17);
+        let a = word_at(in w, 1) ^ small_at(in b, in q, 0) ^ word_at(in m, 0);
+        let c = half_at(in h, in z, 1);
+        let d = saturating_i64(float_at(in f, 1));
+        let e = word_at(in w, 9);
+        wrapping_i64(a ^ lens ^ word_at(in w, 5)) ^ c ^ d ^ wrapping_i64(e)
+    } with {
+        return value => value,
+        raise(error, resume) => 4242,
+    }
+}
+";
+
+#[test]
+fn vesper_chunk_seq_bodies_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(CHUNK_SEQS);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("chunk_seqs", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "chunk_seqs: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() {
+            MIN_CHUNK_SEQ_EMITTED / 2
+        } else {
+            MIN_CHUNK_SEQ_EMITTED
+        };
+        assert!(
+            emitted >= min_emitted,
+            "only {emitted} ChunkSeq functions came from Vesper (expected {min_emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// `CHUNK_SEQS`'s functions emitted from Vesper, both settings, both
+/// comparisons of a JIT-running host.
+const MIN_CHUNK_SEQ_EMITTED: u64 = 44;
