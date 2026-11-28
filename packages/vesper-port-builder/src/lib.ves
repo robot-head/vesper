@@ -12,9 +12,14 @@
 //         <binding> <status> [--rust-types <path>] [--request <file>]
 //
 // The interface JSON and the Rust binding come from @vesper/export-build
-// (slice 1). The object comes from @vesper/native-lib, whose request
-// Stage 2 does not build yet (slices 3b to 3d), so the object is declined
-// unless `--request` names a request file to build it from.
+// (slice 1). The object comes from @vesper/native-lib, whose request is
+// built here (slice 3g, #2733): the exports, 128-bit entries and v2 flag
+// from the interface (@vesper/codegen-export `native_exports`), and the
+// calls input of the library task over the exports' names from Stage 2's
+// front end (@vesper/export-build `stage2_calls_input`), as
+// `vesper build --lib` builds an optimized library for an explicit
+// triple. `--request` names a request file to build the object from
+// instead.
 //
 // The status file holds one line per output group, each a tag and its
 // decline reason (0 when the files were written):
@@ -24,20 +29,25 @@
 //
 // The exit status is 0 unless an argument is missing or a file could not
 // be read or written.
-use @vesper/export-build::{DECLINE_NONE, export_files_dir};
+use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset};
+use @vesper/codegen-export::native::{NativeExports, native_exports};
+use @vesper/export-build::{DECLINE_NONE, export_files_dir, target_os};
+use @vesper/export-build::calls_input::{CALLS_OK, stage2_calls_input};
 use @vesper/native-lib::library_object;
 use @vesper-std/env::{arg_bytes, arg_count};
 use @vesper-std/fs::{IoError, read_path, write_path};
 
 // The object was written.
 pub const OBJECT_BUILT: u64 = 0;
-// Stage 2 does not build @vesper/native-lib's request yet, and no
-// `--request` file was given.
-pub const OBJECT_NO_REQUEST: u64 = 1;
+// Stage 2's front end made no calls input for the library.
+pub const OBJECT_NO_CALLS: u64 = 1;
 // @vesper/native-lib answered with an error.
 pub const OBJECT_FAILED: u64 = 2;
 // The export outputs were declined, so the object was not attempted.
 pub const OBJECT_SKIPPED: u64 = 3;
+// @vesper/native-lib trapped (Stage 2's memory ran out): the builder's run
+// fails with this status written.
+pub const OBJECT_TRAPPED: u64 = 4;
 
 // The positional arguments, after the program name.
 const ARG_PACKAGE: u64 = 1;
@@ -54,6 +64,12 @@ const TAG_EXPORT: Str = "export ";
 const TAG_OBJECT: Str = "object ";
 const NEWLINE: u8 = 10;
 
+// `export_step`'s and `request_step`'s answer when a file could not be
+// read or written (beyond every `DECLINE_*` and `OBJECT_*`).
+const EXPORT_IO: u64 = 255;
+// `stage2_heap_mark` outside Stage 2's self-built heap.
+const NO_HEAP_MARK: u64 = 0;
+
 // Exit statuses.
 const EXIT_OK: u64 = 0;
 const EXIT_USAGE: u64 = 2;
@@ -62,6 +78,29 @@ const EXIT_IO: u64 = 1;
 // @vesper/native-lib's answer: a status word, then the object.
 const ANSWER_OK: u64 = 0;
 const WORD_BYTES: u64 = 8;
+
+// The request's header (`native_export::object` and
+// `native::isa_with_flags` for an optimized build): the ISA flags, with
+// NaN canonicalization for a program with a `DetFloat` function, the
+// object's module name, no CLIF text kept, and instructions that carry
+// their source locations.
+const FLAGS: Str = "enable_llvm_abi_extensions=true;is_pic=true;opt_level=speed";
+const NAN_FLAG: Str = ";enable_nan_canonicalization=true";
+const MODULE_NAME: Str = "vesper";
+const KEEP_CLIF: u64 = 0;
+const SOURCE_LOCATIONS: u64 = 1;
+// A library build is optimized.
+const OPTIMIZE: bool = true;
+// The v2 section's sequence runtime arguments after the Windows flag
+// (`codegen_swap::seq::runtime_args`: `INLINE_BYTES`, `NEW_INLINE_BYTES`,
+// `BUFFER_PREFIX`, `seq::FAULT_STATUS`, `seq::HEADER_BYTES`).
+const INLINE_BYTES: u64 = 65536;
+const NEW_INLINE_BYTES: u64 = 32;
+const BUFFER_PREFIX: u64 = 8;
+const FAULT_STATUS: u64 = 71;
+const HEADER_BYTES: u64 = 24;
+// The triples' operating system word that makes the Windows flag.
+const WINDOWS: Str = "windows";
 
 // Decimal digits, from ASCII `0`.
 const DECIMAL_BASE: u64 = 10;
@@ -98,6 +137,121 @@ fn status_line(inout out: ChunkSeq[u8], tag: Str, reason: u64) {
     out.extend(in tag.as_bytes());
     push_dec(inout out, reason);
     out.push(NEWLINE);
+}
+
+fn put_word(inout out: ChunkSeq[u8], v: u64) {
+    let at = out.len();
+    out.resize(wrapping_add(at, WORD_BYTES), 0);
+    let ok = out.try_write_u64_le(at, v);
+}
+
+fn put_bytes(inout out: ChunkSeq[u8], in b: Slice[u8]) {
+    put_word(inout out, b.len());
+    out.extend(in b);
+}
+
+// Whether `word` occurs in `s`.
+fn contains(in s: Slice[u8], in word: Str) -> bool {
+    let w = word.as_bytes();
+    if w.len() > s.len() {
+        return false;
+    }
+    for at in 0..wrapping_add(wrapping_sub(s.len(), w.len()), 1) {
+        let mut same = true;
+        for i in 0..w.len() {
+            if s.try_get(wrapping_add(at, i)).unwrap_or(0) != w.try_get(i).unwrap_or(0) {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            return true;
+        }
+    }
+    false
+}
+
+// @vesper/native-lib's request (packages/vesper-native-lib/src/lib.ves
+// and exports.ves) for the library whose interface is `e`, over the calls
+// input `calls`.
+fn request_of(
+    in triple: Slice[u8],
+    in e: NativeExports,
+    in interface: Slice[u8],
+    in calls: Slice[u8],
+    det_float: bool
+) -> ChunkSeq[u8] {
+    let mut q: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_bytes(inout q, in triple);
+    let mut flags: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    flags.extend(in FLAGS.as_bytes());
+    if det_float {
+        flags.extend(in NAN_FLAG.as_bytes());
+    }
+    put_bytes(inout q, in flags.as_slice());
+    put_bytes(inout q, in MODULE_NAME.as_bytes());
+    put_word(inout q, KEEP_CLIF);
+    put_word(inout q, SOURCE_LOCATIONS);
+    q.extend(in e.exports.as_slice());
+    put_bytes(inout q, in calls);
+    q.extend(in e.wide.as_slice());
+    if e.v2 {
+        put_word(inout q, 1);
+        put_word(inout q, if contains(in triple, WINDOWS) { 1 } else { 0 });
+        put_word(inout q, INLINE_BYTES);
+        put_word(inout q, NEW_INLINE_BYTES);
+        put_word(inout q, BUFFER_PREFIX);
+        put_word(inout q, FAULT_STATUS);
+        put_word(inout q, HEADER_BYTES);
+        put_bytes(inout q, in interface);
+    } else {
+        put_word(inout q, 0);
+    }
+    q
+}
+
+// @vesper/native-lib's request for the library at `root`, whose
+// interface (`native_exports`' input) is `interface`, as Stage 2 builds
+// it; or why it was not built.
+fn stage2_request(
+    in root: Slice[u8],
+    in triple: Slice[u8],
+    in interface: Slice[u8]
+) -> (u64, ChunkSeq[u8]) eff [Ffi[StdFs]] {
+    let e = native_exports(in interface);
+    let os = target_os(in triple);
+    let calls = stage2_calls_input(in root, in os.as_slice(), in e.roots.as_slice(), OPTIMIZE);
+    if calls.declined != CALLS_OK {
+        return (OBJECT_NO_CALLS, ChunkSeq::new[u8]());
+    }
+    let req = request_of(in triple, in e, in interface, in calls.bytes.as_slice(), calls.det_float);
+    (OBJECT_BUILT, req)
+}
+
+// Parks the request for the library at `root` (whose interface is parked
+// at `object`) at `object`, as `stage2_request` makes it or read from the
+// `--request` file. `OBJECT_BUILT` when it was parked, else why not, or
+// `EXPORT_IO` when a file could not be read or written.
+fn request_step(
+    in root: Slice[u8],
+    in triple: Slice[u8],
+    in object: Slice[u8],
+    has_request: bool,
+    in request: Slice[u8]
+) -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let (reason, req) = if has_request {
+            (OBJECT_BUILT, read_path(in request))
+        } else {
+            let parked = read_path(in object);
+            stage2_request(in root, in triple, in parked.as_slice())
+        };
+        write_path(in object, in req.as_slice());
+        reason
+    } with {
+        return v => v,
+        raise(_e, _k) => EXPORT_IO,
+    }
 }
 
 // The object bytes of @vesper/native-lib's answer to `req`, if it built one.
@@ -164,38 +318,104 @@ pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[Cranelift]] {
         }
         value_next = true;
     }
-    let files = export_files_dir(
+    // Stage 2's self-built heap frees nothing on its own, and two front
+    // ends (the export plan's, then the calls input's) do not fit in one
+    // 4 GiB memory: the export step's heap is freed before the object
+    // step, which reads the interface back from where the export step
+    // parked it (the object's path, which the object step overwrites).
+    let scratch = stage2_heap_mark();
+    let export_reason = export_step(
         in root.as_slice(),
         in library.as_slice(),
         in triple.as_slice(),
         has_types,
-        in types.as_slice()
+        in types.as_slice(),
+        in object.as_slice(),
+        in interface.as_slice(),
+        in binding.as_slice()
     );
-    let export_reason = widen_u64(files.declined);
+    if scratch != NO_HEAP_MARK {
+        stage2_heap_reset(scratch);
+    }
+    if export_reason == EXPORT_IO {
+        return EXIT_IO;
+    }
+    // The calls input's front end is freed in turn before native-lib runs.
+    let mut object_reason = OBJECT_SKIPPED;
+    if export_reason == widen_u64(DECLINE_NONE) {
+        let scratch = stage2_heap_mark();
+        object_reason = request_step(
+            in root.as_slice(),
+            in triple.as_slice(),
+            in object.as_slice(),
+            has_request,
+            in request.as_slice()
+        );
+        if scratch != NO_HEAP_MARK {
+            stage2_heap_reset(scratch);
+        }
+        if object_reason == EXPORT_IO {
+            return EXIT_IO;
+        }
+    }
     let mut report: ChunkSeq[u8] = ChunkSeq::new[u8]();
     status_line(inout report, TAG_EXPORT, export_reason);
     handle Fail[IoError] in {
-        let mut object_reason = OBJECT_SKIPPED;
-        if files.declined == DECLINE_NONE {
-            write_path(in interface.as_slice(), in files.interface.as_slice());
-            write_path(in binding.as_slice(), in files.binding.as_slice());
-            object_reason = OBJECT_NO_REQUEST;
-            if has_request {
-                let req = read_path(in request.as_slice());
-                object_reason = match object_of(in req.as_slice()) {
-                    Option::Some(bytes) => {
-                        write_path(in object.as_slice(), in bytes.as_slice());
-                        OBJECT_BUILT
-                    },
-                    Option::None => OBJECT_FAILED,
-                };
-            }
+        let mut reported = object_reason;
+        if object_reason == OBJECT_BUILT {
+            // Stage 2's 4 GiB memory can run out in native-lib, which traps
+            // the builder: the status names that until the object is
+            // written, and the harness reads it after a failed run.
+            let mut pending: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            pending.extend(in report.as_slice());
+            status_line(inout pending, TAG_OBJECT, OBJECT_TRAPPED);
+            write_path(in status.as_slice(), in pending.as_slice());
+            let req = read_path(in object.as_slice());
+            let (reason, bytes) = match object_of(in req.as_slice()) {
+                Option::Some(bytes) => (OBJECT_BUILT, bytes),
+                Option::None => (OBJECT_FAILED, ChunkSeq::new[u8]()),
+            };
+            write_path(in object.as_slice(), in bytes.as_slice());
+            reported = reason;
+        } else if export_reason == widen_u64(DECLINE_NONE) {
+            // A declined object leaves the path empty, not what was parked.
+            let empty: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            write_path(in object.as_slice(), in empty.as_slice());
         }
-        status_line(inout report, TAG_OBJECT, object_reason);
+        status_line(inout report, TAG_OBJECT, reported);
         write_path(in status.as_slice(), in report.as_slice());
         EXIT_OK
     } with {
         return v => v,
         raise(_e, _k) => EXIT_IO,
+    }
+}
+
+// The export outputs of the library at `root`: writes the interface and
+// the binding, and parks @vesper/native-lib's view of the interface at
+// `object`. @vesper/export-build's `DECLINE_*`, or `EXPORT_IO` when a file
+// could not be written.
+fn export_step(
+    in root: Slice[u8],
+    in library: Slice[u8],
+    in triple: Slice[u8],
+    has_types: bool,
+    in types: Slice[u8],
+    in object: Slice[u8],
+    in interface: Slice[u8],
+    in binding: Slice[u8]
+) -> u64 eff [Ffi[StdFs]] {
+    let files = export_files_dir(in root, in library, in triple, has_types, in types);
+    if files.declined != DECLINE_NONE {
+        return widen_u64(files.declined);
+    }
+    handle Fail[IoError] in {
+        write_path(in interface, in files.interface.as_slice());
+        write_path(in binding, in files.binding.as_slice());
+        write_path(in object, in files.native.as_slice());
+        widen_u64(DECLINE_NONE)
+    } with {
+        return v => v,
+        raise(_e, _k) => EXPORT_IO,
     }
 }

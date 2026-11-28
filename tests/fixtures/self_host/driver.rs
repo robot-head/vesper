@@ -452,10 +452,6 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // The preludes package exports with `pub fn`; its
                     // preludes/ files stay in the corpus.
                     || path.ends_with("packages/vesper-preludes/src")
-                    // Stage 2's own prelude texts (#1996): str_chars.ves,
-                    // whose `impl Str` the Stage 1 parser reads with a
-                    // different tree, is Stage 2 input, not Stage 1's.
-                    || path.ends_with("packages/vesper-stage2/preludes")
                 {
                     continue;
                 }

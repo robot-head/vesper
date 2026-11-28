@@ -512,7 +512,7 @@ pub const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
     ),
     (
         "vesper-lsp-server",
-        "the `vesper lsp` loop over its native `LspEngine` import, the Rust session until the checker runs in Vesper (#1828 part 15a); its JIT differential is tests/self_host_lsp_core.rs `server_loop_matches_rust`, and a wasm32-wasip2 import comes with the routing in part 15c",
+        "the `vesper lsp` loop over the `hc_lsp_engine_*` seam of @vesper/driver-engines, the Rust session until the checker runs in Vesper (#1828 part 15); its JIT differentials are tests/self_host_lsp_core.rs `server_loop_matches_rust` and `live_loop_matches_rust`, and on wasm32-wasip2 driver-engines refuses the seam",
     ),
     (
         "vesper-driver-engines",
