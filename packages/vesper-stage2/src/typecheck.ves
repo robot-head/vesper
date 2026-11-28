@@ -1206,10 +1206,12 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                 tc.f64_ty
             }
         } else if e.a == Lit::String {
-            if expected == tc.types.named0(tc.world.k.string) {
+            // A literal is a `String` (src/check.rs `literal_type`), or a
+            // `Str` view where one is expected.
+            if expected == tc.str_ty {
                 expected
             } else {
-                tc.str_ty
+                tc.types.named0(tc.world.k.string)
             }
         } else if tc.types.kind(expected) == TyKind::Named
             && tc.world.k.is_integer(tc.types.name(expected))

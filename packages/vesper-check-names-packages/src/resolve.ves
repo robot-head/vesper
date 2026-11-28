@@ -114,8 +114,24 @@ pub fn is_foreign(in loader: St, key: u64) -> bool {
     loader.foreign_types.contains_key(key) && !loader.item_kind.contains_key(key)
 }
 
+// The first byte of a generated module's file name (`$string_prelude.ves`,
+// Stage 2's loader): `$`.
+fn generated_file_marker() -> u8 {
+    36
+}
+
+// Whether `module` is a generated prelude module. The Rust loader appends
+// its preludes to the assembled module (src/check.rs `World::collect`),
+// so their items keep their plain names.
+fn is_generated(in loader: St, module: u32) -> bool {
+    let file = at32(in loader.mod_file, w(module));
+    let display = at32(in loader.file_display, w(file));
+    sym_len(in loader, display) != 0 && sym_byte(in loader, display, 0) == generated_file_marker()
+}
+
 // `Resolver::name_of`: its root re-export name, its plain name in the root
-// package's root module, else the mangled name.
+// package's root module or a generated prelude module, else the mangled
+// name.
 pub fn name_of(inout loader: St, key: u64) -> u32 {
     if is_foreign(in loader, key) {
         return lo(key);
@@ -128,7 +144,7 @@ pub fn name_of(inout loader: St, key: u64) -> u32 {
     }
     let module = hi(key);
     let item = lo(key);
-    if module == loader.root_mod {
+    if module == loader.root_mod || is_generated(in loader, module) {
         return item;
     }
     match loader.mangled.get(key) {
