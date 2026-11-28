@@ -1,0 +1,669 @@
+// Handlers in the native walk's body plans (#2657, part of #2094): what an
+// `Op::Handle` instruction's expression holds, read from the facts the
+// input carries after the program (tests/common/handler_facts.rs), and the
+// plans of the nested graphs the walk emits for it (`ir_graph` with a join
+// block, `ir::nested_name`): the handled body and the `return` clause at
+// the handler, and the operation clause at each raise the body makes.
+//
+// Slice 1 covers a `Fail[E]` handler with no label or state, a scalar
+// result, a `return` pattern that binds a name or nothing, and one
+// `raise(e, _)` clause whose continuation is unused. The nested graphs
+// must be graphs the body plan already emits, with no handler of their
+// own, and the names a clause uses must be scalars.
+
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::input::{Reader};
+use @vesper/check-data::types::{TyKind, default_type};
+use @vesper/place-ir::{FnRow, InstRow};
+use @vesper/place-ir::codes::{Op, Term};
+use super::{Gen};
+use super::body::{Header, LANE_PRODUCT, NO_LOCAL, grow_set};
+
+// The first word of the facts: "HANDLERS" in ASCII (`HANDLER_FACTS`).
+pub const HANDLER_FACTS: u64 = 6003937447104102728;
+// A graph the program does not hold.
+const NO_GRAPH: u64 = 18446744073709551615;
+const NONE64: u64 = 18446744073709551615;
+const NONE32: u32 = 4294967295;
+
+// A pattern's kind in the facts.
+const PATTERN_WILD: u64 = 0;
+const PATTERN_BIND: u64 = 1;
+
+// A raise taken by a handler in scope rather than the function's own
+// failure exit: the handler's depth (0 the outermost) above this base.
+pub const HANDLER_BASE: u64 = 4294967296;
+
+// A nested local's kind word: set when the optimize path may keep it in a
+// register (`register_locals`: an integer, `f32`, `f64` or `bool` local).
+pub const NESTED_REGISTER: u64 = 65536;
+// A function's local the optimize path keeps a home for because a handler
+// names it (`register_locals`' memory: an `Op::Handle`'s aliases and free
+// names).
+pub const HANDLER_HOME: u64 = 131072;
+
+// The `Op::Handle` operands: whether it has a state, the state value, the
+// expression's pool row, then the alias pairs and the moves.
+const HANDLE_ALIASES: u64 = 3;
+const PAIR_WORDS: u64 = 2;
+
+// The clause count, pattern count and operation of a slice 1 handler.
+const SLICE_OPS: u64 = 1;
+const RAISE_PATTERNS: u64 = 2;
+
+pub copy struct HandlerRow {
+    effect: u32,
+    nargs: u64,
+    // the first argument's type name (0 for one that is not a plain name)
+    arg: u32,
+    labelled: bool,
+    stateful: bool,
+    region: bool,
+    body: u64,
+    ret_kind: u64,
+    ret_name: u32,
+    ret_graph: u64,
+    // ops[op_a..op_a+op_n]
+    op_a: u64,
+    op_n: u64,
+    // the clauses' free names: names[free_a..free_a+free_n]
+    free_a: u64,
+    free_n: u64,
+    // the whole expression's free names: names[used_a..used_a+used_n]
+    used_a: u64,
+    used_n: u64,
+}
+
+pub copy struct HandlerOp {
+    name: u32,
+    // pats[pat_a..pat_a+2*pat_n]: (kind, name) per pattern
+    pat_a: u64,
+    pat_n: u64,
+    graph: u64,
+}
+
+pub struct HandlerFacts {
+    present: bool,
+    // per program function: its first row and its row count
+    fn_a: ChunkSeq[u64],
+    fn_n: ChunkSeq[u64],
+    rows: ChunkSeq[HandlerRow],
+    ops: ChunkSeq[HandlerOp],
+    pats: ChunkSeq[u64],
+    names: ChunkSeq[u32],
+}
+
+pub fn handler_facts_none() -> HandlerFacts {
+    HandlerFacts {
+        present: false,
+        fn_a: ChunkSeq::new[u64](),
+        fn_n: ChunkSeq::new[u64](),
+        rows: ChunkSeq::new[HandlerRow](),
+        ops: ChunkSeq::new[HandlerOp](),
+        pats: ChunkSeq::new[u64](),
+        names: ChunkSeq::new[u32]()
+    }
+}
+
+fn read_text(inout reader: Reader, in bytes: Slice[u8], inout names: Names) -> u32 {
+    let len = reader.word(in bytes);
+    let start = reader.pos;
+    let name = names.intern(in bytes[start..wrapping_add(start, len)]);
+    reader.pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
+    name
+}
+
+fn read_pattern(
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout names: Names,
+    inout pats: ChunkSeq[u64]
+) {
+    let kind = reader.word(in bytes);
+    pats.push(kind);
+    if kind == PATTERN_BIND {
+        pats.push(widen_u64(read_text(inout reader, in bytes, inout names)));
+    } else {
+        pats.push(NO_LOCAL);
+    }
+}
+
+// The facts after the program, when the input has them (their first word
+// is `HANDLER_FACTS`); else none, and the reader stays where it was.
+pub fn read_handler_facts(
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout names: Names,
+    functions: u64
+) -> HandlerFacts {
+    let mut facts = handler_facts_none();
+    let at = reader.pos;
+    if at >= bytes.len() || reader.word(in bytes) != HANDLER_FACTS {
+        reader.pos = at;
+        return facts;
+    }
+    facts.present = true;
+    for f in 0..functions {
+        facts.fn_a.push(facts.rows.len());
+        let n = reader.word(in bytes);
+        facts.fn_n.push(n);
+        for k in 0..n {
+            let effect = read_text(inout reader, in bytes, inout names);
+            let nargs = reader.word(in bytes);
+            let mut arg: u32 = 0;
+            for j in 0..nargs {
+                let a = read_text(inout reader, in bytes, inout names);
+                if j == 0 && !names.spells(a, in "".as_bytes()) {
+                    arg = a;
+                }
+            }
+            let labelled = reader.word(in bytes) != 0;
+            let stateful = reader.word(in bytes) != 0;
+            let region = reader.word(in bytes) != 0;
+            let body = reader.word(in bytes);
+            let ret_kind = reader.word(in bytes);
+            let mut ret_name: u32 = 0;
+            if ret_kind == PATTERN_BIND {
+                ret_name = read_text(inout reader, in bytes, inout names);
+            }
+            let ret_graph = reader.word(in bytes);
+            let op_a = facts.ops.len();
+            let op_n = reader.word(in bytes);
+            for j in 0..op_n {
+                let name = read_text(inout reader, in bytes, inout names);
+                let pat_a = facts.pats.len();
+                let pat_n = reader.word(in bytes);
+                for p in 0..pat_n {
+                    read_pattern(inout reader, in bytes, inout names, inout facts.pats);
+                }
+                let graph = reader.word(in bytes);
+                facts.ops.push(HandlerOp { name: name, pat_a: pat_a, pat_n: pat_n, graph: graph });
+            }
+            let free_a = facts.names.len();
+            let free_n = reader.word(in bytes);
+            for j in 0..free_n {
+                facts.names.push(read_text(inout reader, in bytes, inout names));
+            }
+            let used_a = facts.names.len();
+            let used_n = reader.word(in bytes);
+            for j in 0..used_n {
+                facts.names.push(read_text(inout reader, in bytes, inout names));
+            }
+            facts.rows.push(HandlerRow {
+                effect: effect,
+                nargs: nargs,
+                arg: arg,
+                labelled: labelled,
+                stateful: stateful,
+                region: region,
+                body: body,
+                ret_kind: ret_kind,
+                ret_name: ret_name,
+                ret_graph: ret_graph,
+                op_a: op_a,
+                op_n: op_n,
+                free_a: free_a,
+                free_n: free_n,
+                used_a: used_a,
+                used_n: used_n
+            });
+        }
+    }
+    facts
+}
+
+// Where one graph's calls and handlers sit among the request's callees
+// (`native::graph_calls`): per instruction (by its offset from the
+// graph's first), its call's index, and for a handler its facts row + 1
+// and the index of its nested graphs' first call.
+pub struct CallSlots {
+    calls: ChunkSeq[u64],
+    rows: ChunkSeq[u64],
+    bases: ChunkSeq[u64],
+}
+
+fn has(in names: ChunkSeq[u32], a: u64, n: u64, name: u64) -> bool {
+    for k in a..add(a, n) {
+        if widen_u64(u32_at(in names, k)) == name {
+            return true;
+        }
+    }
+    false
+}
+
+impl Gen {
+    // The facts row of the `k`-th handler of function `fi`, or NONE64.
+    fn handler_row(in self, fi: u64, k: u64) -> u64 {
+        if !self.handlers.present || fi >= self.handlers.fn_n.len() {
+            return NONE64;
+        }
+        if k >= u64_at(in self.handlers.fn_n, fi) {
+            return NONE64;
+        }
+        add(u64_at(in self.handlers.fn_a, fi), k)
+    }
+
+    fn handler(in self, r: u64) -> HandlerRow {
+        match self.handlers.rows.try_get(r) {
+            Option::Some(x) => x,
+            Option::None => HandlerRow {
+                effect: 0,
+                nargs: 0,
+                arg: 0,
+                labelled: true,
+                stateful: true,
+                region: true,
+                body: NO_GRAPH,
+                ret_kind: NONE64,
+                ret_name: 0,
+                ret_graph: NO_GRAPH,
+                op_a: 0,
+                op_n: 0,
+                free_a: 0,
+                free_n: 0,
+                used_a: 0,
+                used_n: 0
+            },
+        }
+    }
+
+    fn handler_op(in self, i: u64) -> HandlerOp {
+        match self.handlers.ops.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => HandlerOp { name: 0, pat_a: 0, pat_n: 0, graph: NO_GRAPH },
+        }
+    }
+
+    // The number of calls the request lists for graph `fi`: its own, and
+    // at each handler those of its nested graphs.
+    pub fn graph_call_count(in self, fi: u64) -> u64 {
+        if fi == NO_GRAPH || fi >= self.program.fn_count() {
+            return 0;
+        }
+        let f = self.program.function(fi);
+        let mut n: u64 = 0;
+        let mut hk: u64 = 0;
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            for ii in 0..row.ic {
+                let op = self.program.inst(add(row.i0, ii)).op;
+                if op == Op::Call {
+                    n = inc(n);
+                } else if op == Op::Handle {
+                    let r = self.handler_row(fi, hk);
+                    hk = inc(hk);
+                    if r != NONE64 {
+                        let h = self.handler(r);
+                        n = add(n, self.graph_call_count(h.body));
+                        n = add(n, self.graph_call_count(h.ret_graph));
+                        for j in 0..h.op_n {
+                            n = add(
+                                n,
+                                self.graph_call_count(self.handler_op(add(h.op_a, j)).graph)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    // The call slots of nested graph `fi` whose first call is the
+    // request's `base`-th: its own calls and its handlers' nested calls
+    // interleaved in instruction order.
+    pub fn call_slots(in self, fi: u64, base: u64) -> CallSlots {
+        self.slots(fi, base, false)
+    }
+
+    // The call slots of function body `fi`: its own calls first, in
+    // instruction order, then its handlers' nested calls (the request's
+    // count word splits them at `NESTED_CALLS_SHIFT`).
+    pub fn body_call_slots(in self, fi: u64) -> CallSlots {
+        self.slots(fi, 0, true)
+    }
+
+    // The number of `Op::Call`s of graph `fi` itself.
+    fn own_call_count(in self, fi: u64) -> u64 {
+        let f = self.program.function(fi);
+        let mut n: u64 = 0;
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            for ii in 0..row.ic {
+                if self.program.inst(add(row.i0, ii)).op == Op::Call {
+                    n = inc(n);
+                }
+            }
+        }
+        n
+    }
+
+    // The call slots of graph `fi` from `base`; `split` numbers its own
+    // calls from 0 and its handlers' nested calls after them.
+    fn slots(in self, fi: u64, base: u64, split: bool) -> CallSlots {
+        let mut s = CallSlots {
+            calls: ChunkSeq::new[u64](),
+            rows: ChunkSeq::new[u64](),
+            bases: ChunkSeq::new[u64]()
+        };
+        let f = self.program.function(fi);
+        let first = self.program.block(f.b0).i0;
+        let mut n = if split { self.own_call_count(fi) } else { base };
+        let mut c: u64 = 0;
+        let mut hk: u64 = 0;
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            for ii in 0..row.ic {
+                let x = add(row.i0, ii);
+                let off = wrapping_sub(x, first);
+                let op = self.program.inst(x).op;
+                if op == Op::Call && split {
+                    grow_set(inout s.calls, off, c);
+                    c = inc(c);
+                } else if op == Op::Call {
+                    grow_set(inout s.calls, off, n);
+                    n = inc(n);
+                } else if op == Op::Handle {
+                    let r = self.handler_row(fi, hk);
+                    hk = inc(hk);
+                    grow_set(inout s.rows, off, if r == NONE64 { 0 } else { inc(r) });
+                    grow_set(inout s.bases, off, n);
+                    if r != NONE64 {
+                        let h = self.handler(r);
+                        n = add(n, self.graph_call_count(h.body));
+                        n = add(n, self.graph_call_count(h.ret_graph));
+                        for j in 0..h.op_n {
+                            n = add(
+                                n,
+                                self.graph_call_count(self.handler_op(add(h.op_a, j)).graph)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        s
+    }
+
+    // Whether graph `fi` names local `name` as a handler's alias, free
+    // name or move (`register_locals`' memory of an `Op::Handle`).
+    pub fn handler_home(in self, fi: u64, name: u64) -> bool {
+        let f = self.program.function(fi);
+        let mut hk: u64 = 0;
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            for ii in 0..row.ic {
+                let i = self.program.inst(add(row.i0, ii));
+                if i.op == Op::Handle {
+                    let r = self.handler_row(fi, hk);
+                    hk = inc(hk);
+                    if r != NONE64 {
+                        let h = self.handler(r);
+                        if has(in self.handlers.names, h.used_a, h.used_n, name) {
+                            return true;
+                        }
+                    }
+                    let na = self.program.op(add(i.a, HANDLE_ALIASES));
+                    for k in 0..na {
+                        let at = add(add(i.a, inc(HANDLE_ALIASES)), wrapping_mul(k, PAIR_WORDS));
+                        if self.program.op(at) == name || self.program.op(inc(at)) == name {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    // The handler in scope that takes a raise of type `t` (#2657): the
+    // innermost whose `Fail` argument names it, as `HANDLER_BASE` plus its
+    // depth; NONE64 when none does.
+    pub fn handled_raise(inout self, t: u32) -> u64 {
+        let d = default_type(inout self.ctx.types, t);
+        let n = self.ctx.types.node(d);
+        if n.kind != TyKind::Named || n.n != 0 {
+            return NONE64;
+        }
+        let mut k = self.hstack.len();
+        loop {
+            if k == 0 {
+                break;
+            }
+            k = wrapping_sub(k, 1);
+            if widen_u64(n.name) == u64_at(in self.hstack, k) {
+                return add(HANDLER_BASE, k);
+            }
+        }
+        NONE64
+    }
+
+    // The type a handler's `Fail` argument names, as a type id.
+    fn handled_type(inout self, h: HandlerRow) -> u32 {
+        self.ctx.types.named0(h.arg)
+    }
+
+    // A nested graph's plan (`ir_graph` with a join block): `[n, n words]`
+    // of its result's lane, its block count, its locals by name (each one's name, lane and kind; the emitter
+    // shares a name already in scope), its values' lanes, its blocks'
+    // parameters, its lowering order and its blocks, whose `return` jumps
+    // to the join. Its calls are the request's from `base`.
+    pub fn body_nested(
+        inout self,
+        fi: u64,
+        base: u64,
+        in top: Header,
+        inout builtin_calls: ChunkSeq[u64],
+        inout o: ChunkSeq[u64]
+    ) -> bool {
+        if fi == NO_GRAPH || fi >= self.program.fn_count() {
+            return false;
+        }
+        let saved_fi = self.fi;
+        self.fi = fi;
+        let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let ok = self.body_nested_words(fi, base, in top, inout builtin_calls, inout words);
+        self.fi = saved_fi;
+        if !ok {
+            return false;
+        }
+        o.push(words.len());
+        o.extend(in words.as_slice());
+        true
+    }
+
+    fn body_nested_words(
+        inout self,
+        fi: u64,
+        base: u64,
+        in top: Header,
+        inout builtin_calls: ChunkSeq[u64],
+        inout o: ChunkSeq[u64]
+    ) -> bool {
+        let f = self.program.function(fi);
+        let mut h = self.body_header(f);
+        if !h.plain || f.bc == 0 || !self.body_no_trailer(f) {
+            return false;
+        }
+        let rl = self.body_lane(h.result);
+        if rl == 0 || rl == LANE_PRODUCT || self.body_never(h.result) {
+            return false;
+        }
+        // A raise goes to a handler in scope or the function's own exits.
+        let mut fails: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        fails.extend(in top.fails.as_slice());
+        h.fails = fails;
+        o.push(rl);
+        o.push(f.bc);
+        o.push(h.lname.len());
+        for k in 0..h.lname.len() {
+            let t = n32(u64_at(in h.lty, k));
+            let lane = self.body_lane(t);
+            // A product local only as the `raise` clause's bound error,
+            // which holds its storage's address.
+            let bound = u64_at(in h.lname, k) == self.bound_error;
+            if lane == 0 || (lane == LANE_PRODUCT && !bound) {
+                return false;
+            }
+            let name = u64_at(in h.lname, k);
+            o.push(name);
+            o.push(lane);
+            // A local a handler of this graph names keeps its slot.
+            let regs = if self.body_register(t) && !self.handler_home(fi, name) {
+                NESTED_REGISTER
+            } else {
+                0
+            };
+            o.push(self.body_kind(t) | regs);
+        }
+        o.push(h.vty.len());
+        for k in 0..h.vty.len() {
+            let lane = self.body_lane(n32(u64_at(in h.vty, k)));
+            if lane == 0 || lane == LANE_PRODUCT || self.body_words(in h, k) != 0 {
+                return false;
+            }
+            o.push(lane);
+        }
+        if !self.body_layout(in h, f, inout o) {
+            return false;
+        }
+        let slots = self.call_slots(fi, base);
+        if !self.body_blocks(in h, f, in slots, inout builtin_calls, inout o) {
+            return false;
+        }
+        true
+    }
+
+    // `Op::Handle` (#2657): `INST_HANDLE`'s words after its header. The
+    // result's lane and kind; the aliases the handler's graphs see, each
+    // a name and the local of this graph it names; the names its clauses
+    // capture, each with its kind; the `return` pattern's name (NO_LOCAL
+    // for `_`); the `raise` clause's error name and plan; the handled
+    // body's plan; the `return` clause's plan.
+    pub fn body_handle(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        row: u64,
+        base: u64,
+        inout builtin_calls: ChunkSeq[u64],
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        if row == 0 {
+            return false;
+        }
+        let r = self.handler(wrapping_sub(row, 1));
+        let ops_s = self.ops;
+        if r.effect != ops_s.fail_
+            || r.nargs != 1
+            || r.arg == 0
+            || r.labelled
+            || r.stateful
+            || r.region
+            || r.body == NO_GRAPH
+            || r.ret_graph == NO_GRAPH
+            || (r.ret_kind != PATTERN_WILD && r.ret_kind != PATTERN_BIND)
+            || r.op_n != SLICE_OPS
+        {
+            return false;
+        }
+        let op = self.handler_op(r.op_a);
+        if !self.ctx.names.spells(op.name, in "raise".as_bytes())
+            || op.pat_n != RAISE_PATTERNS
+            || op.graph == NO_GRAPH
+        {
+            return false;
+        }
+        let err_kind = u64_at(in self.handlers.pats, op.pat_a);
+        let err_name = u64_at(in self.handlers.pats, inc(op.pat_a));
+        let cont_kind = u64_at(in self.handlers.pats, add(op.pat_a, 2));
+        if (err_kind != PATTERN_WILD && err_kind != PATTERN_BIND) || cont_kind != PATTERN_WILD {
+            return false;
+        }
+        // No state, and nothing moved into the handler.
+        if self.program.op(i.a) != 0 {
+            return false;
+        }
+        let na = self.program.op(add(i.a, HANDLE_ALIASES));
+        let moves_at = add(add(i.a, inc(HANDLE_ALIASES)), wrapping_mul(na, PAIR_WORDS));
+        if self.program.op(moves_at) != 0 {
+            return false;
+        }
+        let lane = self.body_lane(i.ty);
+        if lane == 0 || lane == LANE_PRODUCT {
+            return false;
+        }
+        extra.push(lane);
+        extra.push(self.body_kind(i.ty));
+        // The aliases: each nested name and this graph's local it names.
+        extra.push(na);
+        let mut alias_names: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut alias_locals: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for k in 0..na {
+            let at = add(add(i.a, inc(HANDLE_ALIASES)), wrapping_mul(k, PAIR_WORDS));
+            let name = self.program.op(at);
+            let local = self.body_local(in h, self.program.op(inc(at)));
+            if local == NONE64 {
+                return false;
+            }
+            extra.push(name);
+            extra.push(local);
+            alias_names.push(name);
+            alias_locals.push(local);
+        }
+        // The captures (`copy_bindings`): the clauses' free names in scope,
+        // in name order, each a scalar.
+        let mut captures: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for k in r.free_a..add(r.free_a, r.free_n) {
+            let name = widen_u64(u32_at(in self.handlers.names, k));
+            for j in 0..alias_names.len() {
+                if u64_at(in alias_names, j) == name {
+                    let t = self.body_local_type(in h, u64_at(in alias_locals, j));
+                    let l = self.body_lane(t);
+                    if l == 0 || l == LANE_PRODUCT {
+                        return false;
+                    }
+                    captures.push(name);
+                    captures.push(self.body_kind(t));
+                }
+            }
+        }
+        extra.push(captures.len() / PAIR_WORDS);
+        extra.extend(in captures.as_slice());
+        extra.push(
+            if r.ret_kind == PATTERN_BIND {
+                widen_u64(r.ret_name)
+            } else {
+                NO_LOCAL
+            }
+        );
+        let body_base = base;
+        let ret_base = add(body_base, self.graph_call_count(r.body));
+        let op_base = add(ret_base, self.graph_call_count(r.ret_graph));
+        // The `raise` clause first, which each raise of the body emits, with
+        // the handlers outside this one.
+        extra.push(err_name);
+        let outer_error = self.bound_error;
+        self.bound_error = err_name;
+        let ok = self.body_nested(op.graph, op_base, in h, inout builtin_calls, inout extra);
+        self.bound_error = outer_error;
+        if !ok {
+            return false;
+        }
+        // The handled body, with this handler in scope.
+        let handled = self.handled_type(r);
+        let handled_name = widen_u64(self.ctx.types.node(handled).name);
+        self.hstack.push(handled_name);
+        let ok = self.body_nested(r.body, body_base, in h, inout builtin_calls, inout extra);
+        let popped = self.hstack.pop();
+        if !ok {
+            return false;
+        }
+        // The `return` clause.
+        if !self.body_nested(r.ret_graph, ret_base, in h, inout builtin_calls, inout extra) {
+            return false;
+        }
+        true
+    }
+}

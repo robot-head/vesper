@@ -39,6 +39,12 @@ mod check_words;
 #[path = "../../../tests/common/ir_words.rs"]
 pub(crate) mod ir_words;
 
+// What each handler's expression holds (#2657), after the program in the
+// native walk's body plan input; shared with
+// crates/vesper-codegen-swap-test/tests/self_host_native_walk_body.rs.
+#[path = "../../../tests/common/handler_facts.rs"]
+pub(crate) mod handler_facts;
+
 /// The swaps' input and output costs (SH4 lane 2, #1276), reported at exit
 /// with `VESPER_HYBRID_STATS=1`. `VESPER_HYBRID_STATS=time` also runs the
 /// Rust pass on every swapped call, times it and counts the calls whose

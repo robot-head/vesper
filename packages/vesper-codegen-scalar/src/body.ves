@@ -47,6 +47,7 @@ use super::{
     kind_unsigned
 };
 use super::blocks::{layout};
+use super::handlers::{CallSlots, HANDLER_HOME};
 use @vesper/check-layout::{L_PRODUCT, layout_of};
 
 // The plan's lane codes (`native::scalar` of a value's type).
@@ -131,6 +132,9 @@ const STRIDE_BYTE: u64 = 1;
 const STRIDE_HALF: u64 = 2;
 const STRIDE_QUARTER: u64 = 4;
 const STRIDE_WORD: u64 = 8;
+// A `Fail` handler (#2657): its handled body and clauses as nested graphs;
+// codes from 60 leave room for the other body slices.
+pub const INST_HANDLE: u64 = 60;
 // A `Bind` of a struct or tuple pattern over a product of scalar fields
 // (#2654, `Codegen::bind_ir`): the pattern's nodes follow.
 pub const INST_BIND_FIELDS: u64 = 72;
@@ -404,12 +408,16 @@ fn set(inout s: ChunkSeq[u64], i: u64, x: u64) {
     let ok = s.try_set(i, x);
 }
 
+pub fn grow_set(inout s: ChunkSeq[u64], i: u64, x: u64) {
+    set(inout s, i, x);
+}
+
 fn at(in s: ChunkSeq[u64], i: u64) -> u64 {
     if i < s.len() { u64_at(in s, i) } else { 0 }
 }
 
 // One function's header, as the body plan reads it.
-struct Header {
+pub struct Header {
     // parameter names, in order
     params: ChunkSeq[u64],
     result: u32,
@@ -429,6 +437,9 @@ struct Header {
     // the header names no bounds, captures, or effects other than `Fail`
     // instances and erased capabilities
     plain: bool,
+    // the names and handler capabilities the graph takes from outside
+    // (a nested graph's)
+    captures: u64,
 }
 
 impl Gen {
@@ -790,7 +801,8 @@ impl Gen {
             lty: ChunkSeq::new[u64](),
             pty: ChunkSeq::new[u64](),
             fails: ChunkSeq::new[u64](),
-            plain: true
+            plain: true,
+            captures: 0
         };
         let mut i = f.ha;
         let np = self.program.op(i);
@@ -817,6 +829,11 @@ impl Gen {
                     // `native::fail_only`'s `Fail[E]`: a failure exit.
                     let e = u32_at(in self.ctx.types.items, widen_u64(eff.a));
                     h.fails.push(widen_u64(default_type(inout self.ctx.types, e)));
+                } else if eff_name == ops_s.fail_ && eff.label != 0 && eff.n == 1 {
+                    // A handler's lexical capability (#2657): a nested
+                    // graph raises to the handler in scope; `body`
+                    // refuses it.
+                    h.captures = inc(h.captures);
                 } else if eff_name != ops_s.const_time
                     && eff_name != ops_s.realtime
                     && eff_name != ops_s.det_float
@@ -831,7 +848,10 @@ impl Gen {
         i = add(inc(i), wrapping_mul(nb, 2));
         let nc = self.program.op(i);
         i = add(inc(i), nc);
-        if nb != 0 || nc != 0 {
+        // A handler's nested graph reads the names it captures from the
+        // scope it is emitted in (#2657); `body` refuses them.
+        h.captures = add(h.captures, nc);
+        if nb != 0 {
             h.plain = false;
         }
         let nv = self.program.op(i);
@@ -1589,6 +1609,13 @@ impl Gen {
                 ty = t;
             }
         }
+        // A handler in scope takes the raise first (#2657).
+        let named = self.ctx.types.named0(ty_name);
+        let handled = self.handled_raise(named);
+        if handled != NONE64 {
+            index = handled;
+            ty = named;
+        }
         if index == NONE64 {
             return false;
         }
@@ -1658,6 +1685,11 @@ impl Gen {
                 if n32(u64_at(in h.fails, j)) == t {
                     index = j;
                 }
+            }
+            // A handler in scope takes the raise first (#2657).
+            let handled = self.handled_raise(t);
+            if handled != NONE64 {
+                index = handled;
             }
             if index == NONE64 {
                 return false;
@@ -2484,6 +2516,13 @@ impl Gen {
             if !self.body_seq(in h, i, dest, kept, inout ops, inout extra) {
                 return false;
             }
+        } else if i.op == Op::Handle {
+            kind = INST_HANDLE;
+            let row = self.handle_row;
+            let base = self.handle_base;
+            if !self.body_handle(in h, i, row, base, inout builtin_calls, inout extra) {
+                return false;
+            }
         } else if i.op == Op::Call {
             let mut bops: ChunkSeq[u64] = ChunkSeq::new[u64]();
             if self.body_call_builtin(
@@ -2499,7 +2538,7 @@ impl Gen {
             } else {
                 // Part 6b: a direct call (`Codegen::plain_call`); a
                 // `fail_only` callee's failures raised again (#2425).
-                let callee = if h.fails.len() == 0 {
+                let callee = if h.fails.len() == 0 && self.hstack.len() == 0 {
                     NONE64
                 } else {
                     self.body_function(n32(self.program.op(i.a)))
@@ -3164,6 +3203,108 @@ impl Gen {
         true
     }
 
+    // Each block's parameters, then the lowering order and the blocks
+    // sealed on the way; false for a parameter the plan does not carry.
+    pub fn body_layout(
+        inout self,
+        in h: Header,
+        f: FnRow,
+        inout graph_words: ChunkSeq[u64]
+    ) -> bool {
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            let pa = self.body_params_at(row.ha);
+            let np = self.program.op(pa);
+            graph_words.push(np);
+            for k in 0..np {
+                let v = self.body_value(in h, self.program.op(add(inc(pa), k)));
+                // A product joined at a block parameter has a home of its
+                // own (`aggregates::plan`), left to the walk.
+                if v == NONE64
+                    || self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT
+                    || self.body_words(in h, v) != 0
+                {
+                    return false;
+                }
+                graph_words.push(v);
+            }
+        }
+        let l = layout(in self.program, f);
+        let mut sealed: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for k in 0..l.sealed.len() {
+            set(inout sealed, u64_at(in l.sealed, k), 1);
+        }
+        for k in 0..l.order.len() {
+            let b = u64_at(in l.order, k);
+            graph_words.push(b);
+            graph_words.push(at(in sealed, b));
+        }
+        true
+    }
+
+    // Each block's instructions and terminator, in the lowering order,
+    // with the request's call index of each call (`slots`); false for an
+    // instruction or terminator the plan does not carry.
+    pub fn body_blocks(
+        inout self,
+        in h: Header,
+        f: FnRow,
+        in slots: CallSlots,
+        inout builtin_calls: ChunkSeq[u64],
+        inout block_words: ChunkSeq[u64]
+    ) -> bool {
+        let fi = self.fi;
+        let l = layout(in self.program, f);
+        let first = self.program.block(f.b0).i0;
+        // The plan's record of each instruction, by its index in `f`.
+        let mut record: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut r = u64_at(in self.plan_from, fi);
+        let to = u64_at(in self.plan_to, fi);
+        loop {
+            if r >= to {
+                break;
+            }
+            let bi = u64_at(in self.plan, inc(r));
+            let ii = u64_at(in self.plan, add(r, 2));
+            let row = self.program.block(add(f.b0, bi));
+            set(inout record, wrapping_sub(add(row.i0, ii), first), inc(r));
+            r = add(r, PLAN_RECORD_WORDS);
+        }
+        for k in 0..l.order.len() {
+            let bi = u64_at(in l.order, k);
+            let row = self.program.block(add(f.b0, bi));
+            block_words.push(row.ic);
+            for ii in 0..row.ic {
+                let x = add(row.i0, ii);
+                let off = wrapping_sub(x, first);
+                let rec = at(in record, off);
+                let planned = if rec == 0 {
+                    NONE64
+                } else {
+                    wrapping_sub(rec, 1)
+                };
+                let call = at(in slots.calls, off);
+                self.handle_row = at(in slots.rows, off);
+                self.handle_base = at(in slots.bases, off);
+                if !self.body_inst(
+                    in h,
+                    f.name,
+                    self.program.inst(x),
+                    planned,
+                    call,
+                    inout builtin_calls,
+                    inout block_words
+                ) {
+                    return false;
+                }
+            }
+            if !self.body_terminator(in h, f, bi, inout block_words) {
+                return false;
+            }
+        }
+        true
+    }
+
     // The body plan of function `fi`, whose instruction plan records start
     // at `from` in `self.plan`, appended to `out` as `[fi, n, n words]`.
     pub fn body(inout self, fi: u64, from: u64, inout out: ChunkSeq[u64]) {
@@ -3171,6 +3312,7 @@ impl Gen {
         let f = self.program.function(fi);
         let h = self.body_header(f);
         if !h.plain
+            || h.captures != 0
             || f.bc == 0
             || !self.body_no_trailer(f)
             || (self.body_lane(h.result) == 0 && self.enums.returns(fi) == 0)
@@ -3211,8 +3353,14 @@ impl Gen {
             }
             graph_words.push(entry);
             // The kind its stores coerce to, on the unoptimized path that
-            // keeps every local in a stack slot.
-            graph_words.push(self.body_kind(t));
+            // keeps every local in a stack slot; a local a handler names
+            // keeps its slot on the optimize path too (#2657).
+            let home = if self.handler_home(fi, name) {
+                HANDLER_HOME
+            } else {
+                0
+            };
+            graph_words.push(self.body_kind(t) | home);
         }
         // Each value's register.
         graph_words.push(h.vty.len());
@@ -3228,94 +3376,14 @@ impl Gen {
             }
             graph_words.push(lane);
         }
-        // Each block's parameters.
-        for bi in 0..f.bc {
-            let row = self.program.block(add(f.b0, bi));
-            let pa = self.body_params_at(row.ha);
-            let np = self.program.op(pa);
-            graph_words.push(np);
-            for k in 0..np {
-                let v = self.body_value(in h, self.program.op(add(inc(pa), k)));
-                // A product joined at a block parameter has a home of its
-                // own (`aggregates::plan`), left to the walk.
-                if v == NONE64
-                    || self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT
-                    || self.body_words(in h, v) != 0
-                {
-                    return;
-                }
-                graph_words.push(v);
-            }
-        }
-        // The lowering order and the blocks sealed on the way.
-        let l = layout(in self.program, f);
-        let mut sealed: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        for k in 0..l.sealed.len() {
-            set(inout sealed, u64_at(in l.sealed, k), 1);
-        }
-        for k in 0..l.order.len() {
-            let b = u64_at(in l.order, k);
-            graph_words.push(b);
-            graph_words.push(at(in sealed, b));
-        }
-        // The plan's record of each instruction, by its index in `f`.
-        let first = self.program.block(f.b0).i0;
-        // Each call's position among the function's calls, in block and
-        // instruction order (the order of the request's callee words).
-        let mut calls: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        let mut ncalls: u64 = 0;
-        for bi in 0..f.bc {
-            let row = self.program.block(add(f.b0, bi));
-            for ii in 0..row.ic {
-                let x = add(row.i0, ii);
-                if self.program.inst(x).op == Op::Call {
-                    set(inout calls, wrapping_sub(x, first), ncalls);
-                    ncalls = inc(ncalls);
-                }
-            }
-        }
-        let mut record: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        let mut r = from;
-        loop {
-            if r >= self.plan.len() {
-                break;
-            }
-            let bi = u64_at(in self.plan, inc(r));
-            let ii = u64_at(in self.plan, add(r, 2));
-            let row = self.program.block(add(f.b0, bi));
-            set(inout record, wrapping_sub(add(row.i0, ii), first), inc(r));
-            r = add(r, PLAN_RECORD_WORDS);
+        if !self.body_layout(in h, f, inout graph_words) {
+            return;
         }
         let mut builtin_calls: ChunkSeq[u64] = ChunkSeq::new[u64]();
         let mut block_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        for k in 0..l.order.len() {
-            let bi = u64_at(in l.order, k);
-            let row = self.program.block(add(f.b0, bi));
-            block_words.push(row.ic);
-            for ii in 0..row.ic {
-                let x = add(row.i0, ii);
-                let rec = at(in record, wrapping_sub(x, first));
-                let planned = if rec == 0 {
-                    NONE64
-                } else {
-                    wrapping_sub(rec, 1)
-                };
-                let call = at(in calls, wrapping_sub(x, first));
-                if !self.body_inst(
-                    in h,
-                    f.name,
-                    self.program.inst(x),
-                    planned,
-                    call,
-                    inout builtin_calls,
-                    inout block_words
-                ) {
-                    return;
-                }
-            }
-            if !self.body_terminator(in h, f, bi, inout block_words) {
-                return;
-            }
+        let slots = self.body_call_slots(fi);
+        if !self.body_blocks(in h, f, in slots, inout builtin_calls, inout block_words) {
+            return;
         }
         let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
         o.push(f.bc);
