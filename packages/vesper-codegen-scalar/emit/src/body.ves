@@ -1282,6 +1282,23 @@ impl Body {
         let ok = self.addresses.try_set(l, address.id);
     }
 
+    // `Codegen::alloc_uninit`: a word-aligned slot of at least a word,
+    // never zeroed.
+    fn uninit_storage(
+        inout self,
+        inout b: Builder,
+        in m: Module,
+        size: u64
+    ) -> Value eff [Ffi[Cranelift]] {
+        let bytes = if size < widen_u64(WORD_BYTES) {
+            WORD_BYTES
+        } else {
+            wrapping_u32(size)
+        };
+        let slot = create_stack_slot(inout b, bytes, SLOT_ALIGN_SHIFT);
+        ins_stack_addr(inout b, module_pointer_type(in m), slot, 0)
+    }
+
     // A struct's own storage, of at least a word: `Codegen::alloc_uninit`
     // on the optimize path, `Codegen::alloc` (zeroed a word at a time)
     // otherwise.
@@ -2136,7 +2153,8 @@ impl Body {
             }
             let word = at64(in self.callees, call_idx);
             let fails = kind == INST_FAIL_CALL;
-            if ((word & FAIL_CALL) != 0) != fails || (word & WORDS_CALL) != 0 {
+            let words_call = (word & WORDS_CALL) != 0;
+            if ((word & FAIL_CALL) != 0) != fails || (words_call && fails) {
                 return false;
             }
             let callee = FuncId { id: wrapping_u32(word & CALLEE_ID_MASK) };
@@ -2150,7 +2168,38 @@ impl Body {
                 let tv = Var { id: at32(in temps, k) };
                 args.push(body_operand(inout b, tv, read, self.optimize).id);
             }
-            if !fails {
+            if words_call {
+                // A callee that returns its small aggregate result in
+                // registers, kept in memory here: the call, then its words
+                // stored to the caller's result pointer when it is the
+                // result's home, else to fresh storage (`call_function_into`
+                // with `result_words`).
+                let size = w.next();
+                if size == 0 || (word & SRET_CALL) != 0 {
+                    return false;
+                }
+                let fun = import_function(inout b, inout m, callee);
+                let _ = ins_call(inout b, fun, in args.as_slice());
+                // `Layout::size.div_ceil(8)` (`register_result_words`).
+                let mut words: u64 = 0;
+                loop {
+                    if wrapping_mul(words, widen_u64(WORD_BYTES)) >= size {
+                        break;
+                    }
+                    words = wrapping_add(words, 1);
+                }
+                let out = if self.sret != invalid() && has_call(in self.homes, dest) {
+                    Value { id: self.sret }
+                } else {
+                    self.uninit_storage(inout b, in m, wrapping_mul(words, widen_u64(WORD_BYTES)))
+                };
+                for k in 0..words {
+                    let value = inst_result(inout b, wrapping_u32(k));
+                    let offset = wrapping_mul(k, widen_u64(WORD_BYTES));
+                    ins_store(inout b, PLAIN, value, out, wrapping_i32(offset));
+                }
+                out
+            } else if !fails {
                 // A struct or enum result (#2654) is written through the
                 // storage passed first: the caller's own result pointer
                 // when it is the result's home, else a fresh slot (zeroed
@@ -3330,8 +3379,40 @@ impl Body {
             // pointer unless it was built there, then the word 0.
             let i = w.next();
             let size = w.next();
+            // The enum result's shape: its word count, then each field
+            // word's offset after the tag.
+            let shape_words = w.next();
+            let mut offsets: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            for k in 0..shape_words {
+                if k != 0 {
+                    offsets.push(w.next());
+                }
+            }
             ops.push(i);
             self.read_operands(inout b, in ops);
+            if self.sret == invalid() && self.result_words != 0 {
+                // A register result kept in memory (a small enum
+                // `scalar_enums` left as it is), its words read from the
+                // value's storage: by its shape on the optimize path
+                // (`Codegen::enum_words`), else a word at a time
+                // (`Codegen::return_value`).
+                let from = self.value(i);
+                let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                if self.optimize && shape_words == self.result_words {
+                    out.push(ins_load(inout b, ty_i64(), mem_trusted(), from, 0).id);
+                    for k in 0..offsets.len() {
+                        let at = ins_iadd_imm(inout b, from, wrapping_i64(at64(in offsets, k)));
+                        out.push(ins_load(inout b, ty_i64(), PLAIN, at, 0).id);
+                    }
+                } else {
+                    for k in 0..self.result_words {
+                        let offset = wrapping_mul(k, widen_u64(WORD_BYTES));
+                        out.push(ins_load(inout b, ty_i64(), PLAIN, from, wrapping_i32(offset)).id);
+                    }
+                }
+                ins_return(inout b, in out.as_slice());
+                return true;
+            }
             if self.sret == invalid() {
                 return false;
             }
@@ -3598,9 +3679,11 @@ pub fn emit_body_words(
     }
     // The words the plan returns a small enum result as (#2581): the
     // frame must return that many registers with no result pointer.
+    // A plan that keeps the result in memory (0 words) returns a register
+    // result's words loaded from it (`TERM_RETURN_SRET`).
     let returned = w.next();
     let frame_words = if sret == invalid() { result_words } else { 0 };
-    if returned != frame_words {
+    if returned != frame_words && returned != 0 {
         return DECLINED;
     }
     for k in 0..nc {

@@ -363,6 +363,8 @@ const TERM_MATCH: u64 = 3;
 const TERM_UNREACHABLE: u64 = 4;
 // `return` of a struct result through the result pointer (#2411).
 const TERM_RETURN_SRET: u64 = 32;
+// `aggregates::MAX_ENUM_WORDS`: the most words an enum shape has.
+const MAX_ENUM_WORDS: u64 = 4;
 // `return` of a small enum's words in registers (#2581).
 const TERM_RETURN_WORDS: u64 = 33;
 
@@ -771,6 +773,49 @@ impl Gen {
         extra.push(tag);
         extra.extend(in fields.as_slice());
         true
+    }
+
+    // `aggregates::enum_shape` of enum type `t`: the byte offset of each
+    // field word after the tag, every variant's fields in order, pushed to
+    // `out`; false when `t` has no shape (a field that is not one integer
+    // or `bool` word, or more than MAX_ENUM_WORDS words).
+    fn body_enum_shape(inout self, t: u32, inout out: ChunkSeq[u64]) -> bool {
+        let mark = self.layouts.mark();
+        let d = default_type(inout self.ctx.types, t);
+        let l = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            d
+        );
+        let mut ok = l != NONE32 && self.layouts.node(l).kind == L_ENUM;
+        if ok {
+            let node = self.layouts.node(l);
+            for k in 0..widen_u64(node.n) {
+                let v = self.layouts.lvariant(add(widen_u64(node.a), k));
+                for j in 0..widen_u64(v.fc) {
+                    let field = self.layouts.lfield(add(widen_u64(v.fa), j));
+                    if !self.body_word_type(field.ty) {
+                        ok = false;
+                    }
+                    out.push(wrapping_u64(widen_i64(field.offset)));
+                }
+            }
+        }
+        self.layouts.reset(mark);
+        ok && out.len() < MAX_ENUM_WORDS
+    }
+
+    // `aggregates::word_type`: a non-wide integer or `bool`.
+    fn body_word_type(inout self, t: u32) -> bool {
+        let d = default_type(inout self.ctx.types, t);
+        let n = self.ctx.types.node(d);
+        if n.kind != TyKind::Named || n.n != 0 {
+            return false;
+        }
+        let k = self.ctx.world.k;
+        (k.is_integer(n.name) && !kind_wide(self.kind_of(d))) || n.name == k.bool_
     }
 
     // The storage size of a product type (`Layout::of(..).size`).
@@ -3273,6 +3318,15 @@ impl Gen {
                 o.push(TERM_RETURN_SRET);
                 o.push(v);
                 o.push(self.body_product_size(h.result));
+                // An enum result's shape (`own_scalar_join`): the words a
+                // register result is read as, 0 for none.
+                let mut offsets: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                if self.body_enum_shape(h.result, inout offsets) {
+                    o.push(inc(offsets.len()));
+                    o.extend(in offsets.as_slice());
+                } else {
+                    o.push(0);
+                }
                 return true;
             }
             o.push(TERM_RETURN);

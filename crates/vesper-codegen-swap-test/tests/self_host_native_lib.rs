@@ -27,6 +27,8 @@
 //! are also built with the passes off (`VESPER_CLIF_OPT=off`,
 //! `VESPER_VECTORIZE=off`), and the passes must change some of them, so
 //! the comparison covers them.
+#[path = "../../../tests/common/aggregate_facts.rs"]
+mod aggregate_facts;
 #[path = "../../../tests/common/check_harness.rs"]
 mod check_harness;
 #[path = "../../../tests/common/check_words.rs"]
@@ -185,11 +187,17 @@ thread_local! {
 fn walk_program(
     world: &vesper::check::World,
     program: &vesper::ir::Program,
+    optimize: bool,
 ) -> (Vec<u8>, HashSet<String>) {
     let mut planned = HashSet::new();
-    let Some((input, _)) = ir_words::program_input(world, program) else {
+    let Some((mut input, _)) = ir_words::program_input(world, program) else {
         return (vec![], planned);
     };
+    // The optimize path plans with the small-enum facts, as the hybrid's
+    // body hook does (crates/vesper-hybrid/src/swap/codegen_scalar.rs).
+    if optimize {
+        input.extend(aggregate_facts::facts(world, program));
+    }
     let names: Vec<&String> = program.functions.keys().collect();
     let words = vesper().plan.words(&input);
     let mut rest = &words[..];
@@ -241,6 +249,7 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     let function = lent.site.function.to_owned();
     let world = lent.world;
     let program = lent.program;
+    let optimize = lent.optimize;
     let declared = declarations(&*lent.module);
     RECORD.with(|cell| {
         let mut r = cell.borrow_mut();
@@ -255,13 +264,13 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
             }
         }
         if r.program.is_none() {
-            r.program = Some(walk_program(world, program));
+            r.program = Some(walk_program(world, program, optimize));
         }
         // The driver plans each body itself (slice 3a of #2349); a function
         // without a plan stays with the walk. A generic instance (#2715) is
         // planned from its own substituted program (#2737).
         let planned = match codegen_swap::body_instance() {
-            Some((instance, name)) => walk_program(world, &instance).1.contains(&name),
+            Some((instance, name)) => walk_program(world, &instance, optimize).1.contains(&name),
             None => r
                 .program
                 .as_ref()
