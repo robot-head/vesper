@@ -21,6 +21,7 @@ use @vesper/check-data::world::{SpanRow, set_by_symbol};
 use @vesper/place-ir::{put_names, put_program_section, put_types};
 use @vesper/place-ir-lower::ast::{Ast, Ex};
 use @vesper/stage2::{Lowered, stage2_lower_dir};
+use self::{foreign_sources};
 
 const NONE64: u64 = 18446744073709551615;
 const WORD_BYTES: u64 = 8;
@@ -261,7 +262,14 @@ pub fn stage2_calls_input(
     optimize: bool
 ) -> CallsInput eff [Ffi[StdFs]] {
     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut lw = match stage2_lower_dir(in root_dir, in os, inout err) {
+    let sources = match foreign_sources(in root_dir, in os) {
+        Option::Some(s) => s,
+        Option::None => {
+            err.extend(in "foreign imports do not read".as_bytes());
+            return CallsInput { declined: CALLS_FRONT_END, err: err, bytes: ChunkSeq::new[u8]() };
+        },
+    };
+    let mut lw = match stage2_lower_dir(in root_dir, in os, in sources, inout err) {
         Option::Some(lw) => lw,
         Option::None => {
             return CallsInput { declined: CALLS_FRONT_END, err: err, bytes: ChunkSeq::new[u8]() };
