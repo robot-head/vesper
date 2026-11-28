@@ -39,7 +39,7 @@ mod doctest_verdict_words;
 #[path = "../../../../tests/common/test_report_words.rs"]
 mod test_report_words;
 
-use super::{Registry, Swap, must, on, open, pass};
+use super::{Registry, Swap, must, on, pass};
 
 /// Sources whose tests the Vesper test-runner module discovered.
 static TEST_RUNNER_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -165,10 +165,7 @@ pub(super) const SWAPS: &[Swap] = &[
     pass("doctest_guard", "doctest-guard", "#2207"),
     pass("doctest_generate", "doctest-generate", "#2207"),
     pass("doctest_verdict", "doctest-verdict", "#2207"),
-    open(
-        "test_report",
-        "0 diffs, 1.8x end to end (word boundary), 1.1x rendering alone; no flip-gate configuration",
-    ),
+    pass("test_report", "test-report", "#2684"),
 ];
 
 pub(super) fn register(_r: &mut Registry) {
