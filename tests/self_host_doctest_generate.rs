@@ -258,6 +258,7 @@ fn corpus() -> &'static [Snippet] {
         }
         for suite in [
             "tests/doctest_cli.rs",
+            "crates/vesper-cli-tests/tests/doctest_cli.rs",
             "src/doctest.rs",
             "src/doctest_extract.rs",
         ] {

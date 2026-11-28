@@ -10,7 +10,8 @@ vesper_crate(
     # include_str! from the root package.
     extra_integration_compile_data = [
         "//:cli_test_sources",
-        # codex_footprints_cli embeds the Codex examples and fixtures.
+        # codex_cli, codex_footprints_cli, codex_rest_cli and doc_cli embed
+        # the Codex examples and fixtures.
         "//crates/vesper-doc:files",
     ],
     extra_test_data = [
@@ -57,6 +58,10 @@ vesper_crate(
             "resources:memory:9216",
             "resources:cpu:1",
         ],
+        "test/verify_extract_cli": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
         # Measured peak: 2.3 GB anonymous memory. `lean_replay` marks the
         # Lean/Logos suite run by "Native and acceptance scripts"
         # (.aspect/lean-replay-scope.axl, docs/ci-platforms.md).
@@ -94,6 +99,11 @@ vesper_crate(
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
         }),
+        # Same serial Std kernel-replay pattern as proof_audit_cli and format_proof_cli.
+        "test/verify_extract_cli": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
     },
     test_timeouts = {
         # Actual formatter witnesses replay Lean serially; keep every case
@@ -104,5 +114,6 @@ vesper_crate(
         "test/imported_source_tests": "long",
         # Fresh model compilation, 285 theorem roots and actual negative controls.
         "test/resource_model42": "long",
+        "test/verify_extract_cli": "long",
     },
 )

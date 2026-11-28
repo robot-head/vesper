@@ -12,12 +12,15 @@ publish = false
 blake3 = "1.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
+# native_verifiers_cli recomputes the SHA-384 code digests.
+sha2 = { workspace = true }
 # The libraries the CLI tests check `vesper` results against, as the root
 # package linked them: the frozen seeds until their port crates are the
 # default (#1397 R7).
 vesper-bench = { path = "../vesper-bench/seed", package = "vesper-bench-seed" }
 vesper-chrono = { path = "../vesper-chrono" }
 vesper-doc = { path = "../vesper-doc" }
+vesper-ebpf = { path = "../vesper-ebpf/seed", package = "vesper-ebpf-seed" }
 vesper-ffi = { path = "../vesper-ffi" }
 vesper-highlight = { path = "../vesper-highlight/seed", package = "vesper-highlight-seed", features = ["shot"] }
 vesper-lean-syntax = { path = "../vesper-lean-syntax/seed", package = "vesper-lean-syntax-seed" }
@@ -27,6 +30,9 @@ vesper-loom-cas = { path = "../vesper-loom-cas/seed", package = "vesper-loom-cas
 vesper-lsp = { path = "../vesper-lsp" }
 vesper-semver = { path = "../vesper-semver/seed", package = "vesper-semver-seed" }
 vesper-simd = { path = "../vesper-simd/seed", package = "vesper-simd-seed" }
+# wasm_backend_cli runs the components `vesper build --target wasm` writes,
+# on the same Wasmtime as the root package.
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "runtime", "std", "stack-switching", "gc", "gc-null"] }
 
 # attestation_import_cli makes a FIFO.
 [target.'cfg(unix)'.dev-dependencies]
