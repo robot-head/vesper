@@ -16,6 +16,7 @@
 // results stay on the walk.
 
 use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at};
+use @vesper/check-data::types::{TyKind, default_type};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::input::{Reader};
 use @vesper/place-ir::{InstRow};
@@ -26,12 +27,16 @@ use super::body::{Header, LANE_PRODUCT};
 // The section's first word, "FOREIGNS" in ASCII (`FOREIGN_FACTS`).
 pub const FOREIGN_FACTS: u64 = 6002813733352656710;
 const NONE64: u64 = 18446744073709551615;
+const NONE32: u32 = 4294967295;
 
 // `plan_probe::body_call`'s forms.
 const CALL_DIRECT: u64 = 1;
 pub const PARAM_SCALAR: u64 = 0;
 pub const PARAM_BOOL: u64 = 1;
 pub const PARAM_HANDLE: u64 = 2;
+// A slice lent in place (`ParameterType::Slice` of a source `Slice[T]`):
+// its word is the element's bytes.
+pub const PARAM_SLICE: u64 = 3;
 const RESULT_UNIT: u64 = 0;
 const RESULT_SCALAR: u64 = 1;
 // A plan form's words: the form, then its scalar word.
@@ -48,6 +53,11 @@ pub const SOURCE_LOCAL: u64 = 1;
 pub const SOURCE_HANDLE_IN: u64 = 2;
 pub const SOURCE_HANDLE_INOUT: u64 = 3;
 pub const SOURCE_HANDLE_TEMP: u64 = 4;
+// A slice view (`foreign_view`), copied first as `expr` copies an
+// aggregate: from a whole local (lent `in` or `inout`, read at the call),
+// or from a temporary of the value.
+pub const SOURCE_SLICE_LOCAL: u64 = 5;
+pub const SOURCE_SLICE_TEMP: u64 = 6;
 
 // A call's argument words: pass, value, place root (+1, 0 for none),
 // place path (place-ir `Op::Call`).
@@ -170,6 +180,10 @@ impl Gen {
             let root = self.program.op(add(at, ARG_ROOT));
             if form == PARAM_HANDLE {
                 if !self.body_foreign_handle(in h, at, pass, root, inout ops, inout extra) {
+                    return false;
+                }
+            } else if form == PARAM_SLICE {
+                if !self.body_foreign_slice(in h, at, pass, root, inout ops, inout extra) {
                     return false;
                 }
             } else if (form != PARAM_SCALAR && form != PARAM_BOOL) || pass != PASS_IN {
@@ -314,5 +328,52 @@ impl Gen {
         if shift != 0 {
             extra.push(word);
         }
+    }
+}
+
+impl Gen {
+    // Whether type `t` is a `Slice[T]` (its view `{handle, start, len}`).
+    fn body_is_slice(inout self, t: u32) -> bool {
+        if t == NONE32 {
+            return false;
+        }
+        let d = default_type(inout self.ctx.types, t);
+        let n = self.ctx.types.node(d);
+        n.kind == TyKind::Named && n.n == 1 && n.name == self.ctx.world.k.slice
+    }
+
+    // The source words of a slice argument at call words `at`
+    // (`foreign_view`): a whole `Slice` local lent `in` or `inout`, read at
+    // the call, or a temporary of a `Slice` value.
+    fn body_foreign_slice(
+        inout self,
+        in h: Header,
+        at: u64,
+        pass: u64,
+        root: u64,
+        inout ops: ChunkSeq[u64],
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        if pass == PASS_SINK || root == 0 {
+            let v = self.body_value(in h, self.program.op(add(at, ARG_VALUE)));
+            if v == NONE64 || !self.body_is_slice(n32(u64_at(in h.vty, v))) {
+                return false;
+            }
+            ops.push(v);
+            extra.push(SOURCE_SLICE_TEMP);
+            return true;
+        }
+        if (pass != PASS_IN && pass != PASS_INOUT)
+            || self.program.path(self.program.op(add(at, ARG_PATH))).n != 0
+        {
+            return false;
+        }
+        let l = self.body_local(in h, wrapping_sub(root, 1));
+        if l == NONE64 || !self.body_is_slice(self.body_local_type(in h, l)) {
+            return false;
+        }
+        extra.push(SOURCE_SLICE_LOCAL);
+        extra.push(l);
+        true
     }
 }

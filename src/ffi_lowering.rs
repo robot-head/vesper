@@ -1987,11 +1987,12 @@ pub mod plan_probe {
     ///
     /// A plain direct call has the `direct` handler and no callback
     /// pointer, `errno`, variadic tail, mapping, `@vesper-std/cpu` code or
-    /// runtime-shared symbol, its parameters are scalars, `bool`s or
-    /// handles and its result is `Unit` or a scalar. Its words are the
+    /// runtime-shared symbol, its parameters are scalars, `bool`s, handles
+    /// or slices and its result is `Unit` or a scalar. Its words are the
     /// parameter count, then two words per parameter, its form
-    /// ([`BODY_PARAM_SCALAR`], [`BODY_PARAM_BOOL`] or [`BODY_PARAM_HANDLE`])
-    /// and its scalar word (`bits | signed << 8`, 0 for the others), then
+    /// ([`BODY_PARAM_SCALAR`], [`BODY_PARAM_BOOL`], [`BODY_PARAM_HANDLE`] or
+    /// [`BODY_PARAM_SLICE`]) and its word (`bits | signed << 8` for a
+    /// scalar, the element's bytes for a slice, 0 for the others), then
     /// the result's two: [`BODY_RESULT_UNIT`] and 0, or
     /// [`BODY_RESULT_SCALAR`] and its scalar word.
     pub fn body_call(effect: &str, op: &str, target: &str) -> Option<(String, Vec<u64>)> {
@@ -2013,6 +2014,9 @@ pub mod plan_probe {
                 ParameterType::Value(sys::ValueType::Bool) => words.extend([BODY_PARAM_BOOL, 0]),
                 ParameterType::Handle { handle, .. } if handle.mapping().is_none() => {
                     words.extend([BODY_PARAM_HANDLE, 0])
+                }
+                ParameterType::Slice { element, .. } => {
+                    words.extend([BODY_PARAM_SLICE, element.size() as u64])
                 }
                 _ => return Some((symbol, vec![BODY_CALL_OTHER])),
             }
@@ -2037,6 +2041,7 @@ pub mod plan_probe {
     pub const BODY_PARAM_SCALAR: u64 = 0;
     pub const BODY_PARAM_BOOL: u64 = 1;
     pub const BODY_PARAM_HANDLE: u64 = 2;
+    pub const BODY_PARAM_SLICE: u64 = 3;
     pub const BODY_RESULT_UNIT: u64 = 0;
     pub const BODY_RESULT_SCALAR: u64 = 1;
     /// The bit of a scalar word above its width: whether it is signed.

@@ -2728,6 +2728,9 @@ const FFI_VSYS: &str = r#"sys library Probe (
     fn probe_use(inout c: Ctx, x: u32) -> ForeignVal[u32];
     fn probe_peek(in c: Ctx) -> ForeignVal[u64];
     fn probe_free(sink c: Ctx) -> ForeignVal[Unit];
+    fn probe_len(nocapture in b: CSlice[u8]) -> ForeignVal[u64];
+    fn probe_fill(nocapture inout b: CSlice[u8], x: u8) -> ForeignVal[Unit];
+    fn probe_words(nocapture in w: CSlice[u32], n: u64) -> ForeignVal[u32];
 }
 "#;
 
@@ -2762,7 +2765,26 @@ fn close(sink c: Ctx) -> u64 eff [Ffi[Probe]] {
     Probe::probe_free(c);
     0
 }
+fn blen(in b: Slice[u8]) -> u64 eff [Ffi[Probe]] {
+    Probe::probe_len(in b)
+}
+fn blen_text() -> u64 eff [Ffi[Probe]] {
+    Probe::probe_len(in \"text\".as_bytes())
+}
+fn words(in w: Slice[u32], n: u64) -> u32 eff [Ffi[Probe]] {
+    Probe::probe_words(in w, n)
+}
+fn fill(inout b: Slice[u8]) eff [Ffi[Probe]] {
+    Probe::probe_fill(inout b, 7);
+}
 fn main() -> u64 eff [Ffi[Probe]] {
+    let mut v: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    v.push(1);
+    fill(inout v.as_slice_mut());
+    let mut ws: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    ws.push(2);
+    let n = words(in ws.as_slice(), 1);
+    let l = wrapping_add(blen(in \"abc\".as_bytes()), wrapping_add(blen_text(), blen(in v.as_slice())));
     let s = sum(1, 2);
     let t = twice(3);
     let u = unit(4);
@@ -2774,7 +2796,7 @@ fn main() -> u64 eff [Ffi[Probe]] {
             let k = use_ctx(inout c, s);
             let p = peek(in c);
             let _z = close(c);
-            wrapping_add(wrapping_add(t, u), wrapping_add(p, widen_u64(k)))
+            wrapping_add(wrapping_add(t, u), wrapping_add(wrapping_add(p, l), widen_u64(wrapping_add(k, n))))
         },
         None => 0,
     }
@@ -2874,4 +2896,4 @@ fn vesper_bodies_with_foreign_calls_match() {
 /// (handles lent `inout`, `in` and `sink`) and `twice` (calls of an `Ffi`
 /// function), at both optimizer settings. `main` (an `Option` result)
 /// stays on the walk.
-const MIN_FOREIGN_BODIES: u64 = 18;
+const MIN_FOREIGN_BODIES: u64 = 26;
