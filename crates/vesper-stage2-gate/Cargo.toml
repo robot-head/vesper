@@ -1,0 +1,13 @@
+[package]
+name = "vesper-stage2-gate"
+version = "0.1.0"
+edition = "2024"
+description = "The Stage 2 fixed-point gate, booted from the committed seed with no Rust compiler (#1397)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dev-dependencies]
+# The same Wasmtime build as the root crate's Wasm tests, which ran this gate
+# before it moved here.
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "runtime", "std", "stack-switching", "gc", "gc-null"] }
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }

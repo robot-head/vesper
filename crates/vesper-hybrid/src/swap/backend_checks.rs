@@ -42,7 +42,10 @@ fn vesper_verifiers(
 }
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open("verifiers", "no flip-gate configuration")];
+pub(super) const SWAPS: &[Swap] = &[open(
+    "verifiers",
+    "flip gate FAIL 1.94x: encoding compiles each function for the stack verifier (scripts/ci/flip-gate/backend-checks.json, #2684)",
+)];
 
 pub(super) fn register(r: &mut Registry) {
     if on("verifiers") && !env_off("VESPER_HYBRID_VERIFIERS") {
