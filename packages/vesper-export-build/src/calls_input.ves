@@ -264,7 +264,7 @@ pub fn stage2_calls_input(
     in roots: Slice[u8],
     optimize: bool
 ) -> CallsInput eff [Ffi[StdFs]] {
-    stage2_calls_input_with(in root_dir, in os, in roots, optimize, in NO_WRAPPERS.as_bytes())
+    calls_input_of(in root_dir, in os, in roots, optimize, in NO_WRAPPERS.as_bytes(), true)
 }
 
 // No instance wrappers.
@@ -278,6 +278,31 @@ pub fn stage2_calls_input_with(
     in roots: Slice[u8],
     optimize: bool,
     in wrappers: Slice[u8]
+) -> CallsInput eff [Ffi[StdFs]] {
+    calls_input_of(in root_dir, in os, in roots, optimize, in wrappers, true)
+}
+
+// The calls input of the package at `root_dir` for native target OS `os`
+// whose one task is the executable entry `entry`, optimized when
+// `optimize`, as `vesper build` hands `compile_entry` (slice 4e, #2752):
+// no library flag, so the entry passes `compile_entry`'s checks instead
+// of being compiled as an export.
+pub fn stage2_entry_calls_input(
+    in root_dir: Slice[u8],
+    in os: Slice[u8],
+    in entry: Slice[u8],
+    optimize: bool
+) -> CallsInput eff [Ffi[StdFs]] {
+    calls_input_of(in root_dir, in os, in entry, optimize, in NO_WRAPPERS.as_bytes(), false)
+}
+
+fn calls_input_of(
+    in root_dir: Slice[u8],
+    in os: Slice[u8],
+    in roots: Slice[u8],
+    optimize: bool,
+    in wrappers: Slice[u8],
+    library: bool
 ) -> CallsInput eff [Ffi[StdFs]] {
     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let sources = match foreign_sources(in root_dir, in os) {
@@ -337,7 +362,7 @@ pub fn stage2_calls_input_with(
     put_types(inout o, in lw.low.ctx.types);
     put_world(in lw.low.ctx.world, inout o);
     put_program_section(in lw.low.program, inout o);
-    if !put_section(in lw, in effect_types, in root_syms, optimize, inout o) {
+    if !put_section(in lw, in effect_types, in root_syms, optimize, library, inout o) {
         return CallsInput {
             declined: CALLS_FEATURES,
             err: err,
@@ -361,12 +386,15 @@ const NEWLINE: u8 = 10;
 const TASK_OPTIMIZE: u64 = 1;
 const TASK_LIBRARY: u64 = 4;
 const TASK_MORE_ROOTS: u64 = 8;
+// An executable entry task: no flag bit.
+const TASK_ENTRY: u64 = 0;
 
 fn put_section(
     in lw: Lowered,
     in effect_types: ChunkSeq[u32],
     in roots: ChunkSeq[u32],
     optimize: bool,
+    library: bool,
     inout o: ChunkSeq[u64]
 ) -> bool {
     // trace effects: none
@@ -441,22 +469,48 @@ fn put_section(
             Option::None => return false,
         }
     }
-    // dyn params, stubs, vtables, caller-slot functions: none
+    // `dyn` params: none (only boxed objects reach Stage 2).
     o.push(0);
-    o.push(0);
-    o.push(0);
+    // Vtable stubs, by name (Rust's `DynObjects::stubs` is a BTreeMap).
+    let mut stubs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..lw.dyn_out.stubs.len() {
+        stubs.push(u32_at(in lw.dyn_out.stubs, i));
+    }
+    sort_by_name(in lw, inout stubs);
+    o.push(stubs.len());
+    for i in 0..stubs.len() {
+        o.push(widen_u64(u32_at(in stubs, i)));
+    }
+    // Vtables: object type, value type, then each slot function with no
+    // type arguments.
+    o.push(lw.dyn_out.vtabs.len());
+    for vi in 0..lw.dyn_out.vtabs.len() {
+        match lw.dyn_out.vtabs.try_get(vi) {
+            Option::Some(v) => {
+                o.push(widen_u64(v.object));
+                o.push(widen_u64(v.self_ty));
+                o.push(v.tn);
+                for k in 0..v.tn {
+                    o.push(widen_u64(u32_at(in lw.dyn_out.slots, wrapping_add(v.t0, k))));
+                    o.push(0);
+                }
+            },
+            Option::None => return false,
+        }
+    }
+    // Caller-slot functions: none.
     o.push(0);
     o.push(roots.len());
     let base = if optimize { TASK_OPTIMIZE } else { 0 };
     for i in 0..roots.len() {
         o.push(widen_u64(u32_at(in roots, i)));
-        o.push(
-            base | if i == 0 {
-                TASK_LIBRARY
-            } else {
-                TASK_MORE_ROOTS
-            }
-        );
+        let mut kind = TASK_ENTRY;
+        if i != 0 {
+            kind = TASK_MORE_ROOTS;
+        } else if library {
+            kind = TASK_LIBRARY;
+        }
+        o.push(base | kind);
     }
     true
 }
@@ -575,6 +629,43 @@ fn drop_callee_types(inout lw: Lowered) {
 
 // Insertion sort of call row indexes by (start, end), as the checker's
 // span-keyed map orders them.
+// Sorts symbols by their names' bytes (insertion sort: a program has a
+// few vtable stubs).
+fn sort_by_name(in lw: Lowered, inout syms: ChunkSeq[u32]) {
+    for i in 1..syms.len() {
+        let x = u32_at(in syms, i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let y = u32_at(in syms, wrapping_sub(j, 1));
+            if !name_lt(in lw, x, y) {
+                break;
+            }
+            let _ = syms.try_set(j, y);
+            j = wrapping_sub(j, 1);
+        }
+        let _ = syms.try_set(j, x);
+    }
+}
+
+fn name_lt(in lw: Lowered, x: u32, y: u32) -> bool {
+    let mut a: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    lw.low.ctx.names.write(x, inout a);
+    lw.low.ctx.names.write(y, inout b);
+    let n = if a.len() < b.len() { a.len() } else { b.len() };
+    for i in 0..n {
+        let p = a.try_get(i).unwrap_or(0);
+        let q = b.try_get(i).unwrap_or(0);
+        if p != q {
+            return p < q;
+        }
+    }
+    a.len() < b.len()
+}
+
 fn sort_calls(in lw: Lowered, inout order: ChunkSeq[u64]) {
     for i in 1..order.len() {
         let mut j = i;

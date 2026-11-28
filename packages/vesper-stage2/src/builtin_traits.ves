@@ -1,0 +1,864 @@
+// The builtin `Eq`, `Ord` and `Hash` traits of the Rust frontend
+// (src/pact_frontend/builtin_traits.rs) as source text for Stage 2's
+// loader: the fixed prelude (`Ordering`, the three traits, the hash
+// helpers and the scalar, unit and tuple conformances) and the derived
+// conformance an empty `impl Ord for Point {}` asks for.
+//
+// The Rust frontend parses the same text (`items`), so the generated
+// functions (`impl$Ord.Point$cmp`, ...) have the bodies Rust's have. The
+// prelude goes into the loader's generated module; a derived conformance
+// is appended to the text of the module that asks for it, where the
+// struct's name resolves as it does there.
+
+const FNV_OFFSET: Str = "14695981039346656037";
+const FNV_PRIME: Str = "1099511628211";
+const HASH_MIX: Str = "vesper_builtin_hash_mix";
+const HELPER: Str = "vesper_builtin_";
+const I64_WORD: Str = "vesper_builtin_i64_word";
+// The largest tuple arity with builtin conformances.
+const MAX_TUPLE: u64 = 4;
+// The smallest one.
+const MIN_TUPLE: u64 = 2;
+
+// Separates the components of a conformance's `lhs`/`rhs` lists.
+const B_SEP: u8 = 0;
+const B_ZERO: u8 = 48;
+const B_TAB: u8 = 9;
+const B_LF: u8 = 10;
+const B_CR: u8 = 13;
+const B_SPACE: u8 = 32;
+const B_QUOTE: u8 = 34;
+const B_STAR: u8 = 42;
+const B_PLUS: u8 = 43;
+const B_COMMA: u8 = 44;
+const B_SLASH: u8 = 47;
+const B_COLON: u8 = 58;
+const B_L_BRACKET: u8 = 91;
+const B_BACKSLASH: u8 = 92;
+const B_R_BRACKET: u8 = 93;
+const B_L_BRACE: u8 = 123;
+const B_R_BRACE: u8 = 125;
+const B_L_PAREN: u8 = 40;
+const B_R_PAREN: u8 = 41;
+
+// The trait a derive request names (`TRAIT_*`), or none.
+const TRAIT_NONE: u64 = 0;
+const TRAIT_EQ: u64 = 1;
+const TRAIT_ORD: u64 = 2;
+const TRAIT_HASH: u64 = 3;
+
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn same(in a: Slice[u8], in b: Str) -> bool {
+    let bb = b.as_bytes();
+    if a.len() != bb.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if byte(in a, i) != byte(in bb, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn ident_byte(b: u8) -> bool {
+    (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) || b == 95
+}
+
+fn put(inout out: ChunkSeq[u8], in s: Str) {
+    out.extend(in s.as_bytes());
+}
+
+// The digit of `d` (below 10).
+fn put_digit(inout out: ChunkSeq[u8], d: u64) {
+    out.push(wrapping_add(B_ZERO, wrapping_u8(d)));
+}
+
+// The code tokens of `src`, as `starts[i]..ends[i]`: identifiers (letters,
+// digits and `_`) and single punctuation bytes. Comments and string
+// literals are left out.
+struct Tokens {
+    starts: ChunkSeq[u64],
+    ends: ChunkSeq[u64],
+}
+
+fn tokens(in src: Slice[u8]) -> Tokens {
+    let n = src.len();
+    let mut starts = ChunkSeq::new[u64]();
+    let mut ends = ChunkSeq::new[u64]();
+    let mut p: u64 = 0;
+    loop {
+        if p >= n {
+            break;
+        }
+        let b = byte(in src, p);
+        let b1 = byte(in src, wrapping_add(p, 1));
+        if b == B_SPACE || b == B_TAB || b == B_LF || b == B_CR {
+            p = wrapping_add(p, 1);
+            continue;
+        }
+        if b == B_SLASH && b1 == B_SLASH {
+            loop {
+                if p >= n || byte(in src, p) == B_LF {
+                    break;
+                }
+                p = wrapping_add(p, 1);
+            }
+            continue;
+        }
+        if b == B_SLASH && b1 == B_STAR {
+            let mut depth: u64 = 0;
+            loop {
+                if p >= n {
+                    break;
+                }
+                let c = byte(in src, p);
+                let c1 = byte(in src, wrapping_add(p, 1));
+                if c == B_SLASH && c1 == B_STAR {
+                    depth = wrapping_add(depth, 1);
+                    p = wrapping_add(p, 2);
+                } else if c == B_STAR && c1 == B_SLASH {
+                    depth = wrapping_sub(depth, 1);
+                    p = wrapping_add(p, 2);
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    p = wrapping_add(p, 1);
+                }
+            }
+            continue;
+        }
+        if b == B_QUOTE {
+            p = wrapping_add(p, 1);
+            loop {
+                if p >= n {
+                    break;
+                }
+                let c = byte(in src, p);
+                if c == B_BACKSLASH {
+                    p = wrapping_add(p, 2);
+                    continue;
+                }
+                p = wrapping_add(p, 1);
+                if c == B_QUOTE {
+                    break;
+                }
+            }
+            continue;
+        }
+        let start = p;
+        if ident_byte(b) {
+            loop {
+                if p >= n || !ident_byte(byte(in src, p)) {
+                    break;
+                }
+                p = wrapping_add(p, 1);
+            }
+        } else {
+            p = wrapping_add(p, 1);
+        }
+        starts.push(start);
+        ends.push(p);
+    }
+    Tokens { starts: starts, ends: ends }
+}
+
+fn tok_len(in t: Tokens) -> u64 {
+    t.starts.len()
+}
+
+fn tok_start(in t: Tokens, i: u64) -> u64 {
+    match t.starts.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn tok_end(in t: Tokens, i: u64) -> u64 {
+    match t.ends.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Whether token `i` spells `s`.
+fn tok_is(in src: Slice[u8], in t: Tokens, i: u64, in s: Str) -> bool {
+    if i >= tok_len(in t) {
+        return false;
+    }
+    let lo = tok_start(in t, i);
+    let hi = tok_end(in t, i);
+    let bb = s.as_bytes();
+    if wrapping_sub(hi, lo) != bb.len() {
+        return false;
+    }
+    for k in 0..bb.len() {
+        if byte(in src, wrapping_add(lo, k)) != byte(in bb, k) {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether tokens `i` and `j` spell the same text.
+fn tok_same(in src: Slice[u8], in t: Tokens, i: u64, j: u64) -> bool {
+    if i >= tok_len(in t) || j >= tok_len(in t) {
+        return false;
+    }
+    let lo = tok_start(in t, i);
+    let n = wrapping_sub(tok_end(in t, i), lo);
+    let lo2 = tok_start(in t, j);
+    if wrapping_sub(tok_end(in t, j), lo2) != n {
+        return false;
+    }
+    for k in 0..n {
+        if byte(in src, wrapping_add(lo, k)) != byte(in src, wrapping_add(lo2, k)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn tok_push(in src: Slice[u8], in t: Tokens, i: u64, inout out: ChunkSeq[u8]) {
+    for k in tok_start(in t, i)..tok_end(in t, i) {
+        out.push(byte(in src, k));
+    }
+}
+
+fn tok_byte(in src: Slice[u8], in t: Tokens, i: u64) -> u8 {
+    if i >= tok_len(in t) {
+        return 0;
+    }
+    byte(in src, tok_start(in t, i))
+}
+
+fn is_builtin_name(in src: Slice[u8], in t: Tokens, i: u64) -> bool {
+    tok_is(in src, in t, i, "Eq")
+        || tok_is(in src, in t, i, "Ord")
+        || tok_is(in src, in t, i, "Hash")
+        || tok_is(in src, in t, i, "Ordering")
+}
+
+fn is_declaring(in src: Slice[u8], in t: Tokens, i: u64) -> bool {
+    tok_is(in src, in t, i, "trait")
+        || tok_is(in src, in t, i, "enum")
+        || tok_is(in src, in t, i, "struct")
+        || tok_is(in src, in t, i, "effect")
+        || tok_is(in src, in t, i, "model")
+}
+
+// Whether tokens `i` and `i + 1` are `::`.
+fn is_path_sep(in src: Slice[u8], in t: Tokens, i: u64) -> bool {
+    tok_byte(in src, in t, i) == B_COLON && tok_byte(in src, in t, wrapping_add(i, 1)) == B_COLON
+}
+
+// Whether token `i` follows `::`, as a later path segment does.
+fn after_path_sep(in src: Slice[u8], in t: Tokens, i: u64) -> bool {
+    i >= 2 && is_path_sep(in src, in t, wrapping_sub(i, 2))
+}
+
+// Whether builtin token `i` names a builtin the way Rust's `wanted` sees
+// one: a trait in a bound, a where clause or a conformance, the head of a
+// path call (`Ord::cmp`), or `Ordering` itself.
+fn names_builtin(in src: Slice[u8], in t: Tokens, i: u64) -> bool {
+    if after_path_sep(in src, in t, i) {
+        return false;
+    }
+    if tok_is(in src, in t, i, "Ordering") {
+        return true;
+    }
+    if is_path_sep(in src, in t, wrapping_add(i, 1)) {
+        return true;
+    }
+    if i == 0 {
+        return false;
+    }
+    let prev = wrapping_sub(i, 1);
+    let pb = tok_byte(in src, in t, prev);
+    if pb == B_PLUS || pb == B_COLON {
+        return true;
+    }
+    let next = wrapping_add(i, 1);
+    (tok_is(in src, in t, prev, "impl") || pb == B_R_BRACKET)
+        && (tok_is(in src, in t, next, "for") || tok_byte(in src, in t, next) == B_L_BRACKET)
+}
+
+// `builtin_traits::wanted` over source text: whether a module's code names
+// `Eq`, `Ord`, `Hash` or `Ordering` as a builtin, and none declares one of
+// those names.
+pub fn builtin_traits_wanted(in texts: ChunkSeq[ChunkSeq[u8]]) -> bool {
+    let mut named = false;
+    for ti in 0..texts.len() {
+        match texts.try_get(ti) {
+            Option::Some(src) => {
+                let t = tokens(in src.as_slice());
+                for i in 0..tok_len(in t) {
+                    if !is_builtin_name(in src.as_slice(), in t, i) {
+                        continue;
+                    }
+                    if i > 0 && is_declaring(in src.as_slice(), in t, wrapping_sub(i, 1)) {
+                        return false;
+                    }
+                    if names_builtin(in src.as_slice(), in t, i) {
+                        named = true;
+                    }
+                }
+            },
+            Option::None => {},
+        }
+    }
+    named
+}
+
+// `fn vesper_builtin_<t>_bits`: a scalar's bits as a u64, one binary digit
+// per step.
+fn put_bits_helper(inout out: ChunkSeq[u8], in t: Str) {
+    put(inout out, "fn ");
+    put(inout out, HELPER);
+    put(inout out, t);
+    put(inout out, "_bits(x: ");
+    put(inout out, t);
+    put(inout out, ", acc: u64, weight: u64) -> u64 { if x == 0 { acc } else { ");
+    put(inout out, HELPER);
+    put(inout out, t);
+    put(
+        inout out,
+        "_bits(x / 2, if x % 2 == 1 { wrapping_add(acc, weight) } else { acc }, wrapping_mul(weight, 2)) } }\n"
+    );
+}
+
+// The `Eq`, `Ord` and `Hash` conformances of scalar `s`.
+fn put_scalar(inout out: ChunkSeq[u8], in s: Str) {
+    let is_bool = same(in s.as_bytes(), in "bool");
+    put(inout out, "impl Eq for ");
+    put(inout out, s);
+    put(inout out, " { fn eq(in self, in other: ");
+    put(inout out, s);
+    put(inout out, ") -> bool { self == other } }\n");
+    put(inout out, "impl Ord for ");
+    put(inout out, s);
+    put(inout out, " { fn cmp(in self, in other: ");
+    put(inout out, s);
+    put(inout out, ") -> Ordering { ");
+    if is_bool {
+        put(inout out, "if self == other { Equal } else if other { Less } else { Greater }");
+    } else {
+        put(inout out, "if self < other { Less } else if self == other { Equal } else { Greater }");
+    }
+    put(inout out, " } }\n");
+    put(inout out, "impl Hash for ");
+    put(inout out, s);
+    put(inout out, " { fn hash(in self) -> u64 { ");
+    put(inout out, HASH_MIX);
+    put(inout out, "(");
+    put(inout out, FNV_OFFSET);
+    put(inout out, ", ");
+    if is_bool {
+        put(inout out, "if self { 1 } else { 0 }");
+    } else if same(in s.as_bytes(), in "i64") {
+        put(inout out, I64_WORD);
+        put(inout out, "(self)");
+    } else if same(in s.as_bytes(), in "u64") {
+        put(inout out, "self");
+    } else {
+        put(inout out, HELPER);
+        put(inout out, s);
+        put(inout out, "_bits(self, 0, 1)");
+    }
+    put(inout out, ") } }\n");
+}
+
+// The fixed prelude of `builtin_traits::items`, in its order.
+pub fn append_builtin_prelude(inout out: ChunkSeq[u8]) {
+    put(inout out, "copy enum Ordering { Less, Equal, Greater }\n");
+    put(inout out, "trait Eq { fn eq(in self, in other: Self) -> bool; }\n");
+    put(inout out, "trait Ord { fn cmp(in self, in other: Self) -> Ordering; }\n");
+    put(inout out, "trait Hash { fn hash(in self) -> u64; }\n");
+    put(inout out, "fn ");
+    put(inout out, HASH_MIX);
+    put(inout out, "(h: u64, v: u64) -> u64 { wrapping_mul(wrapping_add(h, v), ");
+    put(inout out, FNV_PRIME);
+    put(inout out, ") }\n");
+    put_bits_helper(inout out, "u8");
+    put_bits_helper(inout out, "u32");
+    put_bits_helper(inout out, "i64");
+    put(inout out, "fn ");
+    put(inout out, I64_WORD);
+    put(inout out, "(x: i64) -> u64 { if x < 0 { wrapping_add(");
+    put(inout out, HELPER);
+    put(
+        inout out,
+        "i64_bits(wrapping_add(wrapping_add(x, 9223372036854775807), 1), 0, 1), 9223372036854775808) } else { "
+    );
+    put(inout out, HELPER);
+    put(inout out, "i64_bits(x, 0, 1) } }\n");
+    put_scalar(inout out, "u8");
+    put_scalar(inout out, "u32");
+    put_scalar(inout out, "u64");
+    put_scalar(inout out, "i64");
+    put_scalar(inout out, "bool");
+    put(inout out, "impl Eq for () { fn eq(in self, in other: ()) -> bool { true } }\n");
+    put(inout out, "impl Ord for () { fn cmp(in self, in other: ()) -> Ordering { Equal } }\n");
+    put(inout out, "impl Hash for () { fn hash(in self) -> u64 { ");
+    put(inout out, FNV_OFFSET);
+    put(inout out, " } }\n");
+    for n in MIN_TUPLE..wrapping_add(MAX_TUPLE, 1) {
+        let mut head = ChunkSeq::new[u8]();
+        let mut ty = ChunkSeq::new[u8]();
+        let mut lhs = ChunkSeq::new[u8]();
+        let mut rhs = ChunkSeq::new[u8]();
+        head.push(B_L_BRACKET);
+        ty.push(B_L_PAREN);
+        for i in 0..n {
+            if i > 0 {
+                put(inout head, ", ");
+                put(inout ty, ", ");
+                lhs.push(B_SEP);
+                rhs.push(B_SEP);
+            }
+            put(inout head, "T");
+            put_digit(inout head, i);
+            put(inout head, ": mod copy");
+            put(inout ty, "T");
+            put_digit(inout ty, i);
+            put(inout lhs, "a");
+            put_digit(inout lhs, i);
+            put(inout rhs, "b");
+            put_digit(inout rhs, i);
+        }
+        head.push(B_R_BRACKET);
+        ty.push(B_R_PAREN);
+        for t in TRAIT_EQ..wrapping_add(TRAIT_HASH, 1) {
+            let mut wheres = ChunkSeq::new[u8]();
+            for i in 0..n {
+                if i > 0 {
+                    put(inout wheres, ", ");
+                }
+                put(inout wheres, "T");
+                put_digit(inout wheres, i);
+                put(inout wheres, ": ");
+                put_trait(inout wheres, t);
+            }
+            conformance(inout out, t, in head, in wheres, in ty, in lhs, in rhs, true);
+        }
+    }
+}
+
+fn put_trait(inout out: ChunkSeq[u8], t: u64) {
+    if t == TRAIT_EQ {
+        put(inout out, "Eq");
+    } else if t == TRAIT_ORD {
+        put(inout out, "Ord");
+    } else {
+        put(inout out, "Hash");
+    }
+}
+
+// `parts` holds components separated by `B_SEP` bytes. The number of them.
+fn part_count(in parts: ChunkSeq[u8]) -> u64 {
+    if parts.len() == 0 {
+        return 0;
+    }
+    let mut n: u64 = 1;
+    for i in 0..parts.len() {
+        if byte(in parts.as_slice(), i) == B_SEP {
+            n = wrapping_add(n, 1);
+        }
+    }
+    n
+}
+
+// Appends component `k` of `parts`.
+fn put_part(in parts: ChunkSeq[u8], k: u64, inout out: ChunkSeq[u8]) {
+    let mut at: u64 = 0;
+    for i in 0..parts.len() {
+        let b = byte(in parts.as_slice(), i);
+        if b == B_SEP {
+            at = wrapping_add(at, 1);
+        } else if at == k {
+            out.push(b);
+        }
+    }
+}
+
+// Appends every component of `parts`, `, `-separated.
+fn put_parts(in parts: ChunkSeq[u8], inout out: ChunkSeq[u8]) {
+    for k in 0..part_count(in parts) {
+        if k > 0 {
+            put(inout out, ", ");
+        }
+        put_part(in parts, k, inout out);
+    }
+}
+
+// Wraps a tuple conformance's body in the destructuring of `self` (and of
+// `other` when `both`), as `conformance`'s `wrap` does.
+fn put_wrapped(
+    inout out: ChunkSeq[u8],
+    in body: ChunkSeq[u8],
+    in lhs: ChunkSeq[u8],
+    in rhs: ChunkSeq[u8],
+    tuple: bool,
+    both: bool
+) {
+    if !tuple {
+        out.extend(in body.as_slice());
+        return;
+    }
+    put(inout out, "match self { (");
+    put_parts(in lhs, inout out);
+    put(inout out, ") => ");
+    if both {
+        put(inout out, "match other { (");
+        put_parts(in rhs, inout out);
+        put(inout out, ") => ");
+        out.extend(in body.as_slice());
+        put(inout out, " }");
+    } else {
+        out.extend(in body.as_slice());
+    }
+    put(inout out, " }");
+}
+
+// `<Trait>::<method>(<l>, <r>)` over components `i` of `lhs` and `rhs`.
+fn put_pair_call(
+    inout out: ChunkSeq[u8],
+    in path: Str,
+    in lhs: ChunkSeq[u8],
+    in rhs: ChunkSeq[u8],
+    i: u64
+) {
+    put(inout out, path);
+    put(inout out, "(");
+    put_part(in lhs, i, inout out);
+    put(inout out, ", ");
+    put_part(in rhs, i, inout out);
+    put(inout out, ")");
+}
+
+// `builtin_traits::conformance`: one canonical conformance of trait `t`
+// for the type text `ty`, lexicographic over the components of `lhs` and
+// `rhs`.
+fn conformance(
+    inout out: ChunkSeq[u8],
+    t: u64,
+    in head: ChunkSeq[u8],
+    in wheres: ChunkSeq[u8],
+    in ty: ChunkSeq[u8],
+    in lhs: ChunkSeq[u8],
+    in rhs: ChunkSeq[u8],
+    tuple: bool
+) {
+    let mut body = ChunkSeq::new[u8]();
+    let n = part_count(in lhs);
+    if t == TRAIT_EQ {
+        put(inout body, "true");
+        for k in 0..n {
+            let i = wrapping_sub(wrapping_sub(n, 1), k);
+            let mut next = ChunkSeq::new[u8]();
+            put(inout next, "if ");
+            put_pair_call(inout next, "Eq::eq", in lhs, in rhs, i);
+            put(inout next, " { ");
+            next.extend(in body.as_slice());
+            put(inout next, " } else { false }");
+            body = next;
+        }
+    } else if t == TRAIT_ORD {
+        put(inout body, "Equal");
+        for k in 0..n {
+            let i = wrapping_sub(wrapping_sub(n, 1), k);
+            let mut next = ChunkSeq::new[u8]();
+            if k == 0 {
+                put_pair_call(inout next, "Ord::cmp", in lhs, in rhs, i);
+            } else {
+                put(inout next, "match ");
+                put_pair_call(inout next, "Ord::cmp", in lhs, in rhs, i);
+                put(inout next, " { Equal => ");
+                next.extend(in body.as_slice());
+                put(inout next, ", unequal => unequal }");
+            }
+            body = next;
+        }
+    } else {
+        put(inout body, FNV_OFFSET);
+        for i in 0..n {
+            let mut next = ChunkSeq::new[u8]();
+            put(inout next, HASH_MIX);
+            put(inout next, "(");
+            next.extend(in body.as_slice());
+            put(inout next, ", Hash::hash(");
+            put_part(in lhs, i, inout next);
+            put(inout next, "))");
+            body = next;
+        }
+    }
+    put(inout out, "impl");
+    out.extend(in head.as_slice());
+    put(inout out, " ");
+    put_trait(inout out, t);
+    put(inout out, " for ");
+    out.extend(in ty.as_slice());
+    if wheres.len() > 0 {
+        put(inout out, " where ");
+        out.extend(in wheres.as_slice());
+    }
+    put(inout out, " { ");
+    if t == TRAIT_EQ {
+        put(inout out, "fn eq(in self, in other: ");
+        out.extend(in ty.as_slice());
+        put(inout out, ") -> bool { ");
+        put_wrapped(inout out, in body, in lhs, in rhs, tuple, true);
+    } else if t == TRAIT_ORD {
+        put(inout out, "fn cmp(in self, in other: ");
+        out.extend(in ty.as_slice());
+        put(inout out, ") -> Ordering { ");
+        put_wrapped(inout out, in body, in lhs, in rhs, tuple, true);
+    } else {
+        put(inout out, "fn hash(in self) -> u64 { ");
+        put_wrapped(inout out, in body, in lhs, in rhs, tuple, false);
+    }
+    put(inout out, " } }\n");
+}
+
+fn trait_of(in src: Slice[u8], in t: Tokens, i: u64) -> u64 {
+    if tok_is(in src, in t, i, "Eq") {
+        TRAIT_EQ
+    } else if tok_is(in src, in t, i, "Ord") {
+        TRAIT_ORD
+    } else if tok_is(in src, in t, i, "Hash") {
+        TRAIT_HASH
+    } else {
+        TRAIT_NONE
+    }
+}
+
+fn is_open(b: u8) -> bool {
+    b == B_L_BRACKET || b == B_L_PAREN || b == B_L_BRACE
+}
+
+fn is_close(b: u8) -> bool {
+    b == B_R_BRACKET || b == B_R_PAREN || b == B_R_BRACE
+}
+
+// The token after the group opened at token `i`.
+fn skip_group(in src: Slice[u8], in t: Tokens, i: u64) -> u64 {
+    let mut depth: u64 = 0;
+    let mut k = i;
+    loop {
+        if k >= tok_len(in t) {
+            return k;
+        }
+        let b = tok_byte(in src, in t, k);
+        if is_open(b) {
+            depth = wrapping_add(depth, 1);
+        } else if is_close(b) {
+            depth = wrapping_sub(depth, 1);
+            if depth == 0 {
+                return wrapping_add(k, 1);
+            }
+        }
+        k = wrapping_add(k, 1);
+    }
+}
+
+// One `struct` declaration: the tokens of its generics (`gen_lo..gen_hi`,
+// inside the brackets), its field name tokens, and each field's type
+// tokens (`ty_lo[f]..ty_hi[f]`).
+struct StructDecl {
+    found: bool,
+    gen_lo: u64,
+    gen_hi: u64,
+    fields: ChunkSeq[u64],
+    ty_lo: ChunkSeq[u64],
+    ty_hi: ChunkSeq[u64],
+}
+
+// The `struct` whose name token spells token `name` of `src`.
+fn find_struct(in src: Slice[u8], in t: Tokens, name: u64) -> StructDecl {
+    let mut d = StructDecl {
+        found: false,
+        gen_lo: 0,
+        gen_hi: 0,
+        fields: ChunkSeq::new[u64](),
+        ty_lo: ChunkSeq::new[u64](),
+        ty_hi: ChunkSeq::new[u64]()
+    };
+    let n = tok_len(in t);
+    for i in 0..n {
+        if !tok_is(in src, in t, i, "struct") {
+            continue;
+        }
+        let ni = wrapping_add(i, 1);
+        if !tok_same(in src, in t, ni, name) {
+            continue;
+        }
+        let mut k = wrapping_add(ni, 1);
+        if tok_byte(in src, in t, k) == B_L_BRACKET {
+            d.gen_lo = wrapping_add(k, 1);
+            k = skip_group(in src, in t, k);
+            d.gen_hi = wrapping_sub(k, 1);
+        }
+        if tok_byte(in src, in t, k) != B_L_BRACE {
+            return d;
+        }
+        k = wrapping_add(k, 1);
+        // Fields: `[pub] name: Type,` at depth 0 of the braces.
+        let mut depth: u64 = 0;
+        let mut field_start = k;
+        let mut colon = n;
+        loop {
+            if k >= n {
+                return d;
+            }
+            let b = tok_byte(in src, in t, k);
+            if depth == 0 && (b == B_COMMA || b == B_R_BRACE) {
+                if colon < k && colon > field_start {
+                    d.fields.push(wrapping_sub(colon, 1));
+                    d.ty_lo.push(wrapping_add(colon, 1));
+                    d.ty_hi.push(k);
+                }
+                if b == B_R_BRACE {
+                    d.found = true;
+                    return d;
+                }
+                field_start = wrapping_add(k, 1);
+                colon = n;
+            } else if is_open(b) {
+                depth = wrapping_add(depth, 1);
+            } else if is_close(b) {
+                depth = wrapping_sub(depth, 1);
+            } else if b == B_COLON && depth == 0 && colon == n {
+                colon = k;
+            }
+            k = wrapping_add(k, 1);
+        }
+    }
+    d
+}
+
+// The name tokens of the generic parameters among tokens `lo..hi`: the
+// first identifier of each comma-separated entry.
+fn generic_names(in src: Slice[u8], in t: Tokens, lo: u64, hi: u64) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    let mut want = true;
+    let mut depth: u64 = 0;
+    for k in lo..hi {
+        let b = tok_byte(in src, in t, k);
+        if is_open(b) {
+            depth = wrapping_add(depth, 1);
+        } else if is_close(b) {
+            depth = wrapping_sub(depth, 1);
+        } else if b == B_COMMA && depth == 0 {
+            want = true;
+        } else if want && ident_byte(b) {
+            out.push(k);
+            want = false;
+        }
+    }
+    out
+}
+
+fn u64_of(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Appends to `out` the conformance each empty builtin-trait impl of `src`
+// (`impl Ord for Point {}`, `impl[T] Eq for Pair[T] {}`) derives for a
+// struct `src` declares (`builtin_traits::items`, the derived part).
+pub fn append_derived(in src: Slice[u8], inout out: ChunkSeq[u8]) {
+    let t = tokens(in src);
+    let n = tok_len(in t);
+    for i in 0..n {
+        if !tok_is(in src, in t, i, "impl") {
+            continue;
+        }
+        let mut k = wrapping_add(i, 1);
+        if tok_byte(in src, in t, k) == B_L_BRACKET {
+            k = skip_group(in src, in t, k);
+        }
+        let tr = trait_of(in src, in t, k);
+        if tr == TRAIT_NONE || !tok_is(in src, in t, wrapping_add(k, 1), "for") {
+            continue;
+        }
+        let name_i = wrapping_add(k, 2);
+        let mut after = wrapping_add(name_i, 1);
+        if tok_byte(in src, in t, after) == B_L_BRACKET {
+            after = skip_group(in src, in t, after);
+        }
+        if tok_byte(in src, in t, after) != B_L_BRACE
+            || tok_byte(in src, in t, wrapping_add(after, 1)) != B_R_BRACE
+        {
+            continue;
+        }
+        let d = find_struct(in src, in t, name_i);
+        if !d.found {
+            continue;
+        }
+        let gens = generic_names(in src, in t, d.gen_lo, d.gen_hi);
+        let mut ty = ChunkSeq::new[u8]();
+        tok_push(in src, in t, name_i, inout ty);
+        let mut head = ChunkSeq::new[u8]();
+        if gens.len() > 0 {
+            ty.push(B_L_BRACKET);
+            for gi in 0..gens.len() {
+                if gi > 0 {
+                    put(inout ty, ", ");
+                }
+                tok_push(in src, in t, u64_of(in gens, gi), inout ty);
+            }
+            ty.push(B_R_BRACKET);
+            head.push(B_L_BRACKET);
+            for g in d.gen_lo..d.gen_hi {
+                let b = tok_byte(in src, in t, g);
+                if g > d.gen_lo && b != B_COMMA && b != B_COLON {
+                    head.push(B_SPACE);
+                }
+                tok_push(in src, in t, g, inout head);
+            }
+            head.push(B_R_BRACKET);
+        }
+        let mut wheres = ChunkSeq::new[u8]();
+        for gi in 0..gens.len() {
+            let g = u64_of(in gens, gi);
+            let mut mentioned = false;
+            for f in 0..d.ty_lo.len() {
+                for tk in u64_of(in d.ty_lo, f)..u64_of(in d.ty_hi, f) {
+                    if tok_same(in src, in t, tk, g) {
+                        mentioned = true;
+                    }
+                }
+            }
+            if mentioned {
+                if wheres.len() > 0 {
+                    put(inout wheres, ", ");
+                }
+                tok_push(in src, in t, g, inout wheres);
+                put(inout wheres, ": ");
+                put_trait(inout wheres, tr);
+            }
+        }
+        let mut lhs = ChunkSeq::new[u8]();
+        let mut rhs = ChunkSeq::new[u8]();
+        for f in 0..d.fields.len() {
+            if f > 0 {
+                lhs.push(B_SEP);
+                rhs.push(B_SEP);
+            }
+            put(inout lhs, "self.");
+            tok_push(in src, in t, u64_of(in d.fields, f), inout lhs);
+            put(inout rhs, "other.");
+            tok_push(in src, in t, u64_of(in d.fields, f), inout rhs);
+        }
+        conformance(inout out, tr, in head, in wheres, in ty, in lhs, in rhs, false);
+    }
+}
