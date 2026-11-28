@@ -2400,6 +2400,12 @@ const STRING_LITERALS: &str = "
 fn empty_len() -> u64 {
     \"\".len()
 }
+fn fresh() -> String {
+    \"\"
+}
+fn named() -> String {
+    \"named\"
+}
 fn short_byte(i: u64) -> u64 eff [Fail[RuntimeError]] {
     widen_u64(\"hey\".byte_at(i))
 }
@@ -2414,7 +2420,8 @@ fn main() -> i64 {
         let a = wrapping_add(empty_len(), short_byte(1));
         let b = wrapping_add(word_len(2), long_byte(10));
         let c = short_byte(3);
-        wrapping_i64(a ^ wrapping_mul(b, 7) ^ c)
+        let d = wrapping_add(fresh().len(), named().len());
+        wrapping_i64(a ^ wrapping_mul(b, 7) ^ c ^ d)
     } with {
         return value => value,
         raise(error, resume) => 4242,
