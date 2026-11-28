@@ -264,19 +264,18 @@ pub enum FrontParse {
 // for a standalone source, with `ReportSyntax`'s report when the parse has
 // diagnostics (crates/vesper-hybrid/src/driver/front.rs) and the `Parse`
 // pass's when the sugar expansion fails. The session keeps what the
-// driver does not cover: a source over the byte budget, an expansion that
-// declares `macro`s and does not parse (Forge), and a report the `@vesper/diagnostics` port refuses (the session's
-// renderer prints the raw diagnostics with its own reason).
+// driver does not cover: an expansion that declares `macro`s and does not
+// parse (Forge), and a report the `@vesper/diagnostics` port refuses (the
+// session's renderer prints the raw diagnostics with its own reason).
 pub fn parse_front(
     in source: ChunkSeq[u8],
     in file: Slice[u8],
     json: bool,
     include_tests: bool
 ) -> FrontParse {
+    // A source over the byte budget parses to the limit's E0003 alone
+    // (`parse_words`), reported raw (`report_of`).
     let bytes = source.as_slice();
-    if bytes.len() > max_source_bytes() {
-        return FrontParse::ParseDeclined;
-    }
     let text = match String::from_utf8(in bytes) {
         Option::Some(t) => t,
         Option::None => return FrontParse::ParseDeclined,
@@ -454,6 +453,12 @@ fn report_of(
         report.extend(in fields.as_slice());
         return Option::Some(report);
     }
+    // `diagnostics()` of src/main.rs prints a source over the display
+    // profile raw.
+    if text.len() > HARD_SOURCE_BYTES {
+        let raw = raw_report(in fields.as_slice());
+        return Option::Some(text_stream(in raw));
+    }
     let name = match String::from_utf8(in file) {
         Option::Some(n) => n,
         Option::None => return Option::None,
@@ -462,14 +467,95 @@ fn report_of(
         Option::Some(r) => r,
         Option::None => return Option::None,
     };
+    Option::Some(text_stream(in rendered))
+}
+
+// A `DIAG_TEXT_STREAM` report of one chunk: `text` as stderr prints it.
+fn text_stream(in text: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut report: ChunkSeq[u8] = ChunkSeq::new[u8]();
     report.push(DIAG_TEXT_STREAM);
-    // One chunk: the source's rendered diagnostics.
     put_u64_le(inout report, 1);
     report.push(DIAG_CHUNK_LITERAL);
-    put_u64_le(inout report, rendered.len());
-    report.extend(in rendered.as_slice());
-    Option::Some(report)
+    put_u64_le(inout report, text.len());
+    report.extend(in text.as_slice());
+    report
 }
+
+// The raw fallback of `diagnostics()` in src/main.rs for a source over
+// the display profile: the reason, then each diagnostic's code and
+// message (cut to whole characters) and raw byte span, up to
+// `MAX_RAW_DIAGNOSTICS`.
+fn raw_report(in fields: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in RAW_OVERSIZE.as_bytes());
+    let mut r = Reader { pos: 0 };
+    let count = read_u64(in fields, inout r);
+    let shown = if count > MAX_RAW_DIAGNOSTICS {
+        MAX_RAW_DIAGNOSTICS
+    } else {
+        count
+    };
+    for _ in 0..shown {
+        let code = read_text(in fields, inout r);
+        let message = read_text(in fields, inout r);
+        let start = read_u64(in fields, inout r);
+        let end = read_u64(in fields, inout r);
+        let related = read_u64(in fields, inout r);
+        for _ in 0..related {
+            read_u64(in fields, inout r);
+            read_u64(in fields, inout r);
+            read_text(in fields, inout r);
+        }
+        if read_u64(in fields, inout r) != 0 {
+            read_text(in fields, inout r);
+        }
+        put_chars(inout out, in fields[code.at..text_end(code)], MAX_RAW_CODE_CHARS);
+        out.extend(in ": ".as_bytes());
+        put_chars(inout out, in fields[message.at..text_end(message)], MAX_RAW_MESSAGE_CHARS);
+        fmt{
+            inout out;
+            write_str(in " (UTF-8 bytes "),
+            write_u64(start),
+            write_str(in ".."),
+            write_u64(end),
+            write_str(in ")\n")
+        };
+    }
+    if count > MAX_RAW_DIAGNOSTICS {
+        fmt{
+            inout out;
+            write_u64(wrapping_sub(count, MAX_RAW_DIAGNOSTICS)),
+            write_str(in " additional compiler errors exceed the display profile\n")
+        };
+    }
+    out
+}
+
+// The first `max` characters of the UTF-8 text `b`.
+fn put_chars(inout out: ChunkSeq[u8], in b: Slice[u8], max: u64) {
+    let mut chars: u64 = 0;
+    let mut end: u64 = 0;
+    for i in 0..b.len() {
+        if b.try_get(i).unwrap_or(0) & UTF8_CONT_MASK != UTF8_CONT_TAG {
+            if chars == max {
+                break;
+            }
+            chars = wrapping_add(chars, 1);
+        }
+        end = wrapping_add(i, 1);
+    }
+    out.extend(in b[0..end]);
+}
+
+// `diagnostics()`' raw fallback (src/main.rs): its reason line for a
+// source over the display profile and its caps.
+const RAW_OVERSIZE: Str = "diagnostic source rendering unavailable: source exceeds the 1 MiB diagnostic display profile\n";
+const MAX_RAW_DIAGNOSTICS: u64 = 128;
+const MAX_RAW_CODE_CHARS: u64 = 128;
+const MAX_RAW_MESSAGE_CHARS: u64 = 4096;
+// A UTF-8 continuation byte is 0b10xxxxxx.
+const UTF8_CONT_MASK: u8 = 192;
+const UTF8_CONT_TAG: u8 = 128;
 
 // `expand_words`' first word: no sugar, or the expansion's diagnostic.
 const SUGAR_NONE: u64 = 0;
