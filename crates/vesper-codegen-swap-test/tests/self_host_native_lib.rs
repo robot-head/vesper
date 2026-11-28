@@ -303,6 +303,12 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
             r.refused = Some(format!("{function}: a slice parameter read at entry"));
             return;
         }
+        // @vesper/native-lib emits no handler (#2657), so it lists only
+        // the body's own callees.
+        if codegen_swap::body::nested_callees(args).is_some_and(|n| !n.is_empty()) {
+            r.refused = Some(format!("{function}: a handler's nested calls"));
+            return;
+        }
         let homes = homes.len() + 1 + pointers.len() + 1;
         let callees = callees.to_vec();
         if module_has_data(&*lent.module) {
