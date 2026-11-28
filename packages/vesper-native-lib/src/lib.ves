@@ -241,6 +241,8 @@ fn define_one(
     for k in 0..np {
         args.push(NO_VALUE);
     }
+    // No slice parameter is read once at entry (#2653).
+    args.push(0);
     args.extend(in plans.words[at..plan_end]);
     let answer = emit_body_words(args, inout b, inout m);
     if answer != HANDLED {
