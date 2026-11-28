@@ -1,0 +1,505 @@
+// The two native-only rewrites that run on a library's first lowering
+// before the optimizer (src/integer_widths.rs `lower_bit_builtin_calls`
+// and src/integer_widths/native.rs `refine_wide_tuples`), on
+// @vesper/place-ir's tables.
+//
+// A rewritten instruction points at operands appended to the operand pool;
+// `put_program` writes each row's own range, so the old words stay unread.
+
+use @vesper/check-data::util::{add, inc, n32, u32_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, Types};
+use @vesper/check-data::world::{Known};
+use @vesper/place-ir::{FnRow, InstRow, Program};
+use @vesper/place-ir::codes::{Op, Pat, Tag, Term};
+use @vesper/codegen-calls::data::{Calls};
+
+const NONE32: u32 = 4294967295;
+
+// `Pass::In` and `Pass::Sink` as `ir_words::pass_word` writes them.
+const PASS_IN: u64 = 0;
+const PASS_SINK: u64 = 2;
+
+// Words of one call argument: pass, value, place root, place path.
+const ARG_WORDS: u64 = 4;
+
+// Words of a pattern before its kind's own words: kind, span start, end.
+const PAT_HEAD: u64 = 3;
+
+// Words of a literal: its kind and two payload words.
+const LIT_WORDS: u64 = 3;
+
+// ----- bit builtins -------------------------------------------------------------------------
+
+// The operand count of the bit builtin `sym` (`BitOp::arity`), or 0 when
+// `sym` names none: a family prefix followed by an integer kind's name.
+fn bit_arity(in names: Names, k: Known, sym: u32) -> u64 {
+    let ones = bit_suffix(in names, k, sym, in "leading_zeros_".as_bytes())
+        || bit_suffix(in names, k, sym, in "trailing_zeros_".as_bytes())
+        || bit_suffix(in names, k, sym, in "count_ones_".as_bytes())
+        || bit_suffix(in names, k, sym, in "wrapping_neg_".as_bytes());
+    if ones {
+        return 1;
+    }
+    let shifts = bit_suffix(in names, k, sym, in "wrapping_shl_".as_bytes())
+        || bit_suffix(in names, k, sym, in "wrapping_shr_".as_bytes());
+    if shifts { 2 } else { 0 }
+}
+
+// Whether `sym` is `prefix` followed by an integer kind's name.
+fn bit_suffix(in names: Names, k: Known, sym: u32, in prefix: Slice[u8]) -> bool {
+    if !names.has_prefix(sym, in prefix) {
+        return false;
+    }
+    let mut rest: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in prefix.len()..names.size(sym) {
+        rest.push(names.byte(sym, i));
+    }
+    let kind = names.lookup(in rest.as_slice());
+    kind != NONE32 && k.is_integer(kind)
+}
+
+fn set_inst(inout p: Program, i: u64, row: InstRow) {
+    let ok = p.insts.try_set(i, row);
+}
+
+fn set_op(inout p: Program, i: u64, x: u64) {
+    let ok = p.ops.try_set(i, x);
+}
+
+// The instruction rows of function `fi`: [first, end).
+fn inst_range(in p: Program, fi: u64) -> (u64, u64) {
+    let f = p.function(fi);
+    if f.bc == 0 {
+        return (0, 0);
+    }
+    let first = p.block(f.b0).i0;
+    let last = p.block(add(f.b0, wrapping_sub(f.bc, 1)));
+    (first, add(last.i0, last.ic))
+}
+
+// `lower_bit_builtin_calls`: every call of a bit builtin the world
+// declares, with its arity of `in` arguments, becomes the `Unary` or
+// `Binary` operator of its name, and the `in` reads of its operands become
+// `sink` reads (the operator releases no loan).
+pub fn lower_bit_builtin_calls(inout p: Program, in names: Names, k: Known, in calls: Calls) {
+    for fi in 0..p.fn_count() {
+        let (first, end) = inst_range(in p, fi);
+        let mut operands: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in first..end {
+            let inst = p.inst(i);
+            if inst.op != Op::Call {
+                continue;
+            }
+            let callee = n32(p.op(inst.a));
+            let arity = bit_arity(in names, k, callee);
+            if arity == 0 || calls.function(callee) == NONE32 {
+                continue;
+            }
+            let nargs = p.op(inc(inst.a));
+            if nargs != arity {
+                continue;
+            }
+            let mut all_in = true;
+            for j in 0..nargs {
+                if p.op(add(add(inst.a, 2), wrapping_mul(j, ARG_WORDS))) != PASS_IN {
+                    all_in = false;
+                }
+            }
+            if !all_in {
+                continue;
+            }
+            let start = p.ops.len();
+            p.put(w(callee), Tag::Name);
+            for j in 0..nargs {
+                let v = p.op(add(add(inst.a, 3), wrapping_mul(j, ARG_WORDS)));
+                p.put(v, Tag::Value);
+                operands.push(n32(v));
+            }
+            let mut row = inst;
+            row.op = if nargs == 1 { Op::Unary } else { Op::Binary };
+            row.a = start;
+            row.n = wrapping_sub(p.ops.len(), start);
+            set_inst(inout p, i, row);
+        }
+        if operands.len() == 0 {
+            continue;
+        }
+        for i in first..end {
+            let inst = p.inst(i);
+            // read: root, path, pass, ...
+            if inst.op == Op::Read
+                && p.op(add(inst.a, 2)) == PASS_IN
+                && holds(in operands, inst.dest)
+            {
+                set_op(inout p, add(inst.a, 2), PASS_SINK);
+            }
+        }
+    }
+}
+
+fn holds(in xs: ChunkSeq[u32], x: u32) -> bool {
+    for i in 0..xs.len() {
+        if u32_at(in xs, i) == x {
+            return true;
+        }
+    }
+    false
+}
+
+// ----- 128-bit tuples ------------------------------------------------------------------------
+
+// `is_wide`: an `i128` or `u128`.
+fn is_wide(in t: Types, k: Known, ty: u32) -> bool {
+    t.kind(ty) == TyKind::Named && k.is_wide(t.name(ty))
+}
+
+// `holds_wide` of src/integer_widths/native.rs: a 128-bit integer, or a
+// tuple that holds one.
+fn holds_wide(in t: Types, k: Known, ty: u32) -> bool {
+    if t.kind(ty) == TyKind::Tuple {
+        for i in 0..t.arity(ty) {
+            if holds_wide(in t, k, t.arg(ty, i)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    is_wide(in t, k, ty)
+}
+
+// `widen`: `declared` with each narrower integer element that `actual`
+// holds as a 128-bit integer replaced by it, or NONE32 when nothing
+// changes.
+fn widen(inout t: Types, k: Known, declared: u32, actual: u32) -> u32 {
+    if t.kind(declared) == TyKind::Tuple
+        && t.kind(actual) == TyKind::Tuple
+        && t.arity(declared) == t.arity(actual)
+    {
+        let mut any = false;
+        let mut elems: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..t.arity(declared) {
+            let d = t.arg(declared, i);
+            let x = widen(inout t, k, d, t.arg(actual, i));
+            if x != NONE32 {
+                any = true;
+                elems.push(x);
+            } else {
+                elems.push(d);
+            }
+        }
+        return if any { t.tuple(in elems) } else { NONE32 };
+    }
+    let integer = t.kind(declared) == TyKind::Lit
+        || (t.kind(declared) == TyKind::Named && k.is_integer(t.name(declared)));
+    if is_wide(in t, k, actual) && !is_wide(in t, k, declared) && integer {
+        actual
+    } else {
+        NONE32
+    }
+}
+
+// One function's value and local types, read from its header and written
+// back by `put_header`.
+struct Typing {
+    // value id -> type, NONE32 when the value has none
+    values: ChunkSeq[u32],
+    // (name, type) in header order
+    local_names: ChunkSeq[u32],
+    local_types: ChunkSeq[u32],
+    // ops[ha..values_at] is the header up to the value count word
+    values_at: u64,
+}
+
+// Where a parameter's words end, from its first word.
+fn param_end(in p: Program, at: u64) -> u64 {
+    // name, pass, k, k paths, type, start, end
+    let k = p.op(add(at, 2));
+    add(add(at, 3), add(k, 3))
+}
+
+fn read_typing(in p: Program, f: FnRow) -> Typing {
+    let mut at = f.ha;
+    let np = p.op(at);
+    at = inc(at);
+    for i in 0..np {
+        at = param_end(in p, at);
+    }
+    // result, effects
+    at = add(at, 2);
+    let nb = p.op(at);
+    at = add(inc(at), wrapping_mul(nb, 2));
+    let nc = p.op(at);
+    at = add(inc(at), nc);
+    let values_at = at;
+    let nv = p.op(at);
+    at = inc(at);
+    let mut values: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..nv {
+        let v = p.op(at);
+        let ty = n32(p.op(inc(at)));
+        loop {
+            if values.len() > v {
+                break;
+            }
+            values.push(NONE32);
+        }
+        let ok = values.try_set(v, ty);
+        at = add(at, 2);
+    }
+    let nl = p.op(at);
+    at = inc(at);
+    let mut local_names: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut local_types: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..nl {
+        local_names.push(n32(p.op(at)));
+        local_types.push(n32(p.op(inc(at))));
+        at = add(at, 2);
+    }
+    Typing {
+        values: values,
+        local_names: local_names,
+        local_types: local_types,
+        values_at: values_at
+    }
+}
+
+fn value_type(in ty: Typing, v: u64) -> u32 {
+    match ty.values.try_get(v) {
+        Option::Some(x) => x,
+        Option::None => NONE32,
+    }
+}
+
+fn set_value_type(inout ty: Typing, v: u64, t: u32) {
+    loop {
+        if ty.values.len() > v {
+            break;
+        }
+        ty.values.push(NONE32);
+    }
+    let ok = ty.values.try_set(v, t);
+}
+
+// The index of local `name`, or the local count.
+fn local_index(in ty: Typing, name: u32) -> u64 {
+    for i in 0..ty.local_names.len() {
+        if u32_at(in ty.local_names, i) == name {
+            return i;
+        }
+    }
+    ty.local_names.len()
+}
+
+// A fresh header range for function `fi` with `ty`'s values and locals.
+fn put_header(inout p: Program, fi: u64, in ty: Typing) {
+    let f = p.function(fi);
+    let start = p.ops.len();
+    for i in f.ha..ty.values_at {
+        let x = p.op(i);
+        let tag = p.tag(i);
+        p.put(x, tag);
+    }
+    let mut nv: u64 = 0;
+    for v in 0..ty.values.len() {
+        if u32_at(in ty.values, v) != NONE32 {
+            nv = inc(nv);
+        }
+    }
+    p.put(nv, Tag::Raw);
+    for v in 0..ty.values.len() {
+        let t = u32_at(in ty.values, v);
+        if t != NONE32 {
+            p.put(v, Tag::Value);
+            p.put(w(t), Tag::Type);
+        }
+    }
+    p.put(ty.local_names.len(), Tag::Raw);
+    for i in 0..ty.local_names.len() {
+        p.put(w(u32_at(in ty.local_names, i)), Tag::Name);
+        p.put(w(u32_at(in ty.local_types, i)), Tag::Type);
+    }
+    let mut row = f;
+    row.ha = start;
+    row.hn = wrapping_sub(p.ops.len(), start);
+    let ok = p.fns.try_set(fi, row);
+}
+
+// Where the pattern starting at `at` ends.
+fn pattern_end(in p: Program, at: u64) -> u64 {
+    let kind = p.op(at);
+    let body = add(at, PAT_HEAD);
+    if kind == Pat::Bind {
+        inc(body)
+    } else if kind == Pat::Literal {
+        add(body, LIT_WORDS)
+    } else if kind == Pat::Tuple {
+        let n = p.op(body);
+        let mut q = inc(body);
+        for i in 0..n {
+            q = pattern_end(in p, q);
+        }
+        q
+    } else if kind == Pat::Constructor {
+        // name, named, n, n x (field, pattern)
+        let n = p.op(add(body, 2));
+        let mut q = add(body, 3);
+        for i in 0..n {
+            q = pattern_end(in p, inc(q));
+        }
+        q
+    } else {
+        body
+    }
+}
+
+// `widen_pattern`: widen the locals the pattern at `at` binds from the
+// bound value's `actual` type; whether any changed.
+fn widen_pattern(
+    inout t: Types,
+    k: Known,
+    in p: Program,
+    inout ty: Typing,
+    at: u64,
+    actual: u32
+) -> bool {
+    let kind = p.op(at);
+    let body = add(at, PAT_HEAD);
+    if kind == Pat::Bind {
+        let name = n32(p.op(body));
+        let li = local_index(in ty, name);
+        if li == ty.local_names.len() {
+            return false;
+        }
+        let x = widen(inout t, k, u32_at(in ty.local_types, li), actual);
+        if x == NONE32 {
+            return false;
+        }
+        let ok = ty.local_types.try_set(li, x);
+        return true;
+    }
+    if kind == Pat::Tuple && actual != NONE32 && t.kind(actual) == TyKind::Tuple {
+        let n = p.op(body);
+        if n != t.arity(actual) {
+            return false;
+        }
+        let mut any = false;
+        let mut q = inc(body);
+        for i in 0..n {
+            if widen_pattern(inout t, k, in p, inout ty, q, t.arg(actual, i)) {
+                any = true;
+            }
+            q = pattern_end(in p, q);
+        }
+        return any;
+    }
+    false
+}
+
+// `refine_wide_tuples`: give every tuple that holds a 128-bit element its
+// 128-bit element type, and the locals and block parameters it flows into,
+// to a fixed point.
+pub fn refine_wide_tuples(inout p: Program, inout t: Types, k: Known) {
+    for fi in 0..p.fn_count() {
+        refine_function(inout p, inout t, k, fi);
+    }
+}
+
+fn refine_function(inout p: Program, inout t: Types, k: Known, fi: u64) {
+    let f = p.function(fi);
+    let mut ty = read_typing(in p, f);
+    let mut wide = false;
+    for v in 0..ty.values.len() {
+        let x = u32_at(in ty.values, v);
+        if x != NONE32 && holds_wide(in t, k, x) {
+            wide = true;
+        }
+    }
+    for i in 0..ty.local_types.len() {
+        if holds_wide(in t, k, u32_at(in ty.local_types, i)) {
+            wide = true;
+        }
+    }
+    if !wide {
+        return;
+    }
+    let mut any = false;
+    loop {
+        let mut changed = false;
+        for bi in f.b0..add(f.b0, f.bc) {
+            let b = p.block(bi);
+            for i in b.i0..add(b.i0, b.ic) {
+                let inst = p.inst(i);
+                if inst.op == Op::Bind {
+                    let actual = value_type(in ty, p.op(inst.a));
+                    if actual != NONE32
+                        && widen_pattern(inout t, k, in p, inout ty, inc(inst.a), actual)
+                    {
+                        changed = true;
+                    }
+                    continue;
+                }
+                // read: root, path, pass, projection count
+                if inst.op == Op::Read && p.op(inc(inst.a)) == 0 && p.op(add(inst.a, 3)) == 0 {
+                    let li = local_index(in ty, n32(p.op(inst.a)));
+                    if li < ty.local_names.len() {
+                        let x = widen(inout t, k, u32_at(in ty.local_types, li), inst.ty);
+                        if x != NONE32 {
+                            let ok = ty.local_types.try_set(li, x);
+                            changed = true;
+                        }
+                    }
+                    continue;
+                }
+                if inst.op != Op::Tuple {
+                    continue;
+                }
+                let n = p.op(inst.a);
+                let mut elems: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                for j in 0..n {
+                    let x = value_type(in ty, p.op(add(inc(inst.a), j)));
+                    elems.push(if x == NONE32 { t.infer } else { x });
+                }
+                let actual = t.tuple(in elems);
+                let x = widen(inout t, k, inst.ty, actual);
+                if x != NONE32 {
+                    let mut row = inst;
+                    row.ty = x;
+                    set_inst(inout p, i, row);
+                    set_value_type(inout ty, w(inst.dest), x);
+                    changed = true;
+                }
+            }
+            if b.term == Term::Jump {
+                let target = p.block(add(f.b0, p.op(b.ta)));
+                let nargs = p.op(inc(b.ta));
+                // block header: entry, ni, ni x (block, token), outgoing, np, params
+                let ni = p.op(inc(target.ha));
+                let params_at = add(target.ha, add(4, wrapping_mul(ni, 2)));
+                let np = p.op(wrapping_sub(params_at, 1));
+                let n = if np < nargs { np } else { nargs };
+                for j in 0..n {
+                    let param = p.op(add(params_at, j));
+                    let arg = p.op(add(add(b.ta, 2), j));
+                    let declared = value_type(in ty, param);
+                    let actual = value_type(in ty, arg);
+                    if declared == NONE32 || actual == NONE32 {
+                        continue;
+                    }
+                    let x = widen(inout t, k, declared, actual);
+                    if x != NONE32 {
+                        set_value_type(inout ty, param, x);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+        any = true;
+    }
+    if any {
+        put_header(inout p, fi, in ty);
+    }
+}

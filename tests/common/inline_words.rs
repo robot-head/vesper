@@ -629,10 +629,14 @@ impl<'w> Enc<'w> {
         if !f.external_captures.is_empty() {
             flags |= W_CAPTURES;
         }
+        // `ir_inline::inlinable`: element views stay borrows wherever
+        // they are spliced, so they do not count.
+        let views = vesper::ir_inline::view_scrutinees(f);
         if vesper::fip::borrowed_scrutinees(f).iter().any(|v| {
-            f.values
-                .get(v)
-                .is_some_and(|t| w.mode(t, &f.bounds) != Mode::Copy)
+            !views.contains(v)
+                && f.values
+                    .get(v)
+                    .is_some_and(|t| w.mode(t, &f.bounds) != Mode::Copy)
         }) {
             flags |= W_BORROWED_MATCH;
         }

@@ -106,10 +106,13 @@ const SEQ_SAME: u64 = 2;
 const SEQ_AS_BYTES: u64 = 3;
 const SEQ_BYTE_AT: u64 = 4;
 const SEQ_GET: u64 = 5;
+// A slice view's header word (`seq_word`): read-only memory when the
+// view is a parameter read once at entry.
+const SEQ_VIEW_WORD: u64 = 6;
 // `try_byte_at` and a slice's `try_get` (#2654): their `Option` built
 // by `seq_option`.
-const SEQ_TRY_BYTE_AT: u64 = 6;
-const SEQ_TRY_GET: u64 = 7;
+const SEQ_TRY_BYTE_AT: u64 = 16;
+const SEQ_TRY_GET: u64 = 17;
 // The word count of an `Option` kept as words (`seq_option`'s scalar
 // form): tag and payload.
 const OPTION_WORDS: u64 = 2;
@@ -2715,7 +2718,7 @@ impl Gen {
             return true;
         }
         if slice && n == 1 && label == ops_s.seq_slice_len {
-            extra.push(SEQ_WORD);
+            extra.push(SEQ_VIEW_WORD);
             extra.push(SLICE_LEN_OFFSET);
             return true;
         }
