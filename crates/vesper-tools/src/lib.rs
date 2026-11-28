@@ -22,11 +22,13 @@ pub mod attest;
 pub mod audit;
 pub mod bench;
 pub mod cas;
+pub mod compiler;
 pub mod fuzz;
 pub mod grammar;
 pub mod highlight;
 pub mod json;
 pub mod migrate;
+pub mod proof_gate;
 pub mod publish;
 pub mod replay;
 pub mod resolve;
@@ -81,12 +83,14 @@ mod compiler_free {
         ("audit.rs", include_str!("audit.rs"), false),
         ("bench.rs", include_str!("bench.rs"), true),
         ("cas.rs", include_str!("cas.rs"), false),
+        ("compiler.rs", include_str!("compiler.rs"), false),
         ("fuzz.rs", include_str!("fuzz.rs"), true),
         ("grammar.rs", include_str!("grammar.rs"), false),
         ("highlight.rs", include_str!("highlight.rs"), true),
         ("json.rs", include_str!("json.rs"), false),
         ("migrate.rs", include_str!("migrate.rs"), false),
-        ("publish.rs", include_str!("publish.rs"), true),
+        ("proof_gate.rs", include_str!("proof_gate.rs"), false),
+        ("publish.rs", include_str!("publish.rs"), false),
         ("replay.rs", include_str!("replay.rs"), false),
         ("resolve.rs", include_str!("resolve.rs"), false),
         ("sbom.rs", include_str!("sbom.rs"), false),
@@ -94,7 +98,7 @@ mod compiler_free {
         ("shot.rs", include_str!("shot.rs"), true),
         ("simd.rs", include_str!("simd.rs"), false),
         ("tee.rs", include_str!("tee.rs"), false),
-        ("top.rs", include_str!("top.rs"), true),
+        ("top.rs", include_str!("top.rs"), false),
         ("traceparent.rs", include_str!("traceparent.rs"), false),
     ];
 

@@ -7,6 +7,7 @@ mod lib_commands;
 mod lint_commands;
 mod package_graph;
 mod tool_commands;
+mod tool_facts;
 mod verify_commands;
 mod vsys_commands;
 use std::{
@@ -52,6 +53,7 @@ const COMPILER_COMMANDS: &[&str] = &[
     "proof-audit",
     "run",
     "test",
+    tool_facts::COMMAND,
     "verify",
 ];
 
@@ -127,6 +129,9 @@ fn cli() -> Result<(), String> {
     }
     if command == "proof-audit" {
         return proof_commands::run(args.collect());
+    }
+    if command == tool_facts::COMMAND {
+        return tool_facts::run(args.collect());
     }
     if command == "graph" {
         return package_graph::run(args.collect());
