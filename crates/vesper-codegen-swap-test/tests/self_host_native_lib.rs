@@ -296,13 +296,21 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
             r.refused = Some(format!("{function}: a slice parameter read at entry"));
             return;
         }
+        // @vesper/native-lib gives no sequence runtime words, so a body
+        // that frees drop slots stays with the walk (#2653).
+        if codegen_swap::body::defines_runtime(args) {
+            r.refused = Some(format!("{function}: frees drop slots"));
+            return;
+        }
         // @vesper/native-lib emits no handler (#2657), so it lists only
         // the body's own callees.
         if codegen_swap::body::nested_callees(args).is_some_and(|n| !n.is_empty()) {
             r.refused = Some(format!("{function}: a handler's nested calls"));
             return;
         }
-        let homes = homes.len() + 1 + pointers.len() + 1;
+        // The result homes, parameter addresses, entry views and runtime
+        // words, each after its count.
+        let homes = homes.len() + 1 + pointers.len() + 1 + 1;
         let callees = callees.to_vec();
         if module_has_data(&*lent.module) {
             r.refused = Some("the module declares data".into());

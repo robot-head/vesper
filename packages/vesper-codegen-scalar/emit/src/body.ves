@@ -52,8 +52,11 @@ use @vesper/cranelift::{
     ins_stack_addr, ins_store, module_pointer_type, ins_imul_imm, ins_uload8, ins_uload16,
     ins_uload32, mem_can_move, mem_readonly, mem_trusted, data_align, data_define, data_new,
     declare_anonymous_data, define_data, import_data, ins_symbol_value, Slot, ins_istore8,
-    ins_istore16, ins_istore32
+    ins_istore16, ins_istore32, call_conv_default, declare_function, linkage_import, linkage_local,
+    module_freestanding, module_get_function, module_jit, module_kind, sig_new, sig_param,
+    sig_return
 };
+use @vesper/codegen-seq-emit::{RUNTIME_ARGS, define_seq_runtime};
 use super::{
     BODY_ERROR, DECLINED, HANDLED, coerce, emit_overflow_test, kind_max_imm, kind_min_imm,
     kind_unsigned, narrow_type, operand, planned, temp
@@ -181,6 +184,14 @@ const HANDLER_BASE: u64 = 4294967296;
 const KIND_MASK: u64 = 65535;
 const NESTED_REGISTER: u64 = 65536;
 const HANDLER_HOME: u64 = 131072;
+// A sequence drop slot (`fip::seq_drop_plan`, #2653): freed when it is
+// bound again and at each return.
+const DROP_SLOT: u64 = 262144;
+// A read of a drop slot moved out (`seq_drop_moved`).
+const INST_READ_MOVED: u64 = 82;
+// `emit_drop_glue`'s sequence free (src/seq/native.rs).
+const SEQ_FREE: Str = "vesper_seq_free";
+const SEQ_FAULT: Str = "vesper_seq_fault";
 // `dispatch_trap`'s code at the end of a handler's return dispatch.
 const DISPATCH_TRAP: u32 = 4;
 // No slot.
@@ -943,6 +954,11 @@ struct Body {
     // (`Codegen::invariant_headers`).
     entry_reads: ChunkSeq[u32],
     invariant: ChunkSeq[u32],
+    // The sequence drop slots, by local index, in name order.
+    drops: ChunkSeq[u64],
+    // The sequence runtime's argument words, empty when the request gave
+    // none (`emit_body_words`).
+    runtime: ChunkSeq[u64],
     // Those views as the request lists them: each one's parameter index,
     // read count and reads.
     views: ChunkSeq[u64],
@@ -980,6 +996,54 @@ struct Body {
 }
 
 impl Body {
+    fn is_drop_slot(in self, local: u64) -> bool {
+        for k in 0..self.drops.len() {
+            if at64(in self.drops, k) == local {
+                return true;
+            }
+        }
+        false
+    }
+
+    // `seq_drop_free` of sequence slot `local`: unless it is empty (0),
+    // `emit_drop_glue` of its handle, which tests it again and calls
+    // `vesper_seq_free`.
+    fn drop_free(inout self, inout b: Builder, inout m: Module, local: u64) eff [Ffi[Cranelift]] {
+        // `seq_ensure_runtime_if_hosted`: the object's runtime, defined
+        // where the walk defines it, before its first free.
+        if module_kind(in m) != module_jit() && !has_seq_runtime(inout m) {
+            let _ = define_seq_runtime(inout m, in self.runtime.as_slice());
+        }
+        let value = self.use_local(inout b, local);
+        let present = ins_icmp_imm(inout b, cc_ne(), value, 0);
+        let free = create_block(inout b);
+        let done = create_block(inout b);
+        ins_brif0(inout b, present, free, done);
+        switch_to_block(inout b, free);
+        let held = ins_icmp_imm(inout b, cc_ne(), value, 0);
+        let drop = create_block(inout b);
+        let dropped = create_block(inout b);
+        ins_brif0(inout b, held, drop, dropped);
+        switch_to_block(inout b, drop);
+        seq_runtime_call(inout b, inout m, in SEQ_FREE, value);
+        let no_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        ins_jump(inout b, dropped, in no_args.as_slice());
+        switch_to_block(inout b, dropped);
+        ins_jump(inout b, done, in no_args.as_slice());
+        switch_to_block(inout b, done);
+    }
+
+    // `seq_drop_exit` of the function's own graph: every drop slot freed,
+    // in name order.
+    fn drop_exit(inout self, inout b: Builder, inout m: Module) eff [Ffi[Cranelift]] {
+        if self.join != invalid() {
+            return;
+        }
+        for k in 0..self.drops.len() {
+            self.drop_free(inout b, inout m, at64(in self.drops, k));
+        }
+    }
+
     fn is_invariant(in self, v: Value) -> bool {
         for k in 0..self.invariant.len() {
             if at32(in self.invariant, k) == v.id {
@@ -1928,8 +1992,22 @@ impl Body {
                 let raw = self.use_local(inout b, local);
                 body_coerce(inout b, raw, read, self.optimize)
             }
+        } else if kind == INST_READ_MOVED {
+            // A drop slot moved out: the read, then the slot left empty
+            // (`seq_drop_moved`).
+            let local = w.next();
+            let read = w.next();
+            let raw = self.use_local(inout b, local);
+            let v = body_coerce(inout b, raw, read, self.optimize);
+            let zero = ins_iconst(inout b, ty_i64(), 0);
+            self.def_local(inout b, local, zero);
+            v
         } else if kind == INST_BIND {
             let local = w.next();
+            // Binding a drop slot frees what it held (`seq_drop_rebind`).
+            if local != NO_LOCAL && self.is_drop_slot(local) {
+                self.drop_free(inout b, inout m, local);
+            }
             if local != NO_LOCAL {
                 self.def_local(inout b, local, x);
             }
@@ -2777,7 +2855,7 @@ impl Body {
                     return false;
                 }
             }
-            if !self.terminator(inout b, inout w) {
+            if !self.terminator(inout b, inout m, inout w) {
                 return false;
             }
         }
@@ -3139,7 +3217,12 @@ impl Body {
         true
     }
 
-    fn terminator(inout self, inout b: Builder, inout w: Words) -> bool eff [Ffi[Cranelift]] {
+    fn terminator(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words
+    ) -> bool eff [Ffi[Cranelift]] {
         let code = w.next();
         let mut ops: ChunkSeq[u64] = ChunkSeq::new[u64]();
         if code == TERM_RETURN {
@@ -3147,6 +3230,7 @@ impl Body {
             let default = w.next();
             ops.push(i);
             self.read_operands(inout b, in ops);
+            self.drop_exit(inout b, inout m);
             let v = if default != 0 {
                 zero_of(inout b, default)
             } else {
@@ -3169,6 +3253,7 @@ impl Body {
             let size = w.next();
             ops.push(i);
             self.read_operands(inout b, in ops);
+            self.drop_exit(inout b, inout m);
             if self.sret == invalid() {
                 return false;
             }
@@ -3209,6 +3294,7 @@ impl Body {
             let nw = w.next();
             ops.push(i);
             self.read_operands(inout b, in ops);
+            self.drop_exit(inout b, inout m);
             let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
             for k in 0..nw {
                 let index = w.next();
@@ -3393,6 +3479,20 @@ pub fn emit_body_words(
             views.push(w.next());
         }
     }
+    // The sequence runtime's argument words (`codegen_swap::seq::runtime_args`,
+    // #2653), or none: what a drop slot's free defines into an object
+    // that has no runtime yet.
+    if count < wrapping_add(w.at, 1) {
+        return BODY_ERROR;
+    }
+    let nruntime = w.next();
+    if (nruntime != 0 && nruntime != RUNTIME_ARGS) || count < wrapping_add(w.at, nruntime) {
+        return BODY_ERROR;
+    }
+    let mut runtime: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..nruntime {
+        runtime.push(w.next());
+    }
     if count < wrapping_add(w.at, 3) {
         return BODY_ERROR;
     }
@@ -3451,6 +3551,8 @@ pub fn emit_body_words(
         result_words: result_words,
         entry_reads: ChunkSeq::new[u32](),
         invariant: ChunkSeq::new[u32](),
+        drops: ChunkSeq::new[u64](),
+        runtime: ChunkSeq::new[u64](),
         views: ChunkSeq::new[u64](),
         nviews: 0,
         join: invalid(),
@@ -3472,6 +3574,18 @@ pub fn emit_body_words(
         hcap_slots: ChunkSeq::new[u64](),
         discard: invalid(),
     };
+    // A drop slot's free calls the sequence runtime: the JIT's, or the
+    // object's own, which the first free defines when the request gives
+    // its words. Without them, or in a freestanding image, the walk frees.
+    if has_drop_slot(in w) && module_kind(in m) != module_jit() {
+        if module_kind(in m) == module_freestanding() {
+            return DECLINED;
+        }
+        if nruntime == 0 && !has_seq_runtime(inout m) {
+            return DECLINED;
+        }
+    }
+    s.runtime = runtime;
     // The graph's blocks: the entry is the current block.
     s.blocks.push(current_block(inout b).id);
     for k in 1..nb {
@@ -3483,6 +3597,9 @@ pub fn emit_body_words(
         let mut entry = w.next();
         let kind_word = w.next();
         s.kinds.push(kind_word & KIND_MASK);
+        if (kind_word & DROP_SLOT) != 0 {
+            s.drops.push(k);
+        }
         let mut address = invalid();
         // A local a handler names keeps its slot on the optimize path too
         // (#2657).
@@ -3523,4 +3640,48 @@ pub fn emit_body_words(
         return BODY_ERROR;
     }
     HANDLED
+}
+
+// Whether the locals ahead in `w` (`[n, n (entry, kind word)]`) name a
+// drop slot, read without consuming them.
+fn has_drop_slot(in w: Words) -> bool {
+    let nl = w.arg(w.at);
+    for k in 0..nl {
+        let kind_word = w.arg(wrapping_add(w.at, wrapping_add(wrapping_mul(k, 2), 2)));
+        if (kind_word & DROP_SLOT) != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+// `seq::aot_runtime::defined`: the runtime is in the module once its fault
+// function is.
+fn has_seq_runtime(inout m: Module) -> bool eff [Ffi[Cranelift]] {
+    match module_get_function(inout m, in SEQ_FAULT.as_bytes()) {
+        Option::Some(_) => true,
+        Option::None => false,
+    }
+}
+
+// `glue_runtime_call` of the sequence runtime's `name` on one word: an
+// import on the JIT, else the module's own runtime (defined beside the
+// function), taking and returning `i64` words.
+fn seq_runtime_call(inout b: Builder, inout m: Module, in name: Str, arg: Value) eff [
+    Ffi[Cranelift]
+] {
+    let jit = module_kind(in m) == module_jit();
+    let sig = sig_new(inout m, call_conv_default());
+    sig_param(inout m, sig, ty_i64());
+    sig_return(inout m, sig, ty_i64());
+    let linkage = if jit {
+        linkage_import()
+    } else {
+        linkage_local()
+    };
+    let id = declare_function(inout m, in name.as_bytes(), linkage, sig);
+    let callee = import_function(inout b, inout m, id);
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    args.push(arg.id);
+    let _ = ins_call(inout b, callee, in args.as_slice());
 }

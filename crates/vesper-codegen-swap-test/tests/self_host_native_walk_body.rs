@@ -2839,3 +2839,89 @@ fn vesper_chunk_seq_bodies_match() {
 /// `CHUNK_SEQS`'s functions emitted from Vesper, both settings, both
 /// comparisons of a JIT-running host.
 const MIN_CHUNK_SEQ_EMITTED: u64 = 44;
+
+/// Sequence drop slots (#2653): `ChunkSeq` locals bound from calls, freed
+/// when bound again and at each return, left empty when moved out.
+const SEQ_DROPS: &str = "
+fn fresh(n: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    s.push(n);
+    s.push(wrapping_add(n, 1));
+    s
+}
+fn sized(n: u64) -> u64 {
+    let s = fresh(n);
+    s.len()
+}
+fn first_of(n: u64) -> u64 eff [Fail[RuntimeError]] {
+    let s = fresh(n);
+    s[0]
+}
+fn longer(n: u64, k: u64) -> u64 {
+    let a = fresh(n);
+    let b = fresh(k);
+    if n < k {
+        wrapping_add(a.len(), b.len())
+    } else {
+        a.len()
+    }
+}
+fn handed(n: u64) -> ChunkSeq[u64] {
+    let s = fresh(n);
+    let t = s;
+    t
+}
+fn rebound(n: u64) -> u64 {
+    let mut s = fresh(n);
+    let first = s.len();
+    s = fresh(wrapping_add(n, 2));
+    wrapping_add(first, s.len())
+}
+fn unused(n: u64) -> u64 {
+    let s: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    wrapping_mul(n, 3)
+}
+fn main() -> i64 {
+    let h = handed(4);
+    let total = sized(3) ^ longer(1, 2) ^ longer(5, 2) ^ rebound(7) ^ unused(9) ^ h.len();
+    handle Fail[RuntimeError] in {
+        wrapping_i64(total ^ first_of(11))
+    } with {
+        return value => value,
+        raise(error, resume) => 4242,
+    }
+}
+";
+
+#[test]
+fn vesper_seq_drop_slots_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SEQ_DROPS);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("seq_drops", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "seq_drops: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() {
+            MIN_SEQ_DROPS_EMITTED / 2
+        } else {
+            MIN_SEQ_DROPS_EMITTED
+        };
+        assert!(
+            emitted >= min_emitted,
+            "only {emitted} drop slot functions came from Vesper (expected {min_emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// `SEQ_DROPS`'s functions emitted from Vesper, both settings, both
+/// comparisons of a JIT-running host.
+const MIN_SEQ_DROPS_EMITTED: u64 = 28;
