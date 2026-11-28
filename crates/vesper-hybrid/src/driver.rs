@@ -386,7 +386,7 @@ enum Step {
     WorldBegin = 81,
 }
 
-const STEPS: [Step; 35] = [
+const STEPS: [Step; 34] = [
     Step::Load,
     Step::EbpfBuild,
     Step::Parse,
