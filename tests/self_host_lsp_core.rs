@@ -3234,7 +3234,223 @@ fn command_cases() -> Vec<(vesper::lsp::PortCheck, String, Option<String>)> {
         proof(Some(proof_call(&m)));
     }
     request_cases(&mut cases);
+    note_cases(&mut cases);
     cases
+}
+
+/// The `PortCheck::Note` rows: every lifecycle state against the
+/// notifications and parameter shapes the gate tells apart, then the
+/// `didOpen`, `didChange` and `didClose` parameter readings.
+fn note_cases(cases: &mut Vec<(vesper::lsp::PortCheck, String, Option<String>)>) {
+    use vesper::lsp::PortCheck::Note;
+    use vesper::lsp::PortState::{Exited, Running, Shutdown, Uninitialized};
+    let open = |doc: &str| format!("{{\"textDocument\":{doc}}}");
+    let good_open = open("{\"uri\":\"file:///a.ves\",\"version\":1,\"text\":\"fn main() {}\"}");
+    let methods = [
+        "exit",
+        "initialized",
+        "textDocument/didOpen",
+        "textDocument/didChange",
+        "textDocument/didClose",
+        "textDocument/didSave",
+        "$/cancelRequest",
+        "$/setTrace",
+        "",
+    ];
+    let shapes = [
+        None,
+        Some("null".to_owned()),
+        Some("{}".into()),
+        Some("[]".into()),
+        Some(good_open.clone()),
+        Some(nested(70, true, "0")),
+    ];
+    for state in [Uninitialized, Running, Shutdown, Exited] {
+        for method in methods {
+            for p in &shapes {
+                cases.push((Note { state }, method.to_owned(), p.clone()));
+            }
+        }
+    }
+    let running = Note { state: Running };
+    let mut push = |method: &str, p: String| {
+        cases.push((running, method.to_owned(), Some(p)));
+    };
+    // didOpen.
+    let mut docs: Vec<String> = vec![
+        "1".into(),
+        "null".into(),
+        "[]".into(),
+        "{}".into(),
+        "{\"version\":1,\"text\":\"\"}".into(),
+        "{\"uri\":1,\"version\":1,\"text\":\"\"}".into(),
+        "{\"uri\":\"file:///a.ves\",\"text\":\"\"}".into(),
+        "{\"uri\":\"file:///a.ves\",\"version\":1}".into(),
+        "{\"uri\":\"file:///a.ves\",\"version\":1,\"text\":7}".into(),
+        "{\"uri\":\"file:///a.ves\",\"version\":1,\"text\":null}".into(),
+        "{\"version\":\"x\",\"text\":1}".into(),
+        "{\"uri\":\"file:///a.ves\",\"version\":1,\"text\":\"a\\nb\\u00e9\\ud83d\\ude00\\\"\"}"
+            .into(),
+        "{\"\\u0075ri\":\"file:///\\u00fc.ves\",\"version\":1,\"text\":\"x\",\"extra\":[1]}".into(),
+    ];
+    for v in [
+        "0",
+        "-0",
+        "-1",
+        "1.0",
+        "1e2",
+        "2147483647",
+        "2147483648",
+        "-2147483648",
+        "-2147483649",
+        "\"1\"",
+        "null",
+        "true",
+    ] {
+        docs.push(format!(
+            "{{\"uri\":\"file:///a.ves\",\"version\":{v},\"text\":\"t\"}}"
+        ));
+    }
+    for uri in [
+        "file:///w/Loom.toml",
+        "Loom.toml",
+        "/Loom.toml",
+        "file:///w/Loom.toml/",
+        "file:///w/loom.toml",
+        "file:///w/Loom.tomlx",
+        "file:///w/xLoom.toml",
+        "untitled:Loom.toml",
+        "a/b/Loom.toml",
+        "",
+        "/",
+    ] {
+        docs.push(format!(
+            "{{\"uri\":\"{uri}\",\"version\":3,\"text\":\"[package]\"}}"
+        ));
+    }
+    docs.push(format!(
+        "{{\"uri\":\"file:///big.ves\",\"version\":1,\"text\":\"{}\"}}",
+        "x".repeat(200_000)
+    ));
+    for d in &docs {
+        push("textDocument/didOpen", open(d));
+        push("textDocument/didClose", open(d));
+    }
+    push(
+        "textDocument/didOpen",
+        "{\"textDocument\":{\"uri\":\"a\",\"version\":1,\"text\":\"\"},\"x\":1}".into(),
+    );
+    push(
+        "textDocument/didClose",
+        "{\"uri\":\"file:///a.ves\"}".into(),
+    );
+    // didChange.
+    let doc = "\"textDocument\":{\"uri\":\"file:///a.ves\",\"version\":2}";
+    let change = |changes: &str| format!("{{{doc},\"contentChanges\":{changes}}}");
+    for d in [
+        "1",
+        "{}",
+        "{\"uri\":\"file:///a.ves\"}",
+        "{\"uri\":\"file:///w/Loom.toml\",\"version\":-5}",
+    ] {
+        push(
+            "textDocument/didChange",
+            format!("{{\"textDocument\":{d},\"contentChanges\":[]}}"),
+        );
+    }
+    push("textDocument/didChange", format!("{{{doc}}}"));
+    push("textDocument/didChange", "{\"contentChanges\":[]}".into());
+    for c in ["null", "{}", "1", "\"x\""] {
+        push("textDocument/didChange", change(c));
+    }
+    let whole = "{\"text\":\"all\"}";
+    for n in [0, 1, 63, 64, 65, 100] {
+        push(
+            "textDocument/didChange",
+            change(&format!("[{}]", vec![whole; n].join(","))),
+        );
+    }
+    push(
+        "textDocument/didChange",
+        change(&format!("[{},1]", vec![whole; 64].join(","))),
+    );
+    let pos = |l: &str, c: &str| format!("{{\"line\":{l},\"character\":{c}}}");
+    let good = pos("1", "2");
+    let ranged = |range: &str, rest: &str| format!("{{\"range\":{range}{rest},\"text\":\"r\"}}");
+    let mut items: Vec<String> = vec![
+        "1".into(),
+        "[]".into(),
+        "{}".into(),
+        "{\"text\":1}".into(),
+        "{\"text\":null}".into(),
+        "{\"range\":null,\"text\":\"n\"}".into(),
+        "{\"range\":null,\"rangeLength\":3,\"text\":\"n\"}".into(),
+        "{\"range\":1,\"text\":\"n\"}".into(),
+        "{\"range\":[],\"text\":\"n\"}".into(),
+        "{\"range\":{},\"text\":\"n\"}".into(),
+        format!("{{\"range\":{{\"start\":{good}}},\"text\":\"n\"}}"),
+        format!("{{\"range\":{{\"end\":{good}}},\"text\":\"n\"}}"),
+        format!("{{\"range\":{{\"start\":1,\"end\":{good}}},\"text\":\"n\"}}"),
+        ranged(
+            &format!("{{\"start\":{good},\"end\":{}}}", pos("3", "4")),
+            "",
+        ),
+        ranged(&format!("{{\"start\":{good},\"end\":{good}}}"), ""),
+        format!("{{\"range\":{{\"start\":{good},\"end\":{good}}}}}"),
+        "{\"text\":\"a\\u0000b\\t\"}".into(),
+    ];
+    for v in [
+        "0",
+        "-0",
+        "-1",
+        "1.0",
+        "1e2",
+        "4294967295",
+        "4294967296",
+        "18446744073709551616",
+        "\"1\"",
+        "null",
+    ] {
+        items.push(ranged(
+            &format!("{{\"start\":{},\"end\":{good}}}", pos(v, "0")),
+            "",
+        ));
+        items.push(ranged(
+            &format!("{{\"start\":{good},\"end\":{}}}", pos("0", v)),
+            "",
+        ));
+        items.push(ranged(
+            &format!("{{\"start\":{good},\"end\":{good}}}"),
+            &format!(",\"rangeLength\":{v}"),
+        ));
+        items.push(format!("{{\"rangeLength\":{v},\"text\":\"x\"}}"));
+    }
+    items.push(ranged(
+        &format!("{{\"start\":{{\"line\":1}},\"end\":{good}}}"),
+        "",
+    ));
+    items.push(ranged(
+        &format!("{{\"start\":{{\"character\":1}},\"end\":{good}}}"),
+        "",
+    ));
+    items.push(ranged(
+        &format!("{{\"start\":{{\"line\":-1}},\"end\":{good}}}"),
+        ",\"rangeLength\":-1",
+    ));
+    for item in &items {
+        push("textDocument/didChange", change(&format!("[{item}]")));
+        push(
+            "textDocument/didChange",
+            change(&format!("[{whole},{item},{whole}]")),
+        );
+    }
+    push(
+        "textDocument/didChange",
+        format!(
+            "{{\"textDocument\":{{\"uri\":\"file:///w/Loom.toml\",\"version\":7}},\"contentChanges\":[{}]}}",
+            items[13]
+        ),
+    );
 }
 
 /// The `PortCheck::Request` rows: every lifecycle state against the
@@ -3424,10 +3640,22 @@ fn request_cases(cases: &mut Vec<(vesper::lsp::PortCheck, String, Option<String>
 }
 
 /// The kind word of a `PortCheck::Request` row: the kind in the low byte,
-/// the state (0 uninitialized, 1 running, 2 shut down) in the next, an
+/// the state (0 uninitialized, 1 running, 2 shut down, 3 exited) in the next, an
 /// auditor bit, a configured-background bit and its milliseconds in the
 /// high half.
 const REQUEST_KIND: u64 = 4;
+/// The kind of a `PortCheck::Note` row (its state in the same byte).
+const NOTE_KIND: u64 = 5;
+
+/// A session state's code in a kind word.
+fn state_code(state: vesper::lsp::PortState) -> u64 {
+    match state {
+        vesper::lsp::PortState::Uninitialized => 0,
+        vesper::lsp::PortState::Running => 1,
+        vesper::lsp::PortState::Shutdown => 2,
+        vesper::lsp::PortState::Exited => 3,
+    }
+}
 const REQUEST_STATE_SHIFT: u64 = 8;
 const REQUEST_AUDITOR_BIT: u64 = 16;
 const REQUEST_BACKGROUND_BIT: u64 = 17;
@@ -3461,18 +3689,14 @@ fn command_checks_input(
             PortCheck::Input => 1,
             PortCheck::Cancel => 2,
             PortCheck::Proof => 3,
+            PortCheck::Note { state } => NOTE_KIND | (state_code(*state) << REQUEST_STATE_SHIFT),
             PortCheck::Request {
                 state,
                 auditor,
                 background_ms,
             } => {
-                let state = match state {
-                    vesper::lsp::PortState::Uninitialized => 0,
-                    vesper::lsp::PortState::Running => 1,
-                    vesper::lsp::PortState::Shutdown => 2,
-                };
                 REQUEST_KIND
-                    | (state << REQUEST_STATE_SHIFT)
+                    | (state_code(*state) << REQUEST_STATE_SHIFT)
                     | (u64::from(*auditor) << REQUEST_AUDITOR_BIT)
                     | background_ms.map_or(0, |ms| {
                         (1 << REQUEST_BACKGROUND_BIT) | (ms << REQUEST_BACKGROUND_MS_SHIFT)
@@ -3587,7 +3811,7 @@ fn commands_speed() {
             std::hint::black_box(entry.words(&input1));
         }));
     }
-    for kind in ["Input", "Cancel", "Proof", "Request"] {
+    for kind in ["Input", "Cancel", "Proof", "Request", "Note"] {
         let sub: Vec<_> = cases
             .iter()
             .filter(|c| format!("{:?}", c.0).starts_with(kind))

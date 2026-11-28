@@ -3,7 +3,9 @@
 // (crates/vesper-lsp/src/lens.rs), the `vesper.proofAudit` argument
 // checks (`proof_command`, src/lsp/session/lens_requests.rs) and the
 // request gate of `Session::request` (`route`: the lifecycle, `initialize`
-// negotiation and its result, `shutdown` and the method check).
+// negotiation and its result, `shutdown` and the method check) and of
+// `Session::notification` (`note_route`: `exit`, the lifecycle and the
+// `didOpen`, `didChange` and `didClose` parameters).
 //
 // Rust walks a `serde_json::Value`, whose objects are `BTreeMap`s, so
 // `validate_input` meets an object's members in key order; the walk here
@@ -59,6 +61,7 @@ const CHECK_INPUT: u64 = 1;
 const CHECK_CANCEL: u64 = 2;
 const CHECK_PROOF: u64 = 3;
 const CHECK_REQUEST: u64 = 4;
+const CHECK_NOTE: u64 = 5;
 
 // A request check's kind word: the kind in the low byte, the session
 // state in the next, an auditor bit, a configured-background bit and its
@@ -68,6 +71,7 @@ const STATE_SHIFT: u64 = 8;
 const STATE_MASK: u64 = 255;
 const STATE_UNINITIALIZED: u64 = 0;
 const STATE_RUNNING: u64 = 1;
+const STATE_SHUTDOWN: u64 = 2;
 const AUDITOR_BIT: u64 = 65536;
 const BACKGROUND_BIT: u64 = 131072;
 const BACKGROUND_MS_SHIFT: u64 = 32;
@@ -77,6 +81,12 @@ const BACKGROUND_MS_SHIFT: u64 = 32;
 // default delay, in milliseconds.
 const MAX_DEBOUNCE_MS: u64 = 60000;
 const DEFAULT_DEBOUNCE_MS: u64 = 150;
+
+// `unsigned`'s bound (`u32::MAX`), `StoreLimits::default().max_changes`
+// and the URI suffix `manifests::is_manifest` looks for.
+const U32_MAX: u64 = 4294967295;
+const MAX_CHANGES: u64 = 64;
+const MANIFEST_SUFFIX: Str = "/Loom.toml";
 
 // Input words: the header, then per open document and per check
 // (`command_checks_input` in tests/self_host_lsp_core.rs).
@@ -133,7 +143,21 @@ pub copy enum Refusal {
     RfNotInitialized,
     RfShutDown,
     RfShutdownParams,
-    RfMethodNotFound
+    RfMethodNotFound,
+    RfMissingTextDocument,
+    RfMissingVersion,
+    RfMissingText,
+    RfMissingContentChanges,
+    RfMissingStart,
+    RfMissingEnd,
+    RfMissingLine,
+    RfMissingCharacter,
+    RfTextString,
+    RfChangesArray,
+    RfTooManyChanges,
+    RfLineU32,
+    RfCharacterU32,
+    RfRangeLengthU32
 }
 
 fn code_of(r: Refusal) -> u64 {
@@ -178,6 +202,20 @@ fn message_of(r: Refusal) -> Str {
         Refusal::RfShutDown => "Server has shut down",
         Refusal::RfShutdownParams => "shutdown takes no parameters",
         Refusal::RfMethodNotFound => "Method not found",
+        Refusal::RfMissingTextDocument => "missing textDocument",
+        Refusal::RfMissingVersion => "missing version",
+        Refusal::RfMissingText => "missing text",
+        Refusal::RfMissingContentChanges => "missing contentChanges",
+        Refusal::RfMissingStart => "missing start",
+        Refusal::RfMissingEnd => "missing end",
+        Refusal::RfMissingLine => "missing line",
+        Refusal::RfMissingCharacter => "missing character",
+        Refusal::RfTextString => "text must be a string",
+        Refusal::RfChangesArray => "contentChanges must be an array",
+        Refusal::RfTooManyChanges => "too many content changes",
+        Refusal::RfLineU32 => "line must be a u32",
+        Refusal::RfCharacterU32 => "character must be a u32",
+        Refusal::RfRangeLengthU32 => "rangeLength must be a u32",
         Refusal::RfNone => "",
     }
 }
@@ -766,26 +804,9 @@ fn flag(in doc: Doc, in body: Slice[u8], i: u64) -> bool {
     }
 }
 
-// `as_u64().filter(|ms| *ms <= MAX_CLIENT_DEBOUNCE_MS)`: serde_json reads
-// a token of digits alone as an unsigned integer (`-0` and any fraction
-// or exponent make a float), and every one past the bound is refused.
+// `as_u64().filter(|ms| *ms <= MAX_CLIENT_DEBOUNCE_MS)`.
 fn debounce_ms(in doc: Doc, in body: Slice[u8], i: u64) -> Option[u64] {
-    if !kind_is(in doc, i, Kind::Number) {
-        return Option::None;
-    }
-    let t = token(in doc, i);
-    let mut v: u64 = 0;
-    for pos in t.start..t.end {
-        let c = byte(in body, pos);
-        if c < Ascii::Zero || c > Ascii::Nine {
-            return Option::None;
-        }
-        v = wrapping_add(wrapping_mul(v, DECIMAL), widen_u64(wrapping_sub(c, Ascii::Zero)));
-        if v > MAX_DEBOUNCE_MS {
-            return Option::None;
-        }
-    }
-    Option::Some(v)
+    bounded_u64(in doc, in body, i, MAX_DEBOUNCE_MS)
 }
 
 // What `initialize` negotiated.
@@ -973,6 +994,286 @@ fn request_row(
     Refusal::RfNone
 }
 
+// `as_u64` of a number token at most `bound`: digits alone (`-0`, a
+// fraction or an exponent make a float).
+fn bounded_u64(in doc: Doc, in body: Slice[u8], i: u64, bound: u64) -> Option[u64] {
+    if !kind_is(in doc, i, Kind::Number) {
+        return Option::None;
+    }
+    let t = token(in doc, i);
+    let mut v: u64 = 0;
+    for pos in t.start..t.end {
+        let c = byte(in body, pos);
+        if c < Ascii::Zero || c > Ascii::Nine {
+            return Option::None;
+        }
+        v = wrapping_add(wrapping_mul(v, DECIMAL), widen_u64(wrapping_sub(c, Ascii::Zero)));
+        if v > bound {
+            return Option::None;
+        }
+    }
+    Option::Some(v)
+}
+
+// `string(field(object, name)?, name)?` as a refusal.
+fn string_field(
+    in doc: Doc,
+    in body: Slice[u8],
+    object: u64,
+    in name: Str,
+    missing: Refusal,
+    not_string: Refusal
+) -> Refusal {
+    string_refusal(in doc, field(in doc, in body, object, in name), missing, not_string)
+}
+
+// `version(field(doc, "version")?)?` as a refusal.
+fn version_refusal(in doc: Doc, in body: Slice[u8], text_document: u64) -> Refusal {
+    let v = field(in doc, in body, text_document, "version");
+    if v == NO_TOKEN {
+        return Refusal::RfMissingVersion;
+    }
+    match int32(in doc, in body, v) {
+        Option::Some(x) => Refusal::RfNone,
+        Option::None => Refusal::RfVersion,
+    }
+}
+
+// The `textDocument` object of `params`, or its refusal.
+fn text_document(in doc: Doc, in body: Slice[u8], params: u64) -> (u64, Refusal) {
+    if !kind_is(in doc, params, Kind::Object) {
+        return (NO_TOKEN, Refusal::RfNotObject);
+    }
+    let td = field(in doc, in body, params, "textDocument");
+    if td == NO_TOKEN {
+        return (NO_TOKEN, Refusal::RfMissingTextDocument);
+    }
+    if !kind_is(in doc, td, Kind::Object) {
+        return (NO_TOKEN, Refusal::RfNotObject);
+    }
+    (td, Refusal::RfNone)
+}
+
+// `position(field(range, name)?)?` as a refusal.
+fn position_refusal(
+    in doc: Doc,
+    in body: Slice[u8],
+    range: u64,
+    in name: Str,
+    missing: Refusal
+) -> Refusal {
+    let p = field(in doc, in body, range, in name);
+    if p == NO_TOKEN {
+        return missing;
+    }
+    if !kind_is(in doc, p, Kind::Object) {
+        return Refusal::RfNotObject;
+    }
+    let line = field(in doc, in body, p, "line");
+    if line == NO_TOKEN {
+        return Refusal::RfMissingLine;
+    }
+    if bounded_u64(in doc, in body, line, U32_MAX).is_none() {
+        return Refusal::RfLineU32;
+    }
+    let character = field(in doc, in body, p, "character");
+    if character == NO_TOKEN {
+        return Refusal::RfMissingCharacter;
+    }
+    if bounded_u64(in doc, in body, character, U32_MAX).is_none() {
+        return Refusal::RfCharacterU32;
+    }
+    Refusal::RfNone
+}
+
+// One content change's refusal: an object, its range (absent or null for
+// none), its `rangeLength` and its text.
+fn change_refusal(in doc: Doc, in body: Slice[u8], change: u64) -> Refusal {
+    if !kind_is(in doc, change, Kind::Object) {
+        return Refusal::RfNotObject;
+    }
+    let range = field(in doc, in body, change, "range");
+    if range != NO_TOKEN && !kind_is(in doc, range, Kind::Null) {
+        if !kind_is(in doc, range, Kind::Object) {
+            return Refusal::RfNotObject;
+        }
+        let r = position_refusal(in doc, in body, range, "start", Refusal::RfMissingStart);
+        if refused(r) {
+            return r;
+        }
+        let r = position_refusal(in doc, in body, range, "end", Refusal::RfMissingEnd);
+        if refused(r) {
+            return r;
+        }
+    }
+    let length = field(in doc, in body, change, "rangeLength");
+    if length != NO_TOKEN && bounded_u64(in doc, in body, length, U32_MAX).is_none() {
+        return Refusal::RfRangeLengthU32;
+    }
+    string_field(in doc, in body, change, "text", Refusal::RfMissingText, Refusal::RfTextString)
+}
+
+// `manifests::is_manifest`: the decoded URI ends in `/Loom.toml`.
+fn manifest(in doc: Doc, in body: Slice[u8], uri: u64) -> bool {
+    let t = token(in doc, uri);
+    let n = MANIFEST_SUFFIX.len();
+    if t.decoded_len < n {
+        return false;
+    }
+    if t.escaped {
+        let mut text: ChunkSeq[u8] = ChunkSeq::new();
+        decoded(in doc, in body, uri, inout text);
+        let len = text.len();
+        return method_is(in text[wrapping_sub(len, n)..len], in MANIFEST_SUFFIX);
+    }
+    let end = wrapping_sub(t.end, 1);
+    method_is(in body[wrapping_sub(end, n)..end], in MANIFEST_SUFFIX)
+}
+
+fn put_number(inout o: ChunkSeq[u8], in doc: Doc, in body: Slice[u8], object: u64, in name: Str) {
+    o.push(B_SPACE);
+    put_u64(
+        inout o,
+        bounded_u64(in doc, in body, field(in doc, in body, object, in name), U32_MAX).unwrap_or(0)
+    );
+}
+
+// The manifest flag, version and URI of a read document.
+fn put_document(inout o: ChunkSeq[u8], in doc: Doc, in body: Slice[u8], td: u64, versioned: bool) {
+    let uri = field(in doc, in body, td, "uri");
+    put_flag(inout o, manifest(in doc, in body, uri));
+    o.push(B_SPACE);
+    if versioned {
+        put_i64(
+            inout o,
+            int32(in doc, in body, field(in doc, in body, td, "version")).unwrap_or(0)
+        );
+        o.push(B_SPACE);
+    }
+    put_string(inout o, in doc, in body, uri);
+}
+
+// `note_route` after `validate_input` passed, as `note_row` writes it.
+fn note_row(
+    inout o: ChunkSeq[u8],
+    kind: u64,
+    in method: Slice[u8],
+    in doc: Doc,
+    in body: Slice[u8],
+    params: u64
+) -> Refusal {
+    let state = (kind >> STATE_SHIFT) & STATE_MASK;
+    if method_is(in method, "exit") {
+        put(inout o, in "X ");
+        put_flag(inout o, state == STATE_SHUTDOWN);
+        return Refusal::RfNone;
+    }
+    if state == STATE_UNINITIALIZED {
+        return Refusal::RfNotInitialized;
+    }
+    if state != STATE_RUNNING {
+        return Refusal::RfShutDown;
+    }
+    let open = method_is(in method, "textDocument/didOpen");
+    let change = method_is(in method, "textDocument/didChange");
+    let close = method_is(in method, "textDocument/didClose");
+    if !open && !change && !close {
+        put(inout o, in "N");
+        return Refusal::RfNone;
+    }
+    let (td, r) = text_document(in doc, in body, params);
+    if refused(r) {
+        return r;
+    }
+    let r = string_field(in doc, in body, td, "uri", Refusal::RfMissingUri, Refusal::RfUriString);
+    if refused(r) {
+        return r;
+    }
+    if close {
+        put(inout o, in "D ");
+        put_document(inout o, in doc, in body, td, false);
+        return Refusal::RfNone;
+    }
+    let r = version_refusal(in doc, in body, td);
+    if refused(r) {
+        return r;
+    }
+    if open {
+        let r = string_field(
+            in doc,
+            in body,
+            td,
+            "text",
+            Refusal::RfMissingText,
+            Refusal::RfTextString
+        );
+        if refused(r) {
+            return r;
+        }
+        put(inout o, in "O ");
+        put_document(inout o, in doc, in body, td, true);
+        o.push(B_SPACE);
+        put_string(inout o, in doc, in body, field(in doc, in body, td, "text"));
+        return Refusal::RfNone;
+    }
+    let changes = field(in doc, in body, params, "contentChanges");
+    if changes == NO_TOKEN {
+        return Refusal::RfMissingContentChanges;
+    }
+    if !kind_is(in doc, changes, Kind::Array) {
+        return Refusal::RfChangesArray;
+    }
+    let count = children(in doc, changes, false);
+    if count > MAX_CHANGES {
+        return Refusal::RfTooManyChanges;
+    }
+    let end = token(in doc, changes).next;
+    let mut c = wrapping_add(changes, 1);
+    loop {
+        if c >= end {
+            break;
+        }
+        let r = change_refusal(in doc, in body, c);
+        if refused(r) {
+            return r;
+        }
+        c = token(in doc, c).next;
+    }
+    put(inout o, in "C ");
+    put_document(inout o, in doc, in body, td, true);
+    o.push(B_SPACE);
+    put_u64(inout o, count);
+    c = wrapping_add(changes, 1);
+    loop {
+        if c >= end {
+            break;
+        }
+        let range = field(in doc, in body, c, "range");
+        if range != NO_TOKEN && !kind_is(in doc, range, Kind::Null) {
+            put(inout o, in " R");
+            let start = field(in doc, in body, range, "start");
+            let finish = field(in doc, in body, range, "end");
+            put_number(inout o, in doc, in body, start, "line");
+            put_number(inout o, in doc, in body, start, "character");
+            put_number(inout o, in doc, in body, finish, "line");
+            put_number(inout o, in doc, in body, finish, "character");
+        } else {
+            put(inout o, in " -");
+        }
+        let length = field(in doc, in body, c, "rangeLength");
+        if length != NO_TOKEN {
+            put(inout o, in " L ");
+            put_u64(inout o, bounded_u64(in doc, in body, length, U32_MAX).unwrap_or(0));
+        } else {
+            put(inout o, in " -");
+        }
+        o.push(B_SPACE);
+        put_string(inout o, in doc, in body, field(in doc, in body, c, "text"));
+        c = token(in doc, c).next;
+    }
+    Refusal::RfNone
+}
+
 fn put(inout o: ChunkSeq[u8], in s: Str) {
     o.extend(in s.as_bytes());
 }
@@ -1059,6 +1360,15 @@ fn check_row(
         }
         if !refused(r) {
             r = request_row(inout o, kind, in method, in doc, in body, params, in version);
+        }
+    } else if check == CHECK_NOTE {
+        if bad_method(in method) {
+            r = Refusal::RfMethodLabel;
+        } else {
+            r = validate_params(in doc, in body, inout w, params);
+        }
+        if !refused(r) {
+            r = note_row(inout o, kind, in method, in doc, in body, params);
         }
     } else if check == CHECK_INPUT {
         if bad_method(in method) {

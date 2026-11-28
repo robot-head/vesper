@@ -296,19 +296,12 @@ impl Session {
         params: Option<Value>,
     ) -> Result<NotificationOutcome, ServerError> {
         validate_input(method, params.as_ref())?;
-        if method == "exit" {
-            let clean = self.state == Lifecycle::Shutdown;
-            self.state = Lifecycle::Exited;
-            return Ok(NotificationOutcome::Exit { clean });
-        }
-        self.running()?;
-        let output = match method {
-            "textDocument/didOpen" => {
-                let params = object(params.as_ref())?;
-                let doc = object(Some(field(params, "textDocument")?))?;
-                let uri = string(field(doc, "uri")?, "uri")?;
-                let version = version(field(doc, "version")?)?;
-                let text = string(field(doc, "text")?, "text")?;
+        let output = match note_route(self.state, method, params.as_ref())? {
+            Note::Exit { clean } => {
+                self.state = Lifecycle::Exited;
+                return Ok(NotificationOutcome::Exit { clean });
+            }
+            Note::Open { uri, version, text } => {
                 if manifests::is_manifest(uri) {
                     return Ok(NotificationOutcome::Continue(vec![
                         self.manifests.open(uri, version, text)?,
@@ -321,37 +314,11 @@ impl Session {
                 self.touch_background(uri);
                 vec![self.diagnostics(uri)?]
             }
-            "textDocument/didChange" => {
-                let params = object(params.as_ref())?;
-                let doc = object(Some(field(params, "textDocument")?))?;
-                let uri = string(field(doc, "uri")?, "uri")?;
-                let version = version(field(doc, "version")?)?;
-                let changes = field(params, "contentChanges")?
-                    .as_array()
-                    .ok_or_else(|| ServerError::params("contentChanges must be an array"))?;
-                if changes.len() > StoreLimits::default().max_changes {
-                    return Err(ServerError::params("too many content changes"));
-                }
-                let changes: Vec<_> = changes
-                    .iter()
-                    .map(|change| {
-                        let change = object(Some(change))?;
-                        let range = change
-                            .get("range")
-                            .filter(|value| !value.is_null())
-                            .map(range)
-                            .transpose()?;
-                        let range_length = change
-                            .get("rangeLength")
-                            .map(|value| unsigned(value, "rangeLength"))
-                            .transpose()?;
-                        Ok(ContentChange {
-                            range,
-                            range_length,
-                            text: string(field(change, "text")?, "text")?,
-                        })
-                    })
-                    .collect::<Result<_, ServerError>>()?;
+            Note::Change {
+                uri,
+                version,
+                changes,
+            } => {
                 if manifests::is_manifest(uri) {
                     return Ok(NotificationOutcome::Continue(vec![
                         self.manifests.change(uri, version, &changes)?,
@@ -364,9 +331,7 @@ impl Session {
                 self.touch_background(uri);
                 vec![self.diagnostics(uri)?]
             }
-            "textDocument/didClose" => {
-                let params = object(params.as_ref())?;
-                let uri = document_uri(params)?;
+            Note::Close { uri } => {
                 if manifests::is_manifest(uri) {
                     return Ok(NotificationOutcome::Continue(vec![
                         self.manifests.close(uri)?,
@@ -384,7 +349,7 @@ impl Session {
             }
             // No background execution, cancellation task, trace output or file
             // read is associated with these or unknown notifications.
-            _ => Vec::new(),
+            Note::Ignore => Vec::new(),
         };
         Ok(NotificationOutcome::Continue(output))
     }
@@ -925,6 +890,94 @@ fn route<'a>(
     }
     object(params).map(Route::Handler)
 }
+/// A validated notification, its parameters read.
+enum Note<'a> {
+    /// `exit`, clean after `shutdown`.
+    Exit {
+        clean: bool,
+    },
+    Open {
+        uri: &'a str,
+        version: i32,
+        text: &'a str,
+    },
+    Change {
+        uri: &'a str,
+        version: i32,
+        changes: Vec<ContentChange<'a>>,
+    },
+    Close {
+        uri: &'a str,
+    },
+    /// A notification the session takes no action on.
+    Ignore,
+}
+/// The lifecycle gate and parameter reading of `Session::notification`
+/// after `validate_input`.
+fn note_route<'a>(
+    state: Lifecycle,
+    method: &str,
+    params: Option<&'a Value>,
+) -> Result<Note<'a>, ServerError> {
+    if method == "exit" {
+        return Ok(Note::Exit {
+            clean: state == Lifecycle::Shutdown,
+        });
+    }
+    running(state)?;
+    match method {
+        "textDocument/didOpen" => {
+            let params = object(params)?;
+            let doc = object(Some(field(params, "textDocument")?))?;
+            Ok(Note::Open {
+                uri: string(field(doc, "uri")?, "uri")?,
+                version: version(field(doc, "version")?)?,
+                text: string(field(doc, "text")?, "text")?,
+            })
+        }
+        "textDocument/didChange" => {
+            let params = object(params)?;
+            let doc = object(Some(field(params, "textDocument")?))?;
+            let uri = string(field(doc, "uri")?, "uri")?;
+            let version = version(field(doc, "version")?)?;
+            let changes = field(params, "contentChanges")?
+                .as_array()
+                .ok_or_else(|| ServerError::params("contentChanges must be an array"))?;
+            if changes.len() > StoreLimits::default().max_changes {
+                return Err(ServerError::params("too many content changes"));
+            }
+            let changes = changes
+                .iter()
+                .map(|change| {
+                    let change = object(Some(change))?;
+                    let range = change
+                        .get("range")
+                        .filter(|value| !value.is_null())
+                        .map(range)
+                        .transpose()?;
+                    let range_length = change
+                        .get("rangeLength")
+                        .map(|value| unsigned(value, "rangeLength"))
+                        .transpose()?;
+                    Ok(ContentChange {
+                        range,
+                        range_length,
+                        text: string(field(change, "text")?, "text")?,
+                    })
+                })
+                .collect::<Result<_, ServerError>>()?;
+            Ok(Note::Change {
+                uri,
+                version,
+                changes,
+            })
+        }
+        "textDocument/didClose" => Ok(Note::Close {
+            uri: document_uri(object(params)?)?,
+        }),
+        _ => Ok(Note::Ignore),
+    }
+}
 /// Requests other than `initialize` need a running session.
 fn running(state: Lifecycle) -> Result<(), ServerError> {
     match state {
@@ -1444,6 +1497,12 @@ pub(crate) fn command_checks_dump(
                         Err(e) => refused(e),
                     }
                 }
+                PortCheck::Note { state } => match validate_input(method, params.as_ref())
+                    .and_then(|()| note_route(state.lifecycle(), method, params.as_ref()))
+                {
+                    Ok(note) => note_row(&note),
+                    Err(e) => refused(e),
+                },
             };
             std::hint::black_box(&row);
         }
@@ -1451,6 +1510,56 @@ pub(crate) fn command_checks_dump(
         out.push('\n');
     }
     out
+}
+
+/// A `PortCheck::Note` row: `X <clean>`, `O <manifest> <version> <uri>
+/// <text>`, `C <manifest> <version> <uri> <count>` then each change's
+/// range (`R` and four numbers, or `-`), length (`L <n>` or `-`) and text,
+/// `D <manifest> <uri>`, or `N`; strings are `<len>:<bytes>`.
+fn note_row(note: &Note) -> String {
+    use std::fmt::Write;
+    let text = |s: &str| format!("{}:{s}", s.len());
+    let flag = |uri: &str| u8::from(manifests::is_manifest(uri));
+    match note {
+        Note::Exit { clean } => format!("X {}", u8::from(*clean)),
+        Note::Open {
+            uri,
+            version,
+            text: body,
+        } => {
+            format!("O {} {version} {} {}", flag(uri), text(uri), text(body))
+        }
+        Note::Change {
+            uri,
+            version,
+            changes,
+        } => {
+            let mut row = format!("C {} {version} {} {}", flag(uri), text(uri), changes.len());
+            for change in changes {
+                match change.range {
+                    Some(r) => {
+                        let _ = write!(
+                            row,
+                            " R {} {} {} {}",
+                            r.start.line, r.start.character, r.end.line, r.end.character
+                        );
+                    }
+                    None => row.push_str(" -"),
+                }
+                match change.range_length {
+                    Some(n) => {
+                        let _ = write!(row, " L {n}");
+                    }
+                    None => row.push_str(" -"),
+                }
+                row.push(' ');
+                row.push_str(&text(change.text));
+            }
+            row
+        }
+        Note::Close { uri } => format!("D {} {}", flag(uri), text(uri)),
+        Note::Ignore => "N".to_owned(),
+    }
 }
 
 /// Which check a row of `command_checks_dump` runs.
@@ -1468,6 +1577,11 @@ pub enum PortCheck {
         auditor: bool,
         background_ms: Option<u64>,
     },
+    /// `Session::notification`'s gate and parameter reading
+    /// (`validate_input`, then `note_route`) in `state`.
+    Note {
+        state: PortState,
+    },
 }
 
 /// The session state a `PortCheck::Request` row starts in.
@@ -1477,6 +1591,7 @@ pub enum PortState {
     Uninitialized,
     Running,
     Shutdown,
+    Exited,
 }
 
 impl PortState {
@@ -1485,6 +1600,7 @@ impl PortState {
             PortState::Uninitialized => Lifecycle::Uninitialized,
             PortState::Running => Lifecycle::Running,
             PortState::Shutdown => Lifecycle::Shutdown,
+            PortState::Exited => Lifecycle::Exited,
         }
     }
 }
