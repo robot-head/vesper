@@ -1092,6 +1092,13 @@ const TAG_UNIT: u8 = 1;
 const CODE_CSTR_SINK: u32 = 610;
 const CODE_DROP_IMPORT: u32 = 611;
 const CODE_NO_FINALIZER: u32 = 612;
+const CODE_EMPTY_WIRE: u32 = 613;
+const CODE_NO_DECLARATIONS: u32 = 614;
+const CODE_CAPTURING_POINTER: u32 = 615;
+const CODE_UNKNOWN_HANDLE: u32 = 616;
+const ACCESS_OUT: u8 = 3;
+const COMMA: u8 = 44;
+const RPAREN: u8 = 41;
 
 // Whether `param` consumes the handle named `arena[start..end]`.
 fn sinks(in param: ParDef, in arena: Slice[u8], start: u64, end: u64) -> bool {
@@ -1132,6 +1139,20 @@ fn check_handles(
             return fail_vsys(err_unsupported(), 0, 0, CODE_CSTR_SINK);
         }
     }
+    // A handle parameter names a declared extern or callback type.
+    for param_index in 0..pars.len() {
+        match pars.try_get(param_index) {
+            Option::Some(param) => {
+                if param.kind == KIND_HANDLE
+                    && find_extern(in externs, in arena, param.pointee_start, param.pointee_end)
+                        .is_none()
+                {
+                    return fail_vsys(err_type(), 0, 0, CODE_UNKNOWN_HANDLE);
+                }
+            },
+            Option::None => (),
+        }
+    }
     for extern_index in 0..externs.len() {
         let t = match externs.try_get(extern_index) {
             Option::Some(v) => v,
@@ -1146,14 +1167,20 @@ fn check_handles(
                     Option::Some(v) => v,
                     Option::None => continue,
                 };
-                if !eq_bytes(in arena[func.sym_start..func.sym_end], in arena[t.drop_start..t.drop_end]) {
+                if !eq_bytes(
+                    in arena[func.sym_start..func.sym_end],
+                    in arena[t.drop_start..t.drop_end]
+                ) {
                     continue;
                 }
-                ok = func.result.tag == TAG_UNIT && !func.errno && func.param_count == 1
-                    && match pars.try_get(func.param_start) {
-                        Option::Some(param) => sinks(in param, in arena, t.name_start, t.name_end),
-                        Option::None => false,
-                    };
+                let takes_handle = match pars.try_get(func.param_start) {
+                    Option::Some(param) => sinks(in param, in arena, t.name_start, t.name_end),
+                    Option::None => false,
+                };
+                ok = func.result.tag == TAG_UNIT
+                    && !func.errno
+                    && func.param_count == 1
+                    && takes_handle;
                 break;
             }
             if !ok {
@@ -1567,6 +1594,9 @@ pub fn parse_library(in source: Slice[u8]) -> Library eff [Fail[VsysError]] {
                     break;
                 }
             }
+            if field_count == 0 {
+                return err_at(in parser, err_type(), CODE_EMPTY_WIRE);
+            }
             wires.push(WireStructDef {
                 name_start: wire_start,
                 name_end: wire_end,
@@ -1769,6 +1799,13 @@ pub fn parse_library(in source: Slice[u8]) -> Library eff [Fail[VsysError]] {
                         ));
                     } else {
                         let (handle_start, handle_end) = take_word(inout parser);
+                        // Without `nocapture`, `in`/`inout` name an extern-type
+                        // handle; anything else is a capturing pointer.
+                        let ends = peek_is_punct(in parser, 0, COMMA)
+                            || peek_is_punct(in parser, 0, RPAREN);
+                        if access == ACCESS_OUT || !ends {
+                            return err_at(in parser, err_unsupported(), CODE_CAPTURING_POINTER);
+                        }
                         pars.push(ParDef {
                             name_start: param_name_start,
                             name_end: param_name_end,
@@ -1913,6 +1950,9 @@ pub fn parse_library(in source: Slice[u8]) -> Library eff [Fail[VsysError]] {
     if cur(in parser).kind != tok_eof() {
         return err_at(in parser, err_syntax(), 571);
     }
+    if funs.len() == 0 && consts.len() == 0 {
+        return err_at(in parser, err_type(), CODE_NO_DECLARATIONS);
+    }
 
     // Compile wire structs & sort declarations.
     compile_all(inout wires, in wire_fields.as_slice(), in parser.arena.as_slice());
@@ -2032,7 +2072,12 @@ pub fn parse_library(in source: Slice[u8]) -> Library eff [Fail[VsysError]] {
         funs.try_set(fun_index, func);
     }
     sort_funs(inout funs, in parser.arena.as_slice());
-    check_handles(in funs.as_slice(), in pars.as_slice(), in externs.as_slice(), in parser.arena.as_slice());
+    check_handles(
+        in funs.as_slice(),
+        in pars.as_slice(),
+        in externs.as_slice(),
+        in parser.arena.as_slice()
+    );
 
     // Canonicalize!
     let mut encoder = new_encoder(1048576);
@@ -2254,19 +2299,34 @@ pub fn parse_library(in source: Slice[u8]) -> Library eff [Fail[VsysError]] {
     let mut names: ChunkSeq[ChunkSeq[u8]] = ChunkSeq::new[ChunkSeq[u8]]();
     for extern_index in 0..externs.len() {
         match externs.try_get(extern_index) {
-            Option::Some(t) => push_name(inout names, in parser.arena.as_slice(), t.name_start, t.name_end),
+            Option::Some(t) => push_name(
+                inout names,
+                in parser.arena.as_slice(),
+                t.name_start,
+                t.name_end
+            ),
             Option::None => (),
         }
     }
     for wire_index in 0..wires.len() {
         match wires.try_get(wire_index) {
-            Option::Some(wire) => push_name(inout names, in parser.arena.as_slice(), wire.name_start, wire.name_end),
+            Option::Some(wire) => push_name(
+                inout names,
+                in parser.arena.as_slice(),
+                wire.name_start,
+                wire.name_end
+            ),
             Option::None => (),
         }
     }
     for enum_index in 0..enums.len() {
         match enums.try_get(enum_index) {
-            Option::Some(e) => push_name(inout names, in parser.arena.as_slice(), e.name_start, e.name_end),
+            Option::Some(e) => push_name(
+                inout names,
+                in parser.arena.as_slice(),
+                e.name_start,
+                e.name_end
+            ),
             Option::None => (),
         }
     }
@@ -2332,7 +2392,11 @@ pub fn run_vsys_names(in source: Str) -> ChunkSeq[u64] {
     let raw = handle Fail[VsysError] in {
         let library = parse_library(in source.as_bytes());
         let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        out.extend(in if library.statically { "s" } else { "d" }.as_bytes());
+        if library.statically {
+            out.extend(in "s".as_bytes());
+        } else {
+            out.extend(in "d".as_bytes());
+        }
         for k in 0..library.names.len() {
             match library.names.try_get(k) {
                 Option::Some(name) => {

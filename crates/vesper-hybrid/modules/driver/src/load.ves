@@ -713,7 +713,11 @@ fn vsys_names(inout l: Ld, t: u64, in text: Slice[u8], pkg: u64, names: bool) ->
         return VSYS_NO_PARSE;
     }
     let a = replace(in text, in "@TARGET@".as_bytes(), in target_triple(t).as_bytes());
-    let source = replace(in a.as_slice(), in "@ABI@".as_bytes(), in vsys_target_abi(wrapping_u32(t)).as_bytes());
+    let source = replace(
+        in a.as_slice(),
+        in "@ABI@".as_bytes(),
+        in vsys_target_abi(wrapping_u32(t)).as_bytes()
+    );
     let parsed = handle Fail[VsysError] in {
         Option::Some(parse_library(in source.as_slice()))
     } with {
@@ -737,7 +741,11 @@ fn vsys_names(inout l: Ld, t: u64, in text: Slice[u8], pkg: u64, names: bool) ->
             }
         }
     }
-    if library.statically { VSYS_STATIC } else { VSYS_DYNAMIC }
+    if library.statically {
+        VSYS_STATIC
+    } else {
+        VSYS_DYNAMIC
+    }
 }
 
 // ---------------------------------------------------------- the walk
@@ -1654,7 +1662,11 @@ fn host_arch_name() -> Str {
 // none of the `.vsys` targets'.
 fn source_os(has_target: bool, in target: Slice[u8]) -> Option[ChunkSeq[u8]] {
     let os_name = driver_target_os(has_target, in target, in host_os_name().as_bytes());
-    if os_name.len() == 0 { Option::None } else { Option::Some(os_name) }
+    if os_name.len() == 0 {
+        Option::None
+    } else {
+        Option::Some(os_name)
+    }
 }
 
 // `driver_host::host_target`: the host's index in the `.vsys` targets

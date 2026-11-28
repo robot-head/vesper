@@ -251,7 +251,10 @@ fn vsys_accepts_what_rust_accepts_under_mutation() {
             match agree(&check, &names, m) {
                 Ok(true) => {}
                 Ok(false) => rejected += 1,
-                Err(why) => diffs.push(format!("{}: {why}\n{m}", path.display())),
+                Err(why) => {
+                    eprintln!("DIFF {}: {why}", path.display());
+                    diffs.push(format!("{}: {why}\n{m}", path.display()))
+                }
             }
         }
     }
