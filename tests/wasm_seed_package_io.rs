@@ -84,7 +84,8 @@ fn options(optimize: bool) -> WasmOptions {
 
 /// Stage 2's own compile limits (`packages/vesper-stage2/src/lib.ves`
 /// `empty_facts`): the boot compile of @vesper/stage2 outgrows the CLI's
-/// default compilation budget.
+/// default instruction budget and function count, which Stage 2 never
+/// applies to itself.
 const STAGE2_MAX_MEMORY_PAGES: u32 = 65535;
 const STAGE2_MAX_FUNCTIONS: usize = 65_536;
 const STAGE2_MAX_INSTRUCTIONS: usize = 50_000_000;

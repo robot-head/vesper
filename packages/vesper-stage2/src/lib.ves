@@ -1,8 +1,8 @@
 // @vesper/stage2: pure-Vesper Stage 2 compiler driver (#1397).
 
 use @vesper/check-data::input::{Ctx};
-use @vesper/check-data::names::{Names};
-use @vesper/check-data::types::{TyPass, Types};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::types::{TyPass, Types, types_new};
 use @vesper/check-data::util::{
     add, inc, n32, push_decimal, stage2_heap_mark, stage2_heap_reset, stage2_heap_swap, u32_at,
     u64_at, w
@@ -25,20 +25,23 @@ use @vesper/wasm-backend::ir::{
 use @vesper/place-ir::codes::{Op, Pat, PoolKind};
 use @vesper-std/env::{arg, arg_count, var};
 use @vesper-std/fs::{IoError, write_path};
-use self::ast_lower::{build_ir_ast, build_ir_ast_for_entry};
-use self::collect::{collect_program};
+use self::ast_lower::{build_ir_ast, build_ir_ast_for_entry, build_ir_ast_traits};
+use self::collect::{collect_program, collect_program_traits};
+use self::traits::{
+    DynOut, MonoPlan, copy_dyn_out, copy_plan, dyn_out, dyn_out_new, mono_plan, mono_plan_new
+};
 use self::facts::{record_failure_ops};
 use self::tables::{lower_table_reads};
 pub use self::ffi::{ForeignSource, foreign_source};
 use self::ffi::{
-    add_foreign_decls, close_foreign_ops, foreign_none, foreign_read, rename_foreign_calls
+    Foreign, add_foreign_decls, close_foreign_ops, foreign_none, foreign_read, rename_foreign_calls
 };
-use self::loader::{load_package_graph_bytes_with};
+use self::loader::{load_package_graph_bytes_full};
 use self::sugar_policy::{
-    PolicyFailure, PolicyFailureKind, PolicyInputs, copy_inputs, explicit_access_valid, has_failure,
-    policy_inputs, resolve_rows
+    PolicyFailure, PolicyFailureKind, PolicyInputs, copy_inputs, empty_inputs,
+    explicit_access_valid, has_failure, policy_inputs, resolve_rows
 };
-use self::typecheck::{typecheck_ast};
+use self::typecheck::{typecheck_ast, typecheck_ast_traits};
 use self::linear::{LinearCode, check_linear, write_linear_fault};
 
 const INVALID_SUGAR_POLICY: Str = "invalid sugar policy metadata";
@@ -85,7 +88,7 @@ const OUTPUT_WRITE_FAILED: u64 = 4;
 /// Load, assemble, and collect declarations of a Loom package from `root_dir`
 /// via `@vesper-std/fs`, returning `(module_count, fn_count, adt_count, diagnostic_bytes)`.
 pub fn stage2_collect_dir(in root_dir: Str) -> (u64, u64, u64, u64) eff [Ffi[StdFs]] {
-    let encoded = match load_graph_compact(in root_dir.as_bytes(), in "".as_bytes()) {
+    let encoded = match load_graph_compact(in root_dir.as_bytes(), in "".as_bytes(), false) {
         Option::Some(b) => b,
         Option::None => {
             return (0, 0, 0, 0);
@@ -281,16 +284,17 @@ fn write_policy_diagnostic(problem: PolicyFailure, inout msg: ChunkSeq[u8]) {
 const LOAD_KEEP_BYTES: u64 = 268435456;
 const LOAD_KEEP_SLACK: u64 = 65536;
 
-// `load_package_graph_bytes` with the loader's scratch freed: the encoded
+// `load_package_graph_bytes_traits` with the loader's scratch freed: the encoded
 // graph is copied into a hole reserved below the scratch and the heap is
 // reset to the copy's end, so only the graph outlives the load. Under a
 // host without Stage 2's heap, or when the graph does not fit the hole, the
 // graph is returned where the loader left it.
 fn load_graph_compact(
     in root_dir: Slice[u8],
-    in os: Slice[u8]
+    in os: Slice[u8],
+    traits: bool
 ) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
-    load_graph_compact_with(in root_dir, in os, in NO_ROOT_EXTRA.as_bytes())
+    load_graph_compact_with(in root_dir, in os, in NO_ROOT_EXTRA.as_bytes(), traits)
 }
 
 // No source appended to the root module.
@@ -300,16 +304,17 @@ const NO_ROOT_EXTRA: Str = "";
 fn load_graph_compact_with(
     in root_dir: Slice[u8],
     in os: Slice[u8],
-    in root_extra: Slice[u8]
+    in root_extra: Slice[u8],
+    traits: bool
 ) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
     if stage2_heap_mark() == 0 {
-        return load_package_graph_bytes_with(in root_dir, in os, in root_extra);
+        return load_package_graph_bytes_full(in root_dir, in os, in root_extra, traits);
     }
     let mut hole = ChunkSeq::new[u8]();
     hole.reserve(LOAD_KEEP_BYTES);
     let scratch = stage2_heap_mark();
     let keep = wrapping_sub(scratch, LOAD_KEEP_BYTES);
-    let encoded = match load_package_graph_bytes_with(in root_dir, in os, in root_extra) {
+    let encoded = match load_package_graph_bytes_full(in root_dir, in os, in root_extra, traits) {
         Option::Some(b) => b,
         Option::None => {
             return Option::None;
@@ -367,6 +372,8 @@ pub struct Lowered {
     low: L,
     call_rows: ChunkSeq[CallRow],
     call_pairs: ChunkSeq[Pair],
+    // The vtable stubs and vtables of boxed trait objects (traits.ves).
+    dyn_out: DynOut,
 }
 
 /// `stage2_compile_dir`'s front end for the package at `root_dir`, for
@@ -411,7 +418,7 @@ pub fn stage2_lower_dir_with(
             },
         }
     };
-    let encoded = match load_graph_compact_with(in root_dir, in os, in root_extra) {
+    let encoded = match load_graph_compact_with(in root_dir, in os, in root_extra, true) {
         Option::Some(b) => b,
         Option::None => {
             err.extend(in "load_package_graph".as_bytes());
@@ -439,12 +446,9 @@ pub fn stage2_lower_dir_with(
             return Option::None;
         },
     };
-    let mut collected = collect_program(in mods);
-    add_foreign_decls(inout collected, inout foreign);
-    let (ir_ast0, names_seed, types_seed, world0) = build_ir_ast_for_entry(
-        sink collected,
+    let (ir_ast0, names_seed, types_seed, world0, dyn_out) = front_with_traits(
         in mods,
-        in ""
+        inout foreign
     );
     let mut names0 = names_seed;
     let mut ir_ast = ir_ast0;
@@ -490,7 +494,90 @@ pub fn stage2_lower_dir_with(
     };
     let mut low = l_new(sink c, sink ir_ast);
     lower_all(inout low);
-    Option::Some(Lowered { low: low, call_rows: call_rows, call_pairs: call_pairs })
+    Option::Some(Lowered {
+        low: low,
+        call_rows: call_rows,
+        call_pairs: call_pairs,
+        dyn_out: dyn_out
+    })
+}
+
+// Collects and lowers `mods` through the trait frontend (traits.ves): a
+// package with traits or conformances is checked once to plan its
+// instances, then collected and lowered again with them, as Rust's
+// `check_lowered_package` checks pass 1 and then the elaborated module.
+fn front_with_traits(
+    in mods: ChunkSeq[AssembledModule],
+    inout foreign: Foreign
+) -> (IrAst, Names, Types, World, DynOut) {
+    // The heap mark before the first pass (0 without Stage 2's heap).
+    let scratch = stage2_heap_mark();
+    let mut names0 = names_new();
+    let types0 = types_new(inout names0);
+    let mut first = collect_program_traits(in mods, sink names0, sink types0, sink mono_plan_new());
+    if first.tr.traits.len() == 0 && first.tr.confs.len() == 0 {
+        add_foreign_decls(inout first, inout foreign);
+        let (ir, n, t, wd) = build_ir_ast_for_entry(sink first, in mods, in "");
+        return (ir, n, t, wd, dyn_out_new());
+    }
+    let (ir1, names1, types1, world1, tr1) = build_ir_ast_traits(sink first, in mods, in "");
+    let (names2, types2, _world2, _rows, _pairs, _bad, calls, tr2) = typecheck_ast_traits(
+        in ir1,
+        sink names1,
+        sink types1,
+        sink world1,
+        sink empty_inputs(),
+        sink tr1
+    );
+    let mut names = names2;
+    let mut types = types2;
+    let plan = mono_plan(in ir1, in tr2, in calls, inout names, inout types);
+    let dyn_objects = dyn_out(in plan, in tr2, inout names);
+    let (names_k, types_k, plan_k, dyn_k) = keep_first_pass(
+        scratch,
+        sink names,
+        sink types,
+        sink plan,
+        sink dyn_objects
+    );
+    let mut second = collect_program_traits(in mods, sink names_k, sink types_k, sink plan_k);
+    add_foreign_decls(inout second, inout foreign);
+    let (ir, n, t, wd) = build_ir_ast_for_entry(sink second, in mods, in "");
+    (ir, n, t, wd, dyn_k)
+}
+
+// What the first pass hands the second (its names, types, plan and `dyn`
+// metadata), moved down to `scratch`, the heap mark before the first pass,
+// so Stage 2's bump heap reuses the first pass's scratch. The values are
+// copied to the top of the heap first and then from there to `scratch`;
+// when that copy would reach the first one (the scratch is smaller than
+// what is kept), or under a host without Stage 2's heap, they stay put.
+fn keep_first_pass(
+    scratch: u64,
+    sink names: Names,
+    sink types: Types,
+    sink plan: MonoPlan,
+    sink dyn_objects: DynOut
+) -> (Names, Types, MonoPlan, DynOut) {
+    if scratch == 0 {
+        return (names, types, plan, dyn_objects);
+    }
+    let top = stage2_heap_mark();
+    let names_t = names.deep_clone_in_heap();
+    let types_t = types.deep_clone_in_heap();
+    let plan_t = copy_plan(in plan);
+    let dyn_t = copy_dyn_out(in dyn_objects);
+    let need = wrapping_sub(stage2_heap_mark(), top);
+    if top < scratch || need > wrapping_sub(top, scratch) {
+        return (names_t, types_t, plan_t, dyn_t);
+    }
+    // Nothing allocated since `scratch` is live but the copies at `top`.
+    stage2_heap_reset(scratch);
+    let names_k = names_t.deep_clone_in_heap();
+    let types_k = types_t.deep_clone_in_heap();
+    let plan_k = copy_plan(in plan_t);
+    let dyn_k = copy_dyn_out(in dyn_t);
+    (names_k, types_k, plan_k, dyn_k)
 }
 
 /// Compile a Loom package from `root_dir` to a core Wasm module at `out_wasm`
@@ -522,7 +609,7 @@ pub fn stage2_lower_entry(
     inout fault: (u64, u64)
 ) -> Option[L] eff [Ffi[StdFs]] {
     write_stage(want_syms, in out_wasm, in "load_package_graph", inout stage_log);
-    let encoded = match load_graph_compact(in root_dir.as_bytes(), in "".as_bytes()) {
+    let encoded = match load_graph_compact(in root_dir.as_bytes(), in "".as_bytes(), false) {
         Option::Some(b) => b,
         Option::None => {
             let mut d = ChunkSeq::new[u8]();
