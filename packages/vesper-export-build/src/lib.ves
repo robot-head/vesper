@@ -1343,7 +1343,8 @@ fn add_instance(
         if !is_plain(in cp.types, ty, true) {
             return false;
         }
-        cp.params.push(ParamInfo { name: p.name, pass: p.pass, ty: ty });
+        cp.params
+            .push(ParamInfo { name: p.name, pass: p.pass, ty: ty, start: p.start, end: p.end });
     }
     let result = substitute(inout cp.types, f.result, in vars);
     if !is_plain(in cp.types, result, true) {
@@ -1736,7 +1737,7 @@ pub fn export_plan_input(
         for pi in 0..w(f.pn) {
             let p = match params.try_get(add(w(f.pa), pi)) {
                 Option::Some(p) => p,
-                Option::None => ParamInfo { name: NONE32, pass: 0, ty: 0 },
+                Option::None => ParamInfo { name: NONE32, pass: 0, ty: 0, start: 0, end: 0 },
             };
             e.put_name(p.name, inout funcs);
             funcs.push(widen_u64(p.pass));

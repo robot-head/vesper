@@ -27,6 +27,7 @@ use @vesper-std/env::{arg, arg_count, var};
 use @vesper-std/fs::{IoError, write_path};
 use self::ast_lower::{build_ir_ast, build_ir_ast_for_entry};
 use self::collect::{collect_program};
+use self::facts::{record_failure_ops};
 use self::loader::{load_package_graph_bytes};
 use self::sugar_policy::{
     PolicyFailure, PolicyFailureKind, PolicyInputs, copy_inputs, explicit_access_valid, has_failure,
@@ -373,6 +374,8 @@ pub fn stage2_lower_dir(
         },
         Option::None => {},
     }
+    // Native lowering reads the operations that may fail.
+    let (names, types, world) = record_failure_ops(in ir_ast, sink names, sink types, sink world);
     let c = Ctx {
         names: names,
         types: types,
