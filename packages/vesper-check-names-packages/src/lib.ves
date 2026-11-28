@@ -86,6 +86,11 @@ fn hidden_and_variants(inout loader: St) {
         }
     }
     for enum_index in 0..loader.enum_mod.len() {
+        // Rust appends the generated preludes (the builtin `Ordering`) after
+        // package name checks, so their variants need no import.
+        if is_generated(in loader, at32(in loader.enum_mod, enum_index)) {
+            continue;
+        }
         let key = pair(at32(in loader.enum_mod, enum_index), at32(in loader.enum_name, enum_index));
         let owner_name = name_of(inout loader, key);
         let owner_shown = shown(inout loader, key);
