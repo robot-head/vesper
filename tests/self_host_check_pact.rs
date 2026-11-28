@@ -864,13 +864,18 @@ fn every_message_of_the_pass_fires() {
 
 /// The declaration pass of `@vesper/check-pact` as the hybrid build
 /// installs it: the shared encoder, the JIT entry and the text decoder.
+/// The declaration pass entry `vesper_declarations` calls.
+fn declarations_entry() -> &'static Entry {
+    static ENTRY: OnceLock<Entry> = OnceLock::new();
+    ENTRY.get_or_init(|| package().entry("check_pact_declarations", true))
+}
+
 fn vesper_declarations(
     m: &Module,
     base: &World,
     identity: &vesper_pact_binding::PackageIdentity,
 ) -> Option<Vec<Diagnostic>> {
-    static ENTRY: OnceLock<Entry> = OnceLock::new();
-    let f = ENTRY.get_or_init(|| package().entry("check_pact_declarations", true));
+    let f = declarations_entry();
     let input = pact_words::declaration_input(m, base, &identity.to_string())?;
     Some(pact_words::decode_declaration_text(&f.text(&input)))
 }
@@ -899,6 +904,11 @@ fn check_package_agrees_through_the_swap_point() {
             .diagnostics
     };
     let rust: Vec<_> = modules.iter().map(|(_, m)| check(m)).collect();
+    // Load the package before installing the pass: loading checks the
+    // package's own modules through `check_package`, so a pass installed
+    // first would wait on the entry it is loading (a deadlock with another
+    // test thread in `package()`).
+    declarations_entry();
     // `OnceLock` may already be initialized if another shard/test ran in-process.
     let _ = pact_frontend::install_declaration_pass(pact_frontend::DeclarationPassTable {
         diagnostics: vesper_declarations,
