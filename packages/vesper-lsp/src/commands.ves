@@ -1,7 +1,9 @@
 // The session's parameter checks over the serde port's token tape:
 // `validate_input` (src/lsp/session.rs), `cancel_params`
-// (crates/vesper-lsp/src/lens.rs) and the `vesper.proofAudit` argument
-// checks (`proof_command`, src/lsp/session/lens_requests.rs).
+// (crates/vesper-lsp/src/lens.rs), the `vesper.proofAudit` argument
+// checks (`proof_command`, src/lsp/session/lens_requests.rs) and the
+// request gate of `Session::request` (`route`: the lifecycle, `initialize`
+// negotiation and its result, `shutdown` and the method check).
 //
 // Rust walks a `serde_json::Value`, whose objects are `BTreeMap`s, so
 // `validate_input` meets an object's members in key order; the walk here
@@ -9,7 +11,7 @@
 use @vesper/serde::{Doc, Error, Kind, Limits, Token, doc_parse, string_equals};
 use @vesper/serde::index::{tok};
 use self::envelope::{NO_TOKEN, decoded, negative_zero, new_doc, parse_i32};
-use self::limits::{Le, le};
+use self::limits::{Ascii, Le, byte, le};
 
 // `validate_input`'s bounds.
 const MAX_METHOD_BYTES: u64 = 256;
@@ -23,6 +25,8 @@ const MAX_FUNCTION_NAME_BYTES: u64 = 1024;
 
 // JSON-RPC error codes, as magnitudes (every one is negative).
 const CODE_INVALID_REQUEST: u64 = 32600;
+const CODE_NOT_INITIALIZED: u64 = 32002;
+const CODE_METHOD_NOT_FOUND: u64 = 32601;
 const CODE_INVALID_PARAMS: u64 = 32602;
 const CODE_CONTENT_MODIFIED: u64 = 32801;
 
@@ -46,16 +50,37 @@ const B_SPACE: u8 = 32;
 const B_LEN_END: u8 = 58;
 const B_NEWLINE: u8 = 10;
 const B_ZERO: u8 = 48;
+const B_ONE: u8 = 49;
+const B_LOWER_T: u8 = 116;
 const DECIMAL: u64 = 10;
 
 // Check kinds (`PortCheck` in src/lsp/session.rs, from 1).
 const CHECK_INPUT: u64 = 1;
 const CHECK_CANCEL: u64 = 2;
 const CHECK_PROOF: u64 = 3;
+const CHECK_REQUEST: u64 = 4;
+
+// A request check's kind word: the kind in the low byte, the session
+// state in the next, an auditor bit, a configured-background bit and its
+// milliseconds in the high half.
+const KIND_MASK: u64 = 255;
+const STATE_SHIFT: u64 = 8;
+const STATE_MASK: u64 = 255;
+const STATE_UNINITIALIZED: u64 = 0;
+const STATE_RUNNING: u64 = 1;
+const AUDITOR_BIT: u64 = 65536;
+const BACKGROUND_BIT: u64 = 131072;
+const BACKGROUND_MS_SHIFT: u64 = 32;
+
+// `background_choice`'s bounds (src/lsp/session/lens_requests.rs): the
+// longest client debounce and the debouncer's one-minute limit, and the
+// default delay, in milliseconds.
+const MAX_DEBOUNCE_MS: u64 = 60000;
+const DEFAULT_DEBOUNCE_MS: u64 = 150;
 
 // Input words: the header, then per open document and per check
 // (`command_checks_input` in tests/self_host_lsp_core.rs).
-const HEADER_WORDS: u64 = 4;
+const HEADER_WORDS: u64 = 6;
 const DOC_WORDS: u64 = 3;
 const CHECK_WORDS: u64 = 5;
 // Header word offsets.
@@ -63,6 +88,8 @@ const H_WORDS: u64 = 0;
 const H_ROUNDS: u64 = 1;
 const H_DOCS: u64 = 2;
 const H_CHECKS: u64 = 3;
+const H_VERSION_AT: u64 = 4;
+const H_VERSION_LEN: u64 = 5;
 // Document word offsets.
 const D_URI_AT: u64 = 0;
 const D_URI_LEN: u64 = 1;
@@ -101,12 +128,21 @@ pub copy enum Refusal {
     RfVersion,
     RfVersionChanged,
     RfCancel,
-    RfJson
+    RfJson,
+    RfInitializeOnce,
+    RfNotInitialized,
+    RfShutDown,
+    RfShutdownParams,
+    RfMethodNotFound
 }
 
 fn code_of(r: Refusal) -> u64 {
     match r {
         Refusal::RfMethodLabel => CODE_INVALID_REQUEST,
+        Refusal::RfInitializeOnce => CODE_INVALID_REQUEST,
+        Refusal::RfShutDown => CODE_INVALID_REQUEST,
+        Refusal::RfNotInitialized => CODE_NOT_INITIALIZED,
+        Refusal::RfMethodNotFound => CODE_METHOD_NOT_FOUND,
         Refusal::RfVersionChanged => CODE_CONTENT_MODIFIED,
         _ => CODE_INVALID_PARAMS,
     }
@@ -137,6 +173,11 @@ fn message_of(r: Refusal) -> Str {
         Refusal::RfVersionChanged => "Document version has changed",
         Refusal::RfCancel => "cancel parameters need an integer or string id",
         Refusal::RfJson => "parameters are not JSON",
+        Refusal::RfInitializeOnce => "initialize may be requested only once",
+        Refusal::RfNotInitialized => "Server not initialized",
+        Refusal::RfShutDown => "Server has shut down",
+        Refusal::RfShutdownParams => "shutdown takes no parameters",
+        Refusal::RfMethodNotFound => "Method not found",
         Refusal::RfNone => "",
     }
 }
@@ -655,6 +696,283 @@ fn proof_command(
     Proof { refusal: Refusal::RfNone, uri: uri, function: function, semantic: semantic }
 }
 
+// The method is `name`, compared a word at a time.
+fn method_is(in m: Slice[u8], in name: Str) -> bool {
+    let len = name.len();
+    if m.len() != len {
+        return false;
+    }
+    let text = name.as_bytes();
+    let mut k: u64 = 0;
+    loop {
+        if wrapping_add(k, Le::WordBytes) > len {
+            break;
+        }
+        if m.try_read_u64_le(k).unwrap_or(0) != text.try_read_u64_le(k).unwrap_or(1) {
+            return false;
+        }
+        k = wrapping_add(k, Le::WordBytes);
+    }
+    loop {
+        if k >= len {
+            return true;
+        }
+        if m.try_get(k) != text.try_get(k) {
+            return false;
+        }
+        k = wrapping_add(k, 1);
+    }
+}
+
+// `HANDLED_METHODS`: the methods a running session answers.
+fn handled(in m: Slice[u8]) -> bool {
+    method_is(in m, "textDocument/hover")
+        || method_is(in m, "textDocument/definition")
+        || method_is(in m, "textDocument/documentSymbol")
+        || method_is(in m, "workspace/symbol")
+        || method_is(in m, "vesper/signatureSearch")
+        || method_is(in m, "vesper/recoveryStatus")
+        || method_is(in m, "vesper/macroPreview")
+        || method_is(in m, "textDocument/formatting")
+        || method_is(in m, "textDocument/codeAction")
+        || method_is(in m, "textDocument/completion")
+        || method_is(in m, "textDocument/inlayHint")
+        || method_is(in m, "textDocument/codeLens")
+}
+
+// `Value::get`: member `name` of the value at `i` when it is an object.
+fn get(in doc: Doc, in body: Slice[u8], i: u64, in name: Str) -> u64 {
+    if kind_is(in doc, i, Kind::Object) {
+        field(in doc, in body, i, in name)
+    } else {
+        NO_TOKEN
+    }
+}
+
+// `Value::as_bool`.
+fn as_bool(in doc: Doc, in body: Slice[u8], i: u64) -> Option[bool] {
+    if kind_is(in doc, i, Kind::Bool) {
+        Option::Some(byte(in body, token(in doc, i).start) == B_LOWER_T)
+    } else {
+        Option::None
+    }
+}
+
+// `as_bool().unwrap_or(false)`.
+fn flag(in doc: Doc, in body: Slice[u8], i: u64) -> bool {
+    match as_bool(in doc, in body, i) {
+        Option::Some(v) => v,
+        Option::None => false,
+    }
+}
+
+// `as_u64().filter(|ms| *ms <= MAX_CLIENT_DEBOUNCE_MS)`: serde_json reads
+// a token of digits alone as an unsigned integer (`-0` and any fraction
+// or exponent make a float), and every one past the bound is refused.
+fn debounce_ms(in doc: Doc, in body: Slice[u8], i: u64) -> Option[u64] {
+    if !kind_is(in doc, i, Kind::Number) {
+        return Option::None;
+    }
+    let t = token(in doc, i);
+    let mut v: u64 = 0;
+    for pos in t.start..t.end {
+        let c = byte(in body, pos);
+        if c < Ascii::Zero || c > Ascii::Nine {
+            return Option::None;
+        }
+        v = wrapping_add(wrapping_mul(v, DECIMAL), widen_u64(wrapping_sub(c, Ascii::Zero)));
+        if v > MAX_DEBOUNCE_MS {
+            return Option::None;
+        }
+    }
+    Option::Some(v)
+}
+
+// What `initialize` negotiated.
+copy struct Negotiated {
+    related: bool,
+    help_data: bool,
+    hierarchical: bool,
+    code_actions: bool,
+    refresh: bool,
+    background: bool,
+    background_ms: u64
+}
+
+// The background delay `background_choice` picks: the client's request
+// over the configured default, or none.
+fn background_delay(requested: Option[bool], debounce: Option[u64], kind: u64) -> Option[u64] {
+    let configured = (kind & BACKGROUND_BIT) != 0;
+    let configured_ms = kind >> BACKGROUND_MS_SHIFT;
+    let fallback = if configured {
+        configured_ms
+    } else {
+        DEFAULT_DEBOUNCE_MS
+    };
+    let delay = match requested {
+        Option::Some(on) => if on {
+            Option::Some(debounce.unwrap_or(fallback))
+        } else {
+            Option::None
+        },
+        Option::None => if configured {
+            Option::Some(debounce.unwrap_or(configured_ms))
+        } else {
+            Option::None
+        },
+    };
+    // Background runs need the auditor, and the debouncer refuses a delay
+    // past a minute.
+    match delay {
+        Option::Some(ms) => if (kind & AUDITOR_BIT) != 0 && ms <= MAX_DEBOUNCE_MS {
+            Option::Some(ms)
+        } else {
+            Option::None
+        },
+        Option::None => Option::None,
+    }
+}
+
+// `route`'s `initialize` negotiation over the parameter object `params`
+// and the lens configuration in the kind word.
+fn negotiate(in doc: Doc, in body: Slice[u8], params: u64, kind: u64) -> Negotiated {
+    let capabilities = field(in doc, in body, params, "capabilities");
+    let text_document = get(in doc, in body, capabilities, "textDocument");
+    let workspace = get(in doc, in body, capabilities, "workspace");
+    let publishes = get(in doc, in body, text_document, "publishDiagnostics");
+    let symbols = get(in doc, in body, text_document, "documentSymbol");
+    let edit = get(in doc, in body, workspace, "workspaceEdit");
+    let action = get(in doc, in body, text_document, "codeAction");
+    let lens = get(in doc, in body, workspace, "codeLens");
+    let code_actions = flag(in doc, in body, get(in doc, in body, edit, "documentChanges"))
+        && kind_is(in doc, get(in doc, in body, action, "codeActionLiteralSupport"), Kind::Object);
+    let options = get(
+        in doc,
+        in body,
+        field(in doc, in body, params, "initializationOptions"),
+        "vesperLens"
+    );
+    let requested = as_bool(in doc, in body, get(in doc, in body, options, "backgroundProofs"));
+    let debounce = debounce_ms(in doc, in body, get(in doc, in body, options, "debounceMs"));
+    let delay = background_delay(requested, debounce, kind);
+    Negotiated {
+        related: flag(in doc, in body, get(in doc, in body, publishes, "relatedInformation")),
+        help_data: flag(in doc, in body, get(in doc, in body, publishes, "dataSupport")),
+        hierarchical: flag(
+            in doc,
+            in body,
+            get(in doc, in body, symbols, "hierarchicalDocumentSymbolSupport")
+        ),
+        code_actions: code_actions,
+        refresh: flag(in doc, in body, get(in doc, in body, lens, "refreshSupport")),
+        background: delay.is_some(),
+        background_ms: delay.unwrap_or(0)
+    }
+}
+
+fn put_flag(inout o: ChunkSeq[u8], v: bool) {
+    if v {
+        o.push(B_ONE);
+    } else {
+        o.push(B_ZERO);
+    }
+}
+
+// `initialize_result` as serde_json writes it: keys sorted, no spaces.
+fn put_initialize_result(inout o: ChunkSeq[u8], n: Negotiated, in version: Slice[u8]) {
+    put(inout o, in "{\"capabilities\":{\"codeActionProvider\":");
+    if n.code_actions {
+        put(
+            inout o,
+            in "{\"codeActionKinds\":[\"quickfix\",\"source.fixAll.vesper\"],\"resolveProvider\":false}"
+        );
+    } else {
+        put(inout o, in "false");
+    }
+    put(
+        inout o,
+        in ",\"codeLensProvider\":{\"resolveProvider\":false},\"completionProvider\":{\"resolveProvider\":false,\"triggerCharacters\":[\".\"]},\"definitionProvider\":true,\"documentFormattingProvider\":true,\"documentSymbolProvider\":true,\"executeCommandProvider\":{\"commands\":[\"vesper.proofAudit\"]},\"experimental\":{\"vesperLens\":{\"asyncCancellation\":\"all_requests\",\"backgroundProofs\":"
+    );
+    if n.background {
+        put(inout o, in "{\"debounceMs\":");
+        put_u64(inout o, n.background_ms);
+        put(inout o, in "}");
+    } else {
+        put(inout o, in "null");
+    }
+    put(
+        inout o,
+        in ",\"completion\":\"obligation_ranked_members\",\"poisonedRecovery\":\"VESPER_POISONED_RECOVERY\",\"proofLenses\":[\"lean_extraction_axiom_free\",\"lean_model_arith_fault_free\"],\"version\":1},\"vesperMacroPreview\":{\"scope\":\"expanded_source_only\",\"tier\":1,\"version\":1},\"vesperRecoveryStatus\":{\"scope\":\"syntax_only\",\"version\":1}},\"hoverProvider\":true,\"inlayHintProvider\":true,\"positionEncoding\":\"utf-16\",\"textDocumentSync\":{\"change\":2,\"openClose\":true},\"workspaceSymbolProvider\":true},\"serverInfo\":{\"name\":\"vesper\",\"version\":\""
+    );
+    // A Cargo version needs no JSON escapes.
+    o.extend(in version);
+    put(inout o, in "\"}}");
+}
+
+// `route` after `validate_input` passed: `I <flags> <ms|-> <result>` for
+// `initialize`, `S` for `shutdown`, `H` for a handled method, else the
+// refusal.
+fn request_row(
+    inout o: ChunkSeq[u8],
+    kind: u64,
+    in method: Slice[u8],
+    in doc: Doc,
+    in body: Slice[u8],
+    params: u64,
+    in version: Slice[u8]
+) -> Refusal {
+    let state = (kind >> STATE_SHIFT) & STATE_MASK;
+    if method_is(in method, "initialize") {
+        if state != STATE_UNINITIALIZED {
+            return Refusal::RfInitializeOnce;
+        }
+        if !kind_is(in doc, params, Kind::Object) {
+            return Refusal::RfNotObject;
+        }
+        let n = negotiate(in doc, in body, params, kind);
+        put(inout o, in "I ");
+        put_flag(inout o, n.related);
+        put_flag(inout o, n.help_data);
+        put_flag(inout o, n.hierarchical);
+        put_flag(inout o, n.code_actions);
+        put_flag(inout o, n.refresh);
+        o.push(B_SPACE);
+        if n.background {
+            put_u64(inout o, n.background_ms);
+        } else {
+            put(inout o, in "-");
+        }
+        o.push(B_SPACE);
+        put_initialize_result(inout o, n, in version);
+        return Refusal::RfNone;
+    }
+    if state == STATE_UNINITIALIZED {
+        return Refusal::RfNotInitialized;
+    }
+    if state != STATE_RUNNING {
+        return Refusal::RfShutDown;
+    }
+    if method_is(in method, "shutdown") {
+        // No parameters, `null` or `{}`.
+        if params != NO_TOKEN
+            && !kind_is(in doc, params, Kind::Null)
+            && !(kind_is(in doc, params, Kind::Object) && children(in doc, params, true) == 0)
+        {
+            return Refusal::RfShutdownParams;
+        }
+        put(inout o, in "S");
+        return Refusal::RfNone;
+    }
+    if !handled(in method) {
+        return Refusal::RfMethodNotFound;
+    }
+    if !kind_is(in doc, params, Kind::Object) {
+        return Refusal::RfNotObject;
+    }
+    put(inout o, in "H");
+    Refusal::RfNone
+}
+
 fn put(inout o: ChunkSeq[u8], in s: Str) {
     o.extend(in s.as_bytes());
 }
@@ -728,10 +1046,21 @@ fn check_row(
     params: u64,
     inout w: Walk,
     in blob: Slice[u8],
-    in open: Open
+    in open: Open,
+    in version: Slice[u8]
 ) {
     let mut r = Refusal::RfNone;
-    if kind == CHECK_INPUT {
+    let check = kind & KIND_MASK;
+    if check == CHECK_REQUEST {
+        if bad_method(in method) {
+            r = Refusal::RfMethodLabel;
+        } else {
+            r = validate_params(in doc, in body, inout w, params);
+        }
+        if !refused(r) {
+            r = request_row(inout o, kind, in method, in doc, in body, params, in version);
+        }
+    } else if check == CHECK_INPUT {
         if bad_method(in method) {
             r = Refusal::RfMethodLabel;
         } else {
@@ -740,7 +1069,7 @@ fn check_row(
         if !refused(r) {
             put(inout o, in ".");
         }
-    } else if kind == CHECK_CANCEL {
+    } else if check == CHECK_CANCEL {
         let id = if kind_is(in doc, params, Kind::Object) {
             field(in doc, in body, params, "id")
         } else {
@@ -762,7 +1091,7 @@ fn check_row(
                 }
             }
         }
-    } else if kind == CHECK_PROOF {
+    } else if check == CHECK_PROOF {
         let p = proof_command(in doc, in body, inout w, params, in blob, in open);
         r = p.refusal;
         if !refused(r) {
@@ -784,10 +1113,11 @@ fn check_row(
 
 // Task "commands": `command_checks_input` in tests/self_host_lsp_core.rs.
 // The input words are the word count W, the rounds, the open document
-// count, the check count, three words per document (URI start and length
-// in the blob, version as an i64) and five per check (kind, method start
-// and length, parameter start and length, start `NO_TOKEN` when there are
-// none), offsets from the blob, which starts at byte W * 8. Each check runs `rounds` times and
+// count, the check count, the server version's start and length, three
+// words per document (URI start and length in the blob, version as an
+// i64) and five per check (kind, method start and length, parameter start
+// and length, start `NO_TOKEN` when there are none), offsets from the
+// blob, which starts at byte W * 8. Each check runs `rounds` times and
 // the result is its last rows' text.
 pub fn command_checks(in b: Slice[u8]) -> ChunkSeq[u8] {
     let words = le(in b, 0, H_WORDS);
@@ -795,6 +1125,8 @@ pub fn command_checks(in b: Slice[u8]) -> ChunkSeq[u8] {
     let n_docs = le(in b, 0, H_DOCS);
     let n_checks = le(in b, 0, H_CHECKS);
     let base = wrapping_mul(words, Le::WordBytes);
+    let version_at = wrapping_add(base, le(in b, 0, H_VERSION_AT));
+    let version_end = wrapping_add(version_at, le(in b, 0, H_VERSION_LEN));
     let mut open = Open { at: ChunkSeq::new(), len: ChunkSeq::new(), version: ChunkSeq::new() };
     for d in 0..n_docs {
         let w0 = wrapping_add(HEADER_WORDS, wrapping_mul(d, DOC_WORDS));
@@ -849,7 +1181,8 @@ pub fn command_checks(in b: Slice[u8]) -> ChunkSeq[u8] {
                     params,
                     inout w,
                     in b,
-                    in open
+                    in open,
+                    in b[version_at..version_end]
                 );
             }
             out.extend(in row[0..row.len()]);
