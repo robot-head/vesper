@@ -20,10 +20,7 @@ vesper_crate(
     },
     # The checked-in tables live in packages/vesper-wasm-backend and
     # packages/vesper-stage2 (both in //:files).
-    extra_test_data = [
-        ":files",
-        "//:files",
-    ],
+    extra_test_data = ["//:files"],
 )
 
 # The component: the cdylib built for wasm32-wasip2, written as
