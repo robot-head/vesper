@@ -2,10 +2,6 @@ load("@crates//vesper-cranelift-component:data.bzl", "all_crate_deps")
 load("@rules_rs//rs:rust_shared_library.bzl", "rust_shared_library")
 load("//tools/bazel:defs.bzl", "vesper_crate")
 
-# The component (:component's output, named after the crate). The Stage 2
-# composition (`wac plug`) takes this file.
-COMPONENT = "vesper_cranelift_component.wasm"
-
 # The root crate's Wasm tests embed the WIT (tests/common/wasm_words.rs).
 exports_files(
     ["wit/vcl.wit"],
@@ -13,46 +9,24 @@ exports_files(
 )
 
 # vesper-cranelift-sys as a wasm component (#2210). build.rs generates the
-# WIT and the glue from cranelift.vsys, and tests/objects.rs checks the
-# checked-in WIT and compares objects built through :component (below)
-# with the native shim's.
+# WIT and the glue from cranelift.vsys, and tests/generated.rs checks the
+# checked-in copies. crates/vesper-cranelift-sys's fixture tests run
+# :component (below).
 vesper_crate(
     build_script_data = ["//packages/vesper-cranelift:cranelift.vsys"],
     build_script_env = {
         # rules_rust already makes this execpath absolute.
         "VESPER_CRANELIFT_VSYS": "$(execpath //packages/vesper-cranelift:cranelift.vsys)",
     },
-    # tests/objects.rs shares vesper-cranelift-sys's test support module
-    # and its fixtures.
-    # tests/wasm_imports.rs includes the root crate's tests/common modules
-    # by path and reads the Wasm backend's packages at run time.
-    extra_integration_compile_data = [
-        "//:files",
-        "//crates/vesper-cranelift-sys:tests/support/mod.rs",
-    ],
-    extra_test_data = [
-        "//:files",
-        "//crates/vesper-cranelift-sys:test_fixtures",
-        "//packages/vesper-cranelift:files",
-    ],
-    # Tests start in this package's runfiles directory, beside :component.
-    # tests/wasm_imports.rs (about 8 min) stays in bootstrap-stage2.yml.
-    test_data_by_target = {
-        "test/objects": [
-            ":component",
-            ":files",
-            "//:files",
-            "//crates/vesper-cranelift-sys:test_fixtures",
-            "//packages/vesper-cranelift:files",
-        ],
-    },
-    test_env_by_target = {
-        "test/objects": {"VESPER_CRANELIFT_COMPONENT": COMPONENT},
-    },
+    # The checked-in tables live in packages/vesper-wasm-backend and
+    # packages/vesper-stage2 (both in //:files).
+    extra_test_data = ["//:files"],
 )
 
-# The component: the cdylib built for wasm32-wasip2. The wasip2 link writes
-# a component, as Cargo's does.
+# The component: the cdylib built for wasm32-wasip2, written as
+# vesper_cranelift_component.wasm (named after the crate). The wasip2 link
+# writes a component, as Cargo's does. The Stage 2 composition (`wac plug`)
+# and crates/vesper-cranelift-sys's fixture tests take this file.
 rust_shared_library(
     name = "component",
     srcs = glob(["src/**/*.rs"]),
