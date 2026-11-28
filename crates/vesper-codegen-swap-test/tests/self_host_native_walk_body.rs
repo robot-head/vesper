@@ -78,8 +78,13 @@ struct Plan {
 }
 
 thread_local! {
-    static PLAN: RefCell<Option<Plan>> = const { RefCell::new(None) };
+    /// The plans of the last programs lent: the compile's program and the
+    /// generic instances it lends beside it (#2715).
+    static PLAN: RefCell<Vec<Plan>> = const { RefCell::new(Vec::new()) };
 }
+
+/// How many programs' plans [`PLAN`] keeps.
+const PLANS_KEPT: usize = 16;
 
 /// Functions emitted from Vesper, and functions the Rust walk kept
 /// (unplanned).
@@ -151,14 +156,26 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     if lent.op != codegen_swap::body::FUNCTION {
         return Ok(false);
     }
+    // A generic instance (#2715) is planned from its own program.
+    let instance = codegen_swap::body_instance();
+    let (program, function): (&Program, &str) = match &instance {
+        Some((p, name)) => (p, name),
+        None => (lent.program, lent.site.function),
+    };
     let words = PLAN.with(|cell| {
-        let mut cell = cell.borrow_mut();
-        let key = (program_key(lent.program), lent.optimize);
-        if cell.as_ref().is_none_or(|p| p.key != key) {
-            *cell = Some(plan_of(lent.world, lent.program, lent.optimize));
-        }
-        let plan = cell.as_ref().expect("just planned");
-        plan.bodies.get(lent.site.function).cloned()
+        let mut plans = cell.borrow_mut();
+        let key = (program_key(program), lent.optimize);
+        let at = match plans.iter().position(|p| p.key == key) {
+            Some(at) => at,
+            None => {
+                if plans.len() == PLANS_KEPT {
+                    plans.remove(0);
+                }
+                plans.push(plan_of(lent.world, program, lent.optimize));
+                plans.len() - 1
+            }
+        };
+        plans[at].bodies.get(function).cloned()
     });
     let Some(words) = words else {
         UNPLANNED.fetch_add(1, Ordering::Relaxed);
@@ -195,6 +212,9 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     match answer {
         HANDLED => {
             EMITTED.fetch_add(1, Ordering::Relaxed);
+            if instance.is_some() {
+                INSTANCES.fetch_add(1, Ordering::Relaxed);
+            }
             if sret != codegen_swap::body::NO_VALUE {
                 if sret >> codegen_swap::body::RESULT_WORDS_SHIFT == 0 {
                     SRET.fetch_add(1, Ordering::Relaxed);
@@ -266,7 +286,7 @@ fn runs(index: usize, case: &check_harness::Case) -> bool {
 fn both(name: &str, world: &vesper::check::World, run: bool) -> Diff {
     let mut total = Diff::default();
     for optimize in [true, false] {
-        PLAN.with(|p| *p.borrow_mut() = None);
+        PLAN.with(|p| p.borrow_mut().clear());
         total.add(compare(name, world, "main", hooks(), optimize, run));
     }
     total
@@ -2779,6 +2799,100 @@ fn vesper_scalar_bodies_try_byte_at_and_try_get_options() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// Generic function instances (#2715), lent with their types substituted:
+/// type parameters at scalar arguments (`i64`, `u8`, `bool`, `f64`) and at
+/// a plain generic struct, a generic calling a non-generic function, and
+/// one calling itself at its own instance.
+const GENERIC_SOURCE: &str = "
+copy struct Pair[T: mod copy] {
+    a: T,
+    b: T,
+}
+fn id[T](sink x: T) -> T {
+    x
+}
+fn pick[T: mod copy](a: T, b: T, right: bool) -> T {
+    if right { b } else { a }
+}
+fn grow(k: i64) -> i64 {
+    if k > 100 { k } else { grow(wrapping_mul(k, 3)) }
+}
+fn tagged[T: mod copy](x: T, k: i64) -> i64 {
+    let y: T = x;
+    let z: T = id(y);
+    grow(k)
+}
+fn first[T: mod copy](p: Pair[T]) -> T {
+    p.a
+}
+fn swap[T: mod copy](p: Pair[T]) -> Pair[T] {
+    Pair { a: p.b, b: p.a }
+}
+fn nth[T: mod copy](p: Pair[T], n: i64) -> T {
+    if n == 0 {
+        first(p)
+    } else {
+        nth(swap(p), wrapping_sub(n, 1))
+    }
+}
+fn main() -> i64 {
+    let a: i64 = pick(3, 4, true);
+    let b: u8 = pick(7, 9, false);
+    let c: bool = pick(true, false, true);
+    let d: f64 = pick(1.5, 2.5, true);
+    let e: i64 = tagged(2.0, 5);
+    let f: i64 = tagged(c, 7);
+    let p: Pair[i64] = Pair { a: 11, b: 13 };
+    let g: i64 = nth(p, 3);
+    let q: Pair[u8] = swap(Pair { a: 1, b: 2 });
+    let h: i64 = id(a);
+    let dd: i64 = if d > 2.0 { 1 } else { 0 };
+    let cc: i64 = if c { 1 } else { 0 };
+    wrapping_add(
+        wrapping_add(wrapping_add(a, widen_i64(b)), wrapping_add(cc, dd)),
+        wrapping_add(wrapping_add(e, f), wrapping_add(wrapping_add(g, h), widen_i64(q.a))),
+    )
+}
+";
+
+/// Of the functions emitted from Vesper, the generic instances (#2715).
+static INSTANCES: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn vesper_generic_instances_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(GENERIC_SOURCE);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the generic program does not build: {e}");
+        }
+        let before = INSTANCES.load(Ordering::Relaxed);
+        let total = both("generic_instances", &checked.world, true);
+        let instances = INSTANCES.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "generic_instances: {}; {instances} generic instances emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let runs = if cross() { 1 } else { 2 };
+        let min_instances = MIN_GENERIC_INSTANCES * runs;
+        assert!(
+            instances >= min_instances,
+            "only {instances} generic instances came from Vesper (expected >= {min_instances})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// `GENERIC_SOURCE`'s scalar instances (`id` at three types, `pick` at
+/// four) at both optimizer settings, once per comparison (a JIT-running
+/// host compares each setting twice). The `Pair` instances wait on plain
+/// generic products in the planner (#2689).
+const MIN_GENERIC_INSTANCES: u64 = 14;
 
 // #2653: a slice's `try_get` fused with its block's `match`
 // (`seq_native::fused_reads`): the bounds check and element address in

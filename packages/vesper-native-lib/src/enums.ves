@@ -1,0 +1,72 @@
+// Enums on the optimize path (#2737). The Rust walk's optimize path keeps
+// small enums as words (`aggregates::scalar_enums` in `ir_graph_at`), and
+// @vesper/codegen-scalar plans a graph that way only from the facts after
+// the program (`aggregate_facts`: the world's functions, element views and
+// each graph's `scalar_enum_facts`). The calls input has no such facts, so
+// on the optimize path a graph whose types hold an enum anywhere would be
+// planned with its enums in memory: a different body from the walk's.
+// Until native-lib makes those facts, such a graph has no body plan.
+
+use @vesper/check-data::util::{add, n32, w};
+use @vesper/check-data::input::{Ctx};
+use @vesper/check-layout::{L_ENUM, L_PRODUCT, Layouts, layout_of};
+use @vesper/place-ir::{Program, Tag};
+
+// No layout (`layout_of`'s refusal).
+const NO_LAYOUT: u32 = 4294967295;
+
+// Whether layout `l` is an enum or holds one in a field.
+fn layout_enum(in ls: Layouts, l: u32) -> bool {
+    let node = ls.node(l);
+    if node.kind == L_ENUM {
+        return true;
+    }
+    if node.kind == L_PRODUCT {
+        for k in 0..widen_u64(node.n) {
+            let field = ls.lfield(add(widen_u64(node.a), k));
+            if layout_enum(in ls, field.layout) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// Whether type `ty` is or holds an enum. A type without a layout (an
+// effect row) is not: the planner refuses a value of one itself.
+fn type_enum(inout ls: Layouts, inout c: Ctx, ty: u32) -> bool {
+    let l = layout_of(inout ls, inout c.types, inout c.names, in c.world, ty);
+    l != NO_LAYOUT && layout_enum(in ls, l)
+}
+
+// Words `a..a+n` of `p`: whether a type among them is or holds an enum.
+fn words_enum(inout ls: Layouts, inout c: Ctx, in p: Program, a: u64, n: u64) -> bool {
+    for i in a..add(a, n) {
+        if p.tag(i) == Tag::Type && type_enum(inout ls, inout c, n32(p.op(i))) {
+            return true;
+        }
+    }
+    false
+}
+
+// Whether graph `fi` of `p` names an enum type: in its header (the
+// parameters, result, values and locals), an instruction's type or a
+// call's type arguments.
+pub fn graph_enums(inout ls: Layouts, inout c: Ctx, in p: Program, fi: u64) -> bool {
+    let f = p.function(fi);
+    if words_enum(inout ls, inout c, in p, f.ha, f.hn) {
+        return true;
+    }
+    for bi in f.b0..add(f.b0, f.bc) {
+        let block = p.block(bi);
+        for ii in block.i0..add(block.i0, block.ic) {
+            let inst = p.inst(ii);
+            if type_enum(inout ls, inout c, inst.ty)
+                || words_enum(inout ls, inout c, in p, inst.a, inst.n)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}

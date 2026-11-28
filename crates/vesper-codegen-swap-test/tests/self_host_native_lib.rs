@@ -262,12 +262,16 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
             r.program = Some(walk_program(world, program));
         }
         // The driver plans each body itself (slice 3a of #2349); a function
-        // without a plan stays with the walk.
-        if !r
-            .program
-            .as_ref()
-            .is_some_and(|(_, p)| p.contains(&function))
-        {
+        // without a plan stays with the walk. A generic instance (#2715) is
+        // planned from its own substituted program (#2737).
+        let planned = match codegen_swap::body_instance() {
+            Some((instance, name)) => walk_program(world, &instance).1.contains(&name),
+            None => r
+                .program
+                .as_ref()
+                .is_some_and(|(_, p)| p.contains(&function)),
+        };
+        if !planned {
             r.refused = Some(format!("{function}: no body plan"));
             return;
         }
@@ -661,4 +665,39 @@ fn malformed_requests_are_refused() {
         let short = &whole[..whole.len() - cut * WORD_BYTES];
         assert!(refused(short), "a request without {what}");
     }
+}
+
+/// An optimized library whose graphs hold enums (#2737). The Rust walk
+/// keeps its small enums as words (`aggregates::scalar_enums`), from facts
+/// the calls input does not carry, so @vesper/native-lib gives such a
+/// graph no body plan rather than planning its enums in memory. Here that
+/// covers the generic `Option::unwrap_or` instance and its non-generic
+/// caller.
+const ENUM_LIBRARY: (&str, &str) = (
+    "enums",
+    "pub fn or_zero(x: u64, some: bool) -> u64 {
+    let o: Option[u64] = if some { Option::Some(x) } else { Option::None };
+    o.unwrap_or(0)
+}",
+);
+
+/// The driver's refusal of an optimized graph with an enum.
+const NO_BODY_PLAN: &str = "no body plan for a definition";
+
+#[test]
+fn optimized_enum_graphs_wait_on_the_enum_facts() {
+    let (_, record) = rust_build_passes_on(ENUM_LIBRARY.0, ENUM_LIBRARY.1)
+        .expect("the Rust walk lends the enum library's bodies");
+    let answer = call(&request(&record));
+    let mut at = 0;
+    assert_ne!(
+        read_word(&answer, &mut at),
+        BUILT,
+        "an enum graph was planned"
+    );
+    let why = String::from_utf8_lossy(read_bytes(&answer, &mut at)).into_owned();
+    assert!(
+        why.starts_with(NO_BODY_PLAN),
+        "the driver refused it otherwise: {why}"
+    );
 }
