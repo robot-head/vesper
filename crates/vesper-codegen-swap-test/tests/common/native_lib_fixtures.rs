@@ -16,6 +16,27 @@ pub fn tag_f64(x: f64, k: i64) -> i64 { tagged(x, k) }
 pub fn pick_u16(a: u16, b: u16, r: bool) -> u16 { pick(a, b, r) }",
     ),
     (
+        "enums",
+        "pub fn some_or(x: u64, some: bool, d: u64) -> u64 {
+    let o: Option[u64] = if some { Option::Some(x) } else { Option::None };
+    match o {
+        Option::Some(v) => wrapping_mul(v, 3),
+        Option::None => d,
+    }
+}
+pub fn or_zero(x: u64, some: bool) -> u64 {
+    let o: Option[u64] = if some { Option::Some(x) } else { Option::None };
+    o.unwrap_or(0)
+}",
+    ),
+    (
+        "ord",
+        "copy struct Key { a: u64, b: u64 }
+impl Ord for Key {}
+fn lt[T: mod copy + Ord](a: T, b: T) -> bool { match a.cmp(b) { Less => true, _ => false } }
+pub fn key_lt(x: u64, y: u64) -> bool { lt(Key { a: x, b: 1 }, Key { a: y, b: 2 }) }",
+    ),
+    (
         "arith",
         "pub fn add3(a: i64, b: i64, c: i64) -> i64 { wrapping_add(wrapping_add(a, b), c) }
 pub fn mix(a: u32, b: u32) -> u32 { (a ^ b) | (a & 7) }",

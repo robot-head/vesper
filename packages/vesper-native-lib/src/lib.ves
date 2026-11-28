@@ -70,8 +70,6 @@ use self::declare::{
     Declared, RESULT_BUFFER, RESULT_SRET, RESULT_WORDS, declare_library, declared_new, exports_new
 };
 use self::generic::{NO_INSTANCE_PLAN, instance_plans};
-use self::enums::{graph_enums};
-use @vesper/check-layout::{layouts_new};
 
 // The answer's status words.
 const OK: u64 = 0;
@@ -552,10 +550,16 @@ fn call_words_of(in walk: Slice[u8], count: u64) -> CallWords {
 }
 
 fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
-    let mut words = codegen_scalar_body_plan_prefix(in program);
     // A generic instance takes the plan of its own substituted graph
-    // (generic.ves), never its generic graph's.
+    // (generic.ves), never its generic graph's. On the optimize path every
+    // graph is planned with the small-enum facts (facts.ves).
     let generic = instance_plans(in program, d.name_at.len(), d.optimize);
+    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if d.optimize {
+        words.extend(in generic.main.as_slice());
+    } else {
+        words = codegen_scalar_body_plan_prefix(in program);
+    }
     // per program function: the start of its plan words
     let mut by_row: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut k: u64 = 0;
@@ -576,9 +580,8 @@ fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
         k = wrapping_add(start, n);
     }
     let mut r = IrReader { pos: 0 };
-    let mut c = read_ctx(inout r, in program);
+    let c = read_ctx(inout r, in program);
     let p = read_program(inout r, in program, in c);
-    let mut ls = layouts_new();
     let mut at: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut graph: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut built: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -601,11 +604,6 @@ fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
                     Option::None => NO_PLAN,
                 };
                 plain = if graph_plain(in p, j) { SET } else { 0 };
-                // An enum on the optimize path waits on the small-enum
-                // facts (enums.ves).
-                if d.optimize && graph_enums(inout ls, inout c, in p, j) {
-                    plan = NO_PLAN;
-                }
                 builds = if result_built(in p, j) { SET } else { 0 };
                 break;
             }

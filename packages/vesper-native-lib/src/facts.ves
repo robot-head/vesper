@@ -1,0 +1,344 @@
+// The small-enum facts of the optimize path (#2737): what the Rust walk's
+// `scalar_enums` (`Codegen::scalar_graph` in `ir_graph_at`) reads beyond
+// the program, in the layout tests/common/aggregate_facts.rs writes for
+// @vesper/codegen-aggregates' `read_env`, made from the walk's calls input:
+//
+//     functions: n, n x (name text, quiet, fip)   every world function
+//     element views: 0                           see `plannable`
+//     per program function: 0 free names         see `plannable`
+//     per program function: n closures, each (lent 0, 0 names)
+//     per program function: ret, n calls, n x words
+//
+// `ret` is whether the graph's instance returns its result as the words
+// of its enum shape (`FnAbi::result_words`); each call's word is whether
+// the callee's instance returns the words of the call's result shape
+// (true for a specialized callee, false for a vtable stub).
+//
+// The facts carry no closure or handler body names and no element views,
+// so a graph with a closure or a handler, or with a sequence operation in
+// a world that has element views, has no body plan (`plannable`).
+
+use @vesper/check-data::util::{add, n32, u32_at, u64_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, Types, Vars, default_type, substitute, substitute_row};
+use @vesper/check-data::input::{Ctx};
+use @vesper/check-layout::{Layouts};
+use @vesper/place-ir::{Op, Program};
+use @vesper/codegen-calls::data::{Calls};
+use @vesper/codegen-calls::instances::{
+    Found, IVars, Syms, concrete, instance_key, ivars_new, is_root, specialized
+};
+use @vesper/codegen-calls::abi::{Errs, default_abi, internal};
+use @vesper/codegen-aggregates::{enum_shape_words};
+
+// The bytes of a facts word, and the pad of a text to whole words.
+const WORD_BYTES: u64 = 8;
+const BITS_PER_BYTE: u64 = 8;
+
+// Each instance's register-result words, by instance key.
+pub struct Abis {
+    keys: ChunkSeq[u32],
+    words: ChunkSeq[u64],
+}
+
+impl Abis {
+    // The result words of the instance keyed `key`, or 0.
+    fn of(in self, key: u32) -> u64 {
+        for i in 0..self.keys.len() {
+            if u32_at(in self.keys, i) == key {
+                return match self.words.try_get(i) {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                };
+            }
+        }
+        0
+    }
+}
+
+// The ABI of every instance `found` holds: a root keeps the default
+// convention, any other instance of an optimized build its internal one
+// (`NativeAbi::plan`).
+pub fn instance_abis(
+    inout ls: Layouts,
+    inout c: Ctx,
+    in calls: Calls,
+    k: Syms,
+    in found: Found,
+    in roots: ChunkSeq[u32],
+    optimize: bool
+) -> Abis {
+    let mut out = Abis { keys: ChunkSeq::new[u32](), words: ChunkSeq::new[u64]() };
+    let mut errs = Errs { text: ChunkSeq::new[u8]() };
+    for i in 0..found.insts.len() {
+        let inst = found.inst(i);
+        let vars = found.vars_of(inst);
+        let f = concrete(inout c.types, inout c.names, in calls, inst.name, in vars);
+        let mut abi = default_abi();
+        if optimize && !is_root(in roots, inst.key) {
+            if !internal(
+                inout ls,
+                inout c.types,
+                inout c.names,
+                in c.world,
+                in calls,
+                k,
+                in f,
+                inout abi,
+                inout errs
+            ) {
+                abi = default_abi();
+            }
+        }
+        out.keys.push(inst.key);
+        out.words.push(widen_u64(abi.result_words));
+    }
+    out
+}
+
+// Whether graph `fi` can be planned from these facts: no closure or
+// handler, and no sequence operation when the world has element views.
+pub fn plannable(in calls: Calls, in p: Program, fi: u64) -> bool {
+    let f = p.function(fi);
+    for bi in f.b0..add(f.b0, f.bc) {
+        let block = p.block(bi);
+        for ii in block.i0..add(block.i0, block.ic) {
+            let op = p.inst(ii).op;
+            if op == Op::Closure || op == Op::Handle {
+                return false;
+            }
+            if op == Op::Seq && calls.element_views {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn put_text(inout o: ChunkSeq[u64], in names: Names, sym: u32) {
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    names.write(sym, inout text);
+    o.push(text.len());
+    let mut x: u64 = 0;
+    let mut k: u64 = 0;
+    for i in 0..text.len() {
+        let b = match text.try_get(i) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        x = x | wrapping_shl_u64(b, n32(wrapping_mul(k, BITS_PER_BYTE)));
+        k = add(k, 1);
+        if k == WORD_BYTES {
+            o.push(x);
+            x = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        o.push(x);
+    }
+}
+
+// The words of the call's result shape the callee's instance returns:
+// `Codegen::scalar_graph`'s `call_words`.
+fn call_words(
+    inout c: Ctx,
+    in calls: Calls,
+    k: Syms,
+    in abis: Abis,
+    in p: Program,
+    a: u64,
+    shape: u64,
+    on: bool,
+    in vars: Vars
+) -> bool {
+    let callee = n32(p.op(a));
+    let index = calls.function(callee);
+    if index == NONE32 {
+        return false;
+    }
+    let info = calls.fn_info(index);
+    let empty = ivars_new();
+    let g = concrete(inout c.types, inout c.names, in calls, callee, in empty);
+    if specialized(inout c.types, in c.names, in c.world, k, in g) {
+        return true;
+    }
+    if u32_at(in calls.stubs, w(callee)) != 0 {
+        return false;
+    }
+    // The call's type arguments follow its arguments (place-ir `Op::Call`:
+    // the callee, the argument count, four words per argument, the type
+    // count, the types, the capability).
+    let args = p.op(add(a, 1));
+    let at = add(add(a, 2), wrapping_mul(args, ARG_WORDS));
+    let nt = p.op(at);
+    let mut cv = ivars_new();
+    let count = if nt < widen_u64(info.generic_count) {
+        nt
+    } else {
+        widen_u64(info.generic_count)
+    };
+    for i in 0..count {
+        let name = calls.generic(add(widen_u64(info.generic_start), i));
+        let arg = subst_if(inout c.types, n32(p.op(add(add(at, 1), i))), on, in vars);
+        let ty = default_type(inout c.types, arg);
+        cv.insert(in c.names, name, ty);
+    }
+    let key = instance_key(inout c.names, in c.types, callee, in cv);
+    abis.of(key) == shape
+}
+
+// A call's argument words (pass, value, place root, place path).
+const ARG_WORDS: u64 = 4;
+// `calls.function`'s miss.
+const NONE32: u32 = 4294967295;
+
+// A type of an instance's graph with the instance's arguments: a row
+// type's effects substituted (`effects.instances` arguments), any other
+// type as `ast::substitute` does (`mono::instantiate`).
+pub fn subst(inout t: Types, ty: u32, in vars: Vars) -> u32 {
+    let node = t.node(ty);
+    if node.kind == TyKind::Row {
+        let row = substitute_row(inout t, node.r2, in vars);
+        return t.row_type(row);
+    }
+    substitute(inout t, ty, in vars)
+}
+
+// `subst` when `on`, else `ty` as it is.
+fn subst_if(inout t: Types, ty: u32, on: bool, in vars: Vars) -> u32 {
+    if on { subst(inout t, ty, in vars) } else { ty }
+}
+
+// The facts of a planner input whose graphs are `rows` of `p`, in output
+// order, graph `q` planned as instance `keys[q]` (its own name for a
+// plain function); the graph at output position `instance` (or none, past
+// the end) is that instance's with `vars` substituted.
+pub fn put_facts(
+    inout o: ChunkSeq[u64],
+    inout c: Ctx,
+    in calls: Calls,
+    k: Syms,
+    in abis: Abis,
+    in p: Program,
+    in rows: ChunkSeq[u64],
+    in keys: ChunkSeq[u32],
+    instance: u64,
+    in vars: Vars
+) {
+    o.push(calls.fns.len());
+    for i in 0..calls.fns.len() {
+        let info = calls.fn_info(n32(i));
+        put_text(inout o, in c.names, info.name);
+        let row = c.types.row(info.row);
+        o.push(if row.n == 0 && row.tail == 0 { 1 } else { 0 });
+        o.push(if info.fip { 1 } else { 0 });
+    }
+    // No element views (`plannable` refuses where they would matter).
+    o.push(0);
+    for _ in 0..rows.len() {
+        o.push(0);
+    }
+    for q in 0..rows.len() {
+        let f = p.function(u64_at(in rows, q));
+        let mut closures: u64 = 0;
+        for bi in f.b0..add(f.b0, f.bc) {
+            let block = p.block(bi);
+            for ii in block.i0..add(block.i0, block.ic) {
+                if p.inst(ii).op == Op::Closure {
+                    closures = add(closures, 1);
+                }
+            }
+        }
+        o.push(closures);
+        for _ in 0..closures {
+            o.push(0);
+            o.push(0);
+        }
+    }
+    for q in 0..rows.len() {
+        let fi = u64_at(in rows, q);
+        let f = p.function(fi);
+        let on = q == instance;
+        let key = u32_at(in keys, q);
+        let result = subst_if(inout c.types, graph_result(in p, fi), on, in vars);
+        let words = abis.of(key);
+        let shape = enum_shape_words(inout c, result);
+        o.push(if words != 0 && words == shape { 1 } else { 0 });
+        let at = o.len();
+        o.push(0);
+        let mut n: u64 = 0;
+        for bi in f.b0..add(f.b0, f.bc) {
+            let block = p.block(bi);
+            for ii in block.i0..add(block.i0, block.ic) {
+                let inst = p.inst(ii);
+                if inst.op != Op::Call {
+                    continue;
+                }
+                let ty = graph_value_type(in p, fi, w(inst.dest));
+                let call_shape = if ty == NONE32 {
+                    0
+                } else {
+                    let call_ty = subst_if(inout c.types, ty, on, in vars);
+                    enum_shape_words(inout c, call_ty)
+                };
+                let yes = call_shape != 0
+                    && call_words(
+                        inout c,
+                        in calls,
+                        k,
+                        in abis,
+                        in p,
+                        inst.a,
+                        call_shape,
+                        on,
+                        in vars
+                    );
+                o.push(if yes { 1 } else { 0 });
+                n = add(n, 1);
+            }
+        }
+        let ok = o.try_set(at, n);
+    }
+}
+
+// A graph header's words (place-ir `header`): per parameter its name,
+// pass and projection count, the projections, then its type and span;
+// then the result, the effects, the bounds' count and (name, mode)
+// pairs, the names, and the (value, type) pairs.
+const PARAM_FIXED_WORDS: u64 = 6;
+const PARAM_PATHS_AT: u64 = 2;
+const BOUND_WORDS: u64 = 2;
+const VALUE_WORDS: u64 = 2;
+
+// The header position after the parameters.
+fn after_params(in p: Program, fi: u64) -> u64 {
+    let f = p.function(fi);
+    let mut at = add(f.ha, 1);
+    let np = p.op(f.ha);
+    for _ in 0..np {
+        at = add(add(at, PARAM_FIXED_WORDS), p.op(add(at, PARAM_PATHS_AT)));
+    }
+    at
+}
+
+// Graph `fi`'s result type.
+fn graph_result(in p: Program, fi: u64) -> u32 {
+    n32(p.op(after_params(in p, fi)))
+}
+
+// The type of value `v` of graph `fi` (its `values` table), or NONE32.
+fn graph_value_type(in p: Program, fi: u64, v: u64) -> u32 {
+    // result, effects, then the bounds
+    let bounds = add(after_params(in p, fi), 2);
+    let names = add(add(bounds, 1), wrapping_mul(p.op(bounds), BOUND_WORDS));
+    let values = add(add(names, 1), p.op(names));
+    let nv = p.op(values);
+    for i in 0..nv {
+        let at = add(add(values, 1), wrapping_mul(i, VALUE_WORDS));
+        if p.op(at) == v {
+            return n32(p.op(add(at, 1)));
+        }
+    }
+    NONE32
+}

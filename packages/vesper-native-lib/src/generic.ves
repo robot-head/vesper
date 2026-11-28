@@ -15,14 +15,16 @@
 
 use @vesper/check-data::util::{add, inc, n32, u32_at, w};
 use @vesper/check-data::names::{Names};
-use @vesper/check-data::types::{TyKind, Types, Vars, display, substitute, substitute_row};
+use @vesper/check-data::types::{Types, Vars, display, vars_new};
 use @vesper/check-data::input::{Ctx, Reader, put_world, read_ctx};
 use @vesper/place-ir::{Op, Program, Tag, put_names, put_types, read_program};
 use @vesper/codegen-calls::data::{Calls, read_calls};
-use @vesper/codegen-calls::instances::{IVars, cmp_names, discover_roots, program_facts, syms_new};
-use @vesper/codegen-scalar::{codegen_scalar_body_plan_prefix};
+use @vesper/codegen-calls::instances::{
+    IVars, Syms, cmp_names, discover_roots, program_facts, syms_new
+};
+use @vesper/codegen-scalar::{codegen_scalar_body_plan_bytes, codegen_scalar_body_plan_prefix};
 use @vesper/check-layout::{layouts_new};
-use super::enums::{graph_enums};
+use super::facts::{Abis, instance_abis, plannable, put_facts, subst};
 
 // The bytes of one input word.
 const WORD_BYTES: u64 = 8;
@@ -50,6 +52,10 @@ const BOUND_WORDS: u64 = 2;
 // none). `generic[i]` is 1 for an instance with type arguments, whose
 // generic graph's plan must not be taken.
 pub struct InstancePlans {
+    // On the optimize path, the plans of the walk's whole program planned
+    // with the small-enum facts (facts.ves); empty when the instances
+    // were not found.
+    pub main: ChunkSeq[u64],
     pub words: ChunkSeq[u64],
     pub at: ChunkSeq[u64],
     pub generic: ChunkSeq[u64],
@@ -59,6 +65,7 @@ pub struct InstancePlans {
 // first library task's instances are the `count` declared ones.
 pub fn instance_plans(in walk: Slice[u8], count: u64, optimize: bool) -> InstancePlans {
     let mut out = InstancePlans {
+        main: ChunkSeq::new[u64](),
         words: ChunkSeq::new[u64](),
         at: ChunkSeq::new[u64](),
         generic: ChunkSeq::new[u64](),
@@ -68,6 +75,7 @@ pub fn instance_plans(in walk: Slice[u8], count: u64, optimize: bool) -> Instanc
     let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in walk);
     let p = read_program(inout r, in walk, in c);
+    let program_end = r.pos;
     let calls = read_calls(inout r, in walk, in c);
     let k = syms_new(inout c.names);
     let facts = program_facts(in c.names, in calls, in p);
@@ -110,6 +118,11 @@ pub fn instance_plans(in walk: Slice[u8], count: u64, optimize: bool) -> Instanc
         }
         return out;
     }
+    let mut ls = layouts_new();
+    let abis = instance_abis(inout ls, inout c, in calls, k, in found, in roots, optimize);
+    if optimize {
+        out.main = main_plans(inout c, in p, in calls, k, in abis, in walk[0..program_end]);
+    }
     for i in 0..count {
         let inst = found.inst(i);
         let vars = found.vars_of(inst);
@@ -121,11 +134,25 @@ pub fn instance_plans(in walk: Slice[u8], count: u64, optimize: bool) -> Instanc
         if fi == p.fn_count() {
             continue;
         }
-        let (input, row) = instance_input(inout c, in p, fi, in vars);
-        if optimize && instance_enums(in input.as_slice(), row) {
+        if optimize && !plannable(in calls, in p, fi) {
             continue;
         }
-        let plans = codegen_scalar_body_plan_prefix(in input.as_slice());
+        let (input, row) = instance_input(
+            inout c,
+            in p,
+            fi,
+            in vars,
+            inst.key,
+            optimize,
+            in calls,
+            k,
+            in abis
+        );
+        let plans = if optimize {
+            codegen_scalar_body_plan_bytes(in input.as_slice())
+        } else {
+            codegen_scalar_body_plan_prefix(in input.as_slice())
+        };
         let mut j: u64 = 0;
         loop {
             if add(j, PLAN_HEADER_WORDS) > plans.len() {
@@ -147,16 +174,6 @@ pub fn instance_plans(in walk: Slice[u8], count: u64, optimize: bool) -> Instanc
         }
     }
     out
-}
-
-// Whether the instance's graph (row `row` of its program `input`) names
-// an enum, which the optimize path waits on (enums.ves).
-fn instance_enums(in input: Slice[u8], row: u64) -> bool {
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in input);
-    let p = read_program(inout r, in input, in c);
-    let mut ls = layouts_new();
-    graph_enums(inout ls, inout c, in p, row)
 }
 
 fn u64_of(in s: ChunkSeq[u64], i: u64) -> u64 {
@@ -222,18 +239,6 @@ fn instance_name(in c: Ctx, base: u32, in vars: IVars) -> ChunkSeq[u8] {
     }
     out.push(GREATER);
     out
-}
-
-// A type of the instance's graph with the instance's arguments: a row
-// type's effects substituted (`effects.instances` arguments), any other
-// type as `ast::substitute` does.
-fn subst(inout t: Types, ty: u32, in vars: Vars) -> u32 {
-    let node = t.node(ty);
-    if node.kind == TyKind::Row {
-        let row = substitute_row(inout t, node.r2, in vars);
-        return t.row_type(row);
-    }
-    substitute(inout t, ty, in vars)
 }
 
 // Words `a..a+n` of `p`, each type id substituted.
@@ -332,7 +337,17 @@ fn put_graph(
 // (with the substituted ones), the world, then the program section of the
 // instance's graph and its callees' graphs, in name order (the
 // `BTreeMap` of `instance_program`).
-fn instance_input(inout c: Ctx, in p: Program, fi: u64, in vars: IVars) -> (ChunkSeq[u8], u64) {
+fn instance_input(
+    inout c: Ctx,
+    in p: Program,
+    fi: u64,
+    in vars: IVars,
+    key: u32,
+    optimize: bool,
+    in calls: Calls,
+    k: Syms,
+    in abis: Abis
+) -> (ChunkSeq[u8], u64) {
     let text = instance_name(in c, p.function(fi).name, in vars);
     let name = c.names.intern(in text.as_slice());
     let subst_vars = vars.vars();
@@ -380,6 +395,37 @@ fn instance_input(inout c: Ctx, in p: Program, fi: u64, in vars: IVars) -> (Chun
     if row == rows.len() {
         put_graph(inout section, inout c.types, in p, fi, name, in subst_vars, true);
     }
+    // The facts, by output position: the callees as themselves, the
+    // instance as its key with its arguments.
+    if optimize {
+        let mut order: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut keys: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for q in 0..rows.len() {
+            if q == row {
+                order.push(fi);
+                keys.push(key);
+            }
+            let x = u64_of(in rows, q);
+            order.push(x);
+            keys.push(p.function(x).name);
+        }
+        if row == rows.len() {
+            order.push(fi);
+            keys.push(key);
+        }
+        put_facts(
+            inout section,
+            inout c,
+            in calls,
+            k,
+            in abis,
+            in p,
+            in order,
+            in keys,
+            row,
+            in subst_vars
+        );
+    }
     let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
     put_names(inout o, in c.names);
     put_types(inout o, in c.types);
@@ -391,6 +437,64 @@ fn instance_input(inout c: Ctx, in p: Program, fi: u64, in vars: IVars) -> (Chun
         let ok = out.try_write_u64_le(wrapping_mul(i, WORD_BYTES), u64_of(in o, i));
     }
     (out, row)
+}
+
+// The plans of the walk's whole program with the small-enum facts, the
+// plan of a graph `plannable` refuses dropped.
+fn main_plans(
+    inout c: Ctx,
+    in p: Program,
+    in calls: Calls,
+    k: Syms,
+    in abis: Abis,
+    in prefix: Slice[u8]
+) -> ChunkSeq[u64] {
+    let mut rows: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut keys: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for fi in 0..p.fn_count() {
+        rows.push(fi);
+        keys.push(p.function(fi).name);
+    }
+    // The facts name functions by their text, so they follow the walk's
+    // own context and program as they are.
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    put_facts(
+        inout o,
+        inout c,
+        in calls,
+        k,
+        in abis,
+        in p,
+        in rows,
+        in keys,
+        rows.len(),
+        in vars_new()
+    );
+    let mut input: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    input.extend(in prefix);
+    let base = input.len();
+    input.resize(add(base, wrapping_mul(o.len(), WORD_BYTES)), 0);
+    for i in 0..o.len() {
+        let ok = input.try_write_u64_le(add(base, wrapping_mul(i, WORD_BYTES)), u64_of(in o, i));
+    }
+    let plans = codegen_scalar_body_plan_bytes(in input.as_slice());
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut j: u64 = 0;
+    loop {
+        if add(j, PLAN_HEADER_WORDS) > plans.len() {
+            break;
+        }
+        let function = u64_of(in plans, j);
+        let n = u64_of(in plans, inc(j));
+        let start = add(j, PLAN_HEADER_WORDS);
+        if plannable(in calls, in p, function) {
+            for x in j..add(start, n) {
+                out.push(u64_of(in plans, x));
+            }
+        }
+        j = add(start, n);
+    }
+    out
 }
 
 // `put_program_section`'s pool and path tables.

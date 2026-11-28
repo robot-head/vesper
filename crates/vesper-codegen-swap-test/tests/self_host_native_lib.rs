@@ -27,6 +27,8 @@
 //! are also built with the passes off (`VESPER_CLIF_OPT=off`,
 //! `VESPER_VECTORIZE=off`), and the passes must change some of them, so
 //! the comparison covers them.
+#[path = "../../../tests/common/aggregate_facts.rs"]
+mod aggregate_facts;
 #[path = "../../../tests/common/check_harness.rs"]
 mod check_harness;
 #[path = "../../../tests/common/check_words.rs"]
@@ -185,11 +187,17 @@ thread_local! {
 fn walk_program(
     world: &vesper::check::World,
     program: &vesper::ir::Program,
+    optimize: bool,
 ) -> (Vec<u8>, HashSet<String>) {
     let mut planned = HashSet::new();
-    let Some((input, _)) = ir_words::program_input(world, program) else {
+    let Some((mut input, _)) = ir_words::program_input(world, program) else {
         return (vec![], planned);
     };
+    // The optimize path plans with the small-enum facts, as the hybrid's
+    // body hook does (crates/vesper-hybrid/src/swap/codegen_scalar.rs).
+    if optimize {
+        input.extend(aggregate_facts::facts(world, program));
+    }
     let names: Vec<&String> = program.functions.keys().collect();
     let words = vesper().plan.words(&input);
     let mut rest = &words[..];
@@ -241,6 +249,7 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     let function = lent.site.function.to_owned();
     let world = lent.world;
     let program = lent.program;
+    let optimize = lent.optimize;
     let declared = declarations(&*lent.module);
     RECORD.with(|cell| {
         let mut r = cell.borrow_mut();
@@ -255,13 +264,13 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
             }
         }
         if r.program.is_none() {
-            r.program = Some(walk_program(world, program));
+            r.program = Some(walk_program(world, program, optimize));
         }
         // The driver plans each body itself (slice 3a of #2349); a function
         // without a plan stays with the walk. A generic instance (#2715) is
         // planned from its own substituted program (#2737).
         let planned = match codegen_swap::body_instance() {
-            Some((instance, name)) => walk_program(world, &instance).1.contains(&name),
+            Some((instance, name)) => walk_program(world, &instance, optimize).1.contains(&name),
             None => r
                 .program
                 .as_ref()
@@ -657,39 +666,4 @@ fn malformed_requests_are_refused() {
         let short = &whole[..whole.len() - cut * WORD_BYTES];
         assert!(refused(short), "a request without {what}");
     }
-}
-
-/// An optimized library whose graphs hold enums (#2737). The Rust walk
-/// keeps its small enums as words (`aggregates::scalar_enums`), from facts
-/// the calls input does not carry, so @vesper/native-lib gives such a
-/// graph no body plan rather than planning its enums in memory. Here that
-/// covers the generic `Option::unwrap_or` instance and its non-generic
-/// caller.
-const ENUM_LIBRARY: (&str, &str) = (
-    "enums",
-    "pub fn or_zero(x: u64, some: bool) -> u64 {
-    let o: Option[u64] = if some { Option::Some(x) } else { Option::None };
-    o.unwrap_or(0)
-}",
-);
-
-/// The driver's refusal of an optimized graph with an enum.
-const NO_BODY_PLAN: &str = "no body plan for a definition";
-
-#[test]
-fn optimized_enum_graphs_wait_on_the_enum_facts() {
-    let (_, record) = rust_build_passes_on(ENUM_LIBRARY.0, ENUM_LIBRARY.1)
-        .expect("the Rust walk lends the enum library's bodies");
-    let answer = call(&request(&record));
-    let mut at = 0;
-    assert_ne!(
-        read_word(&answer, &mut at),
-        BUILT,
-        "an enum graph was planned"
-    );
-    let why = String::from_utf8_lossy(read_bytes(&answer, &mut at)).into_owned();
-    assert!(
-        why.starts_with(NO_BODY_PLAN),
-        "the driver refused it otherwise: {why}"
-    );
 }

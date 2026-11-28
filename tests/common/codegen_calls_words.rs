@@ -147,6 +147,7 @@ fn calls_encodable(w: &World, wide: bool) -> bool {
 /// The calls section's world flags (packages/vesper-codegen-calls/src/data.ves).
 const WORLD_TRACE_ACTIVE: u64 = 1;
 const WORLD_CONST_DENORM: u64 = 2;
+const WORLD_ELEMENT_VIEWS: u64 = 4;
 
 /// The calls section (packages/vesper-codegen-calls/src/data.ves).
 fn calls_section(e: &mut Enc, w: &World, tasks: &[(String, u64)]) -> Vec<u64> {
@@ -156,6 +157,9 @@ fn calls_section(e: &mut Enc, w: &World, tasks: &[(String, u64)]) -> Vec<u64> {
     }
     if !vesper::capability_effects::const_denorm_spans(w).is_empty() {
         flags |= WORLD_CONST_DENORM;
+    }
+    if !w.element_views.is_empty() {
+        flags |= WORLD_ELEMENT_VIEWS;
     }
     let mut out = vec![flags];
     let mut exprs = vec![];

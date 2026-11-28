@@ -1336,6 +1336,9 @@ fn read_names(inout rd: Rd, in words: ChunkSeq[u64], inout names: Names) -> Chun
     syms
 }
 
+// The program section's empty path.
+const EMPTY_PATH: u64 = 0;
+
 // The decoder's context: the output's symbols and the encoder's tables.
 struct Back {
     syms: ChunkSeq[u32],
@@ -1347,9 +1350,14 @@ impl Back {
     }
 }
 
-// A path of names from the output (n, names), as a new path row.
+// A path of names from the output (n, names), as a new path row; the
+// empty path stays path 0, as the program section keeps it (ir_words,
+// which `scalar_enums` reads as "no projection").
 fn read_path(inout p: Program, inout rd: Rd, in words: ChunkSeq[u64], in back: Back) -> u64 {
     let n = rd.next(in words);
+    if n == 0 && p.path_count() != 0 && p.path(EMPTY_PATH).n == 0 {
+        return EMPTY_PATH;
+    }
     let mut parts: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for k in 0..n {
         parts.push(back.sym(rd.next(in words)));
