@@ -22,13 +22,14 @@
 //    selected (`Rename`, applied by ast_lower.ves), so the second check
 //    sees only ordinary calls, as Rust's `check_core` of pass 2 does.
 //
-// Coherence, `use model` scopes, named models, associated types and `dyn`
-// are not part of it yet; the Rust frontend has accepted every package
-// Stage 2 lowers here.
+// Named models and `use model` scopes select instance evidence
+// (`Mono::evidence`), and boxed `dyn` calls go through vtable stubs.
+// Coherence and associated types are not part of it yet; the Rust
+// frontend has accepted every package Stage 2 lowers here.
 
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{TyKind, Types, Vars, substitute, vars_new};
-use @vesper/check-data::util::{n32, u32_at, u64_at, w};
+use @vesper/check-data::util::{copy_seq, n32, u32_at, u64_at, w};
 use @vesper/check-data::world::{set_by_symbol};
 use @vesper/place-ir-lower::ast::{Ast as IrAst, FnR};
 use @vesper/wasm-backend::ir::{Pair};
@@ -633,6 +634,30 @@ pub fn mono_plan_new() -> MonoPlan {
         boxed: ChunkSeq::new[u32](),
         thunks: ChunkSeq::new[Thunk](),
         vtabs: ChunkSeq::new[VTab]()
+    }
+}
+
+// A copy of `plan` in fresh heap, for moving it past the first pass's
+// scratch (lib.ves `front_with_traits`).
+pub fn copy_plan(in plan: MonoPlan) -> MonoPlan {
+    MonoPlan {
+        active: plan.active,
+        insts: copy_seq[Inst](in plan.insts),
+        pairs: copy_seq[Pair](in plan.pairs),
+        renames: copy_seq[Rename](in plan.renames),
+        evs: copy_seq[u64](in plan.evs),
+        dropped: copy_seq[u32](in plan.dropped),
+        boxed: copy_seq[u32](in plan.boxed),
+        thunks: copy_seq[Thunk](in plan.thunks),
+        vtabs: copy_seq[VTab](in plan.vtabs)
+    }
+}
+
+pub fn copy_dyn_out(in d: DynOut) -> DynOut {
+    DynOut {
+        stubs: copy_seq[u32](in d.stubs),
+        vtabs: copy_seq[VTab](in d.vtabs),
+        slots: copy_seq[u32](in d.slots)
     }
 }
 

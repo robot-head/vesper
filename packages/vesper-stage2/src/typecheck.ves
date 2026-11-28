@@ -2867,6 +2867,14 @@ fn undo_fn_run(inout tc: Tc, n_spans: u64, n_calls: u64, n_pairs: u64) {
     tc.lit_uses.clear();
 }
 
+fn undo_trait_calls(inout tc: Tc, n: (u64, u64, u64, u64)) {
+    let (calls, gcalls, pairs, cos) = n;
+    tc.trait_calls.calls.truncate(calls);
+    tc.trait_calls.gcalls.truncate(gcalls);
+    tc.trait_calls.pairs.truncate(pairs);
+    tc.trait_calls.cos.truncate(cos);
+}
+
 // Checks `f`, then, when it has open bindings and an integer use of the
 // wrong kind (where Rust's checker fails), types those bindings from their
 // uses and checks it again (`function_with_literal_typing`).
@@ -2884,12 +2892,20 @@ fn check_fn_with_literal_typing(
     tc.lit_probe = false;
     tc.lit_mismatch = false;
     let violation = tc.sugar_violation;
+    // The trait calls the run records, dropped with its spans on a rerun.
+    let n_tcalls = (
+        tc.trait_calls.calls.len(),
+        tc.trait_calls.gcalls.len(),
+        tc.trait_calls.pairs.len(),
+        tc.trait_calls.cos.len()
+    );
     check_fn_body(inout tc, in a, f);
     if tc.lit_open.len() == 0 || !tc.lit_mismatch {
         return;
     }
     for _round in 0..LITERAL_PROBE_ROUNDS {
         undo_fn_run(inout tc, n_spans, n_calls, n_pairs);
+        undo_trait_calls(inout tc, n_tcalls);
         tc.lit_probe = true;
         tc.sugar_violation = violation;
         check_fn_body(inout tc, in a, f);
@@ -2899,6 +2915,7 @@ fn check_fn_with_literal_typing(
     }
     tc.lit_probe = false;
     undo_fn_run(inout tc, n_spans, n_calls, n_pairs);
+    undo_trait_calls(inout tc, n_tcalls);
     tc.sugar_violation = violation;
     check_fn_body(inout tc, in a, f);
     tc.lit_hints.clear();
@@ -3205,9 +3222,12 @@ pub fn typecheck_ast_traits(
             && tc.lit_peak <= max_lit
             && tc.spans.len() < max_spans
             && tc.calls.len() < max_calls
-            && tc.pairs.len() < max_pairs
-            && tc_perm < tc_perm_end
-        {
+            && tc.pairs.len()
+                < max_pairs
+                // The trait frontend's records (`tc.trait_calls`) do not survive
+        // the reset: its first pass keeps the heap, and lib.ves
+        // `keep_first_pass` compacts what the second pass needs.
+        && !tc.tr.active && tc_perm < tc_perm_end {
             let mut dtc = dummy_tc(tc.world.k);
             swap(inout tc, inout dtc);
             let (ntc, next_perm) = rebuild_tc(
