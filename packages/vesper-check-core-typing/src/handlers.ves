@@ -49,13 +49,7 @@ pub fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         NONE32
     };
     if !ck.skip && observed {
-        // Effects an input without them cannot feed back (`inferred_row`)
-        // do not hold up the fixed point.
-        let used = if handler_effects(ex) == NONE32 {
-            outgoing
-        } else {
-            inferred_row(inout ck, ex)
-        };
+        let used = inferred_row(inout ck, ex);
         record_row(inout ck, ex, used, outgoing);
     }
     ck.handler_obs.truncate(handlers_mark);
@@ -80,14 +74,10 @@ pub fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
 }
 
 // The handler's effects the round before: this checker's, else the
-// input's. An input without them (one not checked yet) also has no
-// partial or overflowing operations, so the effects this checker infers
-// from it would miss their failures: they stay unknown (NONE32).
+// input's, else none yet (`world.handler_effects.get` of a world not
+// checked yet: the continuation's row is the outgoing effects alone).
 fn inferred_row(inout ck: Ck, ex: Ex) -> u32 {
     let input = handler_effects(ex);
-    if input == NONE32 {
-        return NONE32;
-    }
     for i in 0..ck.row_types.len() {
         if u64_at(in ck.row_spans, wrapping_mul(i, 2)) == ex.start
             && u64_at(in ck.row_spans, inc(wrapping_mul(i, 2))) == ex.end
@@ -95,7 +85,13 @@ fn inferred_row(inout ck: Ck, ex: Ex) -> u32 {
             return u32_at(in ck.row_types, i);
         }
     }
-    input
+    if input != NONE32 {
+        return input;
+    }
+    let no_effs: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+    let no_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let empty = ck.ctx.types.mk_row(in no_effs, in no_args, 0);
+    row_type(inout ck, empty)
 }
 
 // A row as the empty function type that carries it.

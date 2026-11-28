@@ -1,11 +1,12 @@
 //! The front-end passes the Vesper driver runs itself (hd_step group 2,
-//! #1893, modules/driver/src/front.ves): `--emit cst` and the parse the
-//! Rust session's later passes read, for a standalone source. The hybrid
-//! and the default compiler run `emit --emit cst` (to stdout and to a
-//! file) and `check` over every `.ves` file of the repository's corpus
-//! (examples/, tests/, the Vesper packages and the crates' Vesper ports)
-//! plus a few sources written for the dump's edge cases, and must agree
-//! on exit status, stdout, stderr and the file written.
+//! #1893, modules/driver/src/front.ves): `--emit cst`, the parse the Rust
+//! session's later passes read and the report of its syntax errors, for a
+//! standalone source. The hybrid and the default compiler run
+//! `emit --emit cst` (to stdout and to a file) and `check` over every
+//! `.ves` file of the repository's corpus (examples/, tests/, the Vesper
+//! packages and the crates' Vesper ports) plus a few sources written for
+//! the dump's and the report's edge cases, and must agree on exit status,
+//! stdout, stderr and the file written.
 //!
 //! `VESPER_DRIVER_FRONT_STRIDE=<n>` runs every n-th file (default 1), and
 //! `VESPER_DRIVER_INTERFACE_STRIDE=<n>` every n-th source and package of the
@@ -69,8 +70,9 @@ fn default_compiler() -> PathBuf {
 }
 
 /// Sources for the dump's edge cases: long tokens cut at a char boundary,
-/// escapes in the token text, non-ASCII, a syntax error (the session's
-/// pass) and source sugar (the session's expansion).
+/// escapes in the token text, non-ASCII, syntax errors (the driver's
+/// report, or the session's when the port refuses or the source has
+/// sugar) and source sugar (the session's expansion).
 const PROGRAMS: &[(&str, &str)] = &[
     (
         "long_tokens.ves",
@@ -86,6 +88,32 @@ const PROGRAMS: &[(&str, &str)] = &[
     ),
     ("empty.ves", ""),
     ("syntax.ves", "fn main( -> i64 {\n"),
+    // Syntax errors the driver reports itself (#1893): several, a
+    // lexer error, CRLF lines and multibyte text under the labels.
+    (
+        "syntax_many.ves",
+        "fn a( -> i64 { 1 }\nfn b() -> { 2 }\nstruct S { x: }\n",
+    ),
+    (
+        "syntax_lex.ves",
+        "fn main() -> i64 {\n    let s = \"open;\n}\n",
+    ),
+    (
+        "syntax_crlf.ves",
+        "fn main() -> i64 {\r\n    let = 1;\r\n}\r\n",
+    ),
+    (
+        "syntax_unicode.ves",
+        "// ünïcödé ✓\nfn main() -> i64 {\n    let ✓ = 1;\n    0\n}\n",
+    ),
+    // A line separator the diagnostic port refuses (the session renders
+    // the raw fallback).
+    ("syntax_vt.ves", "fn main( -> i64 {\x0b\n}\n"),
+    // A syntax error in a source with sugar (the session expands it).
+    (
+        "sugar_syntax.ves",
+        "sugar take_right: infix(`.+`, additive, left) { rule ($a:expr .+ $b:expr) => { $b } }\nfn main( -> i64 {\n    1 .+ 42\n}\n",
+    ),
     ("semantic.ves", "fn main() -> i64 {\n    nope\n}\n"),
     (
         "sugar.ves",
@@ -271,13 +299,25 @@ fn emit_cst_runs_in_the_vesper_driver() {
         passes(&["emit", "--emit", "cst", "examples/counter.ves"]),
         1
     );
-    // A syntax error goes to the session's passes (Load, Parse, EmitCst).
+    // A syntax error too (#1893): the driver reports it and dumps the
+    // tree; and `check` reports it with no session pass after the load.
     let scratch =
         std::env::temp_dir().join(format!("vesper-driver-front-cst-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     let bad = scratch.join("bad.ves");
     std::fs::write(&bad, "fn main( -> i64 {\n").unwrap();
-    assert_eq!(passes(&["emit", "--emit", "cst", bad.to_str().unwrap()]), 3);
+    let bad = bad.to_str().unwrap();
+    assert_eq!(passes(&["emit", "--emit", "cst", bad]), 1);
+    assert_eq!(passes(&["check", bad]), 1);
+    assert_eq!(passes(&["check", "--json", bad]), 1);
+    // The sugar expansion's own error is reported by the driver too.
+    let sugared = scratch.join("sugared.ves");
+    std::fs::write(
+        &sugared,
+        "sugar take_right: infix(`.+`, additive, left) { rule ($a:expr .+ $b:expr) => { $b } }\nfn main( -> i64 {\n    1 .+ 42\n}\n",
+    )
+    .unwrap();
+    assert_eq!(passes(&["check", sugared.to_str().unwrap()]), 1);
     let _ = std::fs::remove_dir_all(&scratch);
     // The driver's parse is the parse swap's: with no swaps, the session
     // parses and dumps.
