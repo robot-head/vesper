@@ -2289,3 +2289,58 @@ fn vesper_slice_last_matches() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+// String literals (`Codegen::string_literal`): empty, under a word, a
+// whole word and longer, read through `len` and `byte_at`.
+const STRING_LITERALS: &str = "
+fn empty_len() -> u64 {
+    \"\".len()
+}
+fn short_byte(i: u64) -> u64 eff [Fail[RuntimeError]] {
+    widen_u64(\"hey\".byte_at(i))
+}
+fn word_len(d: u64) -> u64 {
+    wrapping_add(\"abcdefgh\".len(), d)
+}
+fn long_byte(i: u64) -> u64 eff [Fail[RuntimeError]] {
+    widen_u64(\"the quick brown fox\".byte_at(i))
+}
+fn main() -> i64 {
+    handle Fail[RuntimeError] in {
+        let a = wrapping_add(empty_len(), short_byte(1));
+        let b = wrapping_add(word_len(2), long_byte(10));
+        let c = short_byte(3);
+        wrapping_i64(a ^ wrapping_mul(b, 7) ^ c)
+    } with {
+        return value => value,
+        raise(error, resume) => 4242,
+    }
+}
+";
+
+#[test]
+fn vesper_string_literals_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(STRING_LITERALS);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("string_literals", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "string_literals: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        // The four literal functions in both worlds (and again for the
+        // JIT run off-cross).
+        let min_emitted = if cross() { 8 } else { 16 };
+        assert!(
+            emitted >= min_emitted,
+            "only {emitted} string literal functions came from Vesper (expected {min_emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}

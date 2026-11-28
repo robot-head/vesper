@@ -34,7 +34,7 @@
 // again. A body with any other raise (`Fail::raise`, checked compound
 // writes, negations, narrowing or shifts) stays on the Rust walk.
 
-use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at};
 use @vesper/check-data::types::{TyKind, default_type};
 use @vesper/check-layout::{L_ENUM, L_PRODUCT, layout_of};
 use @vesper/place-ir::{FnRow, InstRow};
@@ -112,6 +112,12 @@ const SEQ_VIEW_WORD: u64 = 6;
 const SEQ_LAST: u64 = 7;
 // The words a small `Option` is kept as: its tag and its payload.
 const OPTION_WORDS: u64 = 2;
+// A string literal (`Codegen::string_literal`): its byte count, then its
+// bytes packed little-endian into words.
+const SEQ_LITERAL: u64 = 8;
+// The bits of a literal byte and of the word it is packed into.
+const BYTE_BITS: u32 = 8;
+const WORD_BITS: u32 = 64;
 // The header words (src/strings/native.rs, src/seq/native.rs): a
 // string's `{len, cap, data}`, a slice view's `{handle, start, len}`.
 const STR_LEN_OFFSET: u64 = 0;
@@ -2013,6 +2019,9 @@ impl Gen {
                             kind = INST_F64CONST;
                             extra.push(self.program.op(inc(i.a)));
                         }
+                    } else if lit == Lit::String {
+                        kind = INST_SEQ;
+                        self.body_literal(n32(self.program.op(inc(i.a))), inout extra);
                     } else {
                         return false;
                     }
@@ -2338,6 +2347,29 @@ impl Gen {
     // in `extra`: a word's offset, or for a checked access the raise of
     // `RuntimeError::IndexOutOfBounds` (`seq_guard`) and, for a slice
     // element, its stride and lane. False for any other operation.
+    // A string literal's words (`SEQ_LITERAL`): its byte count, then its
+    // bytes eight to a word, little-endian, the last word zero-padded.
+    fn body_literal(in self, symbol: u32, inout extra: ChunkSeq[u64]) {
+        let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        self.ctx.names.write(symbol, inout bytes);
+        extra.push(SEQ_LITERAL);
+        extra.push(bytes.len());
+        let mut word: u64 = 0;
+        let mut shift: u32 = 0;
+        for k in 0..bytes.len() {
+            word = word | wrapping_shl_u64(widen_u64(u8_at(in bytes, k)), shift);
+            shift = wrapping_add(shift, BYTE_BITS);
+            if shift == WORD_BITS {
+                extra.push(word);
+                word = 0;
+                shift = 0;
+            }
+        }
+        if shift != 0 {
+            extra.push(word);
+        }
+    }
+
     fn body_seq(
         inout self,
         in h: Header,
