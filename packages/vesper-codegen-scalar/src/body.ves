@@ -396,7 +396,8 @@ pub struct Header {
     // the header names no bounds, captures, or effects other than `Fail`
     // instances and erased capabilities
     plain: bool,
-    // the names the graph captures from outside (a nested graph's)
+    // the names and handler capabilities the graph takes from outside
+    // (a nested graph's)
     captures: u64,
 }
 
@@ -704,6 +705,11 @@ impl Gen {
                     // `native::fail_only`'s `Fail[E]`: a failure exit.
                     let e = u32_at(in self.ctx.types.items, widen_u64(eff.a));
                     h.fails.push(widen_u64(default_type(inout self.ctx.types, e)));
+                } else if eff_name == ops_s.fail_ && eff.label != 0 && eff.n == 1 {
+                    // A handler's lexical capability (#2657): a nested
+                    // graph raises to the handler in scope; `body`
+                    // refuses it.
+                    h.captures = inc(h.captures);
                 } else if eff_name != ops_s.const_time
                     && eff_name != ops_s.realtime
                     && eff_name != ops_s.det_float
@@ -720,7 +726,7 @@ impl Gen {
         i = add(inc(i), nc);
         // A handler's nested graph reads the names it captures from the
         // scope it is emitted in (#2657); `body` refuses them.
-        h.captures = nc;
+        h.captures = add(h.captures, nc);
         if nb != 0 {
             h.plain = false;
         }

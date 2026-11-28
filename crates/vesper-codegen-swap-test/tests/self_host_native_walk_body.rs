@@ -1059,9 +1059,10 @@ fn vesper_fail_record_bodies_match() {
 }
 
 /// `Fail` handlers (#2657): a handled call to a fallible callee, checked
-/// arithmetic raising to a handler in the same function, a `return`
-/// clause that uses its value and captures a local, nested handlers of
-/// different types, and an error bound in the `raise` clause.
+/// arithmetic raising to a handler in the same function, clauses that
+/// capture parameters and locals, handlers in sequence and nested, a raise
+/// that passes an inner handler of another type, and an error bound in
+/// the `raise` clause.
 const HANDLERS: &str = "
 fn bump(x: u8) -> u8 eff [Fail[ArithOverflow]] {
     x + 200
@@ -1088,7 +1089,7 @@ fn scaled(x: i64, k: i64) -> i64 {
         x * k + base
     } with {
         return v => wrapping_mul(v, k),
-        raise(_, _) => base,
+        raise(error, _) => base,
     }
 }
 fn nested(x: i64) -> i64 {
@@ -1110,8 +1111,21 @@ fn nested(x: i64) -> i64 {
         raise(_, _) => -2,
     }
 }
+fn crossing(x: i64) -> i64 {
+    handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in {
+            x * 4611686018427387904 / x
+        } with {
+            return v => v,
+            raise(_, _) => 5,
+        }
+    } with {
+        return v => v,
+        raise(_, _) => -1,
+    }
+}
 fn main() -> i64 {
-    widen_i64(guarded(10)) ^ widen_i64(guarded(100)) ^ wrapping_i64(local(5)) ^ scaled(2, 3)
+    crossing(0) ^ crossing(1) ^ crossing(4) ^ widen_i64(guarded(10)) ^ widen_i64(guarded(100)) ^ wrapping_i64(local(5)) ^ scaled(2, 3)
         ^ scaled(4611686018427387904, 3) ^ nested(0) ^ nested(1) ^ nested(200)
 }
 ";
@@ -1132,9 +1146,9 @@ fn vesper_fail_handlers_match() {
         );
         let ran = if cross() { 0 } else { 2 };
         assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
-        // bump, guarded, local, scaled, nested and main, in both builds
-        // (and again for the JIT runs off-cross).
-        let min_emitted = if cross() { 12 } else { 24 };
+        // bump, guarded, local, scaled, nested, crossing and main, in both
+        // builds (and again for the JIT runs off-cross).
+        let min_emitted = if cross() { 14 } else { 28 };
         assert!(
             emitted >= min_emitted,
             "only {emitted} handler functions came from Vesper (expected {min_emitted})"

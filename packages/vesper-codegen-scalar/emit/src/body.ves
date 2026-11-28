@@ -2412,7 +2412,11 @@ impl Body {
             self.locals.push(at32(in self.svar, slot));
             self.kinds.push(kind_word & KIND_MASK);
             self.addresses.push(at32(in self.saddr, slot));
-            if at64(in self.sreg, slot) == 0 && at32(in self.saddr, slot) == invalid() {
+            // A product (a bound error) is its storage's address: no slot.
+            if lane != LANE_PRODUCT
+                && at64(in self.sreg, slot) == 0
+                && at32(in self.saddr, slot) == invalid()
+            {
                 self.spill(inout b, in m, k);
                 let ok = self.saddr.try_set(slot, at32(in self.addresses, k));
             }

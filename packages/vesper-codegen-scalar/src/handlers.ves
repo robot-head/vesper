@@ -467,7 +467,10 @@ impl Gen {
         for k in 0..h.lname.len() {
             let t = n32(u64_at(in h.lty, k));
             let lane = self.body_lane(t);
-            if lane == 0 || lane == LANE_PRODUCT {
+            // A product local only as the `raise` clause's bound error,
+            // which holds its storage's address.
+            let bound = u64_at(in h.lname, k) == self.bound_error;
+            if lane == 0 || (lane == LANE_PRODUCT && !bound) {
                 return false;
             }
             let name = u64_at(in h.lname, k);
@@ -608,7 +611,11 @@ impl Gen {
         // The `raise` clause first, which each raise of the body emits, with
         // the handlers outside this one.
         extra.push(err_name);
-        if !self.body_nested(op.graph, op_base, in h, inout builtin_calls, inout extra) {
+        let outer_error = self.bound_error;
+        self.bound_error = err_name;
+        let ok = self.body_nested(op.graph, op_base, in h, inout builtin_calls, inout extra);
+        self.bound_error = outer_error;
+        if !ok {
             return false;
         }
         // The handled body, with this handler in scope.
