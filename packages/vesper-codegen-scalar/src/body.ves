@@ -37,6 +37,7 @@
 use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at};
 use @vesper/check-data::types::{TyKind, default_type};
 use @vesper/check-layout::{L_ENUM, L_PRODUCT, layout_of};
+use @vesper/codegen-aggregates::{short_name};
 use @vesper/place-ir::{FnRow, InstRow};
 use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
 use super::{
@@ -124,6 +125,9 @@ const STRIDE_WORD: u64 = 8;
 // A `Fail` handler (#2657): its handled body and clauses as nested graphs;
 // codes from 60 leave room for the other body slices.
 pub const INST_HANDLE: u64 = 60;
+// A `Bind` of a struct or tuple pattern over a product of scalar fields
+// (#2654, `Codegen::bind_ir`): the pattern's nodes follow.
+pub const INST_BIND_FIELDS: u64 = 72;
 
 // A failure record's tag word, and the word its payload is rounded to
 // (`fail_record_size`).
@@ -246,6 +250,21 @@ const MATCH_INT: u64 = 2;
 const MATCH_F32: u64 = 3;
 const MATCH_F64: u64 = 4;
 const MATCH_WIDE: u64 = 5;
+// A struct or tuple pattern over a product (#2654, `pattern_condition`):
+// the arm's target, then the pattern's nodes.
+const MATCH_FIELDS: u64 = 16;
+
+// The nodes of a product pattern (#2654), in the walk's order: a leaf that
+// binds nothing (the condition `pattern_true`), a local bound to the value,
+// an integer or `bool` literal the value is compared with, or the fields
+// (count, then per field its offset, the lane it loads as and its node).
+pub const PNODE_NONE: u64 = 0;
+pub const PNODE_LOCAL: u64 = 1;
+pub const PNODE_INT: u64 = 2;
+pub const PNODE_FIELDS: u64 = 3;
+// An enum constructor's condition (#2654): the tag, the field count, then
+// the fields as `PNODE_FIELDS` has them.
+pub const PNODE_TAG: u64 = 4;
 
 // Sub-operations of `INST_WIDE_UNARY`.
 const WUN_BNOT: u64 = 1;
@@ -319,6 +338,15 @@ const DATA_PAIR_WORDS: u64 = 2;
 const PAT_WILD_WORDS: u64 = 3;
 const PAT_BIND_WORDS: u64 = 4;
 const PAT_LIT_WORDS: u64 = 6;
+// A tuple pattern's words: kind, span, count, then its parts; a
+// constructor's: kind, span, name, the named flag, count, then (field,
+// part) pairs.
+const PAT_TUPLE_COUNT_OFFSET: u64 = 3;
+const PAT_TUPLE_WORDS: u64 = 4;
+const PAT_CTOR_COUNT_OFFSET: u64 = 5;
+const PAT_CTOR_WORDS: u64 = 6;
+const PAT_CTOR_NAME_OFFSET: u64 = 3;
+const PAT_BIND_NAME_OFFSET: u64 = 3;
 const PAT_LIT_KIND_OFFSET: u64 = 3;
 const PAT_LIT_LO_OFFSET: u64 = 4;
 const TABLE_KIND_MASK: u32 = 15;
@@ -449,7 +477,10 @@ impl Gen {
 
     // LANE_PRODUCT for a struct or tuple whose fields are all scalars
     // (`Layout::of` a product with no aggregate field), else 0.
-    fn body_product_layout_ok(in self, l: u32) -> bool {
+    fn body_product_layout_ok(inout self, l: u32) -> bool {
+        if l != NONE32 && self.layouts.node(l).kind == L_ENUM {
+            return self.body_enum_layout_ok(l);
+        }
         if l == NONE32 || self.layouts.node(l).kind != L_PRODUCT {
             return false;
         }
@@ -463,6 +494,43 @@ impl Gen {
             }
         }
         true
+    }
+
+    // An enum kept in memory (#2654) whose variants' fields are register
+    // scalars or products of them: its register holds a pointer to its
+    // storage, as a product's does.
+    fn body_enum_layout_ok(inout self, l: u32) -> bool {
+        let node = self.layouts.node(l);
+        for k in 0..widen_u64(node.n) {
+            let v = self.layouts.lvariant(add(widen_u64(node.a), k));
+            for j in 0..widen_u64(v.fc) {
+                let field = self.layouts.lfield(add(widen_u64(v.fa), j));
+                let fine = if self.layouts.aggregate(field.layout) {
+                    self.layouts.node(field.layout).kind == L_PRODUCT
+                        && self.body_product_layout_ok(field.layout)
+                        && self.body_plain_product(field.ty)
+                } else {
+                    self.body_register(field.ty)
+                };
+                if !fine {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    // The index of the variant of enum layout `l` that constructor or
+    // pattern name `name` names (`Layout::variant`), or NONE64.
+    fn body_variant(inout self, l: u32, name: u32) -> u64 {
+        let short = short_name(inout self.ctx.names, name);
+        let node = self.layouts.node(l);
+        for k in 0..widen_u64(node.n) {
+            if self.layouts.lvariant(add(widen_u64(node.a), k)).name == short {
+                return k;
+            }
+        }
+        NONE64
     }
 
     fn body_product_lane(inout self, d: u32) -> u64 {
@@ -512,6 +580,25 @@ impl Gen {
         // `Op::Data`: name, count, (field, value) pairs; `Op::Tuple`:
         // count, values.
         let data = i.op == Op::Data;
+        // An enum's constructor (#2654): its tag, and its variant's fields.
+        let mut tag = NO_TAG;
+        let mut field_base = widen_u64(node.a);
+        let mut field_count = widen_u64(node.n);
+        if node.kind == L_ENUM {
+            let variant = if data {
+                self.body_variant(l, n32(self.program.op(i.a)))
+            } else {
+                NONE64
+            };
+            if variant == NONE64 {
+                self.layouts.reset(mark);
+                return false;
+            }
+            let v = self.layouts.lvariant(add(widen_u64(node.a), variant));
+            tag = variant;
+            field_base = widen_u64(v.fa);
+            field_count = widen_u64(v.fc);
+        }
         let n = if data {
             self.program.op(inc(i.a))
         } else {
@@ -523,18 +610,22 @@ impl Gen {
         for k in 0..n {
             let (field, at) = if data {
                 let pair = add(add(i.a, DATA_HEADER_WORDS), wrapping_mul(k, DATA_PAIR_WORDS));
-                (self.layouts.field_named(l, n32(self.program.op(pair))), inc(pair))
+                let name = n32(self.program.op(pair));
+                let mut index = NONE64;
+                for j in 0..field_count {
+                    if self.layouts.lfield(add(field_base, j)).name == name {
+                        index = j;
+                    }
+                }
+                (index, inc(pair))
             } else {
-                (wrapping_u32(k), add(inc(i.a), k))
+                (k, add(inc(i.a), k))
             };
-            if field == NONE32
-                || widen_u64(field) >= widen_u64(node.n)
-                || !self.body_operand(in h, at, inout ops)
-            {
+            if field == NONE64 || field >= field_count || !self.body_operand(in h, at, inout ops) {
                 ok = false;
                 break;
             }
-            let lf = self.layouts.lfield(add(widen_u64(node.a), widen_u64(field)));
+            let lf = self.layouts.lfield(add(field_base, field));
             let start = wrapping_u64(widen_i64(lf.offset));
             let size = widen_u64(self.layouts.node(lf.layout).size);
             let vt = n32(u64_at(in h.vty, u64_at(in ops, k)));
@@ -579,12 +670,31 @@ impl Gen {
             fields.push(store);
         }
         let size = widen_u64(node.size);
+        // An enum's zeroing ends at its variant's last field (the words
+        // past it are inactive payload, §16.6), its tag word written.
+        let mut end = if size < WORD_BYTES { WORD_BYTES } else { size };
+        if tag != NO_TAG {
+            covered.push(0);
+            end = 0;
+            for j in 0..field_count {
+                let lf = self.layouts.lfield(add(field_base, j));
+                let last = add(
+                    wrapping_u64(widen_i64(lf.offset)),
+                    widen_u64(self.layouts.node(lf.layout).size)
+                );
+                if last > end {
+                    end = last;
+                }
+            }
+            if field_count == 0 {
+                end = WORD_BYTES;
+            }
+        }
         self.layouts.reset(mark);
         if !ok {
             return false;
         }
         extra.push(size);
-        let end = if size < WORD_BYTES { WORD_BYTES } else { size };
         let mut zeroed: ChunkSeq[u64] = ChunkSeq::new[u64]();
         let mut off: u64 = 0;
         loop {
@@ -604,6 +714,7 @@ impl Gen {
         }
         extra.push(zeroed.len());
         extra.extend(in zeroed.as_slice());
+        extra.push(tag);
         extra.extend(in fields.as_slice());
         true
     }
@@ -1615,6 +1726,167 @@ impl Gen {
         true
     }
 
+    // Whether product type `t` holds only register scalars and products of
+    // them (#2654): a pattern over it loads its fields and binds no `Box`
+    // or handle the walk would drop.
+    fn body_plain_product(inout self, t: u32) -> bool {
+        let mark = self.layouts.mark();
+        let d = default_type(inout self.ctx.types, t);
+        let l = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            d
+        );
+        let mut ok = l != NONE32 && self.layouts.node(l).kind == L_PRODUCT;
+        if ok {
+            let node = self.layouts.node(l);
+            for k in 0..widen_u64(node.n) {
+                let lf = self.layouts.lfield(add(widen_u64(node.a), k));
+                let fine = if self.layouts.aggregate(lf.layout) {
+                    self.body_plain_product(lf.ty)
+                } else {
+                    self.body_register(lf.ty)
+                };
+                if !fine {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        self.layouts.reset(mark);
+        ok
+    }
+
+    // The nodes of pattern `p` (place-ir words, prefix order) over a value
+    // of type `t` (#2654), appended to `o`: the walk's `bind_ir` when
+    // `bind`, else its `pattern_condition`. Answers the word after the
+    // pattern, or NONE64 to leave the function to the walk.
+    fn body_pattern(
+        inout self,
+        in h: Header,
+        p: u64,
+        t: u32,
+        bind: bool,
+        inout o: ChunkSeq[u64]
+    ) -> u64 {
+        let pkind = self.program.op(p);
+        if pkind == Pat::Wild {
+            o.push(PNODE_NONE);
+            return add(p, PAT_WILD_WORDS);
+        }
+        if pkind == Pat::Bind {
+            if bind {
+                let k = self.body_local(in h, self.program.op(add(p, PAT_BIND_NAME_OFFSET)));
+                if k == NONE64 {
+                    return NONE64;
+                }
+                o.push(PNODE_LOCAL);
+                o.push(k);
+            } else {
+                o.push(PNODE_NONE);
+            }
+            return add(p, PAT_BIND_WORDS);
+        }
+        if pkind == Pat::Literal {
+            if bind {
+                o.push(PNODE_NONE);
+                return add(p, PAT_LIT_WORDS);
+            }
+            let lkind = self.program.op(add(p, PAT_LIT_KIND_OFFSET));
+            if (lkind != Lit::Int && lkind != Lit::Bool) || self.body_lane(t) != LANE_I64 {
+                return NONE64;
+            }
+            o.push(PNODE_INT);
+            o.push(self.program.op(add(p, PAT_LIT_LO_OFFSET)));
+            return add(p, PAT_LIT_WORDS);
+        }
+        let tuple = pkind == Pat::Tuple;
+        if (!tuple && pkind != Pat::Constructor) || self.body_lane(t) != LANE_PRODUCT {
+            return NONE64;
+        }
+        let n = if tuple {
+            self.program.op(add(p, PAT_TUPLE_COUNT_OFFSET))
+        } else {
+            self.program.op(add(p, PAT_CTOR_COUNT_OFFSET))
+        };
+        let mut q = if tuple {
+            add(p, PAT_TUPLE_WORDS)
+        } else {
+            add(p, PAT_CTOR_WORDS)
+        };
+        let mark = self.layouts.mark();
+        let d = default_type(inout self.ctx.types, t);
+        let l = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            d
+        );
+        let node = self.layouts.node(l);
+        let mut field_base = widen_u64(node.a);
+        let mut field_count = widen_u64(node.n);
+        if node.kind == L_ENUM {
+            // An enum constructor (#2654): its variant's fields, tested
+            // against its tag first when it is an arm's condition.
+            let variant = if tuple {
+                NONE64
+            } else {
+                self.body_variant(l, n32(self.program.op(add(p, PAT_CTOR_NAME_OFFSET))))
+            };
+            if variant == NONE64 {
+                self.layouts.reset(mark);
+                return NONE64;
+            }
+            let v = self.layouts.lvariant(add(widen_u64(node.a), variant));
+            field_base = widen_u64(v.fa);
+            field_count = widen_u64(v.fc);
+            if bind {
+                o.push(PNODE_FIELDS);
+            } else {
+                o.push(PNODE_TAG);
+                o.push(variant);
+            }
+        } else {
+            // `pattern_condition` of `()` is no product: left to the walk.
+            if !self.body_plain_product(t) || (tuple && (n == 0 || n > field_count)) {
+                self.layouts.reset(mark);
+                return NONE64;
+            }
+            o.push(PNODE_FIELDS);
+        }
+        o.push(n);
+        for k in 0..n {
+            let mut index = NONE64;
+            if tuple {
+                index = k;
+            } else {
+                let name = n32(self.program.op(q));
+                q = inc(q);
+                for j in 0..field_count {
+                    if self.layouts.lfield(add(field_base, j)).name == name {
+                        index = j;
+                    }
+                }
+            }
+            if index == NONE64 {
+                q = NONE64;
+                break;
+            }
+            let lf = self.layouts.lfield(add(field_base, index));
+            o.push(wrapping_u64(widen_i64(lf.offset)));
+            o.push(self.body_lane(lf.ty));
+            q = self.body_pattern(in h, q, lf.ty, bind, inout o);
+            if q == NONE64 {
+                break;
+            }
+        }
+        self.layouts.reset(mark);
+        q
+    }
+
     fn body_write(
         inout self,
         in h: Header,
@@ -2164,6 +2436,13 @@ impl Gen {
                     return false;
                 }
                 extra.push(k);
+            } else if pat == Pat::Tuple || pat == Pat::Constructor {
+                // A struct or tuple destructured (#2654).
+                kind = INST_BIND_FIELDS;
+                let vt = n32(u64_at(in h.vty, u64_at(in ops, 0)));
+                if self.body_pattern(in h, inc(i.a), vt, true, inout extra) == NONE64 {
+                    return false;
+                }
             } else {
                 return false;
             }
@@ -2333,7 +2612,11 @@ impl Gen {
             if self.body_lane(i.ty) == LANE_PRODUCT && kind != INST_READ && kind != INST_READ_COPY {
                 return false;
             }
-            if kind != INST_PROJECT && kind != INST_BIND && kind != INST_CALL {
+            if kind != INST_PROJECT
+                && kind != INST_BIND
+                && kind != INST_BIND_FIELDS
+                && kind != INST_CALL
+            {
                 for k in 0..ops.len() {
                     if self.body_lane(n32(u64_at(in h.vty, u64_at(in ops, k)))) == LANE_PRODUCT {
                         return false;
@@ -2574,7 +2857,7 @@ impl Gen {
             }
             let vty = n32(u64_at(in h.vty, v));
             let vlane = self.body_lane(vty);
-            if vlane == 0 || vlane == LANE_PRODUCT {
+            if vlane == 0 {
                 return false;
             }
             let narms = self.program.op(inc(ta));
@@ -2590,6 +2873,27 @@ impl Gen {
                 } else if pkind == Pat::Bind {
                     akind = MATCH_TRUE;
                     p = add(p, PAT_BIND_WORDS);
+                } else if (pkind == Pat::Tuple || pkind == Pat::Constructor)
+                    && vlane == LANE_PRODUCT
+                {
+                    // A struct or tuple pattern (#2654): its target, then
+                    // its nodes.
+                    let mut nodes: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                    let after = self.body_pattern(in h, p, vty, false, inout nodes);
+                    if after == NONE64 {
+                        return false;
+                    }
+                    let target = self.program.op(after);
+                    p = inc(after);
+                    let trow = self.program.block(add(f.b0, target));
+                    if self.program.op(self.body_params_at(trow.ha)) != 0 {
+                        return false;
+                    }
+                    arms_words.push(MATCH_FIELDS);
+                    arms_words.push(0);
+                    arms_words.push(target);
+                    arms_words.extend(in nodes.as_slice());
+                    continue;
                 } else if pkind == Pat::Literal {
                     let lkind = self.program.op(add(p, PAT_LIT_KIND_OFFSET));
                     let lo = self.program.op(add(p, PAT_LIT_LO_OFFSET));
@@ -2937,10 +3241,12 @@ impl Gen {
         // Each value's register.
         graph_words.push(h.vty.len());
         for k in 0..h.vty.len() {
-            let mut lane = self.body_lane(n32(u64_at(in h.vty, k)));
-            if lane == 0 && self.body_words(in h, k) != 0 {
-                lane = LANE_WORDS;
-            }
+            // A small enum kept as words before one kept in memory (#2654).
+            let lane = if self.body_words(in h, k) != 0 {
+                LANE_WORDS
+            } else {
+                self.body_lane(n32(u64_at(in h.vty, k)))
+            };
             if lane == 0 {
                 return;
             }

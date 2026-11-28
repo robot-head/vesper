@@ -395,9 +395,11 @@ stays Rust by default.
 - `model/mod.rs` process epochs, scenario validation, the canonical-JSON
   identity digests and `value.rs`. These need a JSON value model on the
   Vesper side, or the Rust side has to pass canonical strings in.
-- The session driver itself, which steps the compiler's reference evaluator,
-  waits until the evaluator is reachable from Vesper (after the SH4 swap
-  points).
+- The session driver itself, which steps the compiler's reference evaluator.
+  Since #2680 it does so through a long-lived `vesper sim-host` process
+  (`src/sim_host.rs`), so the crate no longer links the compiler library;
+  Stage 2 serves that command once `@vesper/run` (#2053) can suspend at
+  external operations.
 - The `vesper-port` modules under Bazel: Bazel builds the port object
   (part 11) but runs only the default build; the WAL, SHA-256, process and
   failure ports run under Cargo in the port harness.

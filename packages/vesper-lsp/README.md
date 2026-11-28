@@ -30,4 +30,7 @@ The document store is the sibling package [`documents/`](documents/): a
 world that contains `@vesper/serde` cannot name the builtin `String`
 (serde's `Kind::String` takes the name), and the store needs it.
 
+The session loop that uses these pieces is
+[`@vesper/lsp-server`](../vesper-lsp-server/) (part 15a).
+
 See docs/parallel-results/self-host-lsp-core.md for the numbers and gaps.

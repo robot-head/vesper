@@ -139,6 +139,8 @@ const VIEW_BYTES: u32 = 24;
 const STRIDE_BYTE: u64 = 1;
 const STRIDE_HALF: u64 = 2;
 const STRIDE_QUARTER: u64 = 4;
+// A struct or tuple destructured (#2654): the pattern's nodes follow.
+const INST_BIND_FIELDS: u64 = 72;
 const CALLEE_ID_MASK: u64 = 4294967295;
 // A `Fail` handler (#2657): its handled body and clauses as nested graphs.
 const INST_HANDLE: u64 = 60;
@@ -267,6 +269,15 @@ const MATCH_INT: u64 = 2;
 const MATCH_F32: u64 = 3;
 const MATCH_F64: u64 = 4;
 const MATCH_WIDE: u64 = 5;
+// A struct or tuple pattern (#2654): the target, then the nodes.
+const MATCH_FIELDS: u64 = 16;
+
+// A product pattern's nodes (#2654, @vesper/codegen-scalar's `PNODE_*`).
+const PNODE_NONE: u64 = 0;
+const PNODE_LOCAL: u64 = 1;
+const PNODE_INT: u64 = 2;
+const PNODE_FIELDS: u64 = 3;
+const PNODE_TAG: u64 = 4;
 
 // Sub-operations of `INST_WIDE_UNARY`.
 const WUN_BNOT: u64 = 1;
@@ -981,6 +992,131 @@ impl Body {
         Block { id: at32(in self.blocks, i) }
     }
 
+    // A field of product pattern node words (#2654): `Codegen::offset`,
+    // then `load`, which leaves a product field at its address.
+    fn pattern_field(
+        inout self,
+        inout b: Builder,
+        inout w: Words,
+        base: Value
+    ) -> Value eff [Ffi[Cranelift]] {
+        let off = w.next();
+        let lane = w.next();
+        let ptr = ins_iadd_imm(inout b, base, wrapping_i64(off));
+        if lane == LANE_PRODUCT {
+            ptr
+        } else {
+            ins_load(inout b, lane_type(lane), PLAIN, ptr, 0)
+        }
+    }
+
+    // `Codegen::bind_ir` of a product pattern's node over `v`: each field
+    // loaded in order and bound.
+    fn bind_node(
+        inout self,
+        inout b: Builder,
+        inout w: Words,
+        v: Value
+    ) -> bool eff [Ffi[Cranelift]] {
+        let node = w.next();
+        if node == PNODE_NONE {
+            return true;
+        }
+        if node == PNODE_LOCAL {
+            let local = w.next();
+            self.def_local(inout b, local, v);
+            return true;
+        }
+        if node != PNODE_FIELDS {
+            return false;
+        }
+        let n = w.next();
+        for k in 0..n {
+            let field = self.pattern_field(inout b, inout w, v);
+            if !self.bind_node(inout b, inout w, field) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // `Codegen::pattern_condition` of a product pattern's node over `v`:
+    // `pattern_true`, a literal's comparison, or the conjunction of the
+    // fields' conditions; an invalid value for words that do not read.
+    fn match_node(
+        inout self,
+        inout b: Builder,
+        inout w: Words,
+        v: Value
+    ) -> Value eff [Ffi[Cranelift]] {
+        let node = w.next();
+        if node == PNODE_NONE {
+            return ins_iconst(inout b, ty_i8(), 1);
+        }
+        if node == PNODE_INT {
+            let lit = w.next();
+            return ins_icmp_imm(inout b, cc_eq(), v, wrapping_i64(lit));
+        }
+        if node == PNODE_TAG {
+            // An enum constructor: its tag word compared, then (with
+            // fields) `pattern_open`'s diamond around the fields'
+            // conjunction, closed by `pattern_close`.
+            let tag = w.next();
+            let n = w.next();
+            let actual = ins_load(inout b, ty_i64(), PLAIN, v, 0);
+            let matches_tag = ins_icmp_imm(inout b, cc_eq(), actual, wrapping_i64(tag));
+            if n == 0 {
+                return matches_tag;
+            }
+            let ok = create_block(inout b);
+            let fail = create_block(inout b);
+            let done = create_block(inout b);
+            let joined = append_block_param(inout b, done, ty_i8());
+            ins_brif0(inout b, matches_tag, ok, fail);
+            switch_to_block(inout b, fail);
+            let zero = ins_iconst(inout b, ty_i8(), 0);
+            let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            args.push(zero.id);
+            ins_jump(inout b, done, in args.as_slice());
+            switch_to_block(inout b, ok);
+            let result = self.match_fields(inout b, inout w, v, n);
+            if is_invalid(result) {
+                return result;
+            }
+            let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            out.push(result.id);
+            ins_jump(inout b, done, in out.as_slice());
+            switch_to_block(inout b, done);
+            return joined;
+        }
+        if node != PNODE_FIELDS {
+            return Value { id: invalid() };
+        }
+        let n = w.next();
+        self.match_fields(inout b, inout w, v, n)
+    }
+
+    // The conjunction of `n` fields' conditions over `v`, from
+    // `pattern_true`.
+    fn match_fields(
+        inout self,
+        inout b: Builder,
+        inout w: Words,
+        v: Value,
+        n: u64
+    ) -> Value eff [Ffi[Cranelift]] {
+        let mut result = ins_iconst(inout b, ty_i8(), 1);
+        for k in 0..n {
+            let field = self.pattern_field(inout b, inout w, v);
+            let c = self.match_node(inout b, inout w, field);
+            if is_invalid(c) {
+                return c;
+            }
+            result = ins_band(inout b, result, c);
+        }
+        result
+    }
+
     // The walk's read of value `i` from its register.
     fn read(inout self, inout b: Builder, i: u64) eff [Ffi[Cranelift]] {
         let v = use_var(inout b, var_at(in self.registers, i));
@@ -1502,6 +1638,11 @@ impl Body {
             let local = w.next();
             if local != NO_LOCAL {
                 self.def_local(inout b, local, x);
+            }
+            ins_iconst(inout b, ty_i64(), 0)
+        } else if kind == INST_BIND_FIELDS {
+            if !self.bind_node(inout b, inout w, x) {
+                return false;
             }
             ins_iconst(inout b, ty_i64(), 0)
         } else if kind == INST_WRITE {
@@ -2106,12 +2247,42 @@ impl Body {
                     ins_store(inout b, PLAIN, zero, ptr, wrapping_i32(offset));
                 }
             }
+            // An enum's tag (#2654).
+            let tag = w.next();
+            if tag != NO_TAG {
+                let word = ins_iconst(inout b, ty_i64(), wrapping_i64(tag));
+                ins_store(inout b, PLAIN, word, ptr, 0);
+            }
             for k in 0..n {
                 let offset = w.next();
                 let read = w.next();
                 let store = w.next();
                 let tv = Var { id: at32(in temps, k) };
-                let value = body_operand(inout b, tv, read, self.optimize);
+                let read_value = body_operand(inout b, tv, read, self.optimize);
+                // The unoptimized path reads an aggregate field's value as
+                // an expression: a copy in fresh storage first.
+                let value = if store >= STORE_AGGREGATE && !self.optimize {
+                    let fsize = wrapping_sub(store, STORE_AGGREGATE);
+                    let copy = self.storage(inout b, in m, fsize);
+                    let mut foff: u64 = 0;
+                    loop {
+                        if foff >= fsize {
+                            break;
+                        }
+                        let word = ins_load(
+                            inout b,
+                            ty_i64(),
+                            PLAIN,
+                            read_value,
+                            wrapping_i32(foff)
+                        );
+                        ins_store(inout b, PLAIN, word, copy, wrapping_i32(foff));
+                        foff = wrapping_add(foff, widen_u64(WORD_BYTES));
+                    }
+                    copy
+                } else {
+                    read_value
+                };
                 let field = ins_iadd_imm(inout b, ptr, wrapping_i64(offset));
                 if store >= STORE_AGGREGATE {
                     let fsize = wrapping_sub(store, STORE_AGGREGATE);
@@ -2759,7 +2930,13 @@ impl Body {
                 let hi = if akind == MATCH_WIDE { w.next() } else { 0 };
                 let target = w.next();
                 let next = create_block(inout b);
-                let cond = if akind == MATCH_TRUE {
+                let cond = if akind == MATCH_FIELDS {
+                    let c = self.match_node(inout b, inout w, scr);
+                    if is_invalid(c) {
+                        return false;
+                    }
+                    c
+                } else if akind == MATCH_TRUE {
                     ins_iconst(inout b, ty_i8(), 1)
                 } else if akind == MATCH_INT {
                     ins_icmp_imm(inout b, cc_eq(), scr, wrapping_i64(payload))
