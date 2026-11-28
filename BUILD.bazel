@@ -2587,3 +2587,25 @@ stage2_port_builder(
     seed = "//bootstrap/stage2-seed:seed",
     visibility = ["//visibility:public"],
 )
+
+# The Stage 2 exe builder (#2752): @vesper/exe-builder (`vesper build`'s object
+# for a package's `main`) built and composed the same way.
+# crates/vesper-port-harness/tests/stage2_executable.rs links its objects and
+# compares them, and the executables, with the Rust compiler's.
+stage2_port_builder(
+    name = "exe_builder",
+    out = "vesper-exe-builder.wasm",
+    builder_package = "packages/vesper-exe-builder",
+    cranelift = "//crates/vesper-cranelift-component:component",
+    packages = glob([
+        "packages/**/*.ves",
+        "packages/**/Loom.toml",
+        "packages/**/*.vsys",
+    ]) + [
+        "//packages/vesper-codegen-numeric:files",
+        "//packages/vesper-cranelift:files",
+        "//packages/vesper-crypto:files",
+    ],
+    seed = "//bootstrap/stage2-seed:seed",
+    visibility = ["//visibility:public"],
+)
