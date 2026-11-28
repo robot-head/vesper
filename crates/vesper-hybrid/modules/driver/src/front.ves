@@ -8,7 +8,7 @@
 // byte budget, and a parse with diagnostics in a source with sugar (the
 // session expands it). The syntax errors of a source with none are
 // reported here too (`parse_front`).
-use @vesper/hybrid-parse::{parse_words};
+use @vesper/hybrid-parse::{parse_words, parse_words_tests};
 use @vesper/ast::lower::{lower_source};
 use @vesper/front::{Tokens};
 use @vesper/front::diag::{diags_new};
@@ -267,7 +267,12 @@ pub enum FrontParse {
 // driver does not cover: a source over the byte budget, an expansion that
 // declares `macro`s and does not parse (Forge), and a report the `@vesper/diagnostics` port refuses (the session's
 // renderer prints the raw diagnostics with its own reason).
-pub fn parse_front(in source: ChunkSeq[u8], in file: Slice[u8], json: bool) -> FrontParse {
+pub fn parse_front(
+    in source: ChunkSeq[u8],
+    in file: Slice[u8],
+    json: bool,
+    include_tests: bool
+) -> FrontParse {
     let bytes = source.as_slice();
     if bytes.len() > max_source_bytes() {
         return FrontParse::ParseDeclined;
@@ -276,7 +281,7 @@ pub fn parse_front(in source: ChunkSeq[u8], in file: Slice[u8], json: bool) -> F
         Option::Some(t) => t,
         Option::None => return FrontParse::ParseDeclined,
     };
-    let words = parse_words(in text);
+    let words = parse_for(in text, include_tests);
     let count = diagnostic_count(in words);
     if count == 0 {
         return FrontParse::ParsedClean(words);
@@ -284,7 +289,7 @@ pub fn parse_front(in source: ChunkSeq[u8], in file: Slice[u8], json: bool) -> F
     // `expand_sugar_for_execution(source, false)`: `Ok(None)` keeps the
     // parse's own diagnostics, `Ok(Some)` parses the expansion and `Err`
     // reports the expansion's.
-    let expanded = expand_words(in source, in imports_none(), false);
+    let expanded = expand_words(in source, in imports_none(), include_tests);
     let outcome = word_at(in expanded, 0);
     if outcome == SUGAR_NONE {
         let fields = syntax_fields(in words);
@@ -294,7 +299,7 @@ pub fn parse_front(in source: ChunkSeq[u8], in file: Slice[u8], json: bool) -> F
         };
     }
     if outcome == SUGAR_EXPANDED {
-        return parse_expansion(in text, in file, expanded, json);
+        return parse_expansion(in text, in file, expanded, json, include_tests);
     }
     if outcome != SUGAR_ERROR {
         return FrontParse::ParseDeclined;
@@ -316,7 +321,8 @@ fn parse_expansion(
     in text: Str,
     in file: Slice[u8],
     sink expanded: ChunkSeq[u64],
-    json: bool
+    json: bool,
+    include_tests: bool
 ) -> FrontParse {
     let mut at: u64 = 1;
     let mut source: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -325,7 +331,7 @@ fn parse_expansion(
         Option::Some(t) => t,
         Option::None => return FrontParse::ParseDeclined,
     };
-    let words = parse_words(in expanded_text);
+    let words = parse_for(in expanded_text, include_tests);
     let count = diagnostic_count(in words);
     if count == 0 {
         return FrontParse::ParsedSugar(words, expanded);
@@ -821,5 +827,15 @@ fn terminal_report(in text: Str, in file: Str, in fields: Slice[u8]) -> Option[C
     } with {
         return v => v,
         raise(f, resume) => rendered_refused(f),
+    }
+}
+
+// `parse(source, include_tests)` of src/forge_frontend/sugar.rs as a
+// `parse_words` stream: `parser::parse_for_tests` under `--include-tests`.
+fn parse_for(in text: Str, include_tests: bool) -> ChunkSeq[u64] {
+    if include_tests {
+        parse_words_tests(in text)
+    } else {
+        parse_words(in text)
     }
 }

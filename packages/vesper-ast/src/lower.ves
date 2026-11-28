@@ -37,8 +37,8 @@ use @vesper/front::lex::{
 };
 use @vesper/front::diag::{diags_new};
 use @vesper/front::parse::{
-    hard_depth, head_word, parse_surface_tokens, parse_template_tokens, parse_tokens,
-    sugar_operator_at
+    hard_depth, head_word, parse_surface_tokens, parse_template_tokens, parse_test_tokens,
+    parse_tokens, sugar_operator_at
 };
 use @vesper/front::lex::{lex_sugar_with_limits};
 use @vesper/front::kinds::{
@@ -3878,6 +3878,16 @@ pub fn lower_source_perm(in source: Str, inout ast_perm: u64, ast_perm_end: u64)
 }
 
 pub fn lower_source(in source: Str) -> L {
+    lower_core_source(in source, false)
+}
+
+// `lower_source` of `parser::parse_for_tests`: test blocks parsed and
+// their declarations lowered.
+pub fn lower_source_tests(in source: Str) -> L {
+    lower_core_source(in source, true)
+}
+
+fn lower_core_source(in source: Str, include_tests: bool) -> L {
     let b = source.as_bytes();
     let mut a = ast_new();
     let s = syms_new(inout a);
@@ -3890,7 +3900,11 @@ pub fn lower_source(in source: Str) -> L {
         text.push_str(in source);
         lex(in b, inout d)
     };
-    let p = parse_tokens(in b, t, d, max_diagnostics(), hard_depth());
+    let p = if include_tests {
+        parse_test_tokens(in b, t, d, max_diagnostics(), hard_depth())
+    } else {
+        parse_tokens(in b, t, d, max_diagnostics(), hard_depth())
+    };
     let mut l = L {
         p: p,
         text: text,
@@ -3914,7 +3928,7 @@ pub fn lower_source(in source: Str) -> L {
         decl_public: false,
         buf: String::new(),
         s: s,
-        tests: false
+        tests: include_tests
     };
     if oversized || l.p.halted || l.p.t.limited {
         return l;

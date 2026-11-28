@@ -20,6 +20,7 @@ unsafe extern "C" {
     fn vesper_hybrid_parse_box_new(size: i64) -> i64;
     fn vesper_hybrid_parse_format() -> i64;
     fn vesper_hybrid_parse_parse_words(source: *mut u64) -> i64;
+    fn vesper_hybrid_parse_parse_words_tests(source: *mut u64) -> i64;
 }
 
 /// The sequence runtime of the Vesper library `hybrid_parse`.
@@ -49,5 +50,14 @@ pub fn parse_words(source: &str) -> Vec<u64> {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_str(source, |view_source| unsafe { vesper_hybrid_parse_parse_words(view_source) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `parse_words_tests` of the Vesper library `hybrid_parse` (`vesper_hybrid_parse_parse_words_tests`).
+pub fn parse_words_tests(source: &str) -> Vec<u64> {
+    // SAFETY: `vesper_hybrid_parse_parse_words_tests` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_str(source, |view_source| unsafe { vesper_hybrid_parse_parse_words_tests(view_source) });
     unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }
