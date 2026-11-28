@@ -221,6 +221,7 @@ vesper_hybrid(
             "//:lsp_server_package",
             "//:place_ir_package",
             "//:proof_audit_package",
+            "//:std_arena_package",
             "//:std_collections_package",
             "//:std_env_package",
             "//:std_fmt_package",
@@ -230,11 +231,14 @@ vesper_hybrid(
             "//:std_intern_package",
             "//:std_process_package",
             "//:std_toml_package",
+            "//:sugar_package",
             "//:verified_codegen_package",
             "//:verify_package",
             "//:vsys_package",
             "//:wasm_backend_package",
             "//:wit_component_package",
+            # The syntax errors of a source with no sugar (#1893).
+            "//crates/vesper-diagnostics:port_package",
             # `vesper fmt`'s formatter (#1996 part 3d).
             "//crates/vesper-fmt:port_package",
             "//crates/vesper-lean-syntax:port_package",

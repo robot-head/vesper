@@ -90,7 +90,7 @@ mod evidence;
 mod fail;
 mod lower;
 mod machine;
-mod mono;
+pub(crate) mod mono;
 mod riscv64;
 mod x86_64;
 

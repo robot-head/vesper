@@ -28,6 +28,10 @@ capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdProcess]", "Ffi[Std
 "@vesper/ast" = { version = "^0.1", path = "../../../../packages/vesper-ast" }
 "@vesper/front" = { version = "^0.1", path = "../../../../packages/vesper-front" }
 "@vesper-std/toml" = { version = "^0.1", path = "../../../../packages/vesper-std/toml" }
+# The syntax errors of a source with no sugar (#1893): the sugar check and
+# the terminal renderer.
+"@vesper/sugar" = { version = "^0.1", path = "../../../../packages/vesper-sugar" }
+"@vesper/diagnostics" = { version = "^0.1", path = "../../../vesper-diagnostics/vesper" }
 # The package assembly of the package load (#1986).
 "@vesper/check-names-packages" = { version = "^0.1", path = "../../../../packages/vesper-check-names-packages" }
 # The checked world's declarations (#2024 slice 2c).
