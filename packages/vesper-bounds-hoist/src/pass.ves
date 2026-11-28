@@ -9,6 +9,7 @@ use @vesper/check-data::input::{Ctx, Reader, read_ctx};
 use @vesper/place-ir::{InstRow, Program, put_program, read_program};
 use self::fun::{Fun, add, inc, insert, n32, read_fun, u32_at, u64_at, u8_at, w};
 use self::encode::{POOL_GUARD, TypeCache, encode_fun, type_cache};
+use self::hoists::{entry_view_rows};
 use self::plans::{
     BoundRow, CountedPlan, Lin, LoopPlan, compared_list, counted_plan, dominated_list, fail_lin,
     next_loop, order_list
@@ -582,4 +583,22 @@ pub fn hoist_program(inout p: Program, inout c: Ctx) -> u64 {
         );
     }
     versioned
+}
+
+// The slice parameters graph `fi` of `p` reads once at entry
+// (`entry_view_rows`), after a first word: 1 when every hoist of the graph
+// is one, else 0 and nothing more.
+pub fn entry_views(in p: Program, inout t: Types, in names: Names, fi: u64) -> ChunkSeq[u64] {
+    let mut tc = type_cache(in names, in t);
+    let bytes = encode_fun(in p, inout t, in names, inout tc, fi);
+    let f = read_fun(in bytes.as_slice());
+    let mut rows: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if entry_view_rows(in f, inout rows) {
+        out.push(1);
+        out.extend(in rows.as_slice());
+    } else {
+        out.push(0);
+    }
+    out
 }

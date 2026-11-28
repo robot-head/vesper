@@ -133,4 +133,19 @@ pub fn keep(x: u32) -> u32 { x }",
 pub struct Buf { data: ChunkSeq[u8], n: u64 }
 pub fn count(inout b: Buf) -> u64 { 7 }",
     ),
+    (
+        "fused",
+        "pub fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+pub fn word(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::None => 5,
+        Option::Some(v) => v,
+    }
+}",
+    ),
 ];

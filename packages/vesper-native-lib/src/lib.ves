@@ -61,8 +61,9 @@ use @vesper/native-vectorize::{vectorize_script};
 use @vesper/native-cold-outline::{outline_script};
 use @vesper/codegen-scalar::{codegen_scalar_body_plan_prefix};
 use @vesper/codegen-calls::data::{calls_input_round_trip};
-use @vesper/check-data::input::{Reader as IrReader, read_ctx};
+use @vesper/check-data::input::{Ctx, Reader as IrReader, read_ctx};
 use @vesper/place-ir::{Op, Program, Term, read_program};
+use @vesper/bounds-hoist::pass::{entry_views};
 use @vesper/native-walk::{native_walk_call_words_bytes};
 use @vesper/native-walk::frame::{graph_plain};
 use @vesper/library-ir::{Status as IrStatus, library_walk_calls_input};
@@ -119,6 +120,9 @@ const CALL_HEADER_WORDS: u64 = 2;
 const NO_POINTER_TYPE: u32 = 0;
 // A program function with no body plan.
 const NO_PLAN: u64 = 18446744073709551615;
+// A header parameter's words before its paths: name, pass, path count,
+// type, span start and end.
+const HEADER_PARAM_WORDS: u64 = 6;
 // A block header's words besides its incoming token pairs before the
 // parameters (@vesper/place-ir `read_block`): the entry token, the
 // incoming count and the outgoing token.
@@ -332,8 +336,27 @@ fn define_one(
     for k in first..np {
         args.push(NO_VALUE);
     }
-    // No slice parameter is read once at entry (#2653).
-    args.push(0);
+    // The slice parameters read once at entry (#2653), on the optimize
+    // path.
+    let view = at64(in plans.view_at, index);
+    if view == NO_PLAN {
+        args.push(0);
+    } else {
+        let mut k = view;
+        let nviews = at64(in plans.views, k);
+        args.push(nviews);
+        k = wrapping_add(k, 1);
+        for _ in 0..nviews {
+            args.push(at64(in plans.views, k));
+            let nr = at64(in plans.views, wrapping_add(k, 1));
+            args.push(nr);
+            k = wrapping_add(k, 2);
+            for _ in 0..nr {
+                args.push(at64(in plans.views, k));
+                k = wrapping_add(k, 1);
+            }
+        }
+    }
     args.extend(in plans.words[at..plan_end]);
     let answer = emit_body_words(args, inout b, inout m);
     if answer != HANDLED {
@@ -451,6 +474,11 @@ pub struct Plans {
     // per instance: the graph half of the plain gate (`graph_plain` of its
     // function's graph; 0 when the program has no graph for it)
     graph: ChunkSeq[u64],
+    // per instance: where its entry views start in `views` (NO_PLAN for
+    // none), each as `[count, then per view its parameter index, read
+    // count and reads' value indexes]`
+    view_at: ChunkSeq[u64],
+    views: ChunkSeq[u64],
     // per instance: SET when its graph may return a value that
     // `aggregates::plan` builds in the result (`result_built`)
     built: ChunkSeq[u64],
@@ -581,6 +609,8 @@ fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
     let mut ls = layouts_new();
     let mut at: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut graph: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut view_at: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut views: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut built: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let count = d.name_at.len();
     for i in 0..count {
@@ -593,6 +623,7 @@ fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
         let sym = c.names.lookup(in d.names[start..end]);
         let mut plan = NO_PLAN;
         let mut plain: u64 = 0;
+        let mut view = NO_PLAN;
         let mut builds: u64 = 0;
         for j in 0..p.fn_count() {
             if p.function(j).name == sym {
@@ -605,6 +636,16 @@ fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
                 // facts (enums.ves).
                 if d.optimize && graph_enums(inout ls, inout c, in p, j) {
                     plan = NO_PLAN;
+                }
+                // The slice parameters the optimize path reads once at
+                // entry (`entry_views`); any other header hoist leaves the
+                // graph to the walk.
+                if d.optimize && plan != NO_PLAN {
+                    view = views.len();
+                    if !graph_views(inout c, in p, j, inout views) {
+                        plan = NO_PLAN;
+                        view = NO_PLAN;
+                    }
                 }
                 builds = if result_built(in p, j) { SET } else { 0 };
                 break;
@@ -620,10 +661,84 @@ fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
         }
         at.push(plan);
         graph.push(plain);
+        view_at.push(view);
         built.push(builds);
     }
     words.extend(in generic.words.as_slice());
-    Plans { words: words, at: at, graph: graph, built: built }
+    Plans { words: words, at: at, graph: graph, view_at: view_at, views: views, built: built }
+}
+
+// `entry_views` of graph `fi` (@vesper/bounds-hoist) appended to `out`
+// as the request words that `NativeCodegen::entry_views` makes: the view
+// count, then per view its parameter index, read count and the reads'
+// value indexes. False when a header hoist is not such a view.
+fn graph_views(inout c: Ctx, in p: Program, fi: u64, inout out: ChunkSeq[u64]) -> bool {
+    let rows = entry_views(in p, inout c.types, in c.names, fi);
+    if at64(in rows, 0) != SET {
+        return false;
+    }
+    let ids = value_ids(in p, fi);
+    let count_at = out.len();
+    out.push(0);
+    let mut nviews: u64 = 0;
+    let mut k: u64 = 1;
+    loop {
+        if k >= rows.len() {
+            break;
+        }
+        out.push(at64(in rows, k));
+        let nr = at64(in rows, wrapping_add(k, 1));
+        out.push(nr);
+        k = wrapping_add(k, 2);
+        for _ in 0..nr {
+            let index = position(in ids, at64(in rows, k));
+            if index == NO_PLAN {
+                return false;
+            }
+            out.push(index);
+            k = wrapping_add(k, 1);
+        }
+        nviews = wrapping_add(nviews, 1);
+    }
+    out.try_set(count_at, nviews)
+}
+
+// The value ids of graph `fi`'s header, in its order (the walk's value
+// indexes).
+fn value_ids(in p: Program, fi: u64) -> ChunkSeq[u64] {
+    let f = p.function(fi);
+    let mut i = f.ha;
+    let np = p.op(i);
+    i = wrapping_add(i, 1);
+    for _ in 0..np {
+        // name, pass, path count and paths, type, span start and end
+        let nproj = p.op(wrapping_add(i, 2));
+        i = wrapping_add(wrapping_add(i, HEADER_PARAM_WORDS), nproj);
+    }
+    // result and effects, then the bounds' pairs and the names
+    i = wrapping_add(i, 2);
+    let nb = p.op(i);
+    i = wrapping_add(wrapping_add(i, 1), wrapping_mul(nb, 2));
+    let nn = p.op(i);
+    i = wrapping_add(wrapping_add(i, 1), nn);
+    let nv = p.op(i);
+    i = wrapping_add(i, 1);
+    let mut ids: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for _ in 0..nv {
+        ids.push(p.op(i));
+        i = wrapping_add(i, 2);
+    }
+    ids
+}
+
+// The index of `x` in `ids`, or NO_PLAN.
+fn position(in ids: ChunkSeq[u64], x: u64) -> u64 {
+    for k in 0..ids.len() {
+        if at64(in ids, k) == x {
+            return k;
+        }
+    }
+    NO_PLAN
 }
 
 fn push_dec(inout out: ChunkSeq[u8], value: u64) {
