@@ -17,6 +17,7 @@ use @vesper/check-data::world::{
 use @vesper/place-ir::codes::{Lit, Pat};
 use @vesper/wasm-backend::ir::{CallRow, Pair};
 use @vesper/place-ir-lower::ast::{Ast, Ef, Eop, Ex, FnR, Hd, Pm, Pt};
+use self::facts::{loop_breaks, loop_never_breaks, loop_plain_breaks};
 use self::sugar_policy::{
     POLICY_BAD_METADATA, POLICY_OK, PolicyFailure, PolicyInputs, PolicySpan, caller_supplied,
     captured_value_fault, contains, diagnose_policy_fault, effect_failure, empty_inputs,
@@ -1449,7 +1450,16 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         res
     } else if e.kind == X_LOOP {
         let _bt = check_expr(inout tc, in a, e.a, tc.unit_ty);
-        expected
+        // Rust's loop type: the join of its `break` values, `Unit` for
+        // plain `break`s and `Never` without any.
+        let breaks = loop_breaks(in a, e.a);
+        if breaks == loop_never_breaks() {
+            tc.never_ty
+        } else if breaks == loop_plain_breaks() {
+            tc.unit_ty
+        } else {
+            expected
+        }
     } else if e.kind == X_FOR {
         let it = check_expr(inout tc, in a, e.b, tc.infer_ty);
         push_scope(inout tc);
@@ -1838,6 +1848,12 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 let u8t = tc.types.named0(tc.world.k.u8_);
                                 let opt_nm = tc.names.intern(in "Option".as_bytes());
                                 named1(inout tc, opt_nm, u8t)
+                            } else if is_op(in tc, mname, in "get")
+                                && (tname == tc.world.k.chunk_seq || tname == tc.world.k.slice)
+                                && tc.types.arity(bt) > 0
+                            {
+                                // A sequence or slice element (`SeqOp::Get`).
+                                tc.types.arg(bt, 0)
                             } else if (is_op(in tc, mname, in "try_get")
                                 || is_op(in tc, mname, in "try_get_mut")
                                 || is_op(in tc, mname, in "get")
@@ -1965,7 +1981,7 @@ fn sort_spans_slice(inout s: Slice[SpanRow]) eff [Fail[RuntimeError]] {
     }
 }
 
-fn sort_spans(inout spans: ChunkSeq[SpanRow]) {
+pub fn sort_spans(inout spans: ChunkSeq[SpanRow]) {
     handle Fail[RuntimeError] in {
         sort_spans_slice(inout spans.as_slice_mut());
     } with {

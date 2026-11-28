@@ -76,7 +76,7 @@ const DECLINES: &[&str] = &[
 /// The functions Stage 2 must lower as Rust does today. The rest differ
 /// where Stage 2's checker records less than Rust's: overflow and partial
 /// operations (`fallible`) and the unit type of statements.
-const MIN_SAME_FUNCTIONS: usize = 9;
+const MIN_SAME_FUNCTIONS: usize = 30;
 
 /// Set to print the Rust and Stage 2 bodies of each function that differs.
 const SHOW_DIFFS: &str = "VESPER_STAGE2_CALLS_DIFFS";
@@ -156,6 +156,52 @@ pub fn quad(x: i64) -> i64 { square(square(x)) }",
         "fn step(a: u64, b: u64) -> u64 eff [Fail[ArithOverflow]] { a * b + 1 }
 pub fn total(a: u64, b: u64) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] { step(a, b) / b }",
         &["total"],
+    ),
+    (
+        "guards",
+        "pub fn safe_div(a: u64, b: u64) -> u64 eff [Fail[RuntimeError]] { if b == 0 { return 0; } a / b }
+pub fn bounded(x: u8) -> u8 eff [Fail[ArithOverflow]] { if x < 200 { x + 50 } else { x } }
+pub fn negate(x: i32) -> i32 eff [Fail[ArithOverflow]] { -x }
+pub fn consts() -> i64 eff [Fail[ArithOverflow]] { let a = 5; let b = a * 3; b - 1 }
+pub fn shifts(x: u64, n: u32) -> u64 eff [Fail[ArithOverflow]] { if n < 64 { x << n } else { x >> (n & 7) } }
+pub fn low_byte(x: u64) -> u8 eff [Fail[ArithOverflow]] { narrow_u8(x & 255) }
+pub fn any_byte(x: u64) -> u8 eff [Fail[ArithOverflow]] { narrow_u8(x) }
+pub fn modulo(x: u64, m: u64) -> u64 eff [Fail[RuntimeError]] { x % (m | 1) }
+pub fn halve(x: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] { x / 2 }
+pub fn signed_div(x: i64, y: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] { if y > 0 { x / y } else { 0 } }",
+        &["any_byte", "bounded", "consts", "halve", "low_byte", "modulo", "negate", "safe_div", "shifts", "signed_div"],
+    ),
+    (
+        "loops",
+        "pub fn sum_to(n: u64) -> u64 eff [Fail[ArithOverflow]] { let mut s: u64 = 0; for i in 0..n { s = s + i; } s }
+pub fn count_down(n: i64) -> i64 eff [Fail[ArithOverflow]] { let mut k = n; let mut c: i64 = 0; loop { if k <= 0 { break; } k = k - 1; c += 1; } c }
+pub fn fixed(lo: u32, hi: u32) -> u32 eff [Fail[ArithOverflow]] { let mut t: u32 = 0; for i in lo..hi { t = wrapping_add(t, i * 2); } t }
+pub fn product() -> u64 eff [Fail[ArithOverflow]] { let mut acc: u64 = 1; for i in 1..=16 { acc = wrapping_mul(acc, i + 1); } acc }",
+        &["count_down", "fixed", "product", "sum_to"],
+    ),
+    (
+        "arrays",
+        "pub fn pick(i: u64, a: u32) -> u32 eff [Fail[RuntimeError]] { let t: [u32; 4] = [a, a, a, a]; t[i] }
+pub fn pick_masked(i: u64, a: u32) -> u32 eff [Fail[RuntimeError]] { let t: [u32; 4] = [a, a, a, a]; t[i & 3] }
+pub fn guarded(i: u64, a: u32) -> u32 eff [Fail[RuntimeError]] { let t: [u32; 4] = [a, a, a, a]; if i < 4 { t[i] } else { a } }",
+        &["guarded", "pick", "pick_masked"],
+    ),
+    (
+        "seqs",
+        "fn first(in s: Slice[u64], j: u64) -> u64 eff [Fail[RuntimeError]] { s[j] }
+pub fn seqs(n: u64, j: u64) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] { let mut v = ChunkSeq::new[u64](); v.push(n); v.push(j); let mut t: u64 = 0; for i in 0..v.len() { t = t + v.get(i); } t + v[j] + first(in v.as_slice(), j) }",
+        &["seqs"],
+    ),
+    // Literal typing the Stage 2 checker does not match yet (#2691): a
+    // shift amount, a range typed by its index's uses, array literal
+    // elements and sequence indices.
+    (
+        "literals",
+        "pub fn shift3(x: u64) -> u64 { x >> 3 }
+pub fn steps() -> u32 eff [Fail[ArithOverflow]] { let mut t: u32 = 0; for i in 0..10 { t = wrapping_add(t, i * 2); } t }
+pub fn sum_arr() -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] { let t: [u32; 4] = [1, 2, 3, 4]; let mut s: u32 = 0; for i in 0..4 { s = s + t[i]; } s }
+pub fn second(n: u64) -> u64 eff [Fail[RuntimeError]] { let mut v = ChunkSeq::new[u64](); v.push(n); v[0] }",
+        &["second", "shift3", "steps", "sum_arr"],
     ),
     (
         "floats",
