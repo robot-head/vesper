@@ -223,6 +223,16 @@ pub struct CallSlots {
     bases: ChunkSeq[u64],
 }
 
+// Whether `homed` (`body_homed`) names local `name`.
+fn homed_has(in homed: ChunkSeq[u64], name: u64) -> bool {
+    for k in 0..homed.len() {
+        if u64_at(in homed, k) == name {
+            return true;
+        }
+    }
+    false
+}
+
 fn has(in names: ChunkSeq[u32], a: u64, n: u64, name: u64) -> bool {
     for k in a..add(a, n) {
         if widen_u64(u32_at(in names, k)) == name {
@@ -497,6 +507,7 @@ impl Gen {
         o.push(rl);
         o.push(f.bc);
         o.push(h.lname.len());
+        let homed = self.body_homed(f);
         for k in 0..h.lname.len() {
             let t = n32(u64_at(in h.lty, k));
             let lane = self.body_lane(t);
@@ -509,8 +520,12 @@ impl Gen {
             let name = u64_at(in h.lname, k);
             o.push(name);
             o.push(lane);
-            // A local a handler of this graph names keeps its slot.
-            let regs = if self.body_register(t) && !self.handler_home(fi, name) {
+            // A local a handler of this graph names, or one lent to a
+            // call that may leave (`body_homed`), keeps its slot.
+            let regs = if self.body_register(t)
+                && !self.handler_home(fi, name)
+                && !homed_has(in homed, name)
+            {
                 NESTED_REGISTER
             } else {
                 0
@@ -519,8 +534,10 @@ impl Gen {
         }
         o.push(h.vty.len());
         for k in 0..h.vty.len() {
+            // A product value (an error raised from this graph, #2657) holds
+            // its storage's address as at the top level.
             let lane = self.body_lane(n32(u64_at(in h.vty, k)));
-            if lane == 0 || lane == LANE_PRODUCT || self.body_words(in h, k) != 0 {
+            if lane == 0 || self.body_words(in h, k) != 0 {
                 return false;
             }
             o.push(lane);
