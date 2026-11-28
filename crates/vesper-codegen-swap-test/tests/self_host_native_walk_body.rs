@@ -1280,6 +1280,132 @@ fn vesper_explicit_raises_match() {
     });
 }
 
+/// Constant tables (#2789): a module constant of literals read at run time
+/// (`TABLE[i]`) is a pointer to read-only data (`Codegen::constant_table`),
+/// and each element read one bounds check that traps, or raises
+/// `IndexOutOfBounds` where the checker recorded a possible failure, then
+/// one load. `whole` returns a fresh copy of a table. The walk's
+/// `index_below` elides the check of an index it can bound (`fixed`,
+/// `masked`, `local_const`), so those stay with it, as do a narrow element
+/// (`small`) and an element read from a local's copy (`copied`).
+const TABLES: &str = "
+const TABLE: [u64; 4] = [3, 5, 9, 17];
+const FLAGS: [bool; 3] = [true, false, true];
+const REALS: [f64; 2] = [1.5, 2.25];
+const SMALL: [u8; 3] = [1, 2, 3];
+const LO: [u64; 3] = [9, 32, 133];
+const HI: [u64; 3] = [13, 32, 133];
+fn look(i: u64) -> u64 {
+    if i < 4 { TABLE[i] } else { 0 }
+}
+fn look_raise(i: u64) -> u64 eff [Fail[RuntimeError]] {
+    TABLE[i]
+}
+fn flag(i: u64) -> bool {
+    if i < 3 { FLAGS[i] } else { false }
+}
+fn real(i: u64) -> f64 {
+    if i < 2 { REALS[i] } else { 0.0 }
+}
+fn whole() -> [u64; 4] {
+    TABLE
+}
+fn search(c: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi: u64 = 4;
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        let first = if mid < 4 { TABLE[mid] } else { 0 };
+        if first <= c {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+fn in_runs(c: u64) -> bool {
+    let mut i: u64 = 0;
+    loop {
+        if i >= 3 {
+            break;
+        }
+        let lo = if i < 3 { LO[i] } else { 0 };
+        let hi = if i < 3 { HI[i] } else { 0 };
+        if c < lo {
+            return false;
+        }
+        if c <= hi {
+            return true;
+        }
+        i = wrapping_add(i, 1);
+    }
+    false
+}
+fn fixed() -> u64 {
+    TABLE[2]
+}
+fn masked(i: u64) -> u64 {
+    TABLE[i & 3]
+}
+fn local_const() -> u64 {
+    let j: u64 = 1;
+    TABLE[j]
+}
+fn small(i: u64) -> u8 {
+    if i < 3 { SMALL[i] } else { 0 }
+}
+fn copied(i: u64) -> u64 {
+    let t = TABLE;
+    if i < 4 { t[i] } else { 0 }
+}
+fn main() -> i64 {
+    let b = handle Fail[RuntimeError] in {
+        look_raise(1) ^ look_raise(9)
+    } with {
+        return v => v,
+        raise(error, resume) => 64,
+    };
+    let f = if flag(0) { 1 } else { 0 };
+    let r = if real(1) > 2.0 { 2 } else { 0 };
+    let s = if in_runs(32) { 4 } else { 0 };
+    let t = if in_runs(20) { 8 } else { 0 };
+    let w = whole();
+    let x = look(2) ^ look(7) ^ b ^ f ^ r ^ s ^ t ^ w[3] ^ search(9) ^ fixed() ^ masked(6);
+    wrapping_i64(x ^ local_const() ^ widen_u64(small(2)) ^ copied(3))
+}
+";
+
+#[test]
+fn vesper_constant_tables_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(TABLES);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("tables", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "tables: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        // look, look_raise, flag, real, whole, search and in_runs, in both
+        // builds (and again for the JIT runs off-cross).
+        let min_emitted = if cross() { 14 } else { 28 };
+        assert!(
+            emitted >= min_emitted,
+            "only {emitted} table functions came from Vesper (expected {min_emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
 /// Struct and tuple results through the result pointer (#2411): structs of
 /// word, narrow, `bool` and float fields (an `f32` field leaves its word
 /// to be zeroed), a tuple, a one-field struct smaller than a word, and a

@@ -109,6 +109,12 @@ pub const INST_SEQ: u64 = 80;
 // An arm's `Bind` of a fused `try_get` (`seq_fused_bind`): the local
 // `Some(x)` binds (NO_LOCAL for none), then the element's stride and lane.
 pub const INST_BIND_FUSED: u64 = 81;
+// A constant table read (`Codegen::constant_table`, #2789): `TABLE_*`
+// (read only, or copied), the table's size, then its words.
+pub const INST_TABLE: u64 = 96;
+// An element of an array (`ExprKind::Index`, #2789): the array's length,
+// the element's lane, then `INDEX_TRAPS` or `INDEX_RAISES` and the raise.
+pub const INST_INDEX: u64 = 97;
 // `INST_SEQ`'s forms: a header word loaded at an offset (`Str::len`,
 // `Slice::len`); the operand itself (`as_str`); a byte view of a string
 // (`as_bytes`); a checked byte (`byte_at`); a checked slice element
@@ -2719,6 +2725,17 @@ impl Gen {
             if !self.body_handle(in h, i, row, base, inout builtin_calls, inout extra) {
                 return false;
             }
+        } else if i.op == Op::Index {
+            kind = INST_INDEX;
+            if !self.body_index(in h, i, inout ops, inout extra) {
+                return false;
+            }
+        } else if i.op == Op::Call && self.table_function(n32(self.program.op(i.a))) != NONE64 {
+            kind = INST_TABLE;
+            if !self.body_table(i, inout extra) {
+                return false;
+            }
+            builtin_calls.push(call);
         } else if i.op == Op::Call && n32(self.program.op(i.a)) == self.ops.fail_raise {
             kind = INST_RAISE;
             if !self.body_raise_call(in h, i, call, inout builtin_calls, inout ops, inout extra) {
@@ -2845,6 +2862,7 @@ impl Gen {
                 && kind != INST_READ
                 && kind != INST_READ_COPY
                 && kind != INST_CALL
+                && kind != INST_TABLE
             {
                 return false;
             }
@@ -2854,6 +2872,7 @@ impl Gen {
                 && kind != INST_BIND_FUSED
                 && kind != INST_CALL
                 && kind != INST_RAISE
+                && kind != INST_INDEX
             {
                 for k in 0..ops.len() {
                     if self.body_lane(n32(u64_at(in h.vty, u64_at(in ops, k)))) == LANE_PRODUCT {

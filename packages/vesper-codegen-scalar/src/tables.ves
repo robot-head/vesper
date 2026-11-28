@@ -1,0 +1,550 @@
+// Constant tables in the native walk's body plans (#2789, part of #1509).
+//
+// A use of a module constant whose value is a constant aggregate is a call
+// of `$table$NAME` (`arrays::lower_world`), which `Codegen::constant_table`
+// lowers to a pointer to the constant's read-only data, copied to fresh
+// storage first unless every use only reads an element or a field
+// (`only_read`). `TABLE[i]` is an `Op::Index` of that pointer: one unsigned
+// bounds check (`index_check`, raising `RuntimeError::IndexOutOfBounds`
+// where the checker recorded a possible failure, else a trap), then the
+// element loaded at `base + i * stride`.
+//
+// Slice 1 covers a constant tuple of one-word integer, `bool` or `f64`
+// literals, and an index of an array of such elements. The check's
+// `index_below` elision reads the Cranelift values that define the index,
+// so an index the walk may prove in bounds (a constant, a mask, a
+// remainder, a zero extension or a `select` of such values, found through
+// the variables a local's reads resolve to) leaves the function to the
+// Rust walk.
+
+use @vesper/check-data::util::{add, inc, n32, u64_at};
+use @vesper/check-data::types::{TyKind, default_type};
+use @vesper/check-layout::{L_PRODUCT, layout_of};
+use @vesper/place-ir::{FnRow, InstRow};
+use @vesper/place-ir::codes::{Lit, Op, Pat, Tag, Term};
+use super::{Gen};
+use super::body::{Header, LANE_F64, LANE_I64, LANE_PRODUCT};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+const WORD_BYTES: u64 = 8;
+
+// A table read's words (`INST_TABLE`): whether every use only reads it,
+// then its size and its words.
+pub const TABLE_COPIED: u64 = 0;
+pub const TABLE_READ_ONLY: u64 = 1;
+
+// How an index's bounds check fails (`INST_INDEX`): a trap where the
+// checker proved the index in bounds, else the raise's words follow.
+pub const INDEX_TRAPS: u64 = 0;
+pub const INDEX_RAISES: u64 = 1;
+
+// What a local's read resolves to on the optimize path, as Cranelift's SSA
+// builder answers `use_var` (`table_resolve`): the definition at an
+// instruction (its index in the program), a parameter, a block parameter
+// at block `PHI_BASE + b`, or one the plan cannot tell.
+const RESOLVED_PARAM: u64 = 18446744073709551613;
+const RESOLVED_UNKNOWN: u64 = 18446744073709551615;
+const PHI_BASE: u64 = 4294967296;
+// The most definitions `table_resolve` visits for one index.
+const RESOLVE_BUDGET: u64 = 512;
+
+// Where a `Read`'s operands start: root, path, pass, projection count.
+const READ_PATH: u64 = 1;
+const READ_PROJECTIONS: u64 = 3;
+// A `Bind`'s pattern word, and a `Pat::Bind` pattern's name.
+const BIND_PATTERN: u64 = 1;
+const BIND_NAME: u64 = 4;
+// A `Write`'s assignment operator and value.
+const WRITE_ASSIGN: u64 = 1;
+const WRITE_VALUE: u64 = 2;
+
+impl Gen {
+    // The constant function a call of `callee` reads as a table (its
+    // program row index), or NONE64 when `callee` is not `$table$NAME`.
+    fn table_function(in self, callee: u32) -> u64 {
+        let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        self.ctx.names.write(callee, inout text);
+        let mut prefix: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        self.ctx.names.write(self.ops.table_prefix, inout prefix);
+        if text.len() <= prefix.len() {
+            return NONE64;
+        }
+        let mut head: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let mut rest: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for k in 0..text.len() {
+            let byte = match text.try_get(k) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            if k < prefix.len() {
+                head.push(byte);
+            } else {
+                rest.push(byte);
+            }
+        }
+        if self.ctx.names.lookup(in head.as_slice()) != self.ops.table_prefix {
+            return NONE64;
+        }
+        let name = self.ctx.names.lookup(in rest.as_slice());
+        if name == NONE32 {
+            return NONE64;
+        }
+        self.body_function(name)
+    }
+
+    // `Codegen::constant_table` of call `i` (#2789): whether every use of
+    // its value only reads an element or a field, then the table's size
+    // and its words (`arrays::constant_bytes`). False for a callee that is
+    // not a table or a table slice 1 does not cover.
+    fn body_table(inout self, i: InstRow, inout extra: ChunkSeq[u64]) -> bool {
+        if self.program.op(inc(i.a)) != 0 || self.body_lane(i.ty) != LANE_PRODUCT {
+            return false;
+        }
+        let table = self.table_function(n32(self.program.op(i.a)));
+        if table == NONE64 {
+            return false;
+        }
+        let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        if !self.table_words(table, i.ty, inout words) {
+            return false;
+        }
+        let f = self.program.function(self.fi);
+        extra.push(
+            if self.table_only_read(f, widen_u64(i.dest)) {
+                TABLE_READ_ONLY
+            } else {
+                TABLE_COPIED
+            }
+        );
+        extra.push(wrapping_mul(words.len(), WORD_BYTES));
+        extra.extend(in words.as_slice());
+        true
+    }
+
+    // The words of a constant tuple of type `ty` that function `fi` builds
+    // from literals in one block and returns, or false.
+    fn table_words(inout self, fi: u64, ty: u32, inout words: ChunkSeq[u64]) -> bool {
+        let mut lanes: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        if !self.table_elements(ty, inout lanes) {
+            return false;
+        }
+        let f = self.program.function(fi);
+        if f.bc != 1 {
+            return false;
+        }
+        let row = self.program.block(f.b0);
+        if row.term != Term::Return {
+            return false;
+        }
+        let result = self.program.op(row.ta);
+        // each literal's value id, word and lane
+        let mut ids: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut values: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut value_lanes: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut built = false;
+        for ii in 0..row.ic {
+            let x = self.program.inst(add(row.i0, ii));
+            if x.op == Op::Const {
+                let lit = self.program.op(x.a);
+                if lit != Lit::Int && lit != Lit::Bool && lit != Lit::Float {
+                    return false;
+                }
+                ids.push(widen_u64(x.dest));
+                values.push(self.program.op(inc(x.a)));
+                value_lanes.push(
+                    if lit == Lit::Float {
+                        LANE_F64
+                    } else {
+                        LANE_I64
+                    }
+                );
+            } else if x.op == Op::Tuple && widen_u64(x.dest) == result && !built {
+                let n = self.program.op(x.a);
+                if n != lanes.len() {
+                    return false;
+                }
+                for k in 0..n {
+                    let id = self.program.op(add(inc(x.a), k));
+                    let mut found = false;
+                    for j in 0..ids.len() {
+                        if u64_at(in ids, j) == id
+                            && u64_at(in value_lanes, j) == u64_at(in lanes, k)
+                        {
+                            words.push(u64_at(in values, j));
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        return false;
+                    }
+                }
+                built = true;
+            } else {
+                return false;
+            }
+        }
+        built
+    }
+
+    // The lane of each element of the tuple type `ty`, a word apart from
+    // offset 0, when each is a one-word integer, `bool` or `f64`.
+    fn table_elements(inout self, ty: u32, inout lanes: ChunkSeq[u64]) -> bool {
+        let d = default_type(inout self.ctx.types, ty);
+        if self.ctx.types.node(d).kind != TyKind::Tuple {
+            return false;
+        }
+        let mark = self.layouts.mark();
+        let l = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            d
+        );
+        let mut fields: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut ok = l != NONE32 && self.layouts.node(l).kind == L_PRODUCT;
+        if ok {
+            let node = self.layouts.node(l);
+            ok = widen_u64(node.size) == wrapping_mul(widen_u64(node.n), WORD_BYTES) && node.n != 0;
+            for k in 0..widen_u64(node.n) {
+                let lf = self.layouts.lfield(add(widen_u64(node.a), k));
+                if wrapping_u64(widen_i64(lf.offset)) != wrapping_mul(k, WORD_BYTES)
+                    || widen_u64(self.layouts.node(lf.layout).size) != WORD_BYTES
+                {
+                    ok = false;
+                }
+                fields.push(lf.ty);
+            }
+        }
+        self.layouts.reset(mark);
+        if !ok {
+            return false;
+        }
+        for k in 0..fields.len() {
+            let ft = match fields.try_get(k) {
+                Option::Some(t) => t,
+                Option::None => return false,
+            };
+            let lane = self.table_scalar_lane(ft);
+            if lane == 0 {
+                return false;
+            }
+            lanes.push(lane);
+        }
+        true
+    }
+
+    // The lane of a one-word integer, `bool` or `f64` type, else 0.
+    fn table_scalar_lane(inout self, ty: u32) -> u64 {
+        let d = default_type(inout self.ctx.types, ty);
+        let node = self.ctx.types.node(d);
+        let k = self.ctx.world.k;
+        if node.kind != TyKind::Named || node.n != 0 {
+            return 0;
+        }
+        if node.name == k.f64_ {
+            return LANE_F64;
+        }
+        if (node.name == k.bool_ || k.is_integer(node.name)) && self.body_lane(d) == LANE_I64 {
+            return LANE_I64;
+        }
+        0
+    }
+
+    // `native_arrays::only_read`: every use of value `id` in graph `f` is
+    // the base of an `Index` (not also its index) or of a `Project`, and no
+    // terminator passes it.
+    fn table_only_read(in self, f: FnRow, id: u64) -> bool {
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            for k in row.ta..add(row.ta, row.tn) {
+                if self.program.tag(k) == Tag::Value && self.program.op(k) == id {
+                    return false;
+                }
+            }
+            for ii in 0..row.ic {
+                let x = self.program.inst(add(row.i0, ii));
+                if x.op == Op::Project {
+                    continue;
+                }
+                for k in x.a..add(x.a, x.n) {
+                    if self.program.tag(k) != Tag::Value || self.program.op(k) != id {
+                        continue;
+                    }
+                    if x.op != Op::Index || k != x.a || self.program.op(inc(x.a)) == id {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    // `ExprKind::Index` of an array (#2789): the base and the index as
+    // operands, then the array's length, the element's lane, and how the
+    // bounds check fails (`INDEX_TRAPS`, or `INDEX_RAISES` and the raise
+    // of `RuntimeError::IndexOutOfBounds`). False for an element slice 1
+    // does not cover, or an index the walk's `index_below` may prove in
+    // bounds.
+    fn body_index(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        inout ops: ChunkSeq[u64],
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        if !self.body_operand(in h, i.a, inout ops)
+            || !self.body_operand(in h, inc(i.a), inout ops)
+        {
+            return false;
+        }
+        let base_ty = n32(u64_at(in h.vty, u64_at(in ops, 0)));
+        let index_ty = n32(u64_at(in h.vty, u64_at(in ops, 1)));
+        if self.body_lane(base_ty) != LANE_PRODUCT
+            || self.body_lane(index_ty) != LANE_I64
+            || self.body_kind(index_ty) != 0
+        {
+            return false;
+        }
+        let mut lanes: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        if !self.table_elements(base_ty, inout lanes) {
+            return false;
+        }
+        // A narrow element stays on the walk, which keeps it narrow in
+        // its variable.
+        let lane = u64_at(in lanes, 0);
+        if self.body_lane(i.ty) != lane || self.body_kind(i.ty) != 0 {
+            return false;
+        }
+        // Slice 1 indexes a table read only: the walk reads an element of
+        // a local's place where it lies (`read_in_place`).
+        let f = self.program.function(self.fi);
+        let base = self.table_def(f, self.program.op(i.a));
+        if base == NONE64 {
+            return false;
+        }
+        let b = self.program.inst(base);
+        if b.op != Op::Call || self.table_function(n32(self.program.op(b.a))) == NONE64 {
+            return false;
+        }
+        let mut budget = RESOLVE_BUDGET;
+        if self.table_index_bounded(f, self.program.op(inc(i.a)), inout budget) {
+            return false;
+        }
+        extra.push(lanes.len());
+        extra.push(lane);
+        if !self.ctx.world.is_partial(i.s0, i.s1) {
+            extra.push(INDEX_TRAPS);
+            return true;
+        }
+        extra.push(INDEX_RAISES);
+        let ops_s = self.ops;
+        self.body_raise(in h, ops_s.runtime_error, ops_s.index_out_of_bounds, inout extra)
+    }
+
+    // Whether the Cranelift value of value `id` of graph `f` may be one
+    // `index_below` reads as bounded: a constant, a mask, a remainder, a
+    // call that may extend, or a definition the plan cannot follow.
+    fn table_index_bounded(inout self, f: FnRow, id: u64, inout budget: u64) -> bool {
+        if budget == 0 {
+            return true;
+        }
+        budget = wrapping_sub(budget, 1);
+        let at = self.table_def(f, id);
+        if at == NONE64 {
+            // A block parameter.
+            return false;
+        }
+        let x = self.program.inst(at);
+        let ops_s = self.ops;
+        if x.op == Op::Const {
+            return true;
+        }
+        if x.op == Op::Binary {
+            let op = n32(self.program.op(x.a));
+            return op == ops_s.amp || op == ops_s.percent;
+        }
+        if x.op == Op::Unary || x.op == Op::Seq || x.op == Op::Index || x.op == Op::Project {
+            return false;
+        }
+        if x.op == Op::Call {
+            let callee = n32(self.program.op(x.a));
+            if self.body_function(callee) != NONE64 {
+                return false;
+            }
+            return !((callee == ops_s.wrapping_add
+                || callee == ops_s.wrapping_sub
+                || callee == ops_s.wrapping_mul)
+                && self.body_kind(x.ty) == 0);
+        }
+        if x.op != Op::Read
+            || self.program.path(self.program.op(add(x.a, READ_PATH))).n != 0
+            || self.program.op(add(x.a, READ_PROJECTIONS)) != 0
+        {
+            return true;
+        }
+        let (bi, ii) = self.table_position(f, at);
+        let mut stack: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let r = self.table_resolve(f, self.program.op(x.a), bi, ii, inout stack, inout budget);
+        if r == RESOLVED_UNKNOWN {
+            return true;
+        }
+        if r == RESOLVED_PARAM || r >= PHI_BASE {
+            return false;
+        }
+        let d = self.program.inst(r);
+        if d.op == Op::Bind {
+            return self.table_index_bounded(f, self.program.op(d.a), inout budget);
+        }
+        let assign = n32(self.program.op(add(d.a, WRITE_ASSIGN)));
+        if assign == ops_s.assign {
+            return self.table_index_bounded(
+                f,
+                self.program.op(add(d.a, WRITE_VALUE)),
+                inout budget
+            );
+        }
+        assign == ops_s.amp_eq || assign == ops_s.percent_eq
+    }
+
+    // The program index of the instruction of graph `f` that defines value
+    // `id`, or NONE64 for a block parameter.
+    fn table_def(in self, f: FnRow, id: u64) -> u64 {
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            for ii in 0..row.ic {
+                if widen_u64(self.program.inst(add(row.i0, ii)).dest) == id {
+                    return add(row.i0, ii);
+                }
+            }
+        }
+        NONE64
+    }
+
+    // The block of graph `f` holding instruction `at`, and its place there.
+    fn table_position(in self, f: FnRow, at: u64) -> (u64, u64) {
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            if at >= row.i0 && at < add(row.i0, row.ic) {
+                return (bi, wrapping_sub(at, row.i0));
+            }
+        }
+        (0, 0)
+    }
+
+    // Whether instruction `at` defines local `name` whole: a `let` of it
+    // or a write of all of it.
+    fn table_defines(in self, at: u64, name: u64) -> bool {
+        let x = self.program.inst(at);
+        if x.op == Op::Bind {
+            let pat = add(x.a, BIND_PATTERN);
+            return self.program.op(pat) == Pat::Bind
+                && self.program.op(add(x.a, BIND_NAME)) == name;
+        }
+        x.op == Op::Write && self.program.op(x.a) == name
+    }
+
+    // What `use_var` of local `name` answers before instruction `ii` of
+    // block `bi` (`ii` = the block's count: at its end): the last
+    // definition before it in the block, else the one value every
+    // predecessor reaches (Cranelift drops a block parameter all of whose
+    // arguments are one value), else a block parameter. `stack` holds the
+    // blocks being resolved.
+    fn table_resolve(
+        inout self,
+        f: FnRow,
+        name: u64,
+        bi: u64,
+        ii: u64,
+        inout stack: ChunkSeq[u64],
+        inout budget: u64
+    ) -> u64 {
+        if budget == 0 {
+            return RESOLVED_UNKNOWN;
+        }
+        budget = wrapping_sub(budget, 1);
+        let row = self.program.block(add(f.b0, bi));
+        let mut k = ii;
+        loop {
+            if k == 0 {
+                break;
+            }
+            k = wrapping_sub(k, 1);
+            if self.table_defines(add(row.i0, k), name) {
+                return add(row.i0, k);
+            }
+        }
+        for s in 0..stack.len() {
+            if u64_at(in stack, s) == bi {
+                return add(PHI_BASE, bi);
+            }
+        }
+        if bi == 0 {
+            let h = self.body_header(f);
+            for p in 0..h.params.len() {
+                if u64_at(in h.params, p) == name {
+                    return RESOLVED_PARAM;
+                }
+            }
+            return RESOLVED_UNKNOWN;
+        }
+        stack.push(bi);
+        let mut reached = NONE64;
+        let mut phi = false;
+        let mut preds: u64 = 0;
+        for pi in 0..f.bc {
+            if !self.table_jumps_to(f, pi, bi) {
+                continue;
+            }
+            // A block no edge reaches adds an argument the walk may not
+            // emit (a zero, `use_var` of an undefined variable): either way
+            // the other arguments decide whether the index is bounded.
+            if pi != 0 && !self.table_reached(f, pi) {
+                continue;
+            }
+            preds = inc(preds);
+            let p = self.program.block(add(f.b0, pi));
+            let r = self.table_resolve(f, name, pi, p.ic, inout stack, inout budget);
+            if r == RESOLVED_UNKNOWN {
+                reached = RESOLVED_UNKNOWN;
+                break;
+            }
+            if r == add(PHI_BASE, bi) {
+                continue;
+            }
+            if reached == NONE64 {
+                reached = r;
+            } else if reached != r {
+                phi = true;
+            }
+        }
+        let ok = stack.pop();
+        if preds == 0 || reached == NONE64 || reached == RESOLVED_UNKNOWN {
+            return RESOLVED_UNKNOWN;
+        }
+        if phi { add(PHI_BASE, bi) } else { reached }
+    }
+
+    // Whether some block of graph `f` other than `b` has an edge to `b`.
+    fn table_reached(in self, f: FnRow, b: u64) -> bool {
+        for pi in 0..f.bc {
+            if pi != b && self.table_jumps_to(f, pi, b) {
+                return true;
+            }
+        }
+        false
+    }
+
+    // Whether block `from` of graph `f` ends with an edge to block `to`.
+    fn table_jumps_to(in self, f: FnRow, from: u64, to: u64) -> bool {
+        let row = self.program.block(add(f.b0, from));
+        for k in row.ta..add(row.ta, row.tn) {
+            if self.program.tag(k) == Tag::Block && self.program.op(k) == to {
+                return true;
+            }
+        }
+        false
+    }
+}

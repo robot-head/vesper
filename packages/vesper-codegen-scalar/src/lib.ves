@@ -365,6 +365,9 @@ copy struct Ops {
     // builds (#2654)
     seq_str_try_byte_at: u32,
     seq_try_get: u32,
+    // a constant table read's callee prefix (`arrays::TABLE_PREFIX`,
+    // tables.ves, #2789)
+    table_prefix: u32,
 }
 
 fn mark(inout table: ChunkSeq[u32], symbol: u32, flag: u32) {
@@ -548,6 +551,7 @@ fn ops_new(inout names: Names, inout tables: Tables) -> Ops {
         never: intern(inout names, in "Never"),
         box_: intern(inout names, in "Box"),
         bool_: intern(inout names, in "bool"),
+        table_prefix: intern(inout names, in "$table$"),
     }
 }
 
