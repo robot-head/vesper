@@ -1,0 +1,8 @@
+// The root module is src/main.ves, which `vesper build` also takes.
+fn add(a: u64, b: u64) -> u64 {
+    wrapping_add(a, b)
+}
+
+pub fn main() -> u64 {
+    add(40, 2)
+}

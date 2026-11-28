@@ -1018,6 +1018,35 @@ fn binary_code(in a: Ast, op: u32) -> u64 {
     }
 }
 
+// An assignment operator's word (`assign_code`): OP_NONE for `=`, else the
+// code of the operator it combines with.
+fn assign_code(in a: Ast, op: u32) -> u64 {
+    let t = name_text(in a, op);
+    if t == "+=" {
+        OP_ADD
+    } else if t == "-=" {
+        OP_SUB
+    } else if t == "*=" {
+        OP_MUL
+    } else if t == "/=" {
+        OP_DIV
+    } else if t == "%=" {
+        OP_REM
+    } else if t == "&=" {
+        OP_BIT_AND
+    } else if t == "|=" {
+        OP_BIT_OR
+    } else if t == "^=" {
+        OP_BIT_XOR
+    } else if t == "<<=" {
+        OP_SHL
+    } else if t == ">>=" {
+        OP_SHR
+    } else {
+        OP_NONE
+    }
+}
+
 // Whether `call` routes a call of the name `sym` elsewhere before it looks
 // up constructors and functions (`special_call`).
 fn special_call(in a: Ast, sym: u32, fip: bool) -> bool {
@@ -1153,7 +1182,7 @@ fn expr(inout e: Enc, in a: Ast, x: u32, shift: u32, fip: bool, inout out: Chunk
         }
     } else if n.kind == X_ASSIGN && !element_write(in a, n.a) {
         head(E_ASSIGN, s, t, inout out);
-        out.push(flag(!name_is(in a, n.a, "=")));
+        out.push(assign_code(in a, n.a));
         expr(inout e, in a, n.b, shift, fip, inout out);
         expr(inout e, in a, n.c, shift, fip, inout out);
     } else if n.kind == X_FOR {

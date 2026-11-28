@@ -4,6 +4,11 @@
 // index and a list of children is a run of `pool` words, as in @vesper/ast.
 // Names are check-data symbols and types are check-data type ids.
 //
+// The input packs each pool word as its value above a two-bit tag, and
+// each node as a head word (kind, and above bit 8 the count of operand
+// words that follow), a span word (start, and end above bit 32), then
+// operands `a` onward up to the last nonzero one (the rest read as 0).
+//
 // Expression kinds (`ExprKind`, numbered as in @vesper/ast):
 //   1 Literal
 //   2 Name     a = name
@@ -190,6 +195,19 @@ fn opt(word: u64) -> u32 {
     }
 }
 
+// The low half of a node's span word: its start (the end is above it).
+const SPAN_MASK: u64 = 4294967295;
+
+// A packed node's operand `k`: its next word when the node writes it (it
+// writes `ops` of them, up to its last nonzero one), else 0.
+fn operand(inout reader: Reader, in bytes: Slice[u8], ops: u64, k: u64) -> u32 {
+    if k < ops {
+        n32(reader.word(in bytes))
+    } else {
+        0
+    }
+}
+
 // Decodes the fip task section: the pool, the expressions, the patterns
 // and the functions. Names in pool words are tagged by the node kind that
 // owns them and mapped here, so the checker sees symbols and type ids.
@@ -202,9 +220,10 @@ pub fn read_ast(
     let pool_len = reader.word(in bytes);
     let mut pool: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](pool_len);
     for i in 0..pool_len {
-        // 0: an index; 1: a name; 2: a type.
-        let tag = reader.word(in bytes);
-        let value = reader.word(in bytes);
+        // The value above a two-bit tag: 0 an index, 1 a name, 2 a type.
+        let packed = reader.word(in bytes);
+        let tag = packed & 3;
+        let value = packed >> 2;
         if tag == 1 {
             pool.push(sym(in nmap, value));
         } else if tag == 2 {
@@ -216,14 +235,17 @@ pub fn read_ast(
     let expr_count = reader.word(in bytes);
     let mut exprs: ChunkSeq[ExprRow] = ChunkSeq::with_capacity[ExprRow](expr_count);
     for i in 0..expr_count {
-        let kind = wrapping_u8(reader.word(in bytes));
-        let start = reader.word(in bytes);
-        let end = reader.word(in bytes);
-        let mut a = n32(reader.word(in bytes));
-        let bb = n32(reader.word(in bytes));
-        let c = n32(reader.word(in bytes));
-        let d = n32(reader.word(in bytes));
-        let e = n32(reader.word(in bytes));
+        let head = reader.word(in bytes);
+        let kind = wrapping_u8(head & 255);
+        let ops = head >> 8;
+        let span = reader.word(in bytes);
+        let start = span & SPAN_MASK;
+        let end = span >> 32;
+        let mut a = operand(inout reader, in bytes, ops, 0);
+        let bb = operand(inout reader, in bytes, ops, 1);
+        let c = operand(inout reader, in bytes, ops, 2);
+        let d = operand(inout reader, in bytes, ops, 3);
+        let e = operand(inout reader, in bytes, ops, 4);
         // Name fields: Name a, Field b, Handle a.
         if kind == 2 || kind == 16 {
             a = sym(in nmap, w(a));
@@ -243,12 +265,15 @@ pub fn read_ast(
     let pat_count = reader.word(in bytes);
     let mut pats: ChunkSeq[PatRow] = ChunkSeq::with_capacity[PatRow](pat_count);
     for i in 0..pat_count {
-        let kind = wrapping_u8(reader.word(in bytes));
-        let start = reader.word(in bytes);
-        let end = reader.word(in bytes);
-        let mut a = n32(reader.word(in bytes));
-        let bb = n32(reader.word(in bytes));
-        let c = n32(reader.word(in bytes));
+        let head = reader.word(in bytes);
+        let kind = wrapping_u8(head & 255);
+        let ops = head >> 8;
+        let span = reader.word(in bytes);
+        let start = span & SPAN_MASK;
+        let end = span >> 32;
+        let mut a = operand(inout reader, in bytes, ops, 0);
+        let bb = operand(inout reader, in bytes, ops, 1);
+        let c = operand(inout reader, in bytes, ops, 2);
         if kind == 2 || kind == 5 {
             a = sym(in nmap, w(a));
         }

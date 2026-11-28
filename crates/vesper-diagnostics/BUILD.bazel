@@ -10,6 +10,9 @@ vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
     manifest = "vesper/Loom.toml",
+    # The hybrid driver (crates/vesper-hybrid, #1893) renders syntax errors
+    # through it.
+    visibility = ["//visibility:public"],
 )
 
 vesper_port_object(

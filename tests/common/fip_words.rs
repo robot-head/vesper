@@ -8,28 +8,29 @@ use super::check_words::{Enc, pass_word};
 use vesper::ast::{Diagnostic, Expr, ExprKind, Pass, Pattern, PatternKind, Statement, Type};
 use vesper::check::World;
 
-/// Words per pool entry (its tag and value).
-const POOL_WORDS: usize = 2;
-/// Words per expression node (ast.ves): its kind and operand words and
-/// its span.
-const EXPR_WORDS: usize = 8;
-/// A span's words (start, end) in a node.
-const SPAN_WORDS: usize = 2;
-/// Words per pattern node (ast.ves).
-const PAT_WORDS: usize = 6;
+/// Operand words of an expression node (ast.ves): `a` to `e`.
+const EXPR_OPS: usize = 5;
+/// Operand words of a pattern node (ast.ves): `a` to `c`.
+const PAT_OPS: usize = 3;
 /// The count words of the task section: pool, expressions, patterns and
 /// functions.
 const TASK_COUNTS: usize = 4;
 
-/// The fip task section: the pool of list words (each a tag and a value: 0
-/// an index, 1 a name, 2 a type), the expression and pattern tables and the
-/// functions of `world.functions` in name order (ast.ves documents the
-/// node layout).
+/// The fip task section: the pool of list words (each one word, its value
+/// shifted past a two-bit tag: 0 an index, 1 a name, 2 a type), the
+/// expression and pattern tables and the functions of `world.functions` in
+/// name order (ast.ves documents the node layout).
+///
+/// A node is written packed: a head word (its kind, and the count of
+/// operand words that follow above bit 8), a span word (start, and end
+/// above bit 32), then its operands up to the last nonzero one.
 #[derive(Default)]
 struct FipEnc {
-    pool: Vec<(u64, u64)>,
-    exprs: Vec<[u64; EXPR_WORDS]>,
-    pats: Vec<[u64; PAT_WORDS]>,
+    pool: Vec<u64>,
+    expr_count: u64,
+    exprs: Vec<u64>,
+    pat_count: u64,
+    pats: Vec<u64>,
     /// List words being gathered, innermost list last: a node pushes its
     /// items here from `base` and [`FipEnc::close`]s them into the pool, so
     /// no list needs a vector of its own.
@@ -44,8 +45,17 @@ impl FipEnc {
     fn close(&mut self, base: usize) -> (u64, u64) {
         let at = self.pool.len() as u64;
         let n = (self.stack.len() - base) as u64;
-        self.pool.extend(self.stack.drain(base..));
+        self.pool
+            .extend(self.stack.drain(base..).map(|(tag, x)| (x << 2) | tag));
         (at, n)
+    }
+
+    /// Appends one packed node (see [`FipEnc`]) to `out`.
+    fn node(out: &mut Vec<u64>, kind: u64, start: usize, end: usize, ops: &[u64]) {
+        let n = ops.iter().rposition(|&x| x != 0).map_or(0, |i| i + 1);
+        out.push(kind | ((n as u64) << 8));
+        out.push(start as u64 | ((end as u64) << 32));
+        out.extend_from_slice(&ops[..n]);
     }
 
     fn idx(i: u64) -> (u64, u64) {
@@ -79,9 +89,10 @@ impl FipEnc {
                 (5, name, at, fields.len() as u64)
             }
         };
-        let i = self.pats.len() as u64;
-        self.pats
-            .push([kind, p.span.start as u64, p.span.end as u64, a, b, c]);
+        let i = self.pat_count;
+        self.pat_count += 1;
+        let ops: [u64; PAT_OPS] = [a, b, c];
+        Self::node(&mut self.pats, kind, p.span.start, p.span.end, &ops);
         i
     }
 
@@ -98,7 +109,7 @@ impl FipEnc {
     fn expr(&mut self, enc: &mut Enc, e: &Expr) -> u64 {
         let opt = |x: Option<u64>| x.map_or(0, |i| i + 1);
         let pass = |p: Pass| pass_word(p);
-        let node: [u64; EXPR_WORDS - SPAN_WORDS] = match &e.kind {
+        let node: [u64; 1 + EXPR_OPS] = match &e.kind {
             ExprKind::Literal(_) => [1, 0, 0, 0, 0, 0],
             ExprKind::Name(n) => [2, enc.name(n), 0, 0, 0, 0],
             ExprKind::Tuple(es) => {
@@ -232,17 +243,15 @@ impl FipEnc {
                 [kind, at, n, 0, 0, 0]
             }
         };
-        let i = self.exprs.len() as u64;
-        self.exprs.push([
+        let i = self.expr_count;
+        self.expr_count += 1;
+        Self::node(
+            &mut self.exprs,
             node[0],
-            e.span.start as u64,
-            e.span.end as u64,
-            node[1],
-            node[2],
-            node[3],
-            node[4],
-            node[5],
-        ]);
+            e.span.start,
+            e.span.end,
+            &node[1..],
+        );
         i
     }
 }
@@ -268,21 +277,13 @@ pub fn fip_task(enc: &mut Enc, tail: &mut Vec<u64>, world: &World) {
         fns.push(enc.ty(&Type::Row(f.effects.clone())));
         fns.push(f.body.as_ref().map_or(0, |b| fe.expr(enc, b) + 1));
     }
-    tail.reserve(
-        TASK_COUNTS
-            + POOL_WORDS * fe.pool.len()
-            + EXPR_WORDS * fe.exprs.len()
-            + PAT_WORDS * fe.pats.len()
-            + fns.len(),
-    );
+    tail.reserve(TASK_COUNTS + fe.pool.len() + fe.exprs.len() + fe.pats.len() + fns.len());
     tail.push(fe.pool.len() as u64);
-    for (tag, x) in &fe.pool {
-        tail.extend([*tag, *x]);
-    }
-    tail.push(fe.exprs.len() as u64);
-    tail.extend(fe.exprs.iter().flatten());
-    tail.push(fe.pats.len() as u64);
-    tail.extend(fe.pats.iter().flatten());
+    tail.extend(&fe.pool);
+    tail.push(fe.expr_count);
+    tail.extend(&fe.exprs);
+    tail.push(fe.pat_count);
+    tail.extend(&fe.pats);
     tail.push(world.functions.len() as u64);
     tail.extend(fns);
 }
