@@ -34,6 +34,26 @@ const NONE32: u32 = 4294967295;
 // The variant names `foreign_result` builds an `Option` from.
 const OPTION_SOME: Str = "Some";
 const OPTION_NONE: Str = "None";
+// The variant names of a refusable call's `Result`.
+const RESULT_OK: Str = "Ok";
+const RESULT_ERR: Str = "Err";
+// The words after the result: whether the call may be refused, then the
+// `Result`'s size, `Err` tag and offset, `Ok` tag and offset and the
+// `Ok` payload's copied size.
+const NO_REFUSAL: u64 = 0;
+const REFUSAL: u64 = 1;
+// A scalar word's bits.
+const SCALAR_BITS: u64 = 255;
+
+// Two variants of an in-memory enum (`body_two_variants`).
+copy struct TwoVariants {
+    size: u64,
+    first: u64,
+    first_offset: u64,
+    first_ty: u32,
+    second: u64,
+    second_offset: u64,
+}
 
 // `plan_probe::body_call`'s forms.
 const CALL_DIRECT: u64 = 1;
@@ -46,6 +66,9 @@ pub const PARAM_HANDLE: u64 = 2;
 // A slice lent in place (`ParameterType::Slice` of a source `Slice[T]`):
 // its word is the element's bytes.
 pub const PARAM_SLICE: u64 = 3;
+// A C string (`ParameterType::CStr`): a NUL-terminated `malloc` copy of a
+// byte slice, freed after the call.
+pub const PARAM_CSTR: u64 = 4;
 const RESULT_UNIT: u64 = 0;
 const RESULT_SCALAR: u64 = 1;
 // A nullable handle (`ValueType::Handle { nullable: true }`): an
@@ -163,8 +186,9 @@ impl Gen {
     // (`CALL_DIRECT` or `CALL_INDIRECT`) and argument count, then per argument
     // its source (`SOURCE_TEMP`, or `SOURCE_LOCAL` and the local), the
     // kind its read coerces to and its form with its scalar word, then the
-    // result's form and scalar word. False for a call the plan does not
-    // cover.
+    // result's form and its words, then the refusal words of a call taking
+    // a C string (`REFUSAL`) or `NO_REFUSAL`. False for a call the plan
+    // does not cover.
     fn body_foreign(
         inout self,
         in h: Header,
@@ -190,6 +214,7 @@ impl Gen {
         }
         self.body_symbol(u32_at(in self.foreign.symbol, row), inout extra);
         extra.push(call);
+        let mut refused = false;
         extra.push(nargs);
         for k in 0..nargs {
             let form = self.foreign.word(row, add(2, wrapping_mul(k, FORM_WORDS)));
@@ -200,10 +225,12 @@ impl Gen {
                 if !self.body_foreign_handle(in h, at, pass, root, inout ops, inout extra) {
                     return false;
                 }
-            } else if form == PARAM_SLICE {
+            } else if form == PARAM_SLICE || form == PARAM_CSTR {
+                // A C string is copied from a byte slice's view.
                 if !self.body_foreign_slice(in h, at, pass, root, inout ops, inout extra) {
                     return false;
                 }
+                refused = refused || form == PARAM_CSTR;
             } else if (form != PARAM_SCALAR && form != PARAM_BOOL) || pass != PASS_IN {
                 return false;
             } else if root == 0 {
@@ -241,18 +268,55 @@ impl Gen {
         }
         let at = add(2, wrapping_mul(nargs, FORM_WORDS));
         let result = self.foreign.word(row, at);
-        if result == RESULT_UNIT {
+        // A call taking a C string returns `Result[T, ForeignInvalid]`:
+        // `Err` when a string holds a NUL byte, else `Ok` of the result.
+        let mut ty = i.ty;
+        let mut refusal = TwoVariants {
+            size: 0,
+            first: NONE64,
+            first_offset: 0,
+            first_ty: NONE32,
+            second: NONE64,
+            second_offset: 0
+        };
+        if refused {
+            refusal = self.body_two_variants(i.ty, in RESULT_OK, in RESULT_ERR);
+            if refusal.first == NONE64 || refusal.second == NONE64 {
+                return false;
+            }
+            ty = refusal.first_ty;
+        }
+        // The size of the `Ok` payload copied into the `Result` (0 for a
+        // word stored whole).
+        let mut ok_size: u64 = 0;
+        if result == RESULT_UNIT && !refused {
             extra.push(result);
             extra.push(0);
         } else if result == RESULT_SCALAR {
-            extra.push(result);
-            extra.push(self.foreign.word(row, inc(at)));
-        } else if result == RESULT_OPTION_HANDLE {
-            if !self.body_foreign_option(i.ty, inout extra) {
+            let scalar = self.foreign.word(row, inc(at));
+            if refused && (scalar & SCALAR_BITS) != widen_u64(WORD_BITS) {
                 return false;
             }
+            extra.push(result);
+            extra.push(scalar);
+        } else if result == RESULT_OPTION_HANDLE {
+            if !self.body_foreign_option(ty, inout extra) {
+                return false;
+            }
+            ok_size = self.body_product_size(ty);
         } else {
             return false;
+        }
+        if refused {
+            extra.push(REFUSAL);
+            extra.push(refusal.size);
+            extra.push(refusal.second);
+            extra.push(refusal.second_offset);
+            extra.push(refusal.first);
+            extra.push(refusal.first_offset);
+            extra.push(ok_size);
+        } else {
+            extra.push(NO_REFUSAL);
         }
         true
     }
@@ -261,8 +325,32 @@ impl Gen {
     // (`foreign_result_layout`): `RESULT_OPTION_HANDLE`, then its storage
     // size, the `Some` tag, the payload's offset and the `None` tag.
     fn body_foreign_option(inout self, t: u32, inout extra: ChunkSeq[u64]) -> bool {
-        if self.body_lane(t) != LANE_PRODUCT {
+        let o = self.body_two_variants(t, in OPTION_SOME, in OPTION_NONE);
+        if o.first == NONE64 || o.second == NONE64 {
             return false;
+        }
+        extra.push(RESULT_OPTION_HANDLE);
+        extra.push(o.size);
+        extra.push(o.first);
+        extra.push(o.first_offset);
+        extra.push(o.second);
+        true
+    }
+
+    // Variants `first` (with a payload) and `second` of the in-memory enum
+    // type `t` (`Layout::variant`): their tags, payload offsets and the
+    // first's payload type, NONE64 tags for a type without them.
+    fn body_two_variants(inout self, t: u32, in first: Str, in second: Str) -> TwoVariants {
+        let mut out = TwoVariants {
+            size: 0,
+            first: NONE64,
+            first_offset: 0,
+            first_ty: NONE32,
+            second: NONE64,
+            second_offset: 0
+        };
+        if self.body_lane(t) != LANE_PRODUCT {
+            return out;
         }
         let mark = self.layouts.mark();
         let d = default_type(inout self.ctx.types, t);
@@ -274,32 +362,26 @@ impl Gen {
             d
         );
         let node = self.layouts.node(l);
-        let mut some = NONE64;
-        let mut none = NONE64;
-        let mut offset: u64 = 0;
         if node.kind == L_ENUM {
             for k in 0..widen_u64(node.n) {
                 let v = self.layouts.lvariant(add(widen_u64(node.a), k));
-                if self.ctx.names.spells(v.name, in OPTION_SOME.as_bytes()) && v.fc != 0 {
-                    some = k;
+                if self.ctx.names.spells(v.name, in first.as_bytes()) && v.fc != 0 {
+                    out.first = k;
                     let field = self.layouts.lfield(widen_u64(v.fa));
-                    offset = wrapping_u64(widen_i64(field.offset));
-                } else if self.ctx.names.spells(v.name, in OPTION_NONE.as_bytes()) {
-                    none = k;
+                    out.first_offset = wrapping_u64(widen_i64(field.offset));
+                    out.first_ty = field.ty;
+                } else if self.ctx.names.spells(v.name, in second.as_bytes()) {
+                    out.second = k;
+                    if v.fc != 0 {
+                        let field = self.layouts.lfield(widen_u64(v.fa));
+                        out.second_offset = wrapping_u64(widen_i64(field.offset));
+                    }
                 }
             }
         }
-        let size = widen_u64(node.size);
+        out.size = widen_u64(node.size);
         self.layouts.reset(mark);
-        if some == NONE64 || none == NONE64 {
-            return false;
-        }
-        extra.push(RESULT_OPTION_HANDLE);
-        extra.push(size);
-        extra.push(some);
-        extra.push(offset);
-        extra.push(none);
-        true
+        out
     }
 
     // Whether value `v` of the function being planned is lent `inout` to a

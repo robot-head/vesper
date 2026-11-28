@@ -53,7 +53,8 @@ use @vesper/cranelift::{
     ins_uload32, mem_can_move, mem_readonly, mem_trusted, data_align, data_define, data_new,
     declare_anonymous_data, define_data, import_data, ins_symbol_value, call_conv_default,
     declare_function, ext_none, ext_sext, ext_uext, linkage_import, sig_new, sig_param_ext,
-    sig_return_ext, ty_i16, SigId, import_signature, ins_call_indirect
+    sig_return_ext, ty_i16, SigId, SigRef, FuncRef, import_signature, ins_call_indirect, ins_jump0,
+    ins_trapz, ins_isub
 };
 use super::{
     BODY_ERROR, DECLINED, HANDLED, coerce, emit_overflow_test, kind_max_imm, kind_min_imm,
@@ -418,6 +419,24 @@ const FOREIGN_SOURCE_SLICE_LOCAL: u64 = 5;
 const FOREIGN_SOURCE_SLICE_TEMP: u64 = 6;
 const FOREIGN_RESULT_SCALAR: u64 = 1;
 const FOREIGN_CALL_INDIRECT: u64 = 2;
+const FOREIGN_PARAM_CSTR: u64 = 4;
+// A refusable call's words: its `Result`'s size, `Err` tag and offset,
+// `Ok` tag and offset, and the `Ok` payload's copied size.
+const FOREIGN_REFUSAL: u64 = 1;
+const FOREIGN_REFUSAL_WORDS: u64 = 6;
+const REFUSAL_SIZE: u64 = 0;
+const REFUSAL_ERR: u64 = 1;
+const REFUSAL_ERR_OFFSET: u64 = 2;
+const REFUSAL_OK: u64 = 3;
+const REFUSAL_OK_OFFSET: u64 = 4;
+const REFUSAL_OK_SIZE: u64 = 5;
+// `ffi::CSTR_ALLOC_TRAP`: `malloc` of a C string's copy failed.
+const CSTR_ALLOC_TRAP: u32 = 7;
+// The C library functions a C string argument calls (`foreign_libc`).
+const MALLOC_SYMBOL: Str = "malloc";
+const MEMCPY_SYMBOL: Str = "memcpy";
+const MEMCHR_SYMBOL: Str = "memchr";
+const FREE_SYMBOL: Str = "free";
 const FOREIGN_RESULT_OPTION_HANDLE: u64 = 2;
 const FOREIGN_BITS_MASK: u64 = 255;
 const FOREIGN_SIGNED: u64 = 256;
@@ -1366,6 +1385,9 @@ impl Body {
         // pointer called, not a C argument.
         let indirect = w.next() == FOREIGN_CALL_INDIRECT;
         let mut pointer = Value { id: invalid() };
+        // Each C string argument's `malloc` copy and first NUL offset.
+        let mut buffers: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut nuls: ChunkSeq[u32] = ChunkSeq::new[u32]();
         let nargs = w.next();
         let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
         let mut ti: u64 = 0;
@@ -1449,22 +1471,34 @@ impl Body {
             };
             let form = w.next();
             let scalar = w.next();
-            if form == FOREIGN_PARAM_SLICE {
+            if form == FOREIGN_PARAM_SLICE || form == FOREIGN_PARAM_CSTR {
                 // `(data + start * stride, len)`, a zeroed word's address
                 // when the sequence has no data.
+                let stride = if form == FOREIGN_PARAM_CSTR {
+                    1
+                } else {
+                    scalar
+                };
                 let handle = ins_load(inout b, ty_i64(), PLAIN, value, VIEW_HANDLE);
                 let start = ins_load(inout b, ty_i64(), PLAIN, value, VIEW_START);
                 let len = ins_load(inout b, ty_i64(), PLAIN, value, VIEW_LEN);
                 let data = ins_load(inout b, ty_i64(), PLAIN, handle, HEADER_DATA);
-                let offset = ins_imul_imm(inout b, start, wrapping_i64(scalar));
+                let offset = ins_imul_imm(inout b, start, wrapping_i64(stride));
                 let lent = ins_iadd(inout b, data, offset);
                 let dummy = self.zeroed_word(inout b, in m);
                 let empty = ins_icmp_imm(inout b, cc_eq(), data, 0);
                 let view = ins_select(inout b, empty, dummy, lent);
-                sig_param_ext(inout m, sig, module_pointer_type(in m), ext_none());
-                sig_param_ext(inout m, sig, ty_i64(), ext_none());
-                args.push(view.id);
-                args.push(len.id);
+                if form == FOREIGN_PARAM_CSTR {
+                    // `foreign_cstr`: the C argument is the copy.
+                    self.cstr(inout b, inout m, view, len, inout buffers, inout nuls);
+                    sig_param_ext(inout m, sig, module_pointer_type(in m), ext_none());
+                    args.push(at32(in buffers, wrapping_sub(buffers.len(), 1)));
+                } else {
+                    sig_param_ext(inout m, sig, module_pointer_type(in m), ext_none());
+                    sig_param_ext(inout m, sig, ty_i64(), ext_none());
+                    args.push(view.id);
+                    args.push(len.id);
+                }
             } else if form == FOREIGN_PARAM_HANDLE && indirect && k == 0 {
                 pointer = value;
             } else if form == FOREIGN_PARAM_HANDLE {
@@ -1487,32 +1521,88 @@ impl Body {
             }
         }
         let result = w.next();
+        let mut scalar: u64 = 0;
+        let mut option_size: u64 = 0;
+        let mut some: u64 = 0;
+        let mut some_offset: u64 = 0;
+        let mut none: u64 = 0;
         if result == FOREIGN_RESULT_OPTION_HANDLE {
-            // `ValueType::Handle { nullable: true }`: the word, as a C
-            // pointer, then `Some(handle)` when it is not `NULL`, else
-            // `None`, in fresh zeroed storage.
-            let size = w.next();
-            let some = w.next();
-            let offset = w.next();
-            let none = w.next();
+            option_size = w.next();
+            some = w.next();
+            some_offset = w.next();
+            none = w.next();
             sig_return_ext(inout m, sig, module_pointer_type(in m), ext_none());
-            self.foreign_call(inout b, inout m, in name, sig, indirect, pointer, in args);
+        } else {
+            scalar = w.next();
+            if result == FOREIGN_RESULT_SCALAR {
+                sig_return_ext(inout m, sig, foreign_carrier(scalar), foreign_ext(scalar));
+            }
+        }
+        let refusable = w.next() == FOREIGN_REFUSAL;
+        let mut refusal: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        if refusable {
+            for _ in 0..FOREIGN_REFUSAL_WORDS {
+                refusal.push(w.next());
+            }
+        }
+        // The callee is imported before a refusable call's check
+        // (`foreign_import`, or the signature of an indirect call).
+        let callee = if indirect {
+            import_signature(inout b, in m, sig).id
+        } else {
+            let id = declare_function(inout m, in name.as_slice(), linkage_import(), sig);
+            import_function(inout b, inout m, id).id
+        };
+        // A NUL byte in a C string refuses the call: `Err(ForeignInvalid
+        // { raw: offset })` of the first such string, in the slot.
+        let mut slot = Value { id: invalid() };
+        let mut join = Block { id: invalid() };
+        if refusable {
+            slot = self.zeroed(inout b, in m, at64(in refusal, REFUSAL_SIZE));
+            let mut offset = ins_iconst(inout b, ty_i64(), -1);
+            for j in 0..nuls.len() {
+                let at = Value { id: at32(in nuls, wrapping_sub(wrapping_sub(nuls.len(), 1), j)) };
+                let found = ins_icmp_imm(inout b, cc_sge(), at, 0);
+                offset = ins_select(inout b, found, at, offset);
+            }
+            let refused = ins_icmp_imm(inout b, cc_sge(), offset, 0);
+            let call_block = create_block(inout b);
+            let refuse_block = create_block(inout b);
+            join = create_block(inout b);
+            ins_brif0(inout b, refused, refuse_block, call_block);
+            switch_to_block(inout b, refuse_block);
+            seal_block(inout b, refuse_block);
+            let tag = ins_iconst(inout b, ty_i64(), wrapping_i64(at64(in refusal, REFUSAL_ERR)));
+            ins_store(inout b, PLAIN, tag, slot, 0);
+            ins_store(
+                inout b,
+                PLAIN,
+                offset,
+                slot,
+                wrapping_i32(at64(in refusal, REFUSAL_ERR_OFFSET))
+            );
+            ins_jump0(inout b, join);
+            switch_to_block(inout b, call_block);
+            seal_block(inout b, call_block);
+        }
+        if indirect {
+            let _ = ins_call_indirect(inout b, SigRef { id: callee }, pointer, in args.as_slice());
+        } else {
+            let _ = ins_call(inout b, FuncRef { id: callee }, in args.as_slice());
+        }
+        let mut value = if result == FOREIGN_RESULT_OPTION_HANDLE {
+            // `ValueType::Handle { nullable: true }`: `Some(handle)` when
+            // the word is not `NULL`, else `None`, in fresh zeroed storage.
             let word = inst_result(inout b, 0);
             let present = ins_icmp_imm(inout b, cc_ne(), word, 0);
-            let ptr = self.zeroed(inout b, in m, size);
+            let ptr = self.zeroed(inout b, in m, option_size);
             let some_tag = ins_iconst(inout b, ty_i64(), wrapping_i64(some));
             let none_tag = ins_iconst(inout b, ty_i64(), wrapping_i64(none));
             let tag = ins_select(inout b, present, some_tag, none_tag);
             ins_store(inout b, PLAIN, tag, ptr, 0);
-            ins_store(inout b, PLAIN, word, ptr, wrapping_i32(offset));
-            return ptr;
-        }
-        let scalar = w.next();
-        if result == FOREIGN_RESULT_SCALAR {
-            sig_return_ext(inout m, sig, foreign_carrier(scalar), foreign_ext(scalar));
-        }
-        self.foreign_call(inout b, inout m, in name, sig, indirect, pointer, in args);
-        if result == FOREIGN_RESULT_SCALAR {
+            ins_store(inout b, PLAIN, word, ptr, wrapping_i32(some_offset));
+            ptr
+        } else if result == FOREIGN_RESULT_SCALAR {
             let raw = inst_result(inout b, 0);
             if foreign_bits(scalar) == WORD_BITS {
                 raw
@@ -1523,30 +1613,105 @@ impl Body {
             }
         } else {
             ins_iconst(inout b, ty_i64(), 0)
+        };
+        if refusable {
+            // `Ok` of the call that was made.
+            let tag = ins_iconst(inout b, ty_i64(), wrapping_i64(at64(in refusal, REFUSAL_OK)));
+            ins_store(inout b, PLAIN, tag, slot, 0);
+            let at = ins_iadd_imm(inout b, slot, wrapping_i64(at64(in refusal, REFUSAL_OK_OFFSET)));
+            let copied = at64(in refusal, REFUSAL_OK_SIZE);
+            if copied == 0 {
+                ins_store(inout b, PLAIN, value, at, 0);
+            } else {
+                // `copy_bytes` of the aggregate payload.
+                let mut off: u64 = 0;
+                loop {
+                    if off >= copied {
+                        break;
+                    }
+                    let word = ins_load(inout b, ty_i64(), PLAIN, value, wrapping_i32(off));
+                    ins_store(inout b, PLAIN, word, at, wrapping_i32(off));
+                    off = wrapping_add(off, WORD_BYTES_64);
+                }
+            }
+            ins_jump0(inout b, join);
+            switch_to_block(inout b, join);
+            seal_block(inout b, join);
+            value = slot;
         }
+        // Each C string's copy is freed after the call (`foreign_libc`).
+        for j in 0..buffers.len() {
+            let free = self.libc(inout b, inout m, in FREE_SYMBOL, 1, false);
+            let mut one: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            one.push(at32(in buffers, j));
+            let _ = ins_call(inout b, free, in one.as_slice());
+        }
+        value
     }
 
-    // The call of a foreign operation under C signature `sig`: through
-    // `pointer` (`Callee::Indirect`), or of the imported symbol `name`
-    // (`foreign_import`).
-    fn foreign_call(
+    // `foreign_libc`: C library function `name` of `params` 64-bit word
+    // parameters (and a word result), imported into the function.
+    fn libc(
         inout self,
         inout b: Builder,
         inout m: Module,
-        in name: ChunkSeq[u8],
-        sig: SigId,
-        indirect: bool,
-        pointer: Value,
-        in args: ChunkSeq[u32]
-    ) eff [Ffi[Cranelift]] {
-        if indirect {
-            let sig_ref = import_signature(inout b, in m, sig);
-            let _ = ins_call_indirect(inout b, sig_ref, pointer, in args.as_slice());
-        } else {
-            let callee = declare_function(inout m, in name.as_slice(), linkage_import(), sig);
-            let fun = import_function(inout b, inout m, callee);
-            let _ = ins_call(inout b, fun, in args.as_slice());
+        in name: Str,
+        params: u64,
+        returns: bool
+    ) -> FuncRef eff [Ffi[Cranelift]] {
+        let sig = sig_new(inout m, call_conv_default());
+        for _ in 0..params {
+            sig_param_ext(inout m, sig, ty_i64(), ext_none());
         }
+        if returns {
+            sig_return_ext(inout m, sig, ty_i64(), ext_none());
+        }
+        let id = declare_function(inout m, in name.as_bytes(), linkage_import(), sig);
+        import_function(inout b, inout m, id)
+    }
+
+    // `foreign_cstr`: a NUL-terminated `malloc` copy of the `len` bytes at
+    // `data` (in `buffers`) and the offset of their first NUL byte, or -1
+    // (in `nuls`).
+    fn cstr(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        data: Value,
+        len: Value,
+        inout buffers: ChunkSeq[u32],
+        inout nuls: ChunkSeq[u32]
+    ) eff [Ffi[Cranelift]] {
+        let malloc = self.libc(inout b, inout m, in MALLOC_SYMBOL, 1, true);
+        let memcpy = self.libc(inout b, inout m, in MEMCPY_SYMBOL, 3, true);
+        let memchr = self.libc(inout b, inout m, in MEMCHR_SYMBOL, 3, true);
+        let size = ins_iadd_imm(inout b, len, 1);
+        let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        args.push(size.id);
+        let _ = ins_call(inout b, malloc, in args.as_slice());
+        let buffer = inst_result(inout b, 0);
+        ins_trapz(inout b, buffer, trap_user(CSTR_ALLOC_TRAP));
+        args.clear();
+        args.push(buffer.id);
+        args.push(data.id);
+        args.push(len.id);
+        let _ = ins_call(inout b, memcpy, in args.as_slice());
+        let end = ins_iadd(inout b, buffer, len);
+        let nul = ins_iconst(inout b, ty_i8(), 0);
+        ins_store(inout b, PLAIN, nul, end, 0);
+        let zero = ins_iconst(inout b, ty_i64(), 0);
+        args.clear();
+        args.push(data.id);
+        args.push(zero.id);
+        args.push(len.id);
+        let _ = ins_call(inout b, memchr, in args.as_slice());
+        let found = inst_result(inout b, 0);
+        let missing = ins_icmp_imm(inout b, cc_eq(), found, 0);
+        let at = ins_isub(inout b, found, data);
+        let no_nul = ins_iconst(inout b, ty_i64(), -1);
+        let nul_at = ins_select(inout b, missing, no_nul, at);
+        buffers.push(buffer.id);
+        nuls.push(nul_at.id);
     }
 
     // A zeroed word's address (`Codegen::alloc` of a word, on either path).
