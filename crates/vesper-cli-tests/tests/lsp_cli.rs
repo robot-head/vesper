@@ -1,8 +1,10 @@
 //! Black-box tests of the actual framed stdio server, including immutable revisions.
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
-    process::{Command, Stdio},
+    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
@@ -24,7 +26,7 @@ fn stream(messages: &[Value]) -> Vec<u8> {
         .collect()
 }
 fn run(input: Vec<u8>) -> (bool, Vec<Value>, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vesper"))
+    let mut child = support::vesper()
         .arg("lsp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

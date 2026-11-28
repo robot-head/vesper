@@ -32,7 +32,7 @@
 //!   (`validate_input`, `cancel_params`, the `vesper.proofAudit` arguments)
 //!   against `lsp_commands`, row for row (#1828 part 10b).
 //!
-//! The recorded sessions are the stdio sessions of tests/lsp_cli.rs, run
+//! The recorded sessions are the stdio sessions of crates/vesper-cli-tests/tests/lsp_cli.rs, run
 //! through the actual `vesper lsp` server (`sessions`).
 
 #[path = "common/check_harness.rs"]
@@ -136,7 +136,7 @@ fn frame(body: &[u8]) -> Vec<u8> {
 }
 
 /// The framing cases of crates/vesper-lsp/tests/transport.rs and
-/// tests/lsp_cli.rs, with their limits.
+/// crates/vesper-cli-tests/tests/lsp_cli.rs, with their limits.
 fn frame_cases() -> Vec<(Vec<u8>, ProtocolLimits)> {
     let d = ProtocolLimits::default();
     let mut cases: Vec<(Vec<u8>, ProtocolLimits)> = vec![];
@@ -1692,7 +1692,7 @@ fn at(uri: &str, line: u32, character: u32) -> Value {
     json!({"textDocument":{"uri":uri},"position":{"line":line,"character":character}})
 }
 
-/// The client streams of tests/lsp_cli.rs, message for message.
+/// The client streams of crates/vesper-cli-tests/tests/lsp_cli.rs, message for message.
 fn cli_inputs() -> Vec<(String, Vec<u8>)> {
     let mut inputs = vec![];
     let uri = "untitled:stdio/🦀";

@@ -1,15 +1,31 @@
 load("./lib/cargo.axl", "test_artifacts")
 load("./lib/process.axl", "check", "command", "root_path", "scratch_dir")
 
-def _cli_suites(ctx: TaskContext) -> int:
-    root = ctx.std.env.aspect_root_dir()
-    selected = (ctx.std.env.var("CLI_SUITES") or "").split()
+# The CLI suites that moved out of the root package (#2743). They find the
+# Cargo-built hybrid on their own (tests/support/mod.rs), so they need no
+# binary swap.
+_CLI_CRATE = "vesper-cli-tests"
+
+def _suites(ctx: TaskContext, directory: str, selected: list[str]) -> list[str]:
     suites = []
-    for file in ctx.std.fs.read_dir(root + "/tests"):
+    for file in ctx.std.fs.try_read_dir(directory) or []:
         name = file.path.rpartition("/")[2].removesuffix(".rs")
         if file.is_file and file.path.endswith(".rs") and "cli" in name and (not selected or name in selected):
             suites.append(name)
-    if not suites:
+    return sorted(suites)
+
+def _filters(suites: list[str]) -> list[str]:
+    filters = []
+    for name in suites:
+        filters.extend(["--test", name])
+    return filters
+
+def _cli_suites(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    selected = (ctx.std.env.var("CLI_SUITES") or "").split()
+    suites = _suites(ctx, root + "/tests", selected)
+    moved = _suites(ctx, root + "/crates/" + _CLI_CRATE + "/tests", selected)
+    if not suites and not moved:
         ctx.std.process.exit(2, "No CLI test suites selected")
     # The hybrid first, through the same command as the crate's tests
     # (#2395): building `vesper-tools` first rebuilt dependencies the hybrid
@@ -18,10 +34,8 @@ def _cli_suites(ctx: TaskContext) -> int:
     check(ctx, "cargo", ["test", "--locked", "--no-run", "-p", "vesper-hybrid"], root)
     for package in [["-p", "vesper", "--bin", "vesper"], ["-p", "vesper-tools"]]:
         check(ctx, "cargo", ["build", "--locked"] + package, root)
-    filters = []
-    for name in sorted(suites):
-        filters.extend(["--test", name])
-    executables = test_artifacts(ctx, root, ["-p", "vesper"] + filters, suites)
+    executables = test_artifacts(ctx, root, ["-p", "vesper"] + _filters(suites), suites) if suites else []
+    executables += test_artifacts(ctx, root, ["-p", _CLI_CRATE] + _filters(moved), moved) if moved else []
 
     target = root_path(root, ctx.std.env.var("CARGO_TARGET_DIR") or "target")
     binary = target + "/debug/vesper"

@@ -19,6 +19,9 @@ on:
       - 'tests/forge_cli.rs'
       - 'tests/forge_authority.rs'
       - 'tests/forge_lower.rs'
+      - 'crates/vesper-cli-tests/tests/lsp_cli.rs'
+      - 'crates/vesper-cli-tests/tests/recovery_cli.rs'
+      - 'crates/vesper-cli-tests/tests/support/**'
       - 'tests/fixtures/source_macros/**'
       - '.aspect/source-macros.axl'
       - '.aspect/source-macro-shapes.axl'
@@ -45,6 +48,9 @@ on:
       - 'tests/forge_cli.rs'
       - 'tests/forge_authority.rs'
       - 'tests/forge_lower.rs'
+      - 'crates/vesper-cli-tests/tests/lsp_cli.rs'
+      - 'crates/vesper-cli-tests/tests/recovery_cli.rs'
+      - 'crates/vesper-cli-tests/tests/support/**'
       - 'tests/fixtures/source_macros/**'
       - '.aspect/source-macros.axl'
       - '.aspect/source-macro-shapes.axl'
@@ -130,7 +136,14 @@ jobs:
       # Selecting the root package alone preserves its pure-host dependency
       # graph; workspace feature unification also enables Forge transports.
       - name: Test compiler authority, resolved lowering and actual CLI/stdio
-        run: cargo test --locked -p vesper --lib --test forge_authority --test forge_lower --test forge_cli --test lsp_cli --test recovery_cli
+        run: cargo test --locked -p vesper --lib --test forge_authority --test forge_lower --test forge_cli
+      # The LSP and recovery CLI suites moved to crates/vesper-cli-tests
+      # (#2743). Bazel runs them on the shipped compiler; this lane keeps
+      # running them on the Rust binary the step above built.
+      - name: Test the LSP and recovery CLI suites
+        run: cargo test --locked -p vesper-cli-tests --test lsp_cli --test recovery_cli
+        env:
+          VESPER: ${{ github.workspace }}/target/debug/vesper
       - name: Check strict source compiler and pure host Clippy
         run: cargo clippy --locked --all-targets --no-default-features -p vesper -p vesper-forge -p vesper-syntax -p vesper-core -p vesper-span -p vesper-diagnostics -- -D warnings
       # The source-macros acceptance task runs through Bazel in the BuildBuddy

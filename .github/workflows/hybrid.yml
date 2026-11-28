@@ -137,8 +137,9 @@ jobs:
         run: cargo test --locked -p vesper-hybrid -- --nocapture
       - name: The CLI suites on the hybrid (its main is the Vesper driver)
         # SH5 lane 12 (#1335): every tests/*cli*.rs suite of the root package
-        # with the hybrid binary in place of target/debug/vesper. It builds
-        # every CLI suite, so pull requests skip it (#1321).
+        # with the hybrid binary in place of target/debug/vesper, and every
+        # *cli* suite of crates/vesper-cli-tests, which runs the hybrid itself
+        # (#2743). It builds every CLI suite, so pull requests skip it (#1321).
         if: ${{ !matrix.divergent && github.event_name != 'pull_request' && runner.os != 'Windows' }}
         run: aspect crate hybrid cli-suites
       - name: The CLI suites on the hybrid (Windows)

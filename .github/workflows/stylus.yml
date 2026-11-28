@@ -17,8 +17,9 @@ on:
       - 'tests/stylus_cli.rs'
       - 'tests/fmt_cli.rs'
       - 'tests/lsp_actions.rs'
-      - 'tests/lsp_cli.rs'
-      - 'tests/recovery_cli.rs'
+      - 'crates/vesper-cli-tests/tests/lsp_cli.rs'
+      - 'crates/vesper-cli-tests/tests/recovery_cli.rs'
+      - 'crates/vesper-cli-tests/tests/support/**'
       - 'tests/fixtures/stylus/**'
       - '.aspect/stylus.axl'
       - '.aspect/lib/lsp-fixture.axl'
@@ -41,8 +42,9 @@ on:
       - 'tests/stylus_cli.rs'
       - 'tests/fmt_cli.rs'
       - 'tests/lsp_actions.rs'
-      - 'tests/lsp_cli.rs'
-      - 'tests/recovery_cli.rs'
+      - 'crates/vesper-cli-tests/tests/lsp_cli.rs'
+      - 'crates/vesper-cli-tests/tests/recovery_cli.rs'
+      - 'crates/vesper-cli-tests/tests/support/**'
       - 'tests/fixtures/stylus/**'
       - '.aspect/stylus.axl'
       - '.aspect/lib/lsp-fixture.axl'
@@ -126,7 +128,14 @@ jobs:
       - name: Test actual formatter with macro and complete-function recovery sources
         run: cargo test --locked -p vesper-fmt --all-targets
       - name: Test actual CLI, current editor actions and original-buffer recovery
-        run: cargo test --locked -p vesper --lib --test stylus_cli --test fmt_cli --test lsp_actions --test lsp_cli --test recovery_cli --test forge_cli
+        run: cargo test --locked -p vesper --lib --test stylus_cli --test fmt_cli --test lsp_actions --test forge_cli
+      # The LSP and recovery CLI suites moved to crates/vesper-cli-tests
+      # (#2743). Bazel runs them on the shipped compiler; this lane keeps
+      # running them on the Rust binary the step above built.
+      - name: Test the LSP and recovery CLI suites
+        run: cargo test --locked -p vesper-cli-tests --test lsp_cli --test recovery_cli
+        env:
+          VESPER: ${{ github.workspace }}/target/debug/vesper
       - name: Check strict formatter and source integration Clippy
         run: cargo clippy --locked -p vesper -p vesper-fmt --all-targets -- -D warnings
       - name: Execute actual formatting and stdio acceptance
