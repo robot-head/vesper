@@ -121,6 +121,25 @@ const MAX_U64: u64 = 18446744073709551615;
 
 const MIB: u64 = 1048576;
 
+// `ProtocolLimits::default()`, the limits `vesper lsp` serves with.
+pub fn default_limits() -> Plimits {
+    Plimits {
+        max_body_bytes: 2 * MIB,
+        max_reply_bytes: 2 * MIB,
+        max_header_bytes: 8192,
+        max_header_line_bytes: 1024,
+        max_headers: 32,
+        max_json_depth: 64,
+        max_json_nodes: 65536,
+        max_json_string_bytes: 2 * MIB,
+        max_json_total_string_bytes: 2 * MIB,
+        max_json_index_bytes: 4 * MIB,
+        max_json_work: 32 * MIB,
+        max_id_bytes: 256,
+        max_method_bytes: 256
+    }
+}
+
 // `ProtocolLimits::HARD`.
 pub fn hard() -> Plimits {
     Plimits {

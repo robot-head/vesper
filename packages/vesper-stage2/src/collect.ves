@@ -7,7 +7,7 @@ use @vesper/ast::{
     ItemNode, ParamNode, TypeNode as AstTypeNode, VariantNode, list_at, list_len, none as ast_none
 };
 use @vesper/check-data::names::{Names, names_new};
-use @vesper/check-data::types::{EffNode, TyKind, Types, types_new};
+use @vesper/check-data::types::{EffNode, TyKind, TyMode, Types, types_new};
 use @vesper/check-data::util::{inc32, n32, u32_at, u64_at, u8_at, w};
 
 const NONE32: u32 = 4294967295;
@@ -1084,6 +1084,43 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
                 span_zero: false
             });
             set_by_symbol(inout world.by_name, res_sym, inc32(res_idx));
+        }
+    }
+    // The built-in `Box[T]` (src/fip.rs `prelude`), when a module names
+    // `Box` and none declares it: an affine struct `Box[T: linear](T)`
+    // whose zero span marks it built in (`fip::active`).
+    if mod_asts_mention(in mods, in "Box") {
+        let box_sym = names.intern(in "Box".as_bytes());
+        let has_box = match world.by_name.try_get(w(box_sym)) {
+            Option::Some(v) => v != 0,
+            Option::None => false,
+        };
+        if !has_box {
+            let t_gen = names.intern(in "T".as_bytes());
+            let bga = n32(world.generics.len());
+            world.generics.push(Generic { name: t_gen, bound: TyMode::Linear, row: false });
+            let bfa = n32(world.fields.len());
+            world.fields.push(Field {
+                name: names.intern(in "0".as_bytes()),
+                ty: types.named0(t_gen),
+                modality: 0
+            });
+            let bva = n32(world.variants.len());
+            world.variants.push(Variant { name: box_sym, fa: bfa, fc: 1, named: false });
+            let bidx = n32(world.adts.len());
+            world.adts.push(Adt {
+                name: box_sym,
+                mode: TyMode::Affine,
+                ga: bga,
+                gn: 1,
+                va: bva,
+                vn: 1,
+                is_enum: false,
+                tile: 0,
+                span_zero: true
+            });
+            set_by_symbol(inout world.by_name, box_sym, inc32(bidx));
+            world.box_active = true;
         }
     }
     let re_sym = names.intern(in "RuntimeError".as_bytes());

@@ -1516,3 +1516,38 @@ Rust lines deleted: 0. Gaps: a `vesper.proofAudit` request still
 blocks the loop until its job finishes, work that is already running is
 not cancelled, and `vesper lsp` does not run this loop yet (part 15c,
 which also supplies the stdin, stdout and clock host functions).
+
+# Part 15c: `vesper lsp` runs the Vesper loop
+
+The hybrid compiler's `vesper lsp` now runs `@vesper/lsp-server`'s
+`serve_stdio`: `run_lsp` in `@vesper/driver-commands` calls it instead of
+handing the whole session to Rust `serve`. The engine seam moved into the
+`HybridCommands` import of `@vesper/driver-engines` as
+`hc_lsp_engine_*`, as the Stage 2 plan asked (Rust hooks first), so the
+loop's effect is the one the driver already carries and the wasm32-wasip2
+build refuses it like every other Rust engine.
+`crates/vesper-hybrid/src/lsp_engine.rs` is the host: it starts the Rust
+session with `serve`'s default configuration, reads standard input on its
+own thread (so a read can wait with a timeout on every target) and writes
+and flushes standard output.
+
+## What changed
+
+- `packages/vesper-driver-engines`: `hc_lsp_engine_start`, `frame`,
+  `tick`, `take`, `exit`, `error`, `read`, `write`, `deadline` replace
+  `hc_lsp_serve` and `hc_lsp_err`; src-wasip2 refuses `vesper lsp`.
+- `packages/vesper-lsp-server`: uses that seam (its own `.vsys` files are
+  gone) and adds `serve_stdio` with `ProtocolLimits::default()`
+  (`default_limits` in `@vesper/lsp`).
+- `crates/vesper-hybrid`: the new `lsp_engine.rs`, re-exported from
+  `commands::host`; `hc_lsp_serve` and `hc_lsp_err` are deleted.
+- Bazel: `lsp_package` and `lsp_server_package`, in the driver's deps.
+
+## Differential
+
+The part 15a and 15b differentials bind the same seam by its new names:
+16 sessions, 160 chunked runs and the timed session, 0 diffs.
+
+Rust lines deleted: 39 (`hc_lsp_serve`, `hc_lsp_err` and their error
+cell). `src/lsp.rs` `serve` stays for the root `vesper` binary until the
+hybrid is the default.

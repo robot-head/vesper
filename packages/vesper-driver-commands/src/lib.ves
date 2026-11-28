@@ -14,7 +14,9 @@
 // self-host-cli-commands.md lists each with its lane or blocker.
 use @vesper/driver::{Args, args_count, arg_start, arg_end, eq};
 use @vesper-std/env::{var_bytes, current_exe_bytes, os, os_linux, os_macos, os_windows};
-use @vesper-std/process::{command_path, arg_bytes as proc_arg, spawn, wait, release};
+use @vesper-std/process::{
+    command_path, arg_bytes as proc_arg, env_bytes as proc_env, spawn, wait, release
+};
 use @vesper-std/fs::{
     IoError, error_text, write_stdout, write_stderr, is_executable_path, canonicalize_path, arch,
     arch_x86_64, arch_aarch64, arch_wasm32, not_found, symlink_metadata, symlink_metadata_path,
@@ -61,6 +63,9 @@ const ERROR_TEXT_INITIAL_BYTES: u64 = 128;
 const SIGNAL_EXIT_BASE: i64 = 128;
 // The status of a Rust program whose `main` panicked.
 const PANIC_EXIT: i64 = 101;
+// `tool_commands::COMPILER_ENV`: names this executable to every tool it runs,
+// so a tool that asks the compiler (`vesper tool-facts`, #2670) asks this one.
+const COMPILER_ENV: Str = "VESPER_COMPILER";
 
 // `run`'s result when the Rust CLI should run the command instead (the
 // driver's `delegate()`).
@@ -215,7 +220,9 @@ fn compiler_command(in command: Slice[u8]) -> bool {
         || eq(in command, in "lsp")
         || eq(in command, in "proof-audit")
         || eq(in command, in "run")
+        || eq(in command, in "sim-host")
         || eq(in command, in "test")
+        || eq(in command, in "tool-facts")
         || eq(in command, in "verify")
 }
 
@@ -830,12 +837,24 @@ fn missing(in subcommand: Slice[u8]) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] 
 fn run_tool(
     in binary: Slice[u8],
     in args: Args
-) -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Fail[PrintFailed]] {
+) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Fail[PrintFailed]] {
     let mut command = command_path(in binary);
     let n = args_count(in args);
     for i in 1..n {
         let arg_buf = arg(in args, i);
         proc_arg(inout command, in arg_buf.as_slice());
+    }
+    // As `tool_commands::run` does: a tool whose compiler is not beside it
+    // (Bazel's `shipped/vesper`) still finds this one.
+    let exe = handle Fail[IoError] in {
+        Option::Some(current_exe_bytes())
+    } with {
+        return v => v,
+        raise(_, _) => Option::None,
+    };
+    match exe {
+        Option::Some(path) => proc_env(inout command, in COMPILER_ENV, in path.as_slice()),
+        Option::None => {},
     }
     let mut child = match spawn(command) {
         Result::Ok(child) => child,

@@ -3853,7 +3853,7 @@ fn commands_speed() {
 
 // ------------------------------------------------------------------ server
 
-/// The session behind the Vesper loop's `LspEngine` import in this test: a
+/// The session behind the Vesper loop's engine seam (`hc_lsp_engine_*`) in this test: a
 /// `vesper::lsp::Engine`, what its last frame wrote, how it ended and its
 /// error text.
 struct HostEngine {
@@ -3884,6 +3884,9 @@ const ENGINE_CONTINUE: u64 = 0;
 const ENGINE_CLEAN: u64 = 1;
 const ENGINE_UNCLEAN: u64 = 2;
 const ENGINE_FAILED: u64 = 3;
+
+/// `hc_lsp_engine_start`'s answer for a session that started.
+const ENGINE_STARTED: u64 = 0;
 
 /// `lsp_engine_read`'s answers besides a byte count.
 const READ_END: i64 = 0;
@@ -3984,6 +3987,16 @@ unsafe extern "C" fn lsp_engine_write(buf: *const u8, len: usize) -> u64 {
     WRITE_OK
 }
 
+/// A command engine of `HybridCommands` that the LSP loop never calls.
+extern "C" fn not_the_loop() -> u64 {
+    panic!("the LSP loop called a command engine")
+}
+
+/// The host engine is installed before the loop starts.
+extern "C" fn lsp_engine_start() -> u64 {
+    ENGINE_STARTED
+}
+
 extern "C" fn lsp_engine_deadline() -> i64 {
     with_engine(|h| if h.waits { 0 } else { h.engine.deadline() })
 }
@@ -4026,16 +4039,34 @@ fn server_function(name: &str) -> Entry {
     let imports = assembled.imports(None).unwrap();
     let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports)
         .unwrap_or_else(|e| panic!("{e}"));
-    let symbols: Vec<(&str, *const u8)> = vec![
-        ("lsp_engine_frame", lsp_engine_frame as *const u8),
-        ("lsp_engine_take", lsp_engine_take as *const u8),
-        ("lsp_engine_exit", lsp_engine_exit as *const u8),
-        ("lsp_engine_error", lsp_engine_error as *const u8),
-        ("lsp_engine_read", lsp_engine_read as *const u8),
-        ("lsp_engine_write", lsp_engine_write as *const u8),
-        ("lsp_engine_deadline", lsp_engine_deadline as *const u8),
-        ("lsp_engine_tick", lsp_engine_tick as *const u8),
+    let mut symbols: Vec<(&str, *const u8)> = vec![
+        ("hc_lsp_engine_start", lsp_engine_start as *const u8),
+        ("hc_lsp_engine_frame", lsp_engine_frame as *const u8),
+        ("hc_lsp_engine_take", lsp_engine_take as *const u8),
+        ("hc_lsp_engine_exit", lsp_engine_exit as *const u8),
+        ("hc_lsp_engine_error", lsp_engine_error as *const u8),
+        ("hc_lsp_engine_read", lsp_engine_read as *const u8),
+        ("hc_lsp_engine_write", lsp_engine_write as *const u8),
+        ("hc_lsp_engine_deadline", lsp_engine_deadline as *const u8),
+        ("hc_lsp_engine_tick", lsp_engine_tick as *const u8),
     ];
+    // The rest of the `HybridCommands` import: command engines the loop
+    // never calls.
+    let vsys =
+        std::fs::read_to_string(repo().join("packages/vesper-driver-engines/commands-linux.vsys"))
+            .unwrap();
+    let others: Vec<String> = vsys
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("fn hc_"))
+        .filter_map(|l| l.split('(').next())
+        .map(|name| format!("hc_{name}"))
+        .filter(|name| !symbols.iter().any(|(bound, _)| bound == name))
+        .collect();
+    symbols.extend(
+        others
+            .iter()
+            .map(|name| (name.as_str(), not_the_loop as *const u8)),
+    );
     Entry(
         checked
             .word_function(name, &symbols, optimize())

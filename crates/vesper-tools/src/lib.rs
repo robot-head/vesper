@@ -28,6 +28,7 @@ pub mod grammar;
 pub mod highlight;
 pub mod json;
 pub mod migrate;
+pub mod native_kernel;
 pub mod proof_gate;
 pub mod publish;
 pub mod replay;
@@ -81,14 +82,15 @@ mod compiler_free {
         ("atomic_file.rs", include_str!("atomic_file.rs"), false),
         ("attest.rs", include_str!("attest.rs"), false),
         ("audit.rs", include_str!("audit.rs"), false),
-        ("bench.rs", include_str!("bench.rs"), true),
+        ("bench.rs", include_str!("bench.rs"), false),
         ("cas.rs", include_str!("cas.rs"), false),
         ("compiler.rs", include_str!("compiler.rs"), false),
-        ("fuzz.rs", include_str!("fuzz.rs"), true),
+        ("fuzz.rs", include_str!("fuzz.rs"), false),
         ("grammar.rs", include_str!("grammar.rs"), false),
         ("highlight.rs", include_str!("highlight.rs"), false),
         ("json.rs", include_str!("json.rs"), false),
         ("migrate.rs", include_str!("migrate.rs"), false),
+        ("native_kernel.rs", include_str!("native_kernel.rs"), false),
         ("proof_gate.rs", include_str!("proof_gate.rs"), false),
         ("publish.rs", include_str!("publish.rs"), false),
         ("replay.rs", include_str!("replay.rs"), false),

@@ -20,7 +20,8 @@ use @vesper/check-data::util::{u32_at, u64_at};
 use @vesper/check-data::world::{SpanRow, find_span, set_by_symbol};
 use @vesper/place-ir::{put_names, put_program_section, put_types};
 use @vesper/place-ir-lower::ast::{Ast, Ex};
-use @vesper/stage2::{Lowered, stage2_lower_dir};
+use @vesper/stage2::{Lowered, stage2_lower_dir_with};
+use self::{foreign_sources};
 
 const NONE64: u64 = 18446744073709551615;
 const WORD_BYTES: u64 = 8;
@@ -254,15 +255,50 @@ fn put_expr(in a: Ast, id: u64, inout rows: ChunkSeq[u64]) -> bool {
     true
 }
 
-// The calls input of the package at `root_dir`: its library task over
-// `roots` (symbols named one per line), optimized when `optimize`.
+// The calls input of the package at `root_dir` for native target OS `os`:
+// its library task over `roots` (symbols named one per line), optimized
+// when `optimize`.
 pub fn stage2_calls_input(
     in root_dir: Slice[u8],
+    in os: Slice[u8],
     in roots: Slice[u8],
     optimize: bool
 ) -> CallsInput eff [Ffi[StdFs]] {
+    stage2_calls_input_with(in root_dir, in os, in roots, optimize, in NO_WRAPPERS.as_bytes())
+}
+
+// No instance wrappers.
+const NO_WRAPPERS: Str = "";
+
+// `stage2_calls_input` with `wrappers` (@vesper/export-build's instance
+// wrappers, `ExportFiles.wrappers`) appended to the root module.
+pub fn stage2_calls_input_with(
+    in root_dir: Slice[u8],
+    in os: Slice[u8],
+    in roots: Slice[u8],
+    optimize: bool,
+    in wrappers: Slice[u8]
+) -> CallsInput eff [Ffi[StdFs]] {
     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut lw = match stage2_lower_dir(in root_dir, inout err) {
+    let sources = match foreign_sources(in root_dir, in os) {
+        Option::Some(s) => s,
+        Option::None => {
+            err.extend(in "foreign imports do not read".as_bytes());
+            return CallsInput {
+                declined: CALLS_FRONT_END,
+                err: err,
+                bytes: ChunkSeq::new[u8](),
+                det_float: false
+            };
+        },
+    };
+    let mut lw = match stage2_lower_dir_with(
+        in root_dir,
+        in os,
+        in sources,
+        in wrappers,
+        inout err
+    ) {
         Option::Some(lw) => lw,
         Option::None => {
             return CallsInput {

@@ -22,7 +22,7 @@ use std::{
 pub const COMPILER_ENV: &str = "VESPER_COMPILER";
 
 /// The hidden compiler command that answers the tools.
-const FACTS_COMMAND: &str = "tool-facts";
+pub const FACTS_COMMAND: &str = "tool-facts";
 
 /// The schema of the answer (`SCHEMA` in `src/tool_facts.rs`).
 const FACTS_SCHEMA: &str = "vesper.tool-facts/1";
@@ -60,9 +60,14 @@ pub fn locate() -> Result<PathBuf, String> {
             dirs.push(dir);
         }
         for dir in dirs {
-            // Cargo puts the tools beside `vesper`. Bazel puts them in
+            // Cargo puts the tools beside `vesper`, and test executables in
+            // `deps/` below it. Bazel puts the tools in
             // `<bin>/crates/vesper-tools/bin/`, and `vesper` in `<bin>/bin/`.
-            for candidate in [dir.join(&name), dir.join("../../../bin").join(&name)] {
+            for candidate in [
+                dir.join(&name),
+                dir.join("..").join(&name),
+                dir.join("../../../bin").join(&name),
+            ] {
                 if candidate.is_file() {
                     return Ok(candidate);
                 }

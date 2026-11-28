@@ -1,0 +1,346 @@
+// Constant tables of the Rust checker (src/arrays.rs `lower_world`): a use
+// of a constant aggregate whose value is a tree of literals calls
+// `$table$NAME`, which no pass inlines and native code reads as read-only
+// data, instead of the constant's function `NAME`. Only the native front
+// end (`stage2_lower_dir`) runs this pass, as the Rust checker's native
+// lowering does.
+//
+// A constant's value encodes (`constant_bytes`) when it is a literal of
+// its scalar type (an integer that fits a kind narrower than 128 bits,
+// `bool`, `f64`, or the negation of such a literal), a tuple, array or
+// struct of such values, or a call of another such constant. A block
+// with statements does not encode here (Rust resolves `let` bindings).
+
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, Types};
+use @vesper/check-data::util::{n32, u32_at, u64_at, w};
+use @vesper/check-data::world::{World};
+use @vesper/place-ir::codes::{Lit};
+use @vesper/place-ir-lower::ast::{Ast, Ex};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+const U64_MAX: u64 = 18446744073709551615;
+const WORD_BITS: u64 = 64;
+
+const X_LITERAL: u8 = 1;
+const X_NAME: u8 = 2;
+const X_TUPLE: u8 = 3;
+const X_STRUCT: u8 = 4;
+const X_UNARY: u8 = 7;
+const X_BLOCK: u8 = 10;
+const X_CALL: u8 = 11;
+
+const CONST_PREFIX: Str = "const$";
+const SCOPED_CONST_PREFIX: Str = "__const$";
+// `arrays::TABLE_PREFIX`.
+const TABLE_PREFIX: Str = "$table$";
+const NEGATE: Str = "-";
+// `arrays::MAX_CONST_DEPTH`.
+const MAX_CONST_DEPTH: u64 = 64;
+
+fn ex(in a: Ast, id: u64) -> Option[Ex] {
+    if id == NONE64 {
+        return Option::None;
+    }
+    a.exs.try_get(id)
+}
+
+fn xs(in a: Ast, i: u64) -> u64 {
+    u64_at(in a.xs, i)
+}
+
+fn contains_bytes(in names: Names, sym: u32, in part: Slice[u8]) -> bool {
+    let n = names.size(sym);
+    if part.len() > n {
+        return false;
+    }
+    for start in 0..wrapping_add(wrapping_sub(n, part.len()), 1) {
+        let mut same = true;
+        for i in 0..part.len() {
+            let b = match part.try_get(i) {
+                Option::Some(b) => b,
+                Option::None => 0,
+            };
+            if names.byte(sym, wrapping_add(start, i)) != b {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            return true;
+        }
+    }
+    false
+}
+
+// `arrays::is_const_function`.
+fn is_const_function(in names: Names, sym: u32) -> bool {
+    names.has_prefix(sym, in CONST_PREFIX.as_bytes())
+        || contains_bytes(in names, sym, in SCOPED_CONST_PREFIX.as_bytes())
+}
+
+// The function row of `sym`'s body, or NONE64.
+fn body_of(in a: Ast, sym: u32) -> u64 {
+    if w(sym) >= a.fn_by_key.len() {
+        return NONE64;
+    }
+    let idx = u32_at(in a.fn_by_key, w(sym));
+    if idx == 0 {
+        return NONE64;
+    }
+    match a.fns.try_get(wrapping_sub(w(idx), 1)) {
+        Option::Some(f) => {
+            if f.has_body { f.body } else { NONE64 }
+        },
+        Option::None => NONE64,
+    }
+}
+
+// The bits and signedness of integer type `ty`, or 0 bits.
+fn int_kind(in types: Types, in world: World, ty: u32) -> (u64, bool) {
+    if types.kind(ty) != TyKind::Named || types.arity(ty) != 0 {
+        return (0, false);
+    }
+    let k = world.k;
+    let sym = types.name(ty);
+    if sym == k.u8_ {
+        (8, false)
+    } else if sym == k.u16_ {
+        (16, false)
+    } else if sym == k.u32_ {
+        (32, false)
+    } else if sym == k.u64_ || sym == k.usize_ {
+        (WORD_BITS, false)
+    } else if sym == k.i8_ {
+        (8, true)
+    } else if sym == k.i16_ {
+        (16, true)
+    } else if sym == k.i32_ {
+        (32, true)
+    } else if sym == k.i64_ || sym == k.isize_ {
+        (WORD_BITS, true)
+    } else {
+        (0, false)
+    }
+}
+
+// Whether the integer literal `lo`/`hi`, negated when `negative`, fits a
+// kind of `bits` bits (`IntegerKind::fits`).
+fn int_fits(lo: u64, hi: u64, negative: bool, bits: u64, signed: bool) -> bool {
+    if hi != 0 {
+        return false;
+    }
+    if !signed {
+        if negative {
+            return lo == 0;
+        }
+        return bits == WORD_BITS || lo <= wrapping_sub(wrapping_shl_u64(1, n32(bits)), 1);
+    }
+    let half = wrapping_shl_u64(1, n32(wrapping_sub(bits, 1)));
+    if negative { lo <= half } else { lo < half }
+}
+
+// `scalar_word`: whether literal row `e`, negated when `negative`, is a
+// word of scalar type `ty`.
+fn scalar_encodes(in types: Types, in world: World, e: Ex, negative: bool, ty: u32) -> bool {
+    if types.kind(ty) != TyKind::Named || types.arity(ty) != 0 {
+        return false;
+    }
+    let k = world.k;
+    let name = types.name(ty);
+    if e.a == Lit::Bool {
+        return name == k.bool_ && !negative;
+    }
+    if e.a == Lit::Float {
+        return name == k.f64_;
+    }
+    if e.a == Lit::Int {
+        let (bits, signed) = int_kind(in types, in world, ty);
+        return bits != 0 && int_fits(e.b, e.c, negative, bits, signed);
+    }
+    false
+}
+
+// `encode`: whether expression `id` is a constant tree of type `ty`.
+fn encodes(
+    in a: Ast,
+    in names: Names,
+    in types: Types,
+    in world: World,
+    id: u64,
+    ty: u32,
+    depth: u64
+) -> bool {
+    if depth > MAX_CONST_DEPTH || ty == NONE32 || w(ty) >= types.nodes.len() {
+        return false;
+    }
+    let e = match ex(in a, id) {
+        Option::Some(e) => e,
+        Option::None => return false,
+    };
+    let next = wrapping_add(depth, 1);
+    if e.kind == X_BLOCK {
+        return e.n == 0 && encodes(in a, in names, in types, in world, e.b, ty, next);
+    }
+    if e.kind == X_CALL {
+        if e.n != 0 {
+            return false;
+        }
+        let callee = match ex(in a, e.a) {
+            Option::Some(c) => c,
+            Option::None => return false,
+        };
+        if callee.kind != X_NAME || !is_const_function(in names, n32(callee.a)) {
+            return false;
+        }
+        let body = body_of(in a, n32(callee.a));
+        return body != NONE64 && encodes(in a, in names, in types, in world, body, ty, next);
+    }
+    if e.kind == X_TUPLE {
+        if types.kind(ty) != TyKind::Tuple || types.arity(ty) != e.n || e.n == 0 {
+            return false;
+        }
+        for i in 0..e.n {
+            let element = xs(in a, wrapping_add(e.a, i));
+            if !encodes(in a, in names, in types, in world, element, types.arg(ty, i), next) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if e.kind == X_STRUCT {
+        return struct_encodes(in a, in names, in types, in world, e, ty, next);
+    }
+    if e.kind == X_LITERAL {
+        return scalar_encodes(in types, in world, e, false, ty);
+    }
+    if e.kind == X_UNARY {
+        if !names.spells(n32(e.a), in NEGATE.as_bytes()) {
+            return false;
+        }
+        return match ex(in a, e.b) {
+            Option::Some(v) => v.kind == X_LITERAL
+                && scalar_encodes(in types, in world, v, true, ty),
+            Option::None => false,
+        };
+    }
+    false
+}
+
+// A struct literal row `e` of struct type `ty`: every field of the
+// struct's layout, by name.
+fn struct_encodes(
+    in a: Ast,
+    in names: Names,
+    in types: Types,
+    in world: World,
+    e: Ex,
+    ty: u32,
+    depth: u64
+) -> bool {
+    if types.kind(ty) != TyKind::Named || types.arity(ty) != 0 {
+        return false;
+    }
+    let adt_index = world.lookup(types.name(ty));
+    if adt_index == NONE32 {
+        return false;
+    }
+    let adt = world.adt(adt_index);
+    if adt.is_enum || adt.gn != 0 || adt.vn != 1 {
+        return false;
+    }
+    let variant = world.variant(w(adt.va));
+    if w(variant.fc) != e.n {
+        return false;
+    }
+    for fi in 0..w(variant.fc) {
+        let field = world.field(wrapping_add(w(variant.fa), fi));
+        let mut value = NONE64;
+        for k in 0..e.n {
+            let at = wrapping_add(e.b, wrapping_mul(k, 2));
+            if n32(xs(in a, at)) == field.name {
+                value = xs(in a, wrapping_add(at, 1));
+                break;
+            }
+        }
+        if value == NONE64 || !encodes(in a, in names, in types, in world, value, field.ty, depth) {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether `ty` lays out as an aggregate (`Layout::aggregate`): a tuple
+// or a struct.
+fn aggregate(in types: Types, in world: World, ty: u32) -> bool {
+    if ty == NONE32 || w(ty) >= types.nodes.len() {
+        return false;
+    }
+    if types.kind(ty) == TyKind::Tuple {
+        return types.arity(ty) != 0;
+    }
+    if types.kind(ty) != TyKind::Named {
+        return false;
+    }
+    let adt_index = world.lookup(types.name(ty));
+    adt_index != NONE32 && !world.adt(adt_index).is_enum
+}
+
+/// `arrays::lower_world`'s table reads: every argument-free call of a
+/// constant aggregate that encodes calls `$table$NAME` instead.
+pub fn lower_table_reads(inout a: Ast, inout names: Names, in types: Types, in world: World) {
+    // The table constants, as their `$table$` names by symbol (+ 1).
+    let mut tables = ChunkSeq::new[u32]();
+    let mut any = false;
+    for fi in 0..a.fns.len() {
+        let f = match a.fns.try_get(fi) {
+            Option::Some(f) => f,
+            Option::None => continue,
+        };
+        if !f.has_body || f.param_count != 0 || !is_const_function(in names, f.name) {
+            continue;
+        }
+        if !aggregate(in types, in world, f.result)
+            || !encodes(in a, in names, in types, in world, f.body, f.result, 0)
+        {
+            continue;
+        }
+        let mut table = ChunkSeq::new[u8]();
+        table.extend(in TABLE_PREFIX.as_bytes());
+        names.write(f.name, inout table);
+        let sym = names.intern(in table.as_slice());
+        loop {
+            if tables.len() > w(f.name) {
+                break;
+            }
+            tables.push(0);
+        }
+        let _ = tables.try_set(w(f.name), wrapping_add(sym, 1));
+        any = true;
+    }
+    if !any {
+        return;
+    }
+    for id in 0..a.exs.len() {
+        let e = match a.exs.try_get(id) {
+            Option::Some(e) => e,
+            Option::None => continue,
+        };
+        if e.kind != X_CALL || e.n != 0 {
+            continue;
+        }
+        let mut callee = match a.exs.try_get(e.a) {
+            Option::Some(c) => c,
+            Option::None => continue,
+        };
+        if callee.kind != X_NAME {
+            continue;
+        }
+        let table = u32_at(in tables, callee.a);
+        if table != 0 {
+            callee.a = w(wrapping_sub(table, 1));
+            let _ = a.exs.try_set(e.a, callee);
+        }
+    }
+}

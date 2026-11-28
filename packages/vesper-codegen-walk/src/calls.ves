@@ -7,6 +7,8 @@
 // when the walk would emit the call as a plain direct call, else
 // `codegen_swap::body::NO_CALLEE`. The id carries the call's flags above
 // its low 32 bits: `WORDS_CALL` for a small enum result returned as words,
+// `SRET_CALL` for a struct or enum result written through the result
+// pointer,
 // `FAIL_CALL` for a `fail_only` callee and `STATUS_CALL` when that callee
 // returns its failure status in a register. This module makes the same
 // decisions over @vesper/codegen-calls' discovery and conventions, so
@@ -24,7 +26,7 @@ use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{TyKind, Types, default_type};
 use @vesper/check-data::world::{World};
 use @vesper/check-data::input::{Reader, read_ctx};
-use @vesper/check-layout::{Layouts, layouts_new};
+use @vesper/check-layout::{L_PRODUCT, L_SCALAR, Layouts, layout_of, layouts_new};
 use @vesper/place-ir::{FnRow, Program, read_program};
 use @vesper/place-ir::codes::{Op};
 use @vesper/codegen-calls::data::{Calls, read_calls};
@@ -40,10 +42,12 @@ use self::frame::{enum_words};
 const NONE32: u32 = 4294967295;
 // `codegen_swap::body::NO_CALLEE`: a call the walk does not make directly.
 pub const NO_CALLEE: u64 = 18446744073709551615;
-// `codegen_swap::body::FAIL_CALL`, `STATUS_CALL` and `WORDS_CALL`.
+// `codegen_swap::body::FAIL_CALL`, `STATUS_CALL`, `WORDS_CALL` and
+// `SRET_CALL`.
 pub const FAIL_CALL: u64 = 4294967296;
 pub const STATUS_CALL: u64 = 8589934592;
 pub const WORDS_CALL: u64 = 17179869184;
+pub const SRET_CALL: u64 = 34359738368;
 // A task the Rust compile refuses before the walk (discovery or a
 // convention failed): no instances.
 pub const REFUSED: u64 = 18446744073709551615;
@@ -357,6 +361,14 @@ fn plain_call(
     // A small enum result the callee returns as words in registers (#2581).
     let words_result = abi.result_words != 0
         && enum_words(inout ls, inout t, inout names, in wd, f.result) == w(abi.result_words);
+    // A struct or enum result written through the result pointer (#2654):
+    // the caller passes storage that needs no zeroing on the optimize path
+    // (`aggregates::plain_data`).
+    let result_type = default_type(inout t, f.result);
+    let sret_result = !fails
+        && abi.result_words == 0
+        && !contains_function(inout t, in wd, result_type)
+        && plain_aggregate(inout ls, inout t, inout names, in wd, result_type);
     if specialized(inout t, in names, in wd, k, in f)
         || uses_caller_slot(in d, info)
         || function_value_instance(inout t, in names, in wd, in d, k, info)
@@ -364,6 +376,7 @@ fn plain_call(
         return NO_CALLEE;
     }
     if !words_result
+        && !sret_result
         && !scalar_type(inout ls, inout t, inout names, in wd, in d, k, b, in f, f.result)
     {
         return NO_CALLEE;
@@ -385,6 +398,8 @@ fn plain_call(
     let id = task.id(i);
     if words_result {
         id | WORDS_CALL
+    } else if sret_result {
+        id | SRET_CALL
     } else if !fails {
         id
     } else if abi.status {
@@ -392,6 +407,53 @@ fn plain_call(
     } else {
         id | FAIL_CALL
     }
+}
+
+// Whether `ty`'s layout is an aggregate whose every word is plain data
+// (`native_aggregates::plain_data`): no string, handle or `f32` half-word.
+fn plain_aggregate(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    ty: u32
+) -> bool {
+    let mark = ls.mark();
+    let l = layout_of(inout ls, inout t, inout names, in wd, ty);
+    let plain = l != NONE32 && ls.aggregate(l) && plain_words(in ls, in t, in wd, l);
+    ls.reset(mark);
+    plain
+}
+
+// The walk of `plain_data` over layout `l`.
+fn plain_words(in ls: Layouts, in t: Types, in wd: World, l: u32) -> bool {
+    let node = ls.node(l);
+    let name = t.name(node.ty);
+    let tn = t.node(node.ty);
+    let k = wd.k;
+    if tn.kind == TyKind::Named && tn.n == 0 && (name == k.string || name == k.str_) {
+        return false;
+    }
+    if node.kind == L_SCALAR {
+        return (k.is_scalar(name) && name != k.f32_) || node.ty == t.unit;
+    }
+    if node.kind == L_PRODUCT {
+        for i in 0..w(node.n) {
+            if !plain_words(in ls, in t, in wd, ls.lfield(add(w(node.a), i)).layout) {
+                return false;
+            }
+        }
+        return true;
+    }
+    for v in 0..w(node.n) {
+        let variant = ls.lvariant(add(w(node.a), v));
+        for i in 0..w(variant.fc) {
+            if !plain_words(in ls, in t, in wd, ls.lfield(add(w(variant.fa), i)).layout) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 // The call words of program function `fi`'s graph, appended to `o` after
