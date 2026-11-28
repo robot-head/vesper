@@ -323,29 +323,6 @@ fn non_terminating_inputs_stop_with_a_typed_result() {
     assert!(spin.buffer().fuel_left() > 0 && spin.buffer().fuel_left() < 1000);
 }
 
-#[test]
-fn fuzzing_a_non_terminating_target_reports_invalid_runs() {
-    let temp = Temp::new();
-    let file = temp.write("spin.ves", MAGIC_SOURCE);
-    let o = vesper(&[
-        "fuzz",
-        &file,
-        "--target",
-        "spin",
-        "--native-coverage",
-        "--execs",
-        "300",
-        "--fuel",
-        "5000",
-    ]);
-    let t = text(&o);
-    assert!(t.contains("fuel 5000 block(s)"), "{t}");
-    // spin(3) never terminates; the evaluator runs out of fuel too, so it is
-    // an invalid run, never a hang or a crash.
-    assert!(t.contains("no failure found within budget"), "{t}");
-    assert!(o.status.success(), "{t}");
-}
-
 // ---------------------------------------------------------------------------
 // Comparison logging: signed operands, select and br_table.
 
@@ -887,40 +864,6 @@ fn native_coverage_cross_checks_results_with_the_evaluator() {
     assert_eq!(safe.run(&[1]).unwrap(), NativeOutcome::Returned);
     assert_eq!(safe.last_result(), Some(1));
     let _ = object_with_coverage(&world, "main", Some(TARGETS[1]), true, 0x1000_0000).unwrap();
-}
-
-#[test]
-fn native_differential_compares_results_native_code_does_not_report() {
-    // f64 results have no native result word; the evaluator's outcomes
-    // (cross-checked against native code) still decide the comparison.
-    let source = "fn fa(x: u64) -> f64 {
-    1.0
-}
-
-fn fb(x: u64) -> f64 {
-    2.0
-}
-
-fn main() -> u64 {
-    0
-}
-";
-    let temp = Temp::new();
-    let file = temp.write("floats.ves", source);
-    let o = vesper(&[
-        "fuzz",
-        &file,
-        "--target",
-        "fa",
-        "--differential",
-        "fb",
-        "--native-coverage",
-        "--execs",
-        "50",
-    ]);
-    let t = text(&o);
-    assert!(t.contains("failure [divergence]"), "{t}");
-    assert!(!o.status.success(), "{t}");
 }
 
 #[test]

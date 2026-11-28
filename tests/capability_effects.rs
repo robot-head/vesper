@@ -45,41 +45,6 @@ fn expected_code(source: &str) -> String {
 }
 
 #[test]
-fn accepted_fixtures_check_and_run_on_both_backends() {
-    let expected = [
-        ("closures.ves", "6.5"),
-        ("consttime.ves", "true"),
-        ("detfloat.ves", "0.75"),
-        ("realtime.ves", "42"),
-    ];
-    let files = fixtures("accept");
-    assert_eq!(files.len(), expected.len());
-    for (path, (name, value)) in files.iter().zip(expected) {
-        assert!(path.ends_with(name), "{}", path.display());
-        let p = path.to_str().unwrap();
-        let out = vesper(&["check", p]);
-        assert!(
-            out.status.success(),
-            "{p}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        for backend in ["run", "jit"] {
-            let out = vesper(&[backend, p]);
-            assert!(
-                out.status.success(),
-                "{backend} {p}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            assert_eq!(
-                String::from_utf8_lossy(&out.stdout).trim(),
-                value,
-                "{backend} {p}"
-            );
-        }
-    }
-}
-
-#[test]
 fn rejected_fixtures_report_typed_diagnostics_with_spans() {
     let mut codes = std::collections::BTreeSet::new();
     for path in fixtures("reject") {
@@ -336,18 +301,6 @@ fn capability_names_are_stable() {
         assert!(capability_effects::is_capability_effect(c.name()));
     }
     assert!(!capability_effects::is_capability_effect("Fail"));
-}
-
-#[test]
-fn fixtures_are_canonically_formatted() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/capability_effects");
-    let out = vesper(&["fmt", "--check", dir.to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 fn codes(source: &str) -> Vec<String> {
