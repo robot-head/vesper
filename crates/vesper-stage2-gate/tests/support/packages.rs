@@ -472,7 +472,7 @@ pub const STAGE2_CRANELIFT_PACKAGES: &[(&str, &str, &str, &str)] = &[
         "native-lib",
         "@vesper/native-lib",
         "packages/vesper-native-lib",
-        "use @vesper/native-lib::{executable_object, library_object};\npub fn main() -> u64 eff [Ffi[Cranelift]] { let req: ChunkSeq[u8] = ChunkSeq::new[u8](); wrapping_add(library_object(in req.as_slice()).len(), executable_object(in req.as_slice()).len()) }\n",
+        "use @vesper/native-lib::library_object;\npub fn main() -> u64 eff [Ffi[Cranelift]] { let req: ChunkSeq[u8] = ChunkSeq::new[u8](); library_object(in req.as_slice()).len() }\n",
     ),
 ];
 
@@ -521,10 +521,6 @@ pub const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
     (
         "vesper-export-build",
         "`vesper build --lib`'s interface and binding from Stage 2's front end (#2270) as a native executable beside the Rust CLI (tests/self_host_codegen_export.rs); Stage 2 builds it inside @vesper/port-builder (//:vesper-port-builder.wasm, #2666)",
-    ),
-    (
-        "vesper-exe-builder",
-        "`vesper build`'s object for a package's `main` as one program: Stage 2 builds it into //:vesper-exe-builder.wasm (tools/bazel/stage2_port_builder.bzl), composed with the Cranelift component; crates/vesper-port-harness/tests/stage2_executable.rs links its objects and compares them and the executables with the Rust CLI's (#2752)",
     ),
     (
         "vesper-port-builder",
