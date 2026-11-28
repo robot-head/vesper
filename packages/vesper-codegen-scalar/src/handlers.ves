@@ -310,9 +310,38 @@ impl Gen {
         n
     }
 
-    // The call slots of graph `fi` whose first call is the request's
-    // `base`-th.
+    // The call slots of nested graph `fi` whose first call is the
+    // request's `base`-th: its own calls and its handlers' nested calls
+    // interleaved in instruction order.
     pub fn call_slots(in self, fi: u64, base: u64) -> CallSlots {
+        self.slots(fi, base, false)
+    }
+
+    // The call slots of function body `fi`: its own calls first, in
+    // instruction order, then its handlers' nested calls (the request's
+    // count word splits them at `NESTED_CALLS_SHIFT`).
+    pub fn body_call_slots(in self, fi: u64) -> CallSlots {
+        self.slots(fi, 0, true)
+    }
+
+    // The number of `Op::Call`s of graph `fi` itself.
+    fn own_call_count(in self, fi: u64) -> u64 {
+        let f = self.program.function(fi);
+        let mut n: u64 = 0;
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            for ii in 0..row.ic {
+                if self.program.inst(add(row.i0, ii)).op == Op::Call {
+                    n = inc(n);
+                }
+            }
+        }
+        n
+    }
+
+    // The call slots of graph `fi` from `base`; `split` numbers its own
+    // calls from 0 and its handlers' nested calls after them.
+    fn slots(in self, fi: u64, base: u64, split: bool) -> CallSlots {
         let mut s = CallSlots {
             calls: ChunkSeq::new[u64](),
             rows: ChunkSeq::new[u64](),
@@ -320,7 +349,8 @@ impl Gen {
         };
         let f = self.program.function(fi);
         let first = self.program.block(f.b0).i0;
-        let mut n = base;
+        let mut n = if split { self.own_call_count(fi) } else { base };
+        let mut c: u64 = 0;
         let mut hk: u64 = 0;
         for bi in 0..f.bc {
             let row = self.program.block(add(f.b0, bi));
@@ -328,7 +358,10 @@ impl Gen {
                 let x = add(row.i0, ii);
                 let off = wrapping_sub(x, first);
                 let op = self.program.inst(x).op;
-                if op == Op::Call {
+                if op == Op::Call && split {
+                    grow_set(inout s.calls, off, c);
+                    c = inc(c);
+                } else if op == Op::Call {
                     grow_set(inout s.calls, off, n);
                     n = inc(n);
                 } else if op == Op::Handle {
