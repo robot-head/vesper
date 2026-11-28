@@ -1,0 +1,17 @@
+// @vesper/lsp-server's engine seam on native targets (#1828 part 15): the
+// session that answers the frames the loop's gates pass, served by the
+// Rust session (`vesper::lsp::Engine`) until the checker runs in Vesper.
+// A call hands one frame body over and returns the length of the frames
+// it wrote; `lsp_engine_take` copies them out with the copy-out protocol
+// of @vesper-std (a call returns the length `n` and copies only when `buf`
+// is big enough). The linux, macos and windows files are the same.
+sys library LspEngine (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "static", name = "vesper_hybrid",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    fn lsp_engine_frame(nocapture in body: CSlice[u8]) -> ForeignVal[u64];
+    fn lsp_engine_take(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    fn lsp_engine_exit() -> ForeignVal[u64];
+    fn lsp_engine_error(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+}

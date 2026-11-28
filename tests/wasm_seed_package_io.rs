@@ -3474,6 +3474,10 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
         "Stage 1 front end, checked as one unit; bootstrap/stage1.lock (tests/stage2_seed_runner.rs)",
     ),
     (
+        "vesper-lsp-server",
+        "the `vesper lsp` loop over its native `LspEngine` import, the Rust session until the checker runs in Vesper (#1828 part 15a); its JIT differential is tests/self_host_lsp_core.rs `server_loop_matches_rust`, and a wasm32-wasip2 import comes with the routing in part 15c",
+    ),
+    (
         "vesper-driver-engines",
         "the command engines still in Rust (#1996), built under Stage 2 as a dependency of the @vesper/driver-commands probe in STAGE2_HOST_PACKAGES (src-wasip2 refuses each engine)",
     ),

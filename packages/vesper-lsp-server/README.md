@@ -1,0 +1,19 @@
+# @vesper/lsp-server
+
+The LSP session loop in Vesper (#1828 part 15a). `serve` reads frames,
+answers refused bodies, the request gate and the notification gate with
+`@vesper/lsp`, and hands everything else to the engine seam
+`sys library LspEngine` (see `engine-*.vsys`):
+
+- `lsp_engine_frame(body)` runs one body and reports continue, clean
+  exit, unclean exit or failure.
+- `lsp_engine_take(buf)` copies the answer frames out.
+- `lsp_engine_exit()` and `lsp_engine_error(buf)` report the outcome.
+
+Today the engine is the hidden Rust `vesper::lsp::Engine`. The
+differential `server_loop_matches_rust` in tests/self_host_lsp_core.rs
+binds it from the host and compares whole sessions with Rust `serve`.
+
+Gaps: no timers or background proofs, no cancellation of running work,
+and `vesper lsp` does not route here yet. See
+docs/parallel-results/self-host-lsp-features.md.

@@ -1414,3 +1414,56 @@ cases over 4 KiB.
 
 Rust lines deleted: 0; the session does not call the port yet.
 
+
+# Part 15a: the server loop in Vesper
+
+`@vesper/lsp-server` is the first package that runs a whole LSP session
+in Vesper. It reads each frame with `read_frame`, parses the envelope,
+and answers what Vesper already owns: refused bodies, the request gate
+(lifecycle, `initialize`, `shutdown`), the notification gate and
+`$/cancelRequest`. Everything else crosses an engine seam,
+`sys library LspEngine`: `lsp_engine_frame` hands the body to the
+engine, `lsp_engine_take` copies its answer frames out, `lsp_engine_exit`
+reports whether the session continues or exits cleanly, and
+`lsp_engine_error` carries a failure. The seam is the "checked document"
+interface Stage 2 agreed on; it starts as Rust and gets a Vesper engine
+before `src/lsp` can go.
+
+## What changed
+
+- `packages/vesper-lsp-server`: the loop (`serve`), refusal frames
+  (error responses and `window/logMessage` warnings) and the
+  `lsp_server_run` JIT entry; `engine-*.vsys` declare the seam.
+- `packages/vesper-lsp`: exports the gate (`Gate`, `gate_request`,
+  `gate_note`, `refusal_code`, `refusal_message`), the frame reader,
+  envelope parser, encoder and limits for the server package.
+- `src/lsp.rs`: the hidden `Engine`, which drives a Rust `Session` one
+  body at a time and waits for a proof job to finish before it returns.
+- `tests/self_host_lsp_core.rs`: `server_loop_matches_rust` binds the
+  seam to the hidden `Engine` and compares the bytes `serve_with` writes.
+
+## Differential
+
+16 scripted sessions: empty input, the full lifecycle, requests before
+`initialize`, refused bodies, gate refusals, documents and their
+handlers, a manifest, cancels and responses, edits and proof commands,
+`exit` before `shutdown` and uninitialized, frames after `exit`, end of
+input without `exit`, requests after `shutdown`, a framing error and a
+truncated frame. Every byte of output and the exit outcome match. 0
+diffs.
+
+The scripts leave out sequences where Rust's own answer order is a race
+between its reader and worker threads (a refused envelope body after a
+queued request, cancelling a queued request, `vesper.proofAudit`).
+
+## Numbers
+
+Release build, best of five ABBA pairs over the 16 sessions.
+
+| | Rust | Vesper | Ratio |
+|--|--:|--:|--:|
+| 16 sessions | 7.2 ms | 2.4 ms | **0.33x** |
+
+Rust lines deleted: 0. Gaps: no debounce timers or background proofs
+yet (part 15b), `vesper.proofAudit` runs synchronously, in-flight work
+is not cancelled, and `vesper lsp` still runs Rust (part 15c).

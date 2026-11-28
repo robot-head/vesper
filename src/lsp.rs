@@ -1081,6 +1081,119 @@ impl MacroPreviewForPort {
     }
 }
 
+/// The Rust half of the Vesper LSP server loop (@vesper/lsp-server, #1828
+/// part 15): the session behind the loop's checked-document engine seam.
+/// The loop owns the stream, the framing, the envelope refusals and the
+/// request and notification gates; it hands each frame that passes them to
+/// this engine, which runs it through the same `handle_work` as [`serve`]
+/// and returns the frames that answer it. A `vesper.proofAudit` job runs to
+/// completion before the call returns, and debounce timers are not armed:
+/// the loop is single-threaded until it gains timers (part 15b).
+#[doc(hidden)]
+pub struct Engine {
+    session: session::Session,
+    shared: Shared<Vec<u8>>,
+    events: Sender<Event>,
+    inbox: Receiver<Event>,
+}
+
+/// What a frame handed to [`Engine::frame`] ended in.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineExit {
+    /// The server goes on.
+    Continue,
+    /// `exit` after `shutdown`.
+    Clean,
+    /// `exit` before `shutdown`.
+    Unclean,
+    /// The frame could not be handled (a write or session failure).
+    Failed,
+}
+
+#[doc(hidden)]
+impl Engine {
+    pub fn new(config: LensConfig) -> Result<Self, String> {
+        let (events, inbox) = mpsc::channel::<Event>();
+        Ok(Self {
+            session: session::Session::with_config(config)?,
+            shared: Shared {
+                pending: Mutex::new(PendingRequests::new(MAX_PENDING).map_err(|e| e.to_string())?),
+                writer: Mutex::new(Vec::new()),
+                limits: ProtocolLimits::default(),
+            },
+            events,
+            inbox,
+        })
+    }
+
+    /// Handle one framed body that the loop's gates passed, returning the
+    /// frames written for it and how it ended (with the failure's text).
+    pub fn frame(&mut self, body: &[u8]) -> (Vec<u8>, EngineExit, String) {
+        let (exit, error) = match self.handle(body) {
+            Ok(exit) => (exit, String::new()),
+            Err(error) => (EngineExit::Failed, error),
+        };
+        let frames = std::mem::take(&mut *lock(&self.shared.writer));
+        (frames, exit, error)
+    }
+
+    fn handle(&mut self, body: &[u8]) -> Result<EngineExit, String> {
+        let message = parse_envelope(body, self.shared.limits).map_err(|e| e.to_string())?;
+        let work = match message {
+            Envelope::Request { id, method, params } => {
+                let token = lock(&self.shared.pending)
+                    .begin(id.clone())
+                    .map_err(|e| e.to_string())?;
+                let request = Work::Request {
+                    id: id.clone(),
+                    method,
+                    params,
+                    token: token.clone(),
+                };
+                handle_work(&mut self.session, request, &self.events, &self.shared)?;
+                // A proof job answers from its own thread: wait for it.
+                if lock(&self.shared.pending).is_pending(&id, &token) {
+                    while let Ok(event) = self.inbox.recv() {
+                        if let Event::Proof {
+                            id,
+                            token,
+                            job,
+                            outcome: Some(outcome),
+                        } = event
+                        {
+                            let done = Work::ProofDone {
+                                id,
+                                token,
+                                job,
+                                outcome,
+                            };
+                            handle_work(&mut self.session, done, &self.events, &self.shared)?;
+                            break;
+                        }
+                    }
+                }
+                return Ok(EngineExit::Continue);
+            }
+            Envelope::Notification { method, params } => Work::Notification { method, params },
+            Envelope::Response { .. } => return Ok(EngineExit::Continue),
+        };
+        if handle_work(&mut self.session, work, &self.events, &self.shared)? {
+            while let Ok(event) = self.inbox.try_recv() {
+                if let Event::Exit { clean } = event {
+                    return Ok(if clean {
+                        EngineExit::Clean
+                    } else {
+                        EngineExit::Unclean
+                    });
+                }
+            }
+            return Ok(EngineExit::Failed);
+        }
+        Ok(EngineExit::Continue)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
