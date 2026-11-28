@@ -1,0 +1,2689 @@
+// The integer facts of the Rust checker that decide which operations may
+// fail: `world.partial_ops` (`primitive_failure`, `Fail[RuntimeError]`)
+// and `world.overflow_ops` (`overflow_failure`, `Fail[ArithOverflow]`).
+//
+// The expression checker (exprs.ves) types a body without tracking values.
+// After it checks a body, this pass walks the body again in the Rust
+// checker's evaluation order, over the types the checker recorded, with the
+// environment rules of src/check.rs, src/integer_widths/check.rs,
+// src/arrays/check.rs and src/loops/check.rs: exact integer facts, nonzero
+// facts, the bounds of a dominating comparison or a write, `for` index
+// ranges, the join of branches and loop exits, and the havoc of a loop
+// body's writes (the walk of packages/vesper-stage2/src/facts.ves, over
+// this package's expression rows).
+//
+// Operations whose failure does not depend on facts (a sequence index, a
+// fallible sequence or string method, `ChunkSeq::finish`, an unmasked
+// vector access, `narrow_k` of a float) are marked by the checker where it
+// types them (`mark_failure`); `narrow_k` of an integer is marked for this
+// pass to decide by its operand's bounds.
+//
+// A fact is an exact value of the Rust checker's `i128` domain. Values of
+// at most 64 bits of magnitude are exact here (sign and magnitude); a
+// larger one is `big` (only its sign is kept) and gives no fact.
+
+use @vesper/check-data::util::{add, n32, u32_at, u64_at, w};
+use @vesper/check-data::types::{TyKind};
+use self::exprs::{Arm, Arg, Ck, Ex, Stmt, put, put_u64};
+use self::relations::{lit_of};
+use self::ints::{default_of};
+
+// Keep equal to exprs.ves.
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+const U64_MAX: u64 = 18446744073709551615;
+const HANDLER_ROW_SHIFT: u64 = 32;
+const LOW_WORD_MASK: u64 = 4294967295;
+// Expression kinds (keep equal to exprs.ves).
+const E_INT: u8 = 1;
+const E_BOOL: u8 = 3;
+const E_NAME: u8 = 5;
+const E_TUPLE: u8 = 6;
+const E_STRUCT: u8 = 7;
+const E_BLOCK: u8 = 8;
+const E_CALL: u8 = 9;
+const E_FIELD: u8 = 10;
+const E_UNARY: u8 = 11;
+const E_BINARY: u8 = 12;
+const E_IF: u8 = 13;
+const E_MATCH: u8 = 14;
+const E_INDEX: u8 = 40;
+const E_RETURN: u8 = 15;
+const E_ASSIGN: u8 = 16;
+const E_FOR: u8 = 17;
+const E_RANGE: u8 = 18;
+const E_LOOP: u8 = 19;
+const E_BREAK: u8 = 20;
+const E_CONTINUE: u8 = 21;
+const E_HANDLE: u8 = 22;
+const E_TRY: u8 = 23;
+const E_CLOSURE: u8 = 24;
+const E_ARRAY_WRITE: u8 = 25;
+// Unary and binary operator codes (keep equal to exprs.ves).
+const U_NOT: u32 = 1;
+const U_NEG: u32 = 2;
+const U_COMPLEMENT: u32 = 3;
+const B_ADD: u32 = 1;
+const B_SUB: u32 = 2;
+const B_MUL: u32 = 3;
+const B_DIV: u32 = 4;
+const B_REM: u32 = 5;
+const B_EQ: u32 = 6;
+const B_NE: u32 = 7;
+const B_LT: u32 = 8;
+const B_LE: u32 = 9;
+const B_GT: u32 = 10;
+const B_GE: u32 = 11;
+const B_AND: u32 = 12;
+const B_OR: u32 = 13;
+const B_BIT_AND: u32 = 14;
+const B_SHL: u32 = 17;
+const B_SHR: u32 = 18;
+// Pattern kinds (keep equal to patterns.ves).
+const P_BIND: u8 = 1;
+const P_TUPLE: u8 = 5;
+const P_CTOR: u8 = 6;
+// Argument passing (keep equal to exprs.ves).
+const P_INOUT: u8 = 1;
+const P_SINK: u8 = 2;
+
+// 2^63: the magnitude of i64::MIN.
+const SIGN_BIT: u64 = 9223372036854775808;
+const WORD_BITS: u32 = 64;
+const WIDE_BITS: u32 = 128;
+// The deepest `+`/`-`/`&` chain an array index's bounds look through
+// (src/arrays/check.rs `array_index_bounds`).
+const INDEX_BOUNDS_DEPTH: u64 = 8;
+
+// `fact_checked` outcomes (`Result<i128, ArithFailure>`, plus the values
+// this pass cannot hold).
+const R_OK: u8 = 0;
+const R_OVERFLOW: u8 = 1;
+const R_DIVISION_BY_ZERO: u8 = 2;
+const R_UNKNOWN: u8 = 3;
+
+// Control frames (src/loops/check.rs `ControlFrame`): the target of a
+// `break` is the innermost frame only when it is a loop.
+const FRAME_FUNCTION: u8 = 0;
+const FRAME_LOOP: u8 = 1;
+const FRAME_OTHER: u8 = 2;
+
+// Comparison codes, normalized to `name op bound`.
+const C_LT: u8 = 1;
+const C_LE: u8 = 2;
+const C_GT: u8 = 3;
+const C_GE: u8 = 4;
+const C_EQ: u8 = 5;
+const C_NE: u8 = 6;
+
+// What the checker marked at a span (`mark_failure`): a failure that does
+// not depend on facts, or a `narrow_k` of an integer (its datum the
+// target kind's symbol).
+const MARK_PARTIAL: u64 = 1;
+const MARK_OVERFLOW: u64 = 2;
+const MARK_NARROW: u64 = 3;
+// A mark's words: start, end, kind, datum.
+const MARK_WIDTH: u64 = 4;
+const MARK_START: u64 = 0;
+const MARK_END: u64 = 1;
+const MARK_KIND: u64 = 2;
+const MARK_DATUM: u64 = 3;
+
+const CONST_PREFIX: Str = "const$";
+const SCOPED_CONST_PREFIX: Str = "__const$";
+const WRAPPING_ADD: Str = "wrapping_add";
+const WRAPPING_SUB: Str = "wrapping_sub";
+const WRAPPING_MUL: Str = "wrapping_mul";
+
+// The facts of the function being checked: the checker's marks and binding
+// types of the current run, the bodies of the world's functions (for
+// `const` initializers), and the failing operations of the last walk, which
+// `failure_effects` reads.
+pub struct OpFacts {
+    // Pattern id -> the type the checker bound it at, + 1 (0 for none).
+    pat_types: ChunkSeq[u32],
+    marks: ChunkSeq[u64],
+    body_names: ChunkSeq[u32],
+    body_ids: ChunkSeq[u32],
+    // The body the last walk covered (NONE32 for none), and its failing
+    // operations as sorted (start, end) pairs.
+    body: u32,
+    partial: ChunkSeq[u64],
+    overflow: ChunkSeq[u64],
+    // The body being checked, and whether `failure_effects` asked about an
+    // operation the last walk did not cover the same way.
+    current: u32,
+    stale: bool,
+}
+
+pub fn facts_new() -> OpFacts {
+    OpFacts {
+        pat_types: ChunkSeq::new[u32](),
+        marks: ChunkSeq::new[u64](),
+        body_names: ChunkSeq::new[u32](),
+        body_ids: ChunkSeq::new[u32](),
+        body: NONE32,
+        partial: ChunkSeq::new[u64](),
+        overflow: ChunkSeq::new[u64](),
+        current: NONE32,
+        stale: false
+    }
+}
+
+// The checker bound pattern `pat` at `ty`.
+pub fn note_pattern(inout facts: OpFacts, pat: u32, ty: u32) {
+    if pat == NONE32 {
+        return;
+    }
+    for i in facts.pat_types.len()..add(w(pat), 1) {
+        facts.pat_types.push(0);
+    }
+    let _ok = facts.pat_types.try_set(w(pat), wrapping_add(ty, 1));
+}
+
+// The function `name` has body `body` (for `const` initializers).
+pub fn note_body(inout facts: OpFacts, name: u32, body: u32) {
+    facts.body_names.push(name);
+    facts.body_ids.push(body);
+}
+
+fn mark(inout facts: OpFacts, start: u64, end: u64, kind: u64, datum: u64) {
+    facts.marks.push(start);
+    facts.marks.push(end);
+    facts.marks.push(kind);
+    facts.marks.push(datum);
+}
+
+// The operation at (start, end) may raise `Fail[RuntimeError]` whatever
+// the facts.
+pub fn mark_partial(inout facts: OpFacts, start: u64, end: u64) {
+    mark(inout facts, start, end, MARK_PARTIAL, 0);
+}
+
+// The operation at (start, end) may raise `Fail[ArithOverflow]` whatever
+// the facts.
+pub fn mark_overflow(inout facts: OpFacts, start: u64, end: u64) {
+    mark(inout facts, start, end, MARK_OVERFLOW, 0);
+}
+
+// `narrow_k(x)` of an integer `x` at (start, end), to the kind `to`: it may
+// overflow unless the operand's bounds fit `to`.
+pub fn mark_narrow(inout facts: OpFacts, start: u64, end: u64, to: u32) {
+    mark(inout facts, start, end, MARK_NARROW, w(to));
+}
+
+// The kind and datum of the first mark at (start, end), or 0.
+fn mark_at(in facts: OpFacts, start: u64, end: u64, inout datum: u64) -> u64 {
+    let count = facts.marks.len() / MARK_WIDTH;
+    for i in 0..count {
+        let row = wrapping_mul(i, MARK_WIDTH);
+        if u64_at(in facts.marks, add(row, MARK_START)) == start
+            && u64_at(in facts.marks, add(row, MARK_END)) == end
+        {
+            datum = u64_at(in facts.marks, add(row, MARK_DATUM));
+            return u64_at(in facts.marks, add(row, MARK_KIND));
+        }
+    }
+    0
+}
+
+// A check of `body` starts: the checker's marks and binding types are its
+// own.
+pub fn begin_run(inout facts: OpFacts, body: u32) {
+    facts.marks.truncate(0);
+    facts.current = body;
+    facts.stale = false;
+}
+
+fn has_span(in spans: ChunkSeq[u64], start: u64, end: u64) -> bool {
+    let count = spans.len() / 2;
+    let mut lo: u64 = 0;
+    let mut hi = count;
+    for step in 0..count {
+        if lo >= hi {
+            break;
+        }
+        let mid = add(lo, wrapping_sub(hi, lo) / 2);
+        let s = u64_at(in spans, wrapping_mul(mid, 2));
+        let t = u64_at(in spans, add(wrapping_mul(mid, 2), 1));
+        if s == start && t == end {
+            return true;
+        }
+        if s < start || (s == start && t < end) {
+            lo = add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    false
+}
+
+// Whether the operation at (start, end) of the body being checked may
+// raise `Fail[RuntimeError]` (`partial`) or `Fail[ArithOverflow]`, by the
+// last walk of this body. Before a walk of it the answer is no, and the
+// run is checked again once its walk is done (`finish_run`).
+pub fn op_fails(inout facts: OpFacts, start: u64, end: u64, partial: bool) -> bool {
+    if facts.body != facts.current {
+        facts.stale = true;
+        return false;
+    }
+    if partial {
+        has_span(in facts.partial, start, end)
+    } else {
+        has_span(in facts.overflow, start, end)
+    }
+}
+
+// After a run that checked `body`: walks it, and returns whether the run
+// asked about operations before this walk (so it is checked again).
+pub fn finish_run(inout ck: Ck, body: u32, params: u32) -> bool {
+    record_ops(inout ck, body, params);
+    let stale = ck.facts.stale;
+    ck.facts.stale = false;
+    stale
+}
+
+// The `P start end` and `O start end` rows of the body's failing
+// operations.
+pub fn write_ops(inout ck: Ck) {
+    for pass in 0..2 {
+        let rows = if pass == 0 {
+            copy_spans(in ck.facts.partial)
+        } else {
+            copy_spans(in ck.facts.overflow)
+        };
+        for i in 0..rows.len() / 2 {
+            if pass == 0 {
+                put(inout ck.out, "P ");
+            } else {
+                put(inout ck.out, "O ");
+            }
+            put_u64(inout ck.out, u64_at(in rows, wrapping_mul(i, 2)));
+            ck.out.push(32);
+            put_u64(inout ck.out, u64_at(in rows, add(wrapping_mul(i, 2), 1)));
+            ck.out.push(10);
+        }
+    }
+}
+
+fn copy_spans(in spans: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::with_capacity[u64](spans.len());
+    for i in 0..spans.len() {
+        out.push(u64_at(in spans, i));
+    }
+    out
+}
+
+// ----- values ----------------------------------------------------------------
+
+// An integer value: sign and magnitude, or `big` (magnitude of at least
+// 2^64, sign only). Zero is never negative.
+copy struct V {
+    neg: bool,
+    mag: u64,
+    big: bool,
+}
+
+// An optional value.
+copy struct OptV {
+    has: bool,
+    v: V,
+}
+
+// Optional inclusive bounds.
+copy struct B {
+    has: bool,
+    lo: V,
+    hi: V,
+}
+
+// An integer kind: `bits` is 0 for a type that is not an integer.
+copy struct K {
+    bits: u32,
+    signed: bool,
+}
+
+// The outcome of a checked operation on facts.
+copy struct R {
+    st: u8,
+    v: V,
+}
+
+// A binding of the environment (src/check.rs `Binding`): `id` stands for
+// its span (one binding event), `mutation` for its write identity.
+copy struct FB {
+    name: u32,
+    id: u64,
+    pass: u8,
+    ty: u32,
+    has_int: bool,
+    int: V,
+    nonzero: bool,
+    has_range: bool,
+    lo: V,
+    hi: V,
+    at: u64,
+    looped: bool,
+    mutation: u64,
+}
+
+// A control frame; a loop's exit environments are `exits` rows
+// `exit_start..`, each `entry_len` bindings long.
+copy struct Fr {
+    kind: u8,
+    entry_len: u64,
+    exit_start: u64,
+    count: u64,
+}
+
+struct Fw {
+    env: ChunkSeq[FB],
+    marks: ChunkSeq[u64],
+    frames: ChunkSeq[Fr],
+    exits: ChunkSeq[FB],
+    partial: ChunkSeq[u64],
+    overflow: ChunkSeq[u64],
+    dead: u64,
+    total_operands: u64,
+    next_id: u64,
+    next_mutation: u64,
+}
+
+fn v_small(neg: bool, mag: u64) -> V {
+    V { neg: neg && mag != 0, mag: mag, big: false }
+}
+
+fn v_big(neg: bool) -> V {
+    V { neg: neg, mag: 0, big: true }
+}
+
+fn v_zero() -> V {
+    v_small(false, 0)
+}
+
+fn v_one() -> V {
+    v_small(false, 1)
+}
+
+fn some_v(v: V) -> OptV {
+    OptV { has: true, v: v }
+}
+
+fn no_v() -> OptV {
+    OptV { has: false, v: v_zero() }
+}
+
+fn no_bounds() -> B {
+    B { has: false, lo: v_zero(), hi: v_zero() }
+}
+
+fn bounds(lo: V, hi: V) -> B {
+    B { has: true, lo: lo, hi: hi }
+}
+
+fn v_eq(a: V, b: V) -> bool {
+    !a.big && !b.big && a.neg == b.neg && a.mag == b.mag
+}
+
+fn is_zero(a: V) -> bool {
+    !a.big && a.mag == 0
+}
+
+fn is_minus_one(a: V) -> bool {
+    !a.big && a.neg && a.mag == 1
+}
+
+// -1, 0 or 1 as `a` is below, equal to or above `b`. Two big values of one
+// sign compare equal.
+fn v_cmp(a: V, b: V) -> i64 {
+    if a.neg != b.neg {
+        return if a.neg { -1 } else { 1 };
+    }
+    let above = if a.big && b.big {
+        return 0;
+    } else if a.big {
+        true
+    } else if b.big {
+        false
+    } else if a.mag == b.mag {
+        return 0;
+    } else {
+        a.mag > b.mag
+    };
+    // A larger magnitude is above for positives and below for negatives.
+    if above != a.neg { 1 } else { -1 }
+}
+
+fn v_lt(a: V, b: V) -> bool {
+    v_cmp(a, b) < 0
+}
+
+fn v_le(a: V, b: V) -> bool {
+    v_cmp(a, b) <= 0
+}
+
+fn v_min(a: V, b: V) -> V {
+    if v_le(a, b) { a } else { b }
+}
+
+fn v_max(a: V, b: V) -> V {
+    if v_le(a, b) { b } else { a }
+}
+
+fn v_neg(a: V) -> V {
+    if a.big {
+        return v_big(!a.neg);
+    }
+    v_small(!a.neg, a.mag)
+}
+
+// `a + b` exactly, `big` past 64 bits of magnitude; `has` is false when
+// an operand is big.
+fn v_add(a: V, b: V) -> OptV {
+    if a.big || b.big {
+        return no_v();
+    }
+    if a.neg == b.neg {
+        let sum = wrapping_add(a.mag, b.mag);
+        if sum < a.mag {
+            return some_v(v_big(a.neg));
+        }
+        return some_v(v_small(a.neg, sum));
+    }
+    if a.mag >= b.mag {
+        some_v(v_small(a.neg, wrapping_sub(a.mag, b.mag)))
+    } else {
+        some_v(v_small(b.neg, wrapping_sub(b.mag, a.mag)))
+    }
+}
+
+fn v_sub(a: V, b: V) -> OptV {
+    v_add(a, v_neg(b))
+}
+
+fn v_mul(a: V, b: V) -> OptV {
+    if a.big || b.big {
+        return no_v();
+    }
+    let neg = a.neg != b.neg;
+    if a.mag == 0 || b.mag == 0 {
+        return some_v(v_zero());
+    }
+    let product = wrapping_mul(a.mag, b.mag);
+    if quotient(product, a.mag) != b.mag {
+        return some_v(v_big(neg));
+    }
+    some_v(v_small(neg, product))
+}
+
+// Truncating `a / b` (b nonzero, neither big).
+fn v_div(a: V, b: V) -> V {
+    v_small(a.neg != b.neg, quotient(a.mag, b.mag))
+}
+
+// `a % b` with the dividend's sign (b nonzero, neither big).
+fn v_rem(a: V, b: V) -> V {
+    v_small(a.neg, remainder(a.mag, b.mag))
+}
+
+// `n / d` and `n % d`, 0 for a zero divisor.
+fn quotient(n: u64, d: u64) -> u64 {
+    if d == 0 {
+        return 0;
+    }
+    n / d
+}
+
+fn remainder(n: u64, d: u64) -> u64 {
+    if d == 0 {
+        return 0;
+    }
+    n % d
+}
+
+// `a + 1` and `a - 1`, kept at `a` where the domain ends (Rust's
+// `saturating_add`/`saturating_sub` at the `i128` ends).
+fn v_succ(a: V) -> V {
+    let s = v_add(a, v_one());
+    if s.has { s.v } else { a }
+}
+
+fn v_pred(a: V) -> V {
+    let s = v_sub(a, v_one());
+    if s.has { s.v } else { a }
+}
+
+// The value of an integer literal row: sign, low and high magnitude words.
+fn v_of_literal(neg: bool, mag: u64, hi: u64) -> V {
+    if hi != 0 {
+        return v_big(neg);
+    }
+    v_small(neg, mag)
+}
+
+// ----- kinds -----------------------------------------------------------------
+
+fn no_kind() -> K {
+    K { bits: 0, signed: false }
+}
+
+fn kind_of_sym(in ck: Ck, sym: u32) -> K {
+    let k = ck.ctx.world.k;
+    if sym == k.u8_ {
+        K { bits: 8, signed: false }
+    } else if sym == k.u16_ {
+        K { bits: 16, signed: false }
+    } else if sym == k.u32_ {
+        K { bits: 32, signed: false }
+    } else if sym == k.u64_ || sym == k.usize_ {
+        K { bits: WORD_BITS, signed: false }
+    } else if sym == k.u128_ {
+        K { bits: WIDE_BITS, signed: false }
+    } else if sym == k.i8_ {
+        K { bits: 8, signed: true }
+    } else if sym == k.i16_ {
+        K { bits: 16, signed: true }
+    } else if sym == k.i32_ {
+        K { bits: 32, signed: true }
+    } else if sym == k.i64_ || sym == k.isize_ {
+        K { bits: WORD_BITS, signed: true }
+    } else if sym == k.i128_ {
+        K { bits: WIDE_BITS, signed: true }
+    } else {
+        no_kind()
+    }
+}
+
+fn valid_ty(in ck: Ck, ty: u32) -> bool {
+    ty != NONE32 && w(ty) < ck.ctx.types.nodes.len()
+}
+
+// `IntegerKind::from_type`: an integer name, or a literal's default kind.
+fn kind_of_ty(in ck: Ck, ty: u32) -> K {
+    if !valid_ty(in ck, ty) {
+        return no_kind();
+    }
+    let node = ck.ctx.types.node(ty);
+    if node.kind == TyKind::Lit {
+        return kind_of_sym(in ck, default_of(ck.ctx.world.k, lit_of(node)));
+    }
+    if node.kind != TyKind::Named || node.n != 0 {
+        return no_kind();
+    }
+    kind_of_sym(in ck, node.name)
+}
+
+fn is_named_ty(in ck: Ck, ty: u32, sym: u32) -> bool {
+    valid_ty(in ck, ty) && ck.ctx.types.kind(ty) == TyKind::Named && ck.ctx.types.name(ty) == sym
+}
+
+// The type the checker recorded for expression `id`, or NONE32.
+fn ty_of(in ck: Ck, id: u32) -> u32 {
+    if id == NONE32 || w(id) >= ck.ex_types.len() {
+        return NONE32;
+    }
+    u32_at(in ck.ex_types, w(id))
+}
+
+fn kind_of(in ck: Ck, id: u32) -> K {
+    kind_of_ty(in ck, ty_of(in ck, id))
+}
+
+fn is_u128(k: K) -> bool {
+    k.bits == WIDE_BITS && !k.signed
+}
+
+fn kind_min(k: K) -> V {
+    if !k.signed {
+        return v_zero();
+    }
+    if k.bits >= WIDE_BITS {
+        return v_big(true);
+    }
+    v_small(true, wrapping_shl_u64(1, wrapping_sub(k.bits, 1)))
+}
+
+fn kind_max(k: K) -> V {
+    if k.bits >= WIDE_BITS {
+        return v_big(false);
+    }
+    if !k.signed && k.bits == WORD_BITS {
+        return v_small(false, U64_MAX);
+    }
+    let width = if k.signed {
+        wrapping_sub(w(k.bits), 1)
+    } else {
+        w(k.bits)
+    };
+    v_small(false, wrapping_sub(wrapping_shl_u64(1, n32(width)), 1))
+}
+
+// `IntegerKind::fits`; a big value fits a 128-bit kind of its sign.
+fn fits(k: K, v: V) -> bool {
+    if v.big {
+        return k.bits >= WIDE_BITS && (k.signed || !v.neg);
+    }
+    v_le(kind_min(k), v) && v_le(v, kind_max(k))
+}
+
+// `fact_fits`: every pattern is a `u128` value.
+fn fact_fits(k: K, v: V) -> bool {
+    is_u128(k) || fits(k, v)
+}
+
+// `numeric::may_overflow` of `op` or `op=`.
+fn may_overflow(op: u32, k: K) -> bool {
+    op == B_ADD || op == B_SUB || op == B_MUL || (k.signed && op == B_DIV)
+}
+
+fn is_comparison(op: u32) -> bool {
+    op == B_EQ || op == B_NE || op == B_LT || op == B_LE || op == B_GT || op == B_GE
+}
+
+// ----- rows ------------------------------------------------------------------
+
+fn kid(in ck: Ck, ex: Ex, i: u64) -> u32 {
+    u32_at(in ck.kids, add(w(ex.a), i))
+}
+
+fn stmt_at(in ck: Ck, i: u64) -> Stmt {
+    match ck.stmts.try_get(i) {
+        Option::Some(s) => s,
+        Option::None => Stmt { is_let: false, pat: 0, ty: 0, value: NONE32 },
+    }
+}
+
+fn arg_at(in ck: Ck, ex: Ex, i: u64) -> Arg {
+    match ck.args.try_get(add(w(ex.a), i)) {
+        Option::Some(a) => a,
+        Option::None => Arg { pass: 0, explicit: false, expr: NONE32 },
+    }
+}
+
+fn arm_at(in ck: Ck, ex: Ex, i: u64) -> Arm {
+    match ck.arms.try_get(add(w(ex.a), i)) {
+        Option::Some(a) => a,
+        Option::None => Arm { pat: NONE32, body: NONE32 },
+    }
+}
+
+fn spells(in ck: Ck, sym: u32, in text: Str) -> bool {
+    ck.ctx.names.spells(sym, in text.as_bytes())
+}
+
+// The root of a place (`Place::from_expr`): a name, or a field path of
+// one. NONE32 for any other expression.
+fn place_root(in ck: Ck, id: u32) -> u32 {
+    let e = ck.ex(id);
+    if e.kind == E_NAME {
+        return e.x;
+    }
+    if e.kind == E_FIELD {
+        return place_root(in ck, e.x);
+    }
+    NONE32
+}
+
+fn name_contains(in ck: Ck, sym: u32, in part: Str) -> bool {
+    let b = part.as_bytes();
+    let n = ck.ctx.names.size(sym);
+    if n < b.len() {
+        return false;
+    }
+    for start in 0..wrapping_add(wrapping_sub(n, b.len()), 1) {
+        let mut same = true;
+        for i in 0..b.len() {
+            let c = match b.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            if ck.ctx.names.byte(sym, wrapping_add(start, i)) != c {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            return true;
+        }
+    }
+    false
+}
+
+// `arrays::is_const_function`.
+fn is_const_function(in ck: Ck, sym: u32) -> bool {
+    ck.ctx.names.has_prefix(sym, in CONST_PREFIX.as_bytes())
+        || name_contains(in ck, sym, SCOPED_CONST_PREFIX)
+}
+
+// ----- environment -----------------------------------------------------------
+
+fn fresh_mutation(inout fw: Fw) -> u64 {
+    fw.next_mutation = wrapping_add(fw.next_mutation, 1);
+    fw.next_mutation
+}
+
+fn lookup(in fw: Fw, name: u32) -> u64 {
+    let mut i = fw.env.len();
+    loop {
+        if i == 0 {
+            return NONE64;
+        }
+        i = wrapping_sub(i, 1);
+        match fw.env.try_get(i) {
+            Option::Some(b) => {
+                if b.name == name {
+                    return i;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    NONE64
+}
+
+fn binding(in fw: Fw, i: u64) -> Option[FB] {
+    if i == NONE64 {
+        return Option::None;
+    }
+    fw.env.try_get(i)
+}
+
+fn put_binding(inout fw: Fw, i: u64, b: FB) {
+    let _ok = fw.env.try_set(i, b);
+}
+
+fn bind_name(inout fw: Fw, name: u32, pass: u8, ty: u32) {
+    fw.next_id = wrapping_add(fw.next_id, 1);
+    let mutation = fresh_mutation(inout fw);
+    fw.env.push(FB {
+        name: name,
+        id: fw.next_id,
+        pass: pass,
+        ty: ty,
+        has_int: false,
+        int: v_zero(),
+        nonzero: false,
+        has_range: false,
+        lo: v_zero(),
+        hi: v_zero(),
+        at: 0,
+        looped: false,
+        mutation: mutation
+    });
+}
+
+// A write or invalidation of the binding at `i`: a new write identity and
+// no exact or nonzero fact.
+fn forget(inout fw: Fw, i: u64) {
+    match binding(in fw, i) {
+        Option::Some(b) => {
+            let mut nb = b;
+            nb.mutation = fresh_mutation(inout fw);
+            nb.has_int = false;
+            nb.nonzero = false;
+            put_binding(inout fw, i, nb);
+        },
+        Option::None => {},
+    }
+}
+
+fn push_scope(inout fw: Fw) {
+    fw.marks.push(fw.env.len());
+}
+
+fn pop_scope(inout fw: Fw) {
+    match fw.marks.pop() {
+        Option::Some(n) => fw.env.truncate(n),
+        Option::None => {},
+    }
+}
+
+fn copy_env(in env: ChunkSeq[FB]) -> ChunkSeq[FB] {
+    let mut out = ChunkSeq::with_capacity[FB](env.len());
+    for i in 0..env.len() {
+        match env.try_get(i) {
+            Option::Some(b) => out.push(b),
+            Option::None => {},
+        }
+    }
+    out
+}
+
+fn push_rows(inout out: ChunkSeq[FB], in env: ChunkSeq[FB], start: u64, count: u64) {
+    for i in start..wrapping_add(start, count) {
+        match env.try_get(i) {
+            Option::Some(b) => out.push(b),
+            Option::None => {},
+        }
+    }
+}
+
+fn take_env(inout fw: Fw) -> ChunkSeq[FB] {
+    let mut out = ChunkSeq::new[FB]();
+    swap(inout out, inout fw.env);
+    out
+}
+
+fn set_env(inout fw: Fw, sink env: ChunkSeq[FB]) {
+    let mut e = env;
+    swap(inout e, inout fw.env);
+}
+
+// ----- facts -----------------------------------------------------------------
+
+// `fact_checked`: the kind's checked `op` over exact facts.
+fn fact_checked(k: K, op: u32, a: V, b: V) -> R {
+    let exact = if op == B_ADD {
+        v_add(a, b)
+    } else if op == B_SUB {
+        v_sub(a, b)
+    } else if op == B_MUL {
+        v_mul(a, b)
+    } else if op == B_DIV || op == B_REM {
+        if is_zero(b) {
+            return R { st: R_DIVISION_BY_ZERO, v: v_zero() };
+        }
+        if a.big || b.big {
+            return R { st: R_UNKNOWN, v: v_zero() };
+        }
+        if op == B_DIV {
+            some_v(v_div(a, b))
+        } else if is_minus_one(b) {
+            some_v(v_zero())
+        } else {
+            some_v(v_rem(a, b))
+        }
+    } else {
+        return R { st: R_OVERFLOW, v: v_zero() };
+    };
+    if !exact.has {
+        return R { st: R_UNKNOWN, v: v_zero() };
+    }
+    if exact.v.big {
+        // Past 64 bits of magnitude: an overflow below 128 bits.
+        if k.bits < WIDE_BITS {
+            return R { st: R_OVERFLOW, v: v_zero() };
+        }
+        return R { st: R_UNKNOWN, v: v_zero() };
+    }
+    if fits(k, exact.v) || is_u128(k) && !exact.v.neg {
+        R { st: R_OK, v: exact.v }
+    } else {
+        R { st: R_OVERFLOW, v: v_zero() }
+    }
+}
+
+// `fact_neg`.
+fn fact_neg(k: K, a: V) -> OptV {
+    if is_u128(k) {
+        return if is_zero(a) { some_v(v_zero()) } else { no_v() };
+    }
+    let n = v_neg(a);
+    if n.big || !fits(k, n) {
+        no_v()
+    } else {
+        some_v(n)
+    }
+}
+
+// `IntegerKind::wrapping` of `+`, `-` or `*` for kinds of at most 64 bits.
+fn wrapping_fact(k: K, op: u32, a: V, b: V) -> OptV {
+    if k.bits == 0 || k.bits > WORD_BITS || a.big || b.big {
+        return no_v();
+    }
+    let pa = if a.neg { wrapping_sub(0, a.mag) } else { a.mag };
+    let pb = if b.neg { wrapping_sub(0, b.mag) } else { b.mag };
+    let r = if op == B_ADD {
+        wrapping_add(pa, pb)
+    } else if op == B_SUB {
+        wrapping_sub(pa, pb)
+    } else {
+        wrapping_mul(pa, pb)
+    };
+    let mask = if k.bits >= WORD_BITS {
+        U64_MAX
+    } else {
+        wrapping_sub(wrapping_shl_u64(1, k.bits), 1)
+    };
+    let bits = r & mask;
+    if k.signed {
+        let top = wrapping_shl_u64(1, wrapping_sub(k.bits, 1));
+        if bits & top != 0 {
+            // Negative: the magnitude of the sign-extended pattern.
+            let extended = bits | (U64_MAX ^ mask);
+            return some_v(v_small(true, wrapping_sub(0, extended)));
+        }
+    }
+    some_v(v_small(false, bits))
+}
+
+// The body of a module constant whose initializer is an integer literal.
+fn const_value(in ck: Ck, sym: u32) -> OptV {
+    let mut body = NONE32;
+    for i in 0..ck.facts.body_names.len() {
+        if u32_at(in ck.facts.body_names, i) == sym {
+            body = u32_at(in ck.facts.body_ids, i);
+            break;
+        }
+    }
+    if body == NONE32 {
+        return no_v();
+    }
+    let mut e = ck.ex(body);
+    for depth in 0..ck.exs.len() {
+        if e.kind == E_BLOCK && e.n == 0 && e.x != NONE32 {
+            e = ck.ex(e.x);
+        } else {
+            break;
+        }
+    }
+    if e.kind == E_INT {
+        let v = v_of_literal(e.neg, e.mag, e.hi);
+        if !v.big {
+            return some_v(v);
+        }
+    }
+    no_v()
+}
+
+// The `+`, `-` or `*` of a wrapping intrinsic name, or 0.
+fn wrapping_op(in ck: Ck, sym: u32) -> u32 {
+    if spells(in ck, sym, WRAPPING_ADD) {
+        B_ADD
+    } else if spells(in ck, sym, WRAPPING_SUB) {
+        B_SUB
+    } else if spells(in ck, sym, WRAPPING_MUL) {
+        B_MUL
+    } else {
+        0
+    }
+}
+
+// `integer_fact`: the exact value of a pure integer expression.
+fn integer_fact(in ck: Ck, in fw: Fw, id: u32) -> OptV {
+    let e = ck.ex(id);
+    let n = if e.kind == E_INT {
+        let v = v_of_literal(e.neg, e.mag, e.hi);
+        if v.big {
+            return no_v();
+        }
+        v
+    } else if e.kind == E_NAME {
+        match binding(in fw, lookup(in fw, e.x)) {
+            Option::Some(b) => {
+                if !b.has_int {
+                    return no_v();
+                }
+                b.int
+            },
+            Option::None => return no_v(),
+        }
+    } else if e.kind == E_UNARY && e.y == U_NEG {
+        let mut k = kind_of(in ck, e.x);
+        if k.bits == 0 {
+            k = kind_of(in ck, id);
+        }
+        if k.bits == 0 {
+            return no_v();
+        }
+        let inner = integer_fact(in ck, in fw, e.x);
+        if !inner.has {
+            return no_v();
+        }
+        let r = fact_neg(k, inner.v);
+        if !r.has {
+            return no_v();
+        }
+        r.v
+    } else if e.kind == E_BINARY {
+        let mut k = kind_of(in ck, e.x);
+        if k.bits == 0 {
+            k = kind_of(in ck, id);
+        }
+        if k.bits == 0 {
+            return no_v();
+        }
+        let l = integer_fact(in ck, in fw, e.x);
+        if !l.has {
+            return no_v();
+        }
+        let r = integer_fact(in ck, in fw, e.z);
+        if !r.has {
+            return no_v();
+        }
+        let out = fact_checked(k, e.y, l.v, r.v);
+        if out.st != R_OK {
+            return no_v();
+        }
+        out.v
+    } else if e.kind == E_CALL {
+        let callee = ck.ex(e.x);
+        if callee.kind != E_NAME {
+            return no_v();
+        }
+        let sym = callee.x;
+        if e.n == 0 && is_const_function(in ck, sym) && lookup(in fw, sym) == NONE64 {
+            return const_value(in ck, sym);
+        }
+        let op = wrapping_op(in ck, sym);
+        if op == 0 || lookup(in fw, sym) != NONE64 || e.n != 2 {
+            return no_v();
+        }
+        let l = integer_fact(in ck, in fw, arg_at(in ck, e, 0).expr);
+        if !l.has {
+            return no_v();
+        }
+        let r = integer_fact(in ck, in fw, arg_at(in ck, e, 1).expr);
+        if !r.has {
+            return no_v();
+        }
+        let out = wrapping_fact(kind_of(in ck, id), op, l.v, r.v);
+        if !out.has {
+            return no_v();
+        }
+        out.v
+    } else {
+        return no_v();
+    };
+    let k = kind_of(in ck, id);
+    if k.bits != 0 && !fact_fits(k, n) {
+        return no_v();
+    }
+    some_v(n)
+}
+
+fn u128_expr(in ck: Ck, in fw: Fw, id: u32) -> bool {
+    if is_u128(kind_of(in ck, id)) {
+        return true;
+    }
+    let e = ck.ex(id);
+    if e.kind == E_NAME {
+        return match binding(in fw, lookup(in fw, e.x)) {
+            Option::Some(b) => is_u128(kind_of_ty(in ck, b.ty)),
+            Option::None => false,
+        };
+    }
+    false
+}
+
+// `binding_bounds`: a binding's kind bounds, narrowed by its current range.
+fn binding_bounds(in ck: Ck, b: FB) -> B {
+    let k = kind_of_ty(in ck, b.ty);
+    if k.bits == 0 || is_u128(k) {
+        return no_bounds();
+    }
+    let mut lo = kind_min(k);
+    let mut hi = kind_max(k);
+    if b.has_range && b.at == b.mutation {
+        lo = v_max(lo, b.lo);
+        hi = v_min(hi, b.hi);
+    }
+    bounds(lo, hi)
+}
+
+fn loop_range(b: FB) -> bool {
+    b.has_range && b.looped && b.at == b.mutation
+}
+
+fn loop_index(in ck: Ck, in fw: Fw, id: u32) -> bool {
+    let e = ck.ex(id);
+    if e.kind != E_NAME {
+        return false;
+    }
+    match binding(in fw, lookup(in fw, e.x)) {
+        Option::Some(b) => loop_range(b),
+        Option::None => false,
+    }
+}
+
+// `pure_integer`: an integer expression that cannot write a name.
+fn pure_integer(in ck: Ck, id: u32) -> bool {
+    let e = ck.ex(id);
+    if e.kind == E_INT || e.kind == E_NAME {
+        return true;
+    }
+    if e.kind == E_UNARY {
+        return (e.y == U_NEG || e.y == U_COMPLEMENT) && pure_integer(in ck, e.x);
+    }
+    if e.kind == E_BINARY {
+        return pure_integer(in ck, e.x) && pure_integer(in ck, e.z);
+    }
+    false
+}
+
+fn pure_condition(in ck: Ck, id: u32) -> bool {
+    let e = ck.ex(id);
+    if e.kind == E_BOOL {
+        return true;
+    }
+    if e.kind == E_UNARY && e.y == U_NOT {
+        return pure_condition(in ck, e.x);
+    }
+    if e.kind == E_BINARY {
+        if e.y == B_AND || e.y == B_OR {
+            return pure_condition(in ck, e.x) && pure_condition(in ck, e.z);
+        }
+        if is_comparison(e.y) {
+            return pure_integer(in ck, e.x) && pure_integer(in ck, e.z);
+        }
+    }
+    false
+}
+
+// The high end of `x`'s bounds when they are nonnegative (a mask).
+fn mask_bound(in ck: Ck, in fw: Fw, id: u32) -> OptV {
+    let b = integer_bounds(in ck, in fw, id);
+    if b.has && !b.lo.neg {
+        some_v(b.hi)
+    } else {
+        no_v()
+    }
+}
+
+// `integer_bounds`: inclusive bounds of an integer expression.
+fn integer_bounds(in ck: Ck, in fw: Fw, id: u32) -> B {
+    let f = integer_fact(in ck, in fw, id);
+    if f.has {
+        if !f.v.neg || !u128_expr(in ck, in fw, id) {
+            return bounds(f.v, f.v);
+        }
+        return no_bounds();
+    }
+    let e = ck.ex(id);
+    if e.kind == E_NAME {
+        return match binding(in fw, lookup(in fw, e.x)) {
+            Option::Some(b) => binding_bounds(in ck, b),
+            Option::None => no_bounds(),
+        };
+    }
+    if e.kind == E_BINARY && pure_integer(in ck, id) {
+        if e.y == B_BIT_AND {
+            let x = mask_bound(in ck, in fw, e.x);
+            let y = mask_bound(in ck, in fw, e.z);
+            let m = if x.has && y.has {
+                v_min(x.v, y.v)
+            } else if x.has {
+                x.v
+            } else if y.has {
+                y.v
+            } else {
+                return no_bounds();
+            };
+            return bounds(v_zero(), m);
+        }
+        if e.y == B_REM {
+            let x = integer_bounds(in ck, in fw, e.x);
+            let y = integer_bounds(in ck, in fw, e.z);
+            if x.has && y.has && !x.lo.neg && v_lt(v_zero(), y.lo) {
+                return bounds(v_zero(), v_min(x.hi, v_pred(y.hi)));
+            }
+        }
+    }
+    no_bounds()
+}
+
+fn nonzero(in ck: Ck, in fw: Fw, id: u32) -> bool {
+    let f = integer_fact(in ck, in fw, id);
+    if f.has && !is_zero(f.v) {
+        return true;
+    }
+    let e = ck.ex(id);
+    if e.kind == E_NAME {
+        match binding(in fw, lookup(in fw, e.x)) {
+            Option::Some(b) => {
+                if b.nonzero {
+                    return true;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    let b = integer_bounds(in ck, in fw, id);
+    b.has && (v_lt(v_zero(), b.lo) || b.hi.neg)
+}
+
+// `in_range`: constant facts that prove a checked operation in range.
+fn in_range(op: u32, k: K, x: OptV, y: OptV) -> bool {
+    if x.has && y.has {
+        let r = fact_checked(k, op, x.v, y.v);
+        return r.st != R_OVERFLOW && r.st != R_UNKNOWN;
+    }
+    if op == B_DIV {
+        return (y.has && !is_minus_one(y.v)) || (x.has && !v_eq(x.v, kind_min(k)));
+    }
+    false
+}
+
+// Exactly `x op y` for `+`, `-` and `*`.
+fn corner(op: u32, x: V, y: V) -> OptV {
+    if op == B_ADD {
+        v_add(x, y)
+    } else if op == B_SUB {
+        v_sub(x, y)
+    } else if op == B_MUL {
+        v_mul(x, y)
+    } else {
+        no_v()
+    }
+}
+
+fn corner_fits(op: u32, k: K, x: V, y: V) -> bool {
+    let c = corner(op, x, y);
+    c.has && !c.v.big && fits(k, c.v)
+}
+
+// `bounds_in_range`: every corner of the operands' bounds fits the kind.
+fn bounds_in_range(op: u32, k: K, x: B, y: B) -> bool {
+    if !x.has || !y.has || (op != B_ADD && op != B_SUB && op != B_MUL) {
+        return false;
+    }
+    corner_fits(op, k, x.lo, y.lo)
+        && corner_fits(op, k, x.lo, y.hi)
+        && corner_fits(op, k, x.hi, y.lo)
+        && corner_fits(op, k, x.hi, y.hi)
+}
+
+// `quotient_in_range`: a divisor that cannot be -1 or a dividend that
+// cannot be the kind's minimum.
+fn quotient_in_range(op: u32, k: K, x: B, y: B) -> bool {
+    let minus_one = v_small(true, 1);
+    op == B_DIV
+        && ((y.has && (v_lt(minus_one, y.lo) || v_lt(y.hi, minus_one)))
+            || (x.has && v_lt(kind_min(k), x.lo)))
+}
+
+// `operand_bounds`: bounds of a shift amount or a divisor, through `+`,
+// `-`, `*`, `/` and `>>` of bounded pure operands.
+fn operand_bounds(in ck: Ck, in fw: Fw, id: u32) -> B {
+    let direct = integer_bounds(in ck, in fw, id);
+    if direct.has {
+        return direct;
+    }
+    let e = ck.ex(id);
+    if e.kind != E_BINARY || !pure_integer(in ck, id) || u128_expr(in ck, in fw, e.x) {
+        return no_bounds();
+    }
+    let mut k = kind_of(in ck, id);
+    if k.bits == 0 {
+        k = kind_of(in ck, e.x);
+    }
+    if k.bits == 0 {
+        k = kind_of(in ck, e.z);
+    }
+    if k.bits == 0 {
+        return no_bounds();
+    }
+    let x = operand_bounds(in ck, in fw, e.x);
+    if !x.has || v_lt(x.hi, x.lo) {
+        return no_bounds();
+    }
+    let y = operand_bounds(in ck, in fw, e.z);
+    if !y.has || v_lt(y.hi, y.lo) {
+        return no_bounds();
+    }
+    let code = e.y;
+    if code == B_ADD || code == B_SUB || code == B_MUL {
+        let c0 = corner(code, x.lo, y.lo);
+        let c1 = corner(code, x.lo, y.hi);
+        let c2 = corner(code, x.hi, y.lo);
+        let c3 = corner(code, x.hi, y.hi);
+        if !c0.has || !c1.has || !c2.has || !c3.has {
+            return no_bounds();
+        }
+        if !fits(k, c0.v) || !fits(k, c1.v) || !fits(k, c2.v) || !fits(k, c3.v) {
+            return no_bounds();
+        }
+        if c0.v.big || c1.v.big || c2.v.big || c3.v.big {
+            return no_bounds();
+        }
+        let lo = v_min(v_min(c0.v, c1.v), v_min(c2.v, c3.v));
+        let hi = v_max(v_max(c0.v, c1.v), v_max(c2.v, c3.v));
+        return bounds(lo, hi);
+    }
+    if code == B_DIV && !x.lo.neg && v_lt(v_zero(), y.lo) && !x.hi.big && !y.hi.big {
+        return bounds(v_div(x.lo, y.hi), v_div(x.hi, y.lo));
+    }
+    if code == B_SHR && !x.lo.neg && !y.lo.neg && !x.hi.big && !y.hi.big && y.hi.mag < w(k.bits) {
+        return bounds(
+            v_small(false, wrapping_shr_u64(x.lo.mag, n32(y.hi.mag))),
+            v_small(false, wrapping_shr_u64(x.hi.mag, n32(y.lo.mag)))
+        );
+    }
+    no_bounds()
+}
+
+// `total_operation`.
+fn total_operation(in ck: Ck, in fw: Fw, op: u32, k: K, left: B, right: u32) -> bool {
+    if op == B_DIV {
+        return quotient_in_range(op, k, left, operand_bounds(in ck, in fw, right));
+    }
+    fw.total_operands != 0 && bounds_in_range(op, k, left, operand_bounds(in ck, in fw, right))
+}
+
+fn nonneg_hi(b: B) -> OptV {
+    if b.has && !b.lo.neg {
+        some_v(b.hi)
+    } else {
+        no_v()
+    }
+}
+
+// `array_index_bounds`.
+fn array_index_bounds(in ck: Ck, in fw: Fw, id: u32, depth: u64) -> B {
+    let direct = integer_bounds(in ck, in fw, id);
+    if direct.has {
+        return direct;
+    }
+    let e = ck.ex(id);
+    if e.kind != E_BINARY || depth > INDEX_BOUNDS_DEPTH {
+        return no_bounds();
+    }
+    let next = wrapping_add(depth, 1);
+    if e.y == B_BIT_AND {
+        let ma = if pure_integer(in ck, e.z) {
+            nonneg_hi(array_index_bounds(in ck, in fw, e.x, next))
+        } else {
+            no_v()
+        };
+        let mb = nonneg_hi(array_index_bounds(in ck, in fw, e.z, next));
+        let m = if ma.has && mb.has {
+            v_min(ma.v, mb.v)
+        } else if ma.has {
+            ma.v
+        } else if mb.has {
+            mb.v
+        } else {
+            return no_bounds();
+        };
+        return bounds(v_zero(), m);
+    }
+    let plus = e.y == B_ADD;
+    if (!plus && e.y != B_SUB) || !pure_integer(in ck, e.z) {
+        return no_bounds();
+    }
+    let x = array_index_bounds(in ck, in fw, e.x, next);
+    let y = array_index_bounds(in ck, in fw, e.z, next);
+    if !x.has || !y.has {
+        return no_bounds();
+    }
+    let lo = if plus {
+        v_add(x.lo, y.lo)
+    } else {
+        v_sub(x.lo, y.hi)
+    };
+    let hi = if plus {
+        v_add(x.hi, y.hi)
+    } else {
+        v_sub(x.hi, y.lo)
+    };
+    if !lo.has || !hi.has {
+        return no_bounds();
+    }
+    bounds(lo.v, hi.v)
+}
+
+// `array_index_total`: `index` is provably in `0..n`.
+fn array_index_total(in ck: Ck, in fw: Fw, index: u32, n: u64) -> bool {
+    let b = array_index_bounds(in ck, in fw, index, 0);
+    b.has && !b.lo.neg && v_lt(b.hi, v_small(false, n))
+}
+
+// `arrays::element`: the length of a homogeneous non-empty tuple, else 0.
+fn array_len(in ck: Ck, ty: u32) -> u64 {
+    if !valid_ty(in ck, ty) || ck.ctx.types.kind(ty) != TyKind::Tuple {
+        return 0;
+    }
+    let n = ck.ctx.types.arity(ty);
+    if n == 0 {
+        return 0;
+    }
+    let first = ck.ctx.types.arg(ty, 0);
+    for i in 1..n {
+        if ck.ctx.types.arg(ty, i) != first {
+            return 0;
+        }
+    }
+    n
+}
+
+fn array_element(in ck: Ck, ty: u32) -> u32 {
+    if array_len(in ck, ty) == 0 {
+        NONE32
+    } else {
+        ck.ctx.types.arg(ty, 0)
+    }
+}
+
+// `array_len_bounds`: `a.len()` of an array.
+fn array_len_bounds(in ck: Ck, id: u32) -> B {
+    let e = ck.ex(id);
+    if e.kind != E_CALL || e.n != 0 {
+        return no_bounds();
+    }
+    let callee = ck.ex(e.x);
+    if callee.kind != E_FIELD || !spells(in ck, callee.y, "len") {
+        return no_bounds();
+    }
+    let n = array_len(in ck, ty_of(in ck, callee.x));
+    if n == 0 {
+        return no_bounds();
+    }
+    bounds(v_small(false, n), v_small(false, n))
+}
+
+// ----- failures --------------------------------------------------------------
+
+fn primitive_failure(inout fw: Fw, e: Ex) {
+    if fw.dead == 0 {
+        fw.partial.push(e.start);
+        fw.partial.push(e.end);
+    }
+}
+
+fn overflow_failure(inout fw: Fw, e: Ex) {
+    if fw.dead == 0 {
+        fw.overflow.push(e.start);
+        fw.overflow.push(e.end);
+    }
+}
+
+// ----- joins -----------------------------------------------------------------
+
+// `merge`: each binding of the environment joins its two branch states.
+fn merge(
+    in ck: Ck,
+    inout fw: Fw,
+    in x_env: ChunkSeq[FB],
+    x_start: u64,
+    in y_env: ChunkSeq[FB],
+    y_start: u64
+) {
+    for i in 0..fw.env.len() {
+        let b = match fw.env.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => continue,
+        };
+        let x = match x_env.try_get(wrapping_add(x_start, i)) {
+            Option::Some(x) => x,
+            Option::None => missing_binding(),
+        };
+        let y = match y_env.try_get(wrapping_add(y_start, i)) {
+            Option::Some(y) => y,
+            Option::None => missing_binding(),
+        };
+        let mut nb = b;
+        if x.name != b.name || y.name != b.name {
+            nb.mutation = fresh_mutation(inout fw);
+        } else {
+            nb.mutation = if x.id == y.id && x.mutation == y.mutation {
+                x.mutation
+            } else {
+                fresh_mutation(inout fw)
+            };
+            let bx = binding_bounds(in ck, x);
+            let by = binding_bounds(in ck, y);
+            if x.id == y.id && bx.has && by.has {
+                nb.has_range = true;
+                nb.lo = v_min(bx.lo, by.lo);
+                nb.hi = v_max(bx.hi, by.hi);
+                nb.at = nb.mutation;
+                nb.looped = loop_range(x) && loop_range(y);
+            } else {
+                nb.has_range = false;
+            }
+            nb.has_int = x.has_int && y.has_int && v_eq(x.int, y.int);
+            nb.int = x.int;
+            nb.nonzero = x.nonzero && y.nonzero;
+        }
+        put_binding(inout fw, i, nb);
+    }
+}
+
+// A binding that is in no environment (its name matches none).
+fn missing_binding() -> FB {
+    FB {
+        name: NONE32,
+        id: 0,
+        pass: 0,
+        ty: NONE32,
+        has_int: false,
+        int: v_zero(),
+        nonzero: false,
+        has_range: false,
+        lo: v_zero(),
+        hi: v_zero(),
+        at: 0,
+        looped: false,
+        mutation: 0
+    }
+}
+
+// ----- conditions ------------------------------------------------------------
+
+fn zero_literal(x: Ex) -> bool {
+    x.kind == E_INT && x.mag == 0 && x.hi == 0
+}
+
+fn refine_condition(in ck: Ck, inout fw: Fw, id: u32, truth: bool) {
+    if pure_condition(in ck, id) {
+        refine_pure(in ck, inout fw, id, truth);
+    }
+    let e = ck.ex(id);
+    if e.kind != E_BINARY {
+        return;
+    }
+    let l = ck.ex(e.x);
+    let r = ck.ex(e.z);
+    let name = if l.kind == E_NAME && zero_literal(r) {
+        l.x
+    } else if r.kind == E_NAME && zero_literal(l) {
+        r.x
+    } else {
+        return;
+    };
+    let i = lookup(in fw, name);
+    let ne = e.y == B_NE;
+    let eq = e.y == B_EQ;
+    match binding(in fw, i) {
+        Option::Some(b) => {
+            let mut nb = b;
+            if (ne && truth) || (eq && !truth) {
+                nb.nonzero = true;
+            } else if (eq && truth) || (ne && !truth) {
+                nb.has_int = true;
+                nb.int = v_zero();
+                nb.nonzero = false;
+            }
+            put_binding(inout fw, i, nb);
+        },
+        Option::None => {},
+    }
+}
+
+fn comparison_code(op: u32) -> u8 {
+    if op == B_LT {
+        C_LT
+    } else if op == B_LE {
+        C_LE
+    } else if op == B_GT {
+        C_GT
+    } else if op == B_GE {
+        C_GE
+    } else if op == B_EQ {
+        C_EQ
+    } else if op == B_NE {
+        C_NE
+    } else {
+        0
+    }
+}
+
+fn negate_comparison(c: u8) -> u8 {
+    if c == C_LT {
+        C_GE
+    } else if c == C_LE {
+        C_GT
+    } else if c == C_GT {
+        C_LE
+    } else if c == C_GE {
+        C_LT
+    } else if c == C_EQ {
+        C_NE
+    } else if c == C_NE {
+        C_EQ
+    } else {
+        0
+    }
+}
+
+fn flip_comparison(c: u8) -> u8 {
+    if c == C_LT {
+        C_GT
+    } else if c == C_LE {
+        C_GE
+    } else if c == C_GT {
+        C_LT
+    } else if c == C_GE {
+        C_LE
+    } else {
+        c
+    }
+}
+
+// `refine_pure`: narrow the bounds of the names a pure condition compares.
+fn refine_pure(in ck: Ck, inout fw: Fw, id: u32, truth: bool) {
+    let e = ck.ex(id);
+    if e.kind == E_UNARY {
+        if e.y == U_NOT {
+            refine_pure(in ck, inout fw, e.x, !truth);
+        }
+        return;
+    }
+    if e.kind != E_BINARY {
+        return;
+    }
+    let and = e.y == B_AND;
+    let or = e.y == B_OR;
+    if (and && truth) || (or && !truth) {
+        refine_pure(in ck, inout fw, e.x, truth);
+        refine_pure(in ck, inout fw, e.z, truth);
+        return;
+    }
+    if and || or {
+        return;
+    }
+    let raw = comparison_code(e.y);
+    let c = if truth { raw } else { negate_comparison(raw) };
+    if c == 0 {
+        return;
+    }
+    let left = integer_bounds(in ck, in fw, e.x);
+    let right = integer_bounds(in ck, in fw, e.z);
+    refine_side(in ck, inout fw, e.x, c, right);
+    refine_side(in ck, inout fw, e.z, flip_comparison(c), left);
+}
+
+fn refine_side(in ck: Ck, inout fw: Fw, name_id: u32, c: u8, other: B) {
+    let ne = ck.ex(name_id);
+    if ne.kind != E_NAME || !other.has {
+        return;
+    }
+    let current = integer_bounds(in ck, in fw, name_id);
+    if !current.has {
+        return;
+    }
+    let mut lo = current.lo;
+    let mut hi = current.hi;
+    if c == C_LT {
+        hi = v_min(hi, v_pred(other.hi));
+    } else if c == C_LE {
+        hi = v_min(hi, other.hi);
+    } else if c == C_GT {
+        lo = v_max(lo, v_succ(other.lo));
+    } else if c == C_GE {
+        lo = v_max(lo, other.lo);
+    } else if c == C_EQ {
+        lo = v_max(lo, other.lo);
+        hi = v_min(hi, other.hi);
+    } else if c == C_NE && v_eq(other.lo, other.hi) {
+        if v_eq(lo, other.lo) {
+            lo = v_succ(lo);
+        }
+        if v_eq(hi, other.lo) {
+            hi = v_pred(hi);
+        }
+    } else {
+        return;
+    }
+    let i = lookup(in fw, ne.x);
+    match binding(in fw, i) {
+        Option::Some(b) => {
+            let mut nb = b;
+            nb.looped = loop_range(b);
+            nb.has_range = true;
+            nb.lo = lo;
+            nb.hi = hi;
+            nb.at = b.mutation;
+            put_binding(inout fw, i, nb);
+        },
+        Option::None => {},
+    }
+}
+
+// ----- patterns --------------------------------------------------------------
+
+// The type the checker bound pattern `pat` at, or NONE32.
+fn pattern_type(in ck: Ck, pat: u32) -> u32 {
+    if pat == NONE32 {
+        return NONE32;
+    }
+    let t = u32_at(in ck.facts.pat_types, w(pat));
+    if t == 0 { NONE32 } else { wrapping_sub(t, 1) }
+}
+
+fn bind_pattern(in ck: Ck, inout fw: Fw, pat: u32, pass: u8) {
+    if pat == NONE32 {
+        return;
+    }
+    let p = ck.pats.pat(pat);
+    if p.kind == P_BIND {
+        let name = match ck.pat_extras.try_get(w(pat)) {
+            Option::Some(x) => x.name,
+            Option::None => return,
+        };
+        bind_name(inout fw, name, pass, pattern_type(in ck, pat));
+        return;
+    }
+    if p.kind == P_TUPLE || p.kind == P_CTOR {
+        for i in 0..w(p.kid_count) {
+            bind_pattern(in ck, inout fw, ck.pats.kid(add(w(p.kid_start), i)), pass);
+        }
+    }
+}
+
+fn simple_pattern(in ck: Ck, pat: u32) -> bool {
+    pat != NONE32 && ck.pats.pat(pat).kind == P_BIND
+}
+
+// ----- loops -----------------------------------------------------------------
+
+fn note_written(inout written: ChunkSeq[u32], name: u32) {
+    if name != NONE32 {
+        written.push(name);
+    }
+}
+
+// The names a loop body may write (`havoc`'s visit): assignment targets,
+// call receivers, called locals and argument places. Returns whether the
+// body calls anything.
+fn visit_written(in ck: Ck, id: u32, inout written: ChunkSeq[u32]) -> bool {
+    let e = ck.ex(id);
+    let mut calls = false;
+    if e.kind == E_ASSIGN || e.kind == E_ARRAY_WRITE {
+        note_written(inout written, place_root(in ck, e.x));
+    } else if e.kind == E_CALL {
+        calls = true;
+        let callee = ck.ex(e.x);
+        if callee.kind == E_FIELD {
+            note_written(inout written, place_root(in ck, callee.x));
+        }
+        if callee.kind == E_NAME {
+            note_written(inout written, callee.x);
+        }
+        for i in 0..w(e.n) {
+            note_written(inout written, place_root(in ck, arg_at(in ck, e, i).expr));
+        }
+    }
+    let mut child = ChunkSeq::new[u32]();
+    children(in ck, e, inout child);
+    for i in 0..child.len() {
+        if visit_written(in ck, u32_at(in child, i), inout written) {
+            calls = true;
+        }
+    }
+    calls
+}
+
+fn push_kid(inout out: ChunkSeq[u32], id: u32) {
+    if id != NONE32 {
+        out.push(id);
+    }
+}
+
+// Every child expression of a row.
+fn children(in ck: Ck, e: Ex, inout out: ChunkSeq[u32]) {
+    if e.kind == E_TUPLE || e.kind == E_STRUCT {
+        for i in 0..w(e.n) {
+            out.push(kid(in ck, e, i));
+        }
+    } else if e.kind == E_FIELD || e.kind == E_TRY || e.kind == E_LOOP || e.kind == E_UNARY {
+        push_kid(inout out, e.x);
+    } else if e.kind == E_INDEX {
+        push_kid(inout out, e.x);
+        push_kid(inout out, e.z);
+        if e.y != 0 {
+            push_kid(inout out, e.b);
+        }
+    } else if e.kind == E_BINARY
+        || e.kind == E_ASSIGN
+        || e.kind == E_ARRAY_WRITE
+        || e.kind == E_RANGE
+    {
+        push_kid(inout out, e.x);
+        push_kid(inout out, e.z);
+    } else if e.kind == E_BLOCK {
+        for i in 0..w(e.n) {
+            push_kid(inout out, stmt_at(in ck, add(w(e.a), i)).value);
+        }
+        push_kid(inout out, e.x);
+    } else if e.kind == E_CALL {
+        push_kid(inout out, e.x);
+        for i in 0..w(e.n) {
+            push_kid(inout out, arg_at(in ck, e, i).expr);
+        }
+    } else if e.kind == E_IF {
+        push_kid(inout out, e.x);
+        push_kid(inout out, e.y);
+        push_kid(inout out, e.z);
+    } else if e.kind == E_MATCH {
+        push_kid(inout out, e.x);
+        for i in 0..w(e.n) {
+            push_kid(inout out, arm_at(in ck, e, i).body);
+        }
+    } else if e.kind == E_FOR {
+        push_kid(inout out, e.x);
+        push_kid(inout out, e.z);
+    } else if e.kind == E_BREAK || e.kind == E_RETURN {
+        if e.y != 0 {
+            push_kid(inout out, e.x);
+        }
+    } else if e.kind == E_CLOSURE {
+        push_kid(inout out, e.x);
+    } else if e.kind == E_HANDLE {
+        push_kid(inout out, e.z);
+        push_kid(inout out, e.x);
+        for ci in 0..w(e.n) {
+            match ck.clauses.try_get(add(w(e.a), ci)) {
+                Option::Some(cl) => push_kid(inout out, cl.body),
+                Option::None => {},
+            }
+        }
+    }
+}
+
+fn contains_name(in names: ChunkSeq[u32], name: u32) -> bool {
+    for i in 0..names.len() {
+        if u32_at(in names, i) == name {
+            return true;
+        }
+    }
+    false
+}
+
+// `havoc`: forget the facts of every binding the body may write.
+fn havoc(in ck: Ck, inout fw: Fw, body: u32) {
+    let mut written = ChunkSeq::new[u32]();
+    let calls = visit_written(in ck, body, inout written);
+    for i in 0..fw.env.len() {
+        match fw.env.try_get(i) {
+            Option::Some(b) => {
+                if contains_name(in written, b.name) || (calls && b.pass == P_INOUT) {
+                    forget(inout fw, i);
+                }
+            },
+            Option::None => {},
+        }
+    }
+}
+
+// `loop_body`: a `loop` (`value`) or `for` body. `pat` is the `for`
+// pattern (NONE32 for `loop`), bound with `nonzero_index` and `range`.
+fn loop_body(
+    in ck: Ck,
+    inout fw: Fw,
+    body: u32,
+    value: bool,
+    pat: u32,
+    nonzero_index: bool,
+    range: B
+) -> bool {
+    havoc(in ck, inout fw, body);
+    let entry = copy_env(in fw.env);
+    let entry_len = fw.env.len();
+    let exit_start = fw.exits.len();
+    if !value {
+        // A `for` loop also ends when its range is exhausted.
+        push_rows(inout fw.exits, in entry, 0, entry_len);
+    }
+    let first = if value { 0 } else { 1 };
+    fw.frames
+        .push(Fr { kind: FRAME_LOOP, entry_len: entry_len, exit_start: exit_start, count: first });
+    push_scope(inout fw);
+    if pat != NONE32 {
+        bind_pattern(in ck, inout fw, pat, P_SINK);
+        if simple_pattern(in ck, pat) && fw.env.len() > entry_len {
+            let i = wrapping_sub(fw.env.len(), 1);
+            match binding(in fw, i) {
+                Option::Some(b) => {
+                    let mut nb = b;
+                    nb.nonzero = nonzero_index;
+                    nb.has_range = range.has;
+                    nb.lo = range.lo;
+                    nb.hi = range.hi;
+                    nb.at = b.mutation;
+                    nb.looped = true;
+                    put_binding(inout fw, i, nb);
+                },
+                Option::None => {},
+            }
+        }
+    }
+    let _body_never = ev(in ck, inout fw, body);
+    pop_scope(inout fw);
+    fw.env.truncate(entry_len);
+    let count = match fw.frames.pop() {
+        Option::Some(f) => f.count,
+        Option::None => 0,
+    };
+    if count == 0 {
+        fw.exits.truncate(exit_start);
+        return true;
+    }
+    if entry_len != 0 {
+        let rows = copy_env(in fw.exits);
+        fw.env.clear();
+        push_rows(inout fw.env, in rows, exit_start, entry_len);
+        for xi in 1..count {
+            let prev = copy_env(in fw.env);
+            let at = wrapping_add(exit_start, wrapping_mul(xi, entry_len));
+            merge(in ck, inout fw, in prev, 0, in rows, at);
+        }
+    }
+    fw.exits.truncate(exit_start);
+    false
+}
+
+fn record_exit(inout fw: Fw) {
+    let top = match fw.frames.last() {
+        Option::Some(f) => f,
+        Option::None => return,
+    };
+    if top.kind != FRAME_LOOP {
+        return;
+    }
+    let env = copy_env(in fw.env);
+    push_rows(inout fw.exits, in env, 0, top.entry_len);
+    let mut next = top;
+    next.count = wrapping_add(top.count, 1);
+    let _ok = fw.frames.try_set(wrapping_sub(fw.frames.len(), 1), next);
+}
+
+// ----- expressions -----------------------------------------------------------
+
+fn is_never(in ck: Ck, id: u32) -> bool {
+    is_named_ty(in ck, ty_of(in ck, id), ck.ctx.world.k.never)
+}
+
+fn is_text(in ck: Ck, ty: u32) -> bool {
+    is_named_ty(in ck, ty, ck.ctx.world.k.string) || is_named_ty(in ck, ty, ck.ctx.world.k.str_)
+}
+
+// Walks `id` as the Rust checker checks it; returns whether it never
+// completes normally.
+fn ev(in ck: Ck, inout fw: Fw, id: u32) -> bool {
+    if id == NONE32 {
+        return false;
+    }
+    let structural = ev_kind(in ck, inout fw, id, ck.ex(id));
+    structural || is_never(in ck, id)
+}
+
+fn ev_kind(in ck: Ck, inout fw: Fw, id: u32, e: Ex) -> bool {
+    if e.kind == E_CONTINUE {
+        return true;
+    }
+    if e.kind == E_TUPLE || e.kind == E_STRUCT {
+        for i in 0..w(e.n) {
+            let _n = ev(in ck, inout fw, kid(in ck, e, i));
+        }
+        return false;
+    }
+    if e.kind == E_FIELD || e.kind == E_TRY {
+        let _n = ev(in ck, inout fw, e.x);
+        return false;
+    }
+    if e.kind == E_INDEX {
+        ev_index(in ck, inout fw, e);
+        return false;
+    }
+    if e.kind == E_UNARY {
+        let _n = ev(in ck, inout fw, e.x);
+        if e.y == U_NEG {
+            let mut k = kind_of(in ck, id);
+            if k.bits == 0 {
+                k = kind_of(in ck, e.x);
+            }
+            if k.bits != 0 {
+                let f = integer_fact(in ck, in fw, e.x);
+                if !f.has || !fact_neg(k, f.v).has {
+                    overflow_failure(inout fw, e);
+                }
+            }
+        }
+        return false;
+    }
+    if e.kind == E_BINARY {
+        ev_binary(in ck, inout fw, id, e);
+        return false;
+    }
+    if e.kind == E_ASSIGN {
+        ev_assign(in ck, inout fw, e);
+        return false;
+    }
+    if e.kind == E_ARRAY_WRITE {
+        ev_array_write(in ck, inout fw, e);
+        return false;
+    }
+    if e.kind == E_BLOCK {
+        return ev_block(in ck, inout fw, e);
+    }
+    if e.kind == E_CALL {
+        ev_call(in ck, inout fw, e);
+        return false;
+    }
+    if e.kind == E_IF {
+        return ev_if(in ck, inout fw, e);
+    }
+    if e.kind == E_MATCH {
+        return ev_match(in ck, inout fw, e);
+    }
+    if e.kind == E_LOOP {
+        return loop_body(in ck, inout fw, e.x, true, NONE32, false, no_bounds());
+    }
+    if e.kind == E_FOR {
+        return ev_for(in ck, inout fw, e);
+    }
+    if e.kind == E_RANGE {
+        let _s = ev(in ck, inout fw, e.x);
+        let _e = ev(in ck, inout fw, e.z);
+        return false;
+    }
+    if e.kind == E_BREAK {
+        if e.y != 0 {
+            let _n = ev(in ck, inout fw, e.x);
+        }
+        record_exit(inout fw);
+        return true;
+    }
+    if e.kind == E_RETURN {
+        if e.y != 0 {
+            let _n = ev(in ck, inout fw, e.x);
+        }
+        return true;
+    }
+    if e.kind == E_CLOSURE {
+        ev_closure(in ck, inout fw, e);
+        return false;
+    }
+    if e.kind == E_HANDLE {
+        ev_handle(in ck, inout fw, e);
+        return false;
+    }
+    false
+}
+
+fn ev_index(in ck: Ck, inout fw: Fw, e: Ex) {
+    let _b = ev(in ck, inout fw, e.x);
+    let _i = ev(in ck, inout fw, e.z);
+    if e.y != 0 {
+        // A slice or text view: no element check.
+        let _h = ev(in ck, inout fw, e.b);
+        return;
+    }
+    let mut datum: u64 = 0;
+    if mark_at(in ck.facts, e.start, e.end, inout datum) == MARK_PARTIAL {
+        primitive_failure(inout fw, e);
+        return;
+    }
+    let base_ty = ty_of(in ck, e.x);
+    if valid_ty(in ck, base_ty) && ck.ctx.types.kind(base_ty) == TyKind::Tuple {
+        let n = ck.ctx.types.arity(base_ty);
+        let f = integer_fact(in ck, in fw, e.z);
+        let constant = f.has && !f.v.neg && v_lt(f.v, v_small(false, n));
+        if !constant && !array_index_total(in ck, in fw, e.z, n) {
+            primitive_failure(inout fw, e);
+        }
+    }
+}
+
+fn ev_binary(in ck: Ck, inout fw: Fw, id: u32, e: Ex) {
+    let op = e.y;
+    if is_comparison(op)
+        && (is_text(in ck, ty_of(in ck, e.x)) || is_text(in ck, ty_of(in ck, e.z)))
+    {
+        let _l = ev(in ck, inout fw, e.x);
+        let _r = ev(in ck, inout fw, e.z);
+        return;
+    }
+    if op == B_SHL || op == B_SHR {
+        let _l = ev(in ck, inout fw, e.x);
+        fw.total_operands = wrapping_add(fw.total_operands, 1);
+        let _r = ev(in ck, inout fw, e.z);
+        fw.total_operands = wrapping_sub(fw.total_operands, 1);
+        let amount = operand_bounds(in ck, in fw, e.z);
+        let mut k = kind_of(in ck, id);
+        if k.bits == 0 {
+            k = kind_of(in ck, e.x);
+        }
+        if k.bits != 0
+            && !(amount.has && !amount.lo.neg && !amount.hi.big && amount.hi.mag < w(k.bits))
+        {
+            overflow_failure(inout fw, e);
+        }
+        return;
+    }
+    let _l = ev(in ck, inout fw, e.x);
+    let left_fact = integer_fact(in ck, in fw, e.x);
+    let left_bounds = integer_bounds(in ck, in fw, e.x);
+    let left_index = loop_index(in ck, in fw, e.x);
+    let left_operand = operand_bounds(in ck, in fw, e.x);
+    let and = op == B_AND;
+    let or = op == B_OR;
+    if and || or {
+        let before = copy_env(in fw.env);
+        let l = ck.ex(e.x);
+        let dead = l.kind == E_BOOL && ((l.x == 0) == and);
+        if dead {
+            fw.dead = wrapping_add(fw.dead, 1);
+        }
+        let _r = ev(in ck, inout fw, e.z);
+        if dead {
+            fw.dead = wrapping_sub(fw.dead, 1);
+            set_env(inout fw, sink before);
+        } else {
+            let after = copy_env(in fw.env);
+            merge(in ck, inout fw, in before, 0, in after, 0);
+        }
+        return;
+    }
+    if op == B_DIV || op == B_REM {
+        fw.total_operands = wrapping_add(fw.total_operands, 1);
+        let _r = ev(in ck, inout fw, e.z);
+        fw.total_operands = wrapping_sub(fw.total_operands, 1);
+    } else {
+        let _r = ev(in ck, inout fw, e.z);
+    }
+    let mut k = kind_of(in ck, e.x);
+    if k.bits == 0 {
+        k = kind_of(in ck, e.z);
+    }
+    if k.bits == 0 {
+        return;
+    }
+    if (op == B_DIV || op == B_REM) && !nonzero(in ck, in fw, e.z) {
+        let divisor = operand_bounds(in ck, in fw, e.z);
+        if !(divisor.has && (v_lt(v_zero(), divisor.lo) || divisor.hi.neg)) {
+            primitive_failure(inout fw, e);
+        }
+    }
+    if may_overflow(op, k)
+        && !in_range(op, k, left_fact, integer_fact(in ck, in fw, e.z))
+        && !quotient_in_range(op, k, left_bounds, integer_bounds(in ck, in fw, e.z))
+        && !total_operation(in ck, in fw, op, k, left_operand, e.z)
+        && !((left_index || loop_index(in ck, in fw, e.z))
+            && bounds_in_range(op, k, left_bounds, integer_bounds(in ck, in fw, e.z)))
+    {
+        overflow_failure(inout fw, e);
+    }
+}
+
+fn forget_place(inout fw: Fw, root: u32) {
+    let i = lookup(in fw, root);
+    match binding(in fw, i) {
+        Option::Some(b) => {
+            let mut nb = b;
+            nb.mutation = fresh_mutation(inout fw);
+            nb.has_int = false;
+            nb.nonzero = false;
+            nb.has_range = false;
+            put_binding(inout fw, i, nb);
+        },
+        Option::None => {},
+    }
+}
+
+// `array_assign` and `array_element_write`: `a[i] op= v` and
+// `a.set(i, v)`, lowered to the array place and the (index, value) pair.
+fn ev_array_write(in ck: Ck, inout fw: Fw, e: Ex) {
+    let pair = ck.ex(e.z);
+    let index = kid(in ck, pair, 0);
+    let value = kid(in ck, pair, 1);
+    let root = place_root(in ck, e.x);
+    let base_ty = ty_of(in ck, e.x);
+    let n = array_len(in ck, base_ty);
+    let _i = ev(in ck, inout fw, index);
+    if !array_index_total(in ck, in fw, index, n) {
+        primitive_failure(inout fw, e);
+    }
+    let _v = ev(in ck, inout fw, value);
+    if e.y != 0 {
+        let k = kind_of_ty(in ck, array_element(in ck, base_ty));
+        if k.bits != 0 && may_overflow(e.y, k) {
+            overflow_failure(inout fw, e);
+        }
+        if k.bits != 0 && (e.y == B_DIV || e.y == B_REM) && !nonzero(in ck, in fw, value) {
+            primitive_failure(inout fw, e);
+        }
+    }
+    forget_place(inout fw, root);
+}
+
+// The exact fact of an assignment target that is a name.
+fn target_fact(in fw: Fw, root: u32, path_empty: bool) -> OptV {
+    match binding(in fw, lookup(in fw, root)) {
+        Option::Some(b) => if path_empty && b.has_int {
+            some_v(b.int)
+        } else {
+            no_v()
+        },
+        Option::None => no_v(),
+    }
+}
+
+fn ev_assign(in ck: Ck, inout fw: Fw, e: Ex) {
+    let op = e.y;
+    let target = ck.ex(e.x);
+    let root = place_root(in ck, e.x);
+    if root == NONE32 {
+        let _v = ev(in ck, inout fw, e.z);
+        return;
+    }
+    let path_empty = target.kind == E_NAME;
+    let bi = lookup(in fw, root);
+    let before = target_fact(in fw, root, path_empty);
+    let state_before = match binding(in fw, bi) {
+        Option::Some(b) => if path_empty { b.mutation } else { NONE64 },
+        Option::None => NONE64,
+    };
+    let bounds_before = if state_before != NONE64 {
+        integer_bounds(in ck, in fw, e.x)
+    } else {
+        no_bounds()
+    };
+    let _v = ev(in ck, inout fw, e.z);
+    let k = kind_of(in ck, e.x);
+    let assign = op == 0;
+    if k.bits != 0 && (op == B_DIV || op == B_REM) && !nonzero(in ck, in fw, e.z) {
+        primitive_failure(inout fw, e);
+    }
+    let now = target_fact(in fw, root, path_empty);
+    let unchanged = now.has == before.has && (!now.has || v_eq(now.v, before.v));
+    let old = if unchanged { now } else { no_v() };
+    let value = integer_fact(in ck, in fw, e.z);
+    let value_bounds = integer_bounds(in ck, in fw, e.z);
+    let state_now = match binding(in fw, lookup(in fw, root)) {
+        Option::Some(b) => if path_empty { b.mutation } else { NONE64 },
+        Option::None => NONE64,
+    };
+    let old_bounds = if state_before != NONE64 && state_now == state_before {
+        bounds_before
+    } else {
+        no_bounds()
+    };
+    if k.bits != 0
+        && !assign
+        && may_overflow(op, k)
+        && !in_range(op, k, old, value)
+        && !quotient_in_range(op, k, old_bounds, value_bounds)
+    {
+        overflow_failure(inout fw, e);
+    }
+    let fact = if assign {
+        value
+    } else if k.bits != 0 && old.has && value.has {
+        let r = fact_checked(k, op, old.v, value.v);
+        if r.st == R_OK { some_v(r.v) } else { no_v() }
+    } else {
+        no_v()
+    };
+    let nz = (fact.has && !is_zero(fact.v)) || (assign && nonzero(in ck, in fw, e.z));
+    let i = lookup(in fw, root);
+    match binding(in fw, i) {
+        Option::Some(b) => {
+            let mut nb = b;
+            nb.mutation = fresh_mutation(inout fw);
+            nb.has_int = fact.has && path_empty;
+            nb.int = fact.v;
+            nb.nonzero = nz && path_empty;
+            nb.has_range = value_bounds.has && assign && path_empty;
+            nb.lo = value_bounds.lo;
+            nb.hi = value_bounds.hi;
+            nb.at = nb.mutation;
+            nb.looped = false;
+            put_binding(inout fw, i, nb);
+        },
+        Option::None => {},
+    }
+}
+
+fn ev_block(in ck: Ck, inout fw: Fw, e: Ex) -> bool {
+    push_scope(inout fw);
+    let mut never = false;
+    for i in 0..w(e.n) {
+        if never {
+            break;
+        }
+        let stmt = stmt_at(in ck, add(w(e.a), i));
+        if stmt.is_let {
+            let _n = ev(in ck, inout fw, stmt.value);
+            let fact = integer_fact(in ck, in fw, stmt.value);
+            let nz = nonzero(in ck, in fw, stmt.value);
+            let b = integer_bounds(in ck, in fw, stmt.value);
+            let before = fw.env.len();
+            bind_pattern(in ck, inout fw, stmt.pat, P_SINK);
+            if simple_pattern(in ck, stmt.pat) && fw.env.len() > before {
+                let bi = wrapping_sub(fw.env.len(), 1);
+                match binding(in fw, bi) {
+                    Option::Some(nb0) => {
+                        let mut nb = nb0;
+                        nb.has_int = fact.has;
+                        nb.int = fact.v;
+                        nb.nonzero = nz;
+                        nb.has_range = b.has;
+                        nb.lo = b.lo;
+                        nb.hi = b.hi;
+                        nb.at = nb.mutation;
+                        nb.looped = false;
+                        put_binding(inout fw, bi, nb);
+                    },
+                    Option::None => {},
+                }
+            }
+        } else if ev(in ck, inout fw, stmt.value) {
+            never = true;
+        }
+    }
+    if !never && e.x != NONE32 {
+        never = ev(in ck, inout fw, e.x);
+    }
+    pop_scope(inout fw);
+    never
+}
+
+fn ev_call(in ck: Ck, inout fw: Fw, e: Ex) {
+    let callee = ck.ex(e.x);
+    if callee.kind == E_FIELD {
+        let _r = ev(in ck, inout fw, callee.x);
+    } else if callee.kind != E_NAME {
+        let _c = ev(in ck, inout fw, e.x);
+    }
+    for i in 0..w(e.n) {
+        let arg = arg_at(in ck, e, i);
+        let _n = ev(in ck, inout fw, arg.expr);
+        if arg.pass == P_INOUT {
+            let root = place_root(in ck, arg.expr);
+            if root != NONE32 {
+                forget(inout fw, lookup(in fw, root));
+            }
+        }
+    }
+    let mut datum: u64 = 0;
+    let marked = mark_at(in ck.facts, e.start, e.end, inout datum);
+    if marked == MARK_PARTIAL {
+        primitive_failure(inout fw, e);
+    } else if marked == MARK_OVERFLOW {
+        overflow_failure(inout fw, e);
+    } else if marked == MARK_NARROW && e.n == 1 {
+        let to = kind_of_sym(in ck, n32(datum));
+        let arg = arg_at(in ck, e, 0).expr;
+        let b = integer_bounds(in ck, in fw, arg);
+        if !(b.has && fits(to, b.lo) && fits(to, b.hi)) {
+            overflow_failure(inout fw, e);
+        }
+    }
+}
+
+fn ev_if(in ck: Ck, inout fw: Fw, e: Ex) -> bool {
+    let _c = ev(in ck, inout fw, e.x);
+    let original = copy_env(in fw.env);
+    refine_condition(in ck, inout fw, e.x, true);
+    let then_never = ev(in ck, inout fw, e.y);
+    let left = take_env(inout fw);
+    set_env(inout fw, sink copy_env(in original));
+    refine_condition(in ck, inout fw, e.x, false);
+    let else_never = if e.z != NONE32 {
+        ev(in ck, inout fw, e.z)
+    } else {
+        false
+    };
+    let right = take_env(inout fw);
+    if then_never {
+        set_env(inout fw, sink right);
+    } else if else_never {
+        set_env(inout fw, sink left);
+    } else {
+        set_env(inout fw, sink copy_env(in original));
+        merge(in ck, inout fw, in left, 0, in right, 0);
+        for i in 0..fw.env.len() {
+            let b = match fw.env.try_get(i) {
+                Option::Some(b) => b,
+                Option::None => continue,
+            };
+            if b.has_int {
+                continue;
+            }
+            let o = match original.try_get(i) {
+                Option::Some(o) => o,
+                Option::None => missing_binding(),
+            };
+            let x = match left.try_get(i) {
+                Option::Some(x) => x,
+                Option::None => missing_binding(),
+            };
+            let y = match right.try_get(i) {
+                Option::Some(y) => y,
+                Option::None => missing_binding(),
+            };
+            if o.name != NONE32
+                && b.id == o.id
+                && x.id == o.id
+                && y.id == o.id
+                && o.mutation == x.mutation
+                && o.mutation == y.mutation
+            {
+                let mut nb = b;
+                nb.has_int = o.has_int;
+                nb.int = o.int;
+                put_binding(inout fw, i, nb);
+            }
+        }
+    }
+    then_never && else_never
+}
+
+fn ev_match(in ck: Ck, inout fw: Fw, e: Ex) -> bool {
+    let _v = ev(in ck, inout fw, e.x);
+    let original = copy_env(in fw.env);
+    let len = original.len();
+    let mut branches = ChunkSeq::new[FB]();
+    let mut count: u64 = 0;
+    for i in 0..w(e.n) {
+        let arm = arm_at(in ck, e, i);
+        set_env(inout fw, sink copy_env(in original));
+        push_scope(inout fw);
+        bind_pattern(in ck, inout fw, arm.pat, P_SINK);
+        let never = ev(in ck, inout fw, arm.body);
+        pop_scope(inout fw);
+        fw.env.truncate(len);
+        if !never {
+            push_rows(inout branches, in fw.env, 0, len);
+            count = wrapping_add(count, 1);
+        }
+    }
+    set_env(inout fw, sink copy_env(in original));
+    if count == 0 {
+        return true;
+    }
+    if len == 0 {
+        return false;
+    }
+    fw.env.clear();
+    push_rows(inout fw.env, in branches, 0, len);
+    for bi in 1..count {
+        let prev = copy_env(in fw.env);
+        merge(in ck, inout fw, in prev, 0, in branches, wrapping_mul(bi, len));
+    }
+    false
+}
+
+fn ev_for(in ck: Ck, inout fw: Fw, e: Ex) -> bool {
+    let iter = ck.ex(e.x);
+    if iter.kind != E_RANGE {
+        let _i = ev(in ck, inout fw, e.x);
+        return loop_body(in ck, inout fw, e.z, false, e.y, false, no_bounds());
+    }
+    let _s = ev(in ck, inout fw, iter.x);
+    let _e = ev(in ck, inout fw, iter.z);
+    let start = integer_fact(in ck, in fw, iter.x);
+    let nonzero_index = start.has && !start.v.neg && !is_zero(start.v);
+    let lo = integer_bounds(in ck, in fw, iter.x);
+    let mut hi = integer_bounds(in ck, in fw, iter.z);
+    if !hi.has {
+        hi = array_len_bounds(in ck, iter.z);
+    }
+    let inclusive = iter.y != 0;
+    let mut range = no_bounds();
+    if lo.has && hi.has {
+        let top = if inclusive { hi.hi } else { v_pred(hi.hi) };
+        if v_le(lo.lo, top) {
+            range = bounds(lo.lo, top);
+        }
+    }
+    loop_body(in ck, inout fw, e.z, false, e.y, nonzero_index, range)
+}
+
+fn ev_closure(in ck: Ck, inout fw: Fw, e: Ex) {
+    let saved = copy_env(in fw.env);
+    let saved_marks = fw.marks.len();
+    fw.frames.push(Fr { kind: FRAME_FUNCTION, entry_len: 0, exit_start: fw.exits.len(), count: 0 });
+    push_scope(inout fw);
+    let sig = ck.fsig(e.a);
+    for i in 0..w(sig.param_count) {
+        let param = ck.param(add(w(sig.param_start), i));
+        bind_name(inout fw, param.name, param.pass, param.ty);
+    }
+    let _n = ev(in ck, inout fw, e.x);
+    pop_scope(inout fw);
+    fw.marks.truncate(saved_marks);
+    let _f = fw.frames.pop();
+    set_env(inout fw, sink saved);
+}
+
+fn ev_handle(in ck: Ck, inout fw: Fw, e: Ex) {
+    let stateful = e.z != NONE32;
+    if stateful {
+        let _s = ev(in ck, inout fw, e.z);
+    }
+    let outer = copy_env(in fw.env);
+    fw.frames.push(Fr { kind: FRAME_OTHER, entry_len: 0, exit_start: fw.exits.len(), count: 0 });
+    let _b = ev(in ck, inout fw, e.x);
+    let _f = fw.frames.pop();
+    // The body's writes may have happened before any clause ran: forget
+    // the facts of every place the body wrote.
+    for i in 0..fw.env.len() {
+        let b = match fw.env.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => continue,
+        };
+        match outer.try_get(i) {
+            Option::Some(o) => {
+                if b.mutation != o.mutation {
+                    let mut nb = b;
+                    nb.has_int = false;
+                    nb.nonzero = false;
+                    nb.has_range = false;
+                    put_binding(inout fw, i, nb);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    // Clauses check in an environment of their own: snapshots of the
+    // outer bindings they name.
+    let after = take_env(inout fw);
+    let saved_marks = fw.marks.len();
+    let state_pat = if stateful {
+        n32(e.mag & LOW_WORD_MASK)
+    } else {
+        NONE32
+    };
+    for ci in 0..w(e.n) {
+        match ck.clauses.try_get(add(w(e.a), ci)) {
+            Option::Some(cl) => {
+                set_env(inout fw, sink copy_env(in outer));
+                fw.frames.push(Fr {
+                    kind: FRAME_OTHER,
+                    entry_len: 0,
+                    exit_start: fw.exits.len(),
+                    count: 0
+                });
+                push_scope(inout fw);
+                for pi in 0..w(cl.pat_count) {
+                    bind_pattern(
+                        in ck,
+                        inout fw,
+                        u32_at(in ck.clause_pats, add(w(cl.pat_start), pi)),
+                        P_SINK
+                    );
+                }
+                if stateful && ci != 0 {
+                    bind_pattern(in ck, inout fw, state_pat, P_SINK);
+                }
+                let _c = ev(in ck, inout fw, cl.body);
+                pop_scope(inout fw);
+                fw.marks.truncate(saved_marks);
+                let _f = fw.frames.pop();
+            },
+            Option::None => {},
+        }
+    }
+    set_env(inout fw, sink after);
+}
+
+// ----- entry -----------------------------------------------------------------
+
+// Sorts (start, end) pairs and drops repeats.
+fn sort_spans(in spans: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let count = spans.len() / 2;
+    let mut order = ChunkSeq::with_capacity[u64](count);
+    for i in 0..count {
+        order.push(i);
+    }
+    // Insertion sort: a body has few failing operations.
+    for i in 1..count {
+        let mut j = i;
+        for step in 0..i {
+            if j == 0 {
+                break;
+            }
+            let a = u64_at(in order, wrapping_sub(j, 1));
+            let b = u64_at(in order, j);
+            let (sa, ta) = (
+                u64_at(in spans, wrapping_mul(a, 2)),
+                u64_at(in spans, add(wrapping_mul(a, 2), 1))
+            );
+            let (sb, tb) = (
+                u64_at(in spans, wrapping_mul(b, 2)),
+                u64_at(in spans, add(wrapping_mul(b, 2), 1))
+            );
+            if sa < sb || (sa == sb && ta <= tb) {
+                break;
+            }
+            let _x = order.try_set(wrapping_sub(j, 1), b);
+            let _y = order.try_set(j, a);
+            j = wrapping_sub(j, 1);
+        }
+    }
+    let mut out = ChunkSeq::with_capacity[u64](spans.len());
+    let mut prev_start = NONE64;
+    let mut prev_end = NONE64;
+    for i in 0..count {
+        let k = u64_at(in order, i);
+        let s = u64_at(in spans, wrapping_mul(k, 2));
+        let t = u64_at(in spans, add(wrapping_mul(k, 2), 1));
+        if s != prev_start || t != prev_end {
+            out.push(s);
+            out.push(t);
+            prev_start = s;
+            prev_end = t;
+        }
+    }
+    out
+}
+
+// Walks the checked `body` of the function whose parameters are
+// `fsig(params)` and keeps its failing operations in `ck.facts`.
+fn record_ops(inout ck: Ck, body: u32, params: u32) {
+    let mut fw = Fw {
+        env: ChunkSeq::new[FB](),
+        marks: ChunkSeq::new[u64](),
+        frames: ChunkSeq::new[Fr](),
+        exits: ChunkSeq::new[FB](),
+        partial: ChunkSeq::new[u64](),
+        overflow: ChunkSeq::new[u64](),
+        dead: 0,
+        total_operands: 0,
+        next_id: 0,
+        next_mutation: 0
+    };
+    let sig = ck.fsig(params);
+    for i in 0..w(sig.param_count) {
+        let param = ck.param(add(w(sig.param_start), i));
+        bind_name(inout fw, param.name, param.pass, param.ty);
+    }
+    fw.frames.push(Fr { kind: FRAME_FUNCTION, entry_len: 0, exit_start: 0, count: 0 });
+    let _n = ev(in ck, inout fw, body);
+    ck.facts.partial = sort_spans(in fw.partial);
+    ck.facts.overflow = sort_spans(in fw.overflow);
+    ck.facts.body = body;
+}

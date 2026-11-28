@@ -122,7 +122,7 @@ const FORMAT: usize = 2;
 const ENTRY: usize = 3;
 const TARGET: usize = 4;
 const LINKER: usize = 5;
-const PACKAGE: usize = 6;
+// 6 is `--package`, which only the Vesper driver reads (interface export).
 const POLICY: usize = 7;
 const CODEGEN: usize = 8;
 const LIB_NAME: usize = 9;
@@ -338,8 +338,10 @@ struct Checking {
 #[derive(Clone, Copy)]
 enum Step {
     // 1 (`IsPackage`), 19 (`IsWindowsTarget`), 21 (`Tee`) and 27
-    // (`IoError`) moved to the Vesper driver (#1896), and 17 (`CheckMain`)
-    // to the world it holds (#2024); numbers are not reused.
+    // (`IoError`) moved to the Vesper driver (#1896), 17 (`CheckMain`)
+    // to the world it holds (#2024), and 11 (`EmitInterface`, the package
+    // name of an interface export) to the Vesper driver's manifest read
+    // (#1893); numbers are not reused.
     Load = 2,
     EbpfBuild = 3,
     Parse = 4,
@@ -349,7 +351,6 @@ enum Step {
     VsysRun = 8,
     Check = 9,
     LibBuild = 10,
-    EmitInterface = 11,
     Optimize = 12,
     Run = 13,
     Jit = 14,
@@ -386,7 +387,7 @@ enum Step {
     WorldBegin = 81,
 }
 
-const STEPS: [Step; 36] = [
+const STEPS: [Step; 35] = [
     Step::Load,
     Step::EbpfBuild,
     Step::Parse,
@@ -396,7 +397,6 @@ const STEPS: [Step; 36] = [
     Step::VsysRun,
     Step::Check,
     Step::LibBuild,
-    Step::EmitInterface,
     Step::Optimize,
     Step::Run,
     Step::Jit,
@@ -531,7 +531,6 @@ impl Session {
             | Step::CheckFinish
             | Step::CheckReport
             | Step::EmitHir
-            | Step::EmitInterface
             | Step::LibBuild => self.front_step(step, arg),
             Step::Optimize
             | Step::EmitIr
