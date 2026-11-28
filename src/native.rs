@@ -361,6 +361,43 @@ fn capability_only(f: &Function) -> bool {
 pub fn cyclic_blocks(f: &crate::ir::FunctionIr) -> BTreeSet<usize> {
     aggregates::cyclic_blocks(f)
 }
+/// The calls of graph `f` as the body hook's request lists them (#2657):
+/// each `Op::Call` in block and instruction order, and at each
+/// `Op::Handle` the calls of its handled body, its `return` clause and its
+/// operation clauses, in that order (the nested graphs the walk emits
+/// there, `ir::nested_name`).
+fn graph_calls<'a>(
+    program: &'a crate::ir::Program,
+    f: &'a crate::ir::FunctionIr,
+    out: &mut Vec<&'a crate::ir::Op>,
+) {
+    for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+        match &inst.op {
+            op @ crate::ir::Op::Call { .. } => out.push(op),
+            crate::ir::Op::Handle { expr, .. } => {
+                if let ExprKind::Handle { body, ret, ops, .. } = &expr.kind {
+                    let nested =
+                        std::iter::once(crate::ir::nested_name("handler_body", &body.span))
+                            .chain(std::iter::once(crate::ir::nested_name(
+                                "handler_clause",
+                                &ret.body.span,
+                            )))
+                            .chain(
+                                ops.iter().map(|c| {
+                                    crate::ir::nested_name("handler_clause", &c.body.span)
+                                }),
+                            );
+                    for name in nested {
+                        if let Some(g) = program.functions.get(&name) {
+                            graph_calls(program, g, out);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
 /// The locals and `in` parameters of `f` kept in Cranelift SSA variables
 /// instead of stack home slots (`#1023`, `#1330`, `#1509`).
 pub fn register_locals(
@@ -4226,14 +4263,15 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.b.def_var(var, record);
             args.push(u64::from(var.as_u32()));
         }
-        // Each `Op::Call` of the body, in instruction order: the callee's
-        // function id when the walk would emit it as a plain direct call
-        // (part 6b), else `codegen_swap::body::NO_CALLEE`.
-        let calls = body
-            .blocks
-            .iter()
-            .flat_map(|b| &b.instructions)
-            .filter_map(|i| match &i.op {
+        // Each `Op::Call` of the body, in instruction order, a handler's
+        // nested graphs' calls at its `Op::Handle` (`graph_calls`, #2657):
+        // the callee's function id when the walk would emit it as a plain
+        // direct call (part 6b), else `codegen_swap::body::NO_CALLEE`.
+        let mut graph_ops = vec![];
+        graph_calls(self.program, body, &mut graph_ops);
+        let calls = graph_ops
+            .into_iter()
+            .filter_map(|op| match op {
                 crate::ir::Op::Call {
                     callee,
                     args,
