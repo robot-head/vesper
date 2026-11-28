@@ -342,23 +342,6 @@ impl Session {
                 self.lib_build()?;
                 Ok(0)
             }
-            // The interface's package name (validated) for the Vesper
-            // interface export (`interface_json` of modules/driver), as
-            // the session's text.
-            Step::EmitInterface => {
-                // A package directory exports under its manifest name by
-                // default.
-                let package = o
-                    .slot(PACKAGE)
-                    .map(str::to_owned)
-                    .or_else(|| self.loaded.as_ref().map(|p| p.package.clone()))
-                    .ok_or("interface export requires --package @org/name or std/name")?;
-                let package = vesper_loom_calculus::PackageName::parse(&package)?;
-                // The declarations themselves are the world the driver
-                // holds (`WorldDecls`, driver/world.rs, #2024).
-                self.text = package.as_str().as_bytes().to_vec();
-                Ok(0)
-            }
             Step::EmitHir => {
                 self.text = serde_json::to_string_pretty(&self.parsed()?.module)
                     .map_err(|e| e.to_string())?
