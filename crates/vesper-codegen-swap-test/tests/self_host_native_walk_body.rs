@@ -78,13 +78,8 @@ struct Plan {
 }
 
 thread_local! {
-    /// The plans of the last programs lent: the compile's program and the
-    /// generic instances it lends beside it (#2715).
-    static PLAN: RefCell<Vec<Plan>> = const { RefCell::new(Vec::new()) };
+    static PLAN: RefCell<Option<Plan>> = const { RefCell::new(None) };
 }
-
-/// How many programs' plans [`PLAN`] keeps.
-const PLANS_KEPT: usize = 16;
 
 /// Functions emitted from Vesper, and functions the Rust walk kept
 /// (unplanned).
@@ -156,27 +151,23 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     if lent.op != codegen_swap::body::FUNCTION {
         return Ok(false);
     }
-    // A generic instance (#2715) is planned from its own program.
+    // A generic instance (#2715) is planned from its own program, made
+    // for this request only (so its plan is not cached).
     let instance = codegen_swap::body_instance();
-    let (program, function): (&Program, &str) = match &instance {
-        Some((p, name)) => (p, name),
-        None => (lent.program, lent.site.function),
-    };
-    let words = PLAN.with(|cell| {
-        let mut plans = cell.borrow_mut();
-        let key = (program_key(program), lent.optimize);
-        let at = match plans.iter().position(|p| p.key == key) {
-            Some(at) => at,
-            None => {
-                if plans.len() == PLANS_KEPT {
-                    plans.remove(0);
-                }
-                plans.push(plan_of(lent.world, program, lent.optimize));
-                plans.len() - 1
+    let words = match &instance {
+        Some((program, name)) => plan_of(lent.world, program, lent.optimize)
+            .bodies
+            .remove(name),
+        None => PLAN.with(|cell| {
+            let mut cell = cell.borrow_mut();
+            let key = (program_key(lent.program), lent.optimize);
+            if cell.as_ref().is_none_or(|p| p.key != key) {
+                *cell = Some(plan_of(lent.world, lent.program, lent.optimize));
             }
-        };
-        plans[at].bodies.get(function).cloned()
-    });
+            let plan = cell.as_ref().expect("just planned");
+            plan.bodies.get(lent.site.function).cloned()
+        }),
+    };
     let Some(words) = words else {
         UNPLANNED.fetch_add(1, Ordering::Relaxed);
         return Ok(false);
@@ -286,7 +277,7 @@ fn runs(index: usize, case: &check_harness::Case) -> bool {
 fn both(name: &str, world: &vesper::check::World, run: bool) -> Diff {
     let mut total = Diff::default();
     for optimize in [true, false] {
-        PLAN.with(|p| p.borrow_mut().clear());
+        PLAN.with(|p| *p.borrow_mut() = None);
         total.add(compare(name, world, "main", hooks(), optimize, run));
     }
     total
