@@ -1483,6 +1483,42 @@ fn constrain_literals(inout tc: Tc, in a: Ast, eid: u64, target: u32) {
             constrain_literals(inout tc, in a, body, target);
         }
     }
+    // A block, `if` or `match` whose branches settled to `target` takes it
+    // too (`refine_annotation` of its compatible joined type).
+    if !tc.lit_probe
+        && (e.kind == X_BLOCK || e.kind == X_IF || e.kind == X_MATCH)
+        && (tc.types.kind(target) == TyKind::Tuple || is_int_ty(in tc, target))
+        && branches_settled(in tc, in a, e, target)
+    {
+        retype_span(inout tc, e.s0, e.s1, target);
+    }
+}
+
+// Whether each branch of the block, `if` or `match` `e` (its tail, both
+// arms, every arm) has `target`'s type or diverges.
+fn branches_settled(in tc: Tc, in a: Ast, e: Ex, target: u32) -> bool {
+    if e.kind == X_BLOCK {
+        return e.b != NONE64 && branch_settled(in tc, in a, e.b, target);
+    }
+    if e.kind == X_IF {
+        return e.c != NONE64
+            && branch_settled(in tc, in a, e.b, target)
+            && branch_settled(in tc, in a, e.c, target);
+    }
+    for i in 0..e.n {
+        let body = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
+        if !branch_settled(in tc, in a, body, target) {
+            return false;
+        }
+    }
+    e.n > 0
+}
+
+fn branch_settled(in tc: Tc, in a: Ast, eid: u64, target: u32) -> bool {
+    match a.exs.try_get(eid) {
+        Option::Some(b) => span_ty(in tc, b.s0, b.s1) == target || diverges_expr(in tc, in a, eid),
+        Option::None => false,
+    }
 }
 
 // The type recorded last at `s0..s1`, or NONE32.
