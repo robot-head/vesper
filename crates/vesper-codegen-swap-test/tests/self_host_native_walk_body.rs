@@ -76,8 +76,13 @@ struct Plan {
 }
 
 thread_local! {
-    static PLAN: RefCell<Option<Plan>> = const { RefCell::new(None) };
+    /// The plans of the last programs lent: the compile's program and the
+    /// generic instances it lends beside it (#2715).
+    static PLAN: RefCell<Vec<Plan>> = const { RefCell::new(Vec::new()) };
 }
+
+/// How many programs' plans [`PLAN`] keeps.
+const PLANS_KEPT: usize = 16;
 
 /// Functions emitted from Vesper, and functions the Rust walk kept
 /// (unplanned).
@@ -146,14 +151,26 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     if lent.op != codegen_swap::body::FUNCTION {
         return Ok(false);
     }
+    // A generic instance (#2715) is planned from its own program.
+    let instance = codegen_swap::body_instance();
+    let (program, function): (&Program, &str) = match &instance {
+        Some((p, name)) => (p, name),
+        None => (lent.program, lent.site.function),
+    };
     let words = PLAN.with(|cell| {
-        let mut cell = cell.borrow_mut();
-        let key = (program_key(lent.program), lent.optimize);
-        if cell.as_ref().is_none_or(|p| p.key != key) {
-            *cell = Some(plan_of(lent.world, lent.program, lent.optimize));
-        }
-        let plan = cell.as_ref().expect("just planned");
-        plan.bodies.get(lent.site.function).cloned()
+        let mut plans = cell.borrow_mut();
+        let key = (program_key(program), lent.optimize);
+        let at = match plans.iter().position(|p| p.key == key) {
+            Some(at) => at,
+            None => {
+                if plans.len() == PLANS_KEPT {
+                    plans.remove(0);
+                }
+                plans.push(plan_of(lent.world, program, lent.optimize));
+                plans.len() - 1
+            }
+        };
+        plans[at].bodies.get(function).cloned()
     });
     let Some(words) = words else {
         UNPLANNED.fetch_add(1, Ordering::Relaxed);
@@ -190,7 +207,7 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     match answer {
         HANDLED => {
             EMITTED.fetch_add(1, Ordering::Relaxed);
-            if function.contains(INSTANCE_MARK) {
+            if instance.is_some() {
                 INSTANCES.fetch_add(1, Ordering::Relaxed);
             }
             if sret != codegen_swap::body::NO_VALUE {
@@ -264,7 +281,7 @@ fn runs(index: usize, case: &check_harness::Case) -> bool {
 fn both(name: &str, world: &vesper::check::World, run: bool) -> Diff {
     let mut total = Diff::default();
     for optimize in [true, false] {
-        PLAN.with(|p| *p.borrow_mut() = None);
+        PLAN.with(|p| p.borrow_mut().clear());
         total.add(compare(name, world, "main", hooks(), optimize, run));
     }
     total
@@ -2588,10 +2605,6 @@ fn main() -> i64 {
     )
 }
 ";
-
-/// `site.function` of a generic instance (`mono::instance_name`) carries
-/// its type arguments after this mark.
-const INSTANCE_MARK: char = '<';
 
 /// Of the functions emitted from Vesper, the generic instances (#2715).
 static INSTANCES: AtomicU64 = AtomicU64::new(0);

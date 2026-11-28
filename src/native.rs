@@ -1891,7 +1891,7 @@ fn define_instances_observed_with_trace<M: Module>(
             // Part 6 of the native walk (#2094): the `body` hook may emit
             // the whole body of a plain function; else the Rust walk does.
             let body_gate = c.body_gate(&frame, body, sret);
-            if !(body_gate.plain() && c.body_hook(name, &f, &frame, body, sret)?) {
+            if !(body_gate.plain() && c.body_hook(key, name, &f, &frame, body, sret)?) {
                 c.ir_function(body, sret)?;
             }
             c.b.seal_all_blocks();
@@ -4239,8 +4239,12 @@ impl<M: Module> Codegen<'_, '_, M> {
             && self.denorm.is_empty()
             && self.session.is_none()
             // A generic instance (#2715) is lent with its types
-            // substituted; one bound to function values is not.
-            && self.generic_vars.keys().all(|k| !k.starts_with(FN_ARG))
+            // substituted; one bound to function values or `dyn`
+            // arguments is not.
+            && self
+                .generic_vars
+                .keys()
+                .all(|k| !k.starts_with(FN_ARG) && !k.starts_with(crate::dyn_trait::DYN_GENERIC))
             && !self.in_fip_fn
             && self.trace_fail.is_none()
             && self.caller_slot.is_none()
@@ -4263,6 +4267,7 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// function [`Self::body_gate`] leaves plain; `true` when it did.
     fn body_hook(
         &mut self,
+        key: &str,
         name: &str,
         f: &Function,
         frame: &FramePlan,
@@ -4403,6 +4408,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             &mut *self.m,
             self.world,
             self.program,
+            key,
             name,
             &self.generic_vars,
             &args,
