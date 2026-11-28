@@ -2863,13 +2863,62 @@ fn rebuild_low(
     (out, next_perm)
 }
 
+// The region `lower_all` keeps the lowered tables in: each batch's rebuild
+// (`rebuild_low`) copies the batch's new rows there and frees the rest.
+const LOW_PERM_BYTES: u64 = 536870912;
+// An upper bound on the region bytes one copied row costs (the row, the
+// temporary sequence that holds it while the tail is popped, which may
+// have doubled, and an `Option` per read).
+const REBUILD_ROW_BYTES: u64 = 512;
+// Room kept free in the region beyond that bound.
+const REBUILD_SLACK_BYTES: u64 = 16777216;
+// An upper bound on what one round of `reserve_lower` capacity takes
+// (about 75 MiB of rows at the batch limits below).
+const RESERVE_LOWER_BYTES: u64 = 134217728;
+
+// Whether a rebuild of the rows added since the `n_*` counts fits in what
+// is left of the region (`low_perm`..`low_perm_end`). A rebuild that ran
+// past the region's end would overwrite the live tables allocated after
+// it, so a batch that would not fit is kept where it is instead.
+fn rebuild_fits(
+    in l: L,
+    low_perm: u64,
+    low_perm_end: u64,
+    n_fns: u64,
+    n_blocks: u64,
+    n_insts: u64,
+    n_paths: u64,
+    n_pool: u64,
+    n_ast_fns: u64,
+    n_ast_params: u64,
+    n_nodes: u64,
+    n_rows: u64,
+    n_effs: u64
+) -> bool {
+    if low_perm >= low_perm_end {
+        return false;
+    }
+    let mut rows = wrapping_sub(l.program.fns.len(), n_fns);
+    rows = wrapping_add(rows, wrapping_sub(l.program.blocks.len(), n_blocks));
+    rows = wrapping_add(rows, wrapping_sub(l.program.insts.len(), n_insts));
+    rows = wrapping_add(rows, wrapping_sub(l.program.paths.len(), n_paths));
+    rows = wrapping_add(rows, wrapping_sub(l.program.pool.len(), n_pool));
+    rows = wrapping_add(rows, wrapping_sub(l.ast.fns.len(), n_ast_fns));
+    rows = wrapping_add(rows, wrapping_sub(l.ast.pms.len(), n_ast_params));
+    rows = wrapping_add(rows, wrapping_sub(l.ctx.types.nodes.len(), n_nodes));
+    rows = wrapping_add(rows, wrapping_sub(l.ctx.types.rows.len(), n_rows));
+    rows = wrapping_add(rows, wrapping_sub(l.ctx.types.effs.len(), n_effs));
+    let need = wrapping_add(wrapping_mul(rows, REBUILD_ROW_BYTES), REBUILD_SLACK_BYTES);
+    need < wrapping_sub(low_perm_end, low_perm)
+}
+
 // Every world function, then the closures and handlers they nest (each
 // appended to the function table as it is prepared).
 pub fn lower_all(inout l: L) {
     let mut low_perm_buf = ChunkSeq::new[u8]();
-    low_perm_buf.reserve(268435456);
+    low_perm_buf.reserve(LOW_PERM_BYTES);
     let low_perm_end = stage2_heap_mark();
-    let mut low_perm = wrapping_sub(low_perm_end, 268435456);
+    let mut low_perm = wrapping_sub(low_perm_end, LOW_PERM_BYTES);
     let mut max_fns = wrapping_add(l.program.fns.len(), 32768);
     let mut max_blocks = wrapping_add(l.program.blocks.len(), 131072);
     let mut max_insts = wrapping_add(l.program.insts.len(), 524288);
@@ -2947,6 +2996,21 @@ pub fn lower_all(inout l: L) {
                     && l.ctx.types.mask == prev_type_mask
                     && l.ctx.types.row_mask == prev_row_mask
                     && low_perm < low_perm_end
+                    && rebuild_fits(
+                        in l,
+                        low_perm,
+                        low_perm_end,
+                        n_fns,
+                        n_blocks,
+                        n_insts,
+                        n_paths,
+                        n_pool,
+                        n_ast_fns,
+                        n_ast_params,
+                        n_nodes,
+                        n_rows,
+                        n_effs
+                    )
                 {
                     let mut placeholder = dummy_low();
                     swap(inout l, inout placeholder);
@@ -2974,7 +3038,11 @@ pub fn lower_all(inout l: L) {
                     }
                     heap_mark = stage2_heap_mark();
                 } else {
-                    let saved_heap = if low_perm < low_perm_end {
+                    // The new capacity goes in the region while it has room
+                    // for it, and on the heap below the batch's mark if not.
+                    let in_perm = low_perm < low_perm_end
+                        && wrapping_sub(low_perm_end, low_perm) > RESERVE_LOWER_BYTES;
+                    let saved_heap = if in_perm {
                         stage2_heap_swap(low_perm)
                     } else {
                         0
@@ -3002,7 +3070,7 @@ pub fn lower_all(inout l: L) {
                         max_pool
                     );
                     l.ast.reserve_lower(16384, 32768, 16384, 16384);
-                    if low_perm < low_perm_end {
+                    if in_perm {
                         low_perm = stage2_heap_swap(saved_heap);
                     }
                     prev_name_mask = l.ctx.names.mask;
@@ -3040,6 +3108,21 @@ pub fn lower_all(inout l: L) {
         && l.ctx.types.mask == prev_type_mask
         && l.ctx.types.row_mask == prev_row_mask
         && low_perm < low_perm_end
+        && rebuild_fits(
+            in l,
+            low_perm,
+            low_perm_end,
+            n_fns,
+            n_blocks,
+            n_insts,
+            n_paths,
+            n_pool,
+            n_ast_fns,
+            n_ast_params,
+            n_nodes,
+            n_rows,
+            n_effs
+        )
     {
         let mut placeholder = dummy_low();
         swap(inout l, inout placeholder);
