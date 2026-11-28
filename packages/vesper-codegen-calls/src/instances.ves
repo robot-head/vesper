@@ -128,6 +128,11 @@ impl Syms {
             || sym == self.never
     }
 
+    // Whether `sym` is the `ConstTime` capability (`Capability::ConstTime`).
+    pub fn is_const_time(self, sym: u32) -> bool {
+        sym == self.const_time
+    }
+
     // `capability_effects::is_capability_effect`.
     pub fn is_capability(self, sym: u32) -> bool {
         sym == self.const_time
