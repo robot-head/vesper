@@ -1,5 +1,10 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
 
+# The heaviest codegen differentials, killed for memory on BuildBuddy at the
+# 6144 MiB self-host reservation (native_walk_body on #2719, codegen_control
+# and codegen_seq on #2686); 9216 MiB lets two share the ci_tests budget.
+_HEAVY_CODEGEN_MEMORY = "resources:memory:9216"
+
 # The SH4 codegen swap differential (#1275). The tests include the root
 # package's tests/common/check_harness.rs by path and read the corpus
 # (examples/, packages/, tests/fixtures/) and @vesper/codegen-base's
@@ -23,7 +28,10 @@ vesper_crate(
     ],
     test_tags = {
         # Runs whole-body Vesper emissions across the corpus in Self-host codegen differentials.
-        "test/self_host_native_walk_body": ["resources:memory:6144"],
+        "test/self_host_native_walk_body": [_HEAVY_CODEGEN_MEMORY],
+        # Killed for memory under the 6144 MiB self-host default on #2686.
+        "test/self_host_codegen_control": [_HEAVY_CODEGEN_MEMORY],
+        "test/self_host_codegen_seq": [_HEAVY_CODEGEN_MEMORY],
     },
     test_timeouts = {
         "test/self_host_codegen_calls_emit": "long",
