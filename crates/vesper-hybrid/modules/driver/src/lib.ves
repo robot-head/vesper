@@ -38,11 +38,11 @@ use @vesper/driver::{
     record_format as driver_record_format, with_extension, windows_linker_flavor,
     windows_link_args_nul
 };
-use @vesper-std/env::{arg_count, arg_bytes, var_bytes, os, os_windows};
+use @vesper-std/env::{arg_count, arg_bytes, var_bytes, os, os_linux, os_macos, os_windows};
 use @vesper-std/process::{command_path, arg_bytes as proc_arg, spawn, wait, release, success};
 use @vesper-std/fs::{
     IoError, is_dir_path, is_file_path, read_path, write_path, replace_path, remove_file,
-    set_permissions
+    set_permissions, arch, arch_x86_64, arch_aarch64
 };
 // `vesper build --target wasm32-wasip2` in Vesper (#1895).
 use @vesper/wasm-backend::{wasm_backend_module};
@@ -143,10 +143,6 @@ fn step_run() -> u32 {
 
 fn step_jit() -> u32 {
     14
-}
-
-fn step_verified_build() -> u32 {
-    15
 }
 
 fn step_wasm_build() -> u32 {
@@ -911,11 +907,24 @@ fn link(
     in object: Slice[u8],
     in path: Slice[u8]
 ) -> u64 eff [Ffi[StdProcess]] {
+    link_with(in linker, in object, in path, true)
+}
+
+// `link`, with `-lm` only when `libm` (the verified code generator's
+// Mach-O object links without it).
+fn link_with(
+    in linker: Slice[u8],
+    in object: Slice[u8],
+    in path: Slice[u8],
+    libm: bool
+) -> u64 eff [Ffi[StdProcess]] {
     let mut c = command_path(in linker);
     proc_arg(inout c, in object);
     proc_arg(inout c, in "-o".as_bytes());
     proc_arg(inout c, in path);
-    proc_arg(inout c, in "-lm".as_bytes());
+    if libm {
+        proc_arg(inout c, in "-lm".as_bytes());
+    }
     let mut ch = match spawn(c) {
         Result::Ok(ch) => ch,
         Result::Err(e) => return error_word(e),
@@ -1029,124 +1038,414 @@ const ERROR_PREFIX_LEN: u64 = 7;
 // The newline byte that ends a summary line.
 const NEWLINE: u8 = 10;
 
-// Whether the code generator's summary is an `error: <display>` line whose
-// display Rust's `VerifiedError::from_display` reads back to the same text.
-fn verified_error_text(in summary: Slice[u8]) -> bool {
-    let n = summary.len();
-    if n <= ERROR_PREFIX_LEN {
+// The verified code generator's architectures and operating systems
+// (`verified_codegen::Arch` and `Os`), as the `VerifiedInput` step reads
+// them; 0 is none.
+const VERIFIED_X86_64: u8 = 1;
+const VERIFIED_AARCH64: u8 = 2;
+const VERIFIED_RISCV64: u8 = 3;
+const VERIFIED_LINUX: u8 = 1;
+const VERIFIED_MACOS: u8 = 2;
+const VERIFIED_WINDOWS: u8 = 3;
+// `verified_code` packs the architecture over the operating system.
+const VERIFIED_ARCH_STRIDE: u64 = 256;
+// The first word of the `VerifiedInput` step's text: the code generator's
+// input follows (`verified_build_input` in
+// crates/vesper-hybrid/src/swap/verified_codegen.rs), or the artifact Rust's
+// code generator built (the swap is off, or the program does not encode).
+const VERIFIED_PORT_INPUT: u64 = 0;
+const VERIFIED_RUST_BUILT: u64 = 1;
+// The text's header: that word, then (Rust's build) the code size and the
+// artifact's byte length.
+const VERIFIED_WORD_BYTES: u64 = 8;
+// The executable's mode on Unix hosts (`0o755`).
+const EXECUTABLE_MODE: u32 = 493;
+// The lengths of `verified codegen: `, `unsupported ` and ` in '` in a
+// `VerifiedError` display.
+const VERIFIED_HEAD_LEN: u64 = 18;
+const UNSUPPORTED_LEN: u64 = 12;
+const IN_QUOTE_LEN: u64 = 5;
+
+// Whether `needle` occurs in `text`.
+fn contains(in text: Slice[u8], in needle: Slice[u8]) -> bool {
+    if needle.len() > text.len() {
         return false;
     }
-    let last = match summary.try_get(wrapping_sub(n, 1)) {
-        Option::Some(c) => c,
-        Option::None => 0,
+    for i in 0..wrapping_add(wrapping_sub(text.len(), needle.len()), 1) {
+        if starts_with(in text[i..text.len()], in needle) {
+            return true;
+        }
+    }
+    false
+}
+
+// The index of the first `needle` in `text` at or after `from`, or the
+// length of `text`.
+fn find(in text: Slice[u8], from: u64, in needle: Slice[u8]) -> u64 {
+    let mut i = from;
+    loop {
+        if wrapping_add(i, needle.len()) > text.len() {
+            return text.len();
+        }
+        if starts_with(in text[i..text.len()], in needle) {
+            return i;
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+// The target word of `arch` and `os_code`.
+fn verified_code(arch: u8, os_code: u8) -> u64 {
+    wrapping_add(wrapping_mul(widen_u64(arch), VERIFIED_ARCH_STRIDE), widen_u64(os_code))
+}
+
+// `{:?}` of `verified_codegen::Arch`.
+fn verified_arch_name(arch: u8) -> Str {
+    if arch == VERIFIED_X86_64 {
+        "X86_64"
+    } else if arch == VERIFIED_AARCH64 {
+        "Aarch64"
+    } else {
+        "Riscv64"
+    }
+}
+
+// `{:?}` of `verified_codegen::Os`.
+fn verified_os_name(os_code: u8) -> Str {
+    if os_code == VERIFIED_LINUX {
+        "Linux"
+    } else if os_code == VERIFIED_MACOS {
+        "MacOs"
+    } else {
+        "Windows"
+    }
+}
+
+// `verified_codegen::Target::from_triple` of `--target`, or `Target::host`
+// without one: `verified_code` of the architecture and the operating system, or 0 with
+// the error's display in `message`.
+fn verified_target(in o: Options, inout message: ChunkSeq[u8]) -> u64 {
+    if !has(in o, slot_target()) {
+        let host_arch = arch();
+        let host_os = os();
+        let a = if host_arch == arch_x86_64() {
+            VERIFIED_X86_64
+        } else if host_arch == arch_aarch64() {
+            VERIFIED_AARCH64
+        } else {
+            0
+        };
+        let s = if host_os == os_linux() {
+            VERIFIED_LINUX
+        } else if host_os == os_macos() {
+            VERIFIED_MACOS
+        } else if host_os == os_windows() {
+            VERIFIED_WINDOWS
+        } else {
+            0
+        };
+        let supported = (a != 0 && s == VERIFIED_LINUX)
+            || (a == VERIFIED_AARCH64 && s == VERIFIED_MACOS)
+            || (a == VERIFIED_X86_64 && s == VERIFIED_WINDOWS);
+        if !supported {
+            message.extend(
+                in "verified codegen: the host is not a supported target; pass --target".as_bytes()
+            );
+            return 0;
+        }
+        return verified_code(a, s);
+    }
+    let triple = value(in o, slot_target());
+    let t = triple.as_slice();
+    let a = if starts_with(in t, in "x86_64-".as_bytes()) {
+        VERIFIED_X86_64
+    } else if starts_with(in t, in "aarch64-".as_bytes())
+        || starts_with(in t, in "arm64-".as_bytes())
+    {
+        VERIFIED_AARCH64
+    } else if starts_with(in t, in "riscv64".as_bytes()) {
+        VERIFIED_RISCV64
+    } else {
+        message.extend(in "verified codegen: target: unsupported target '".as_bytes());
+        message.extend(in t);
+        message.extend(in "' (x86_64, aarch64 or riscv64 Linux, aarch64 macOS)".as_bytes());
+        return 0;
     };
-    if last != NEWLINE {
+    let s = if contains(in t, in "-linux".as_bytes()) {
+        VERIFIED_LINUX
+    } else if contains(in t, in "-apple-darwin".as_bytes())
+        || contains(in t, in "-macos".as_bytes())
+    {
+        VERIFIED_MACOS
+    } else if contains(in t, in "-windows".as_bytes()) {
+        VERIFIED_WINDOWS
+    } else {
+        message.extend(in "verified codegen: target: unsupported operating system in '".as_bytes());
+        message.extend(in t);
+        message.extend(in "'".as_bytes());
+        return 0;
+    };
+    if a != VERIFIED_AARCH64 && s == VERIFIED_MACOS {
+        message.extend(in "verified codegen: target: ".as_bytes());
+        message.extend(in verified_arch_name(a).as_bytes());
+        message.extend(in " macOS is not a verified-codegen target".as_bytes());
+        return 0;
+    }
+    if a != VERIFIED_X86_64 && s == VERIFIED_WINDOWS {
+        message.extend(in "verified codegen: target: ".as_bytes());
+        message.extend(in verified_arch_name(a).as_bytes());
+        message.extend(in " Windows is not a verified-codegen target".as_bytes());
+        return 0;
+    }
+    verified_code(a, s)
+}
+
+// Whether `text` is exactly `word`.
+fn same_bytes(in text: Slice[u8], in word: Str) -> bool {
+    starts_with(in text, in word.as_bytes()) && starts_with(in word.as_bytes(), in text)
+}
+
+// Whether `name` is the `{:?}` of a `verified_codegen::Unsupported`.
+fn unsupported_name(in name: Slice[u8]) -> bool {
+    same_bytes(in name, in "Float")
+        || same_bytes(in name, in "String")
+        || same_bytes(in name, in "Enum")
+        || same_bytes(in name, in "Match")
+        || same_bytes(in name, in "Index")
+        || same_bytes(in name, in "FunctionValue")
+        || same_bytes(in name, in "Generic")
+        || same_bytes(in name, in "Effect")
+        || same_bytes(in name, in "ExternalFunction")
+        || same_bytes(in name, in "StructuralEquality")
+        || same_bytes(in name, in "Type")
+        || same_bytes(in name, in "Operation")
+}
+
+// Whether `display` is one `VerifiedError::from_display` reads back to
+// the same display (anything else it reads as `Invalid(display)`).
+fn verified_display(in display: Slice[u8]) -> bool {
+    let n = display.len();
+    let head = VERIFIED_HEAD_LEN;
+    if !starts_with(in display, in "verified codegen: ".as_bytes()) {
         return false;
     }
-    for i in 0..wrapping_sub(n, 1) {
-        let c = match summary.try_get(i) {
+    if starts_with(in display[head..n], in "entry: ".as_bytes())
+        || starts_with(in display[head..n], in "target: ".as_bytes())
+        || starts_with(in display[head..n], in "limit: ".as_bytes())
+        || starts_with(in display[head..n], in "invalid input: ".as_bytes())
+    {
+        return true;
+    }
+    if !starts_with(in display[head..n], in "unsupported ".as_bytes()) {
+        return false;
+    }
+    let construct = wrapping_add(head, UNSUPPORTED_LEN);
+    let at = find(in display, construct, in " in '".as_bytes());
+    if at == n || !unsupported_name(in display[construct..at]) {
+        return false;
+    }
+    find(in display, wrapping_add(at, IN_QUOTE_LEN), in "': ".as_bytes()) != n
+}
+
+// The code generator's `error: <display>\n` summary, reported as Rust's
+// `decode_build` and `VerifiedError`'s display print it.
+fn verified_error(in summary: Slice[u8]) -> i64 eff [Ffi[HybridDriver]] {
+    let mut end = summary.len();
+    if end > ERROR_PREFIX_LEN {
+        let last = match summary.try_get(wrapping_sub(end, 1)) {
             Option::Some(c) => c,
             Option::None => 0,
         };
-        if c == NEWLINE {
-            return false;
+        if last == NEWLINE {
+            end = wrapping_sub(end, 1);
         }
     }
-    starts_with(in summary, in "error: verified codegen: unsupported ".as_bytes())
-        || starts_with(in summary, in "error: verified codegen: entry: ".as_bytes())
-        || starts_with(in summary, in "error: verified codegen: target: ".as_bytes())
-        || starts_with(in summary, in "error: verified codegen: limit: ".as_bytes())
-        || starts_with(in summary, in "error: verified codegen: invalid input: ".as_bytes())
+    let start = ERROR_PREFIX_LEN;
+    if verified_display(in summary[start..end]) {
+        return error(in summary[start..end]);
+    }
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in "verified codegen: invalid input: ".as_bytes());
+    m.extend(in summary[start..end]);
+    error(in m.as_slice())
 }
 
-// `--codegen verified`: the session encodes the optimized program (the
-// `verified_codegen` swap's input) for a target whose artifact is a Linux
-// ELF executable, and @vesper/verified-codegen builds it here; the
-// executable is written and made executable. Anything else (the swap off,
-// a Mach-O or COFF object, a program that does not encode, a code
-// generator error, a failed write) goes to the Rust pass, so its messages
-// stay Rust's.
-fn verified_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
-    let r = step(inout s, step_verified_input());
-    if is_failure(r) {
-        return pass_failed(in s, r);
+// `<path>: <io error>`, as Rust's build reports a failed write.
+fn path_failed(in path: Slice[u8], failed: u64) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in path);
+    m.extend(in ": ".as_bytes());
+    let t = io_error_text(wrapping_sub(failed, 2));
+    m.extend(in t.as_slice());
+    error(in m.as_slice())
+}
+
+// Write `bytes` to `path`: 0, or `error_word` of the failure.
+fn write_bytes_to(in path: Slice[u8], in bytes: Slice[u8]) -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        write_path(in path, in bytes);
+        0
+    } with {
+        return v => v,
+        raise(e, _) => error_word(e),
     }
-    if r == 0 {
-        return pass(inout s, step_verified_build());
-    }
-    let input = text(in s);
-    let b = input.as_slice();
-    // The summary's target text, then the code generator's input.
-    let ll = word_at(in b, 0);
-    let start = wrapping_add(8, wrapping_mul(wrapping_add(ll, 7) / 8, 8));
-    let words = compile_bytes(in b[start..b.len()]);
-    let mut summary: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let at = unpack(in words, 0, inout summary);
-    // A code generator error is reported here: the Rust pass would build
-    // the same input again and print the same text (each prefix below is
-    // one `VerifiedError::from_display` reads back exactly).
-    if verified_error_text(in summary.as_slice()) {
-        let line = summary.as_slice();
-        let start = ERROR_PREFIX_LEN;
-        return error(in line[start..wrapping_sub(line.len(), 1)]);
-    }
-    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let rest = unpack(in words, at, inout bytes);
-    // `code <bytes>` is the summary's first line.
-    let prefix = "code ".as_bytes();
-    let mut ok = summary.len() > prefix.len();
-    for i in 0..prefix.len() {
-        let a = match summary.try_get(i) {
-            Option::Some(c) => widen_u64(c),
-            Option::None => 256,
-        };
-        let p = match prefix.try_get(i) {
-            Option::Some(c) => widen_u64(c),
-            Option::None => 257,
-        };
-        if a != p {
-            ok = false;
-        }
-    }
-    if !ok {
-        return pass(inout s, step_verified_build());
-    }
-    let mut code: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    for i in prefix.len()..summary.len() {
-        let c = match summary.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => NEWLINE,
-        };
-        if c == NEWLINE {
-            break;
-        }
-        code.push(c);
-    }
-    let mut path = value(in o, slot_output());
-    if !has(in o, slot_output()) {
-        path.extend(in "a.out".as_bytes());
-    }
-    let name = match String::from_utf8(in path.as_slice()) {
+}
+
+// Remove `path`, ignoring a failure (the Rust build's `let _ =`).
+fn remove_quietly(in path: Slice[u8]) eff [Ffi[StdFs]] {
+    let name = match String::from_utf8(in path) {
         Option::Some(p) => p,
-        Option::None => return pass(inout s, step_verified_build()),
+        Option::None => return,
     };
-    let failed = handle Fail[IoError] in {
-        write_path(in path.as_slice(), in bytes.as_slice());
-        set_permissions(in name, 493);
+    let _ = handle Fail[IoError] in {
+        remove_file(in name);
         0
     } with {
         return v => v,
         raise(e, _) => error_word(e),
     };
-    if failed != 0 {
-        return pass(inout s, step_verified_build());
+}
+
+// `--codegen verified`: the target is parsed here, the session checks the
+// program and encodes it (the `verified_codegen` swap's input), and
+// @vesper/verified-codegen builds it (a program the input cannot hold, or
+// the swap off, comes back built by Rust's code generator); the
+// executable is written here, or the Mach-O or COFF object is written and
+// linked (`verified_codegen::build_command`).
+fn verified_build(
+    inout s: Session,
+    in o: Options
+) -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[HybridDriver]] {
+    let mut target_error: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let target = verified_target(in o, inout target_error);
+    let target_arch = wrapping_u8(target / VERIFIED_ARCH_STRIDE);
+    let target_os = wrapping_u8(target % VERIFIED_ARCH_STRIDE);
+    // The program's check and refusals come before the target's error.
+    let mut request: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if target_arch != 0 {
+        request.push(target_arch);
+        request.push(target_os);
+    }
+    let r = step_with(inout s, step_verified_input(), in request.as_slice());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    if target_arch == 0 {
+        return error(in target_error.as_slice());
+    }
+    let input = text(in s);
+    let b = input.as_slice();
+    let mut code: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if word_at(in b, 0) == VERIFIED_RUST_BUILT {
+        write_u64(inout code, word_at(in b, VERIFIED_WORD_BYTES));
+        let len = word_at(in b, wrapping_mul(2, VERIFIED_WORD_BYTES));
+        let start = wrapping_mul(3, VERIFIED_WORD_BYTES);
+        bytes.extend(in b[start..wrapping_add(start, len)]);
+    } else {
+        let start = VERIFIED_WORD_BYTES;
+        let words = compile_bytes(in b[start..b.len()]);
+        let mut summary: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let at = unpack(in words, 0, inout summary);
+        if starts_with(in summary.as_slice(), in "error: ".as_bytes()) {
+            return verified_error(in summary.as_slice());
+        }
+        let _ = unpack(in words, at, inout bytes);
+        // `code <bytes>` is the summary's first line.
+        let prefix = "code ".as_bytes();
+        if !starts_with(in summary.as_slice(), in prefix) {
+            return error(
+                in "verified codegen: invalid input: Vesper verified codegen: no code size"
+                    .as_bytes()
+            );
+        }
+        for i in prefix.len()..summary.len() {
+            let c = match summary.try_get(i) {
+                Option::Some(c) => c,
+                Option::None => NEWLINE,
+            };
+            if c == NEWLINE {
+                break;
+            }
+            code.push(c);
+        }
+    }
+    let mut path = value(in o, slot_output());
+    if !has(in o, slot_output()) {
+        path.extend(in "a.out".as_bytes());
+    }
+    let windows_host = os() == os_windows();
+    if target_os == VERIFIED_LINUX {
+        let failed = write_bytes_to(in path.as_slice(), in bytes.as_slice());
+        if failed != 0 {
+            return path_failed(in path.as_slice(), failed);
+        }
+        // `make_executable`, a no-op off Unix.
+        if !windows_host {
+            let name = match String::from_utf8(in path.as_slice()) {
+                Option::Some(p) => p,
+                Option::None => String::new(),
+            };
+            let failed = handle Fail[IoError] in {
+                set_permissions(in name, EXECUTABLE_MODE);
+                0
+            } with {
+                return v => v,
+                raise(e, _) => error_word(e),
+            };
+            if failed != 0 {
+                return path_failed(in path.as_slice(), failed);
+            }
+        }
+    } else if target_os == VERIFIED_MACOS {
+        let object = with_extension(in path.as_slice(), in "vesper.o", windows_host);
+        let failed = write_bytes_to(in object.as_slice(), in bytes.as_slice());
+        if failed != 0 {
+            return path_failed(in object.as_slice(), failed);
+        }
+        let linker = value(in o, slot_linker());
+        let linked = link_with(
+            in linker.as_slice(),
+            in object.as_slice(),
+            in path.as_slice(),
+            false
+        );
+        remove_quietly(in object.as_slice());
+        if linked == 1 {
+            return error(in "linker failed".as_bytes());
+        }
+        if linked != 0 {
+            let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            m.extend(in "could not invoke linker '".as_bytes());
+            m.extend(in linker.as_slice());
+            m.extend(in "': ".as_bytes());
+            let t = io_error_text(wrapping_sub(linked, 2));
+            m.extend(in t.as_slice());
+            return error(in m.as_slice());
+        }
+    } else {
+        let object = with_extension(in path.as_slice(), in "vesper.obj", windows_host);
+        let failed = write_bytes_to(in object.as_slice(), in bytes.as_slice());
+        if failed != 0 {
+            return path_failed(in object.as_slice(), failed);
+        }
+        // As for the Cranelift path, the default `cc` means "find the
+        // MSVC linker".
+        let request = windows_link_request(in object.as_slice(), in path.as_slice(), in o);
+        let q = step_with(inout s, step_windows_link(), in request.as_slice());
+        remove_quietly(in object.as_slice());
+        if is_failure(q) {
+            return pass_failed(in s, q);
+        }
     }
     let line = fmt{
         new;
         write_str(in "built "),
         write_bytes(in path.as_slice()),
         write_str(in " (verified codegen, "),
-        write_bytes(in b[8..wrapping_add(8, ll)]),
+        write_str(in verified_arch_name(target_arch)),
+        write_str(in " "),
+        write_str(in verified_os_name(target_os)),
         write_str(in ", "),
         write_bytes(in code.as_slice()),
         write_str(in " bytes of code)\n")

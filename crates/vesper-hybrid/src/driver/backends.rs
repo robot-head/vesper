@@ -26,27 +26,6 @@ impl Session {
                 print!("{summary}");
                 Ok(0)
             }
-            Step::VerifiedBuild => {
-                if self.verified_input {
-                    crate::vesper_hybrid::DRIVER_VERIFIED_FALLBACKS.fetch_add(1, Relaxed);
-                }
-                let world = &self.checked()?.world;
-                vesper::dyn_trait::refuse(world, "verified code generator")
-                    .map_err(|d| format!("{}: {}", d.code, d.message))?;
-                let path = o.output().unwrap_or_else(|| PathBuf::from("a.out"));
-                println!(
-                    "{}",
-                    vesper::verified_codegen::build_command(
-                        world,
-                        o.entry(),
-                        o.target(),
-                        o.optimize,
-                        o.linker(),
-                        &path,
-                    )?
-                );
-                Ok(0)
-            }
             Step::WasmBuild => {
                 if self.wasm_input {
                     crate::vesper_hybrid::DRIVER_WASM_FALLBACKS.fetch_add(1, Relaxed);
@@ -105,26 +84,28 @@ impl Session {
                 }
             }
             Step::VerifiedInput => {
-                // The Vesper driver builds and writes the executable itself
-                // from the `verified_codegen` swap's input; 0 leaves the
-                // build to `VerifiedBuild` (the swap is off, the target is
-                // not a Linux ELF one, or the program does not encode).
+                // `[arch, os]`: the target the Vesper driver parsed
+                // (`verified_target` in modules/driver/src/lib.ves), or
+                // nothing when it is not one: the check and the refusal still
+                // come first, and 0 leaves the target's error to the driver.
+                // 1: the text holds the code generator's input, or the
+                // artifact Rust's code generator built.
                 let world = &self.checked()?.world;
                 vesper::dyn_trait::refuse(world, "verified code generator")
                     .map_err(|d| format!("{}: {}", d.code, d.message))?;
-                match crate::vesper_hybrid::verified_build_input(
-                    world,
-                    o.entry(),
-                    o.target(),
-                    o.optimize,
-                ) {
-                    Some(input) => {
-                        self.text = input;
-                        self.verified_input = true;
-                        crate::vesper_hybrid::DRIVER_VERIFIED_INPUTS.fetch_add(1, Relaxed);
+                match *arg {
+                    [] => Ok(0),
+                    [arch, os] => {
+                        self.text = crate::vesper_hybrid::verified_build_input(
+                            world,
+                            o.entry(),
+                            arch,
+                            os,
+                            o.optimize,
+                        )?;
                         Ok(1)
                     }
-                    None => Ok(0),
+                    _ => Err("driver: bad verified build request".into()),
                 }
             }
             Step::EbpfInput => {

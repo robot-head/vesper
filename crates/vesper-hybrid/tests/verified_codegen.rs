@@ -249,20 +249,13 @@ fn hybrid_verified_builds_match_rust() {
 }
 
 /// `vesper build --codegen verified` of `examples/fibonacci.ves` with the
-/// hybrid's statistics on (`driver`: the Vesper driver step on): the number
-/// on the stats line that starts with `prefix` and ends with `suffix`.
-fn reported(driver: bool, prefix: &str, suffix: &str) -> u64 {
+/// hybrid's statistics on: the stats line that holds `what`.
+fn reported(what: &str) -> String {
     let root = repository();
-    let dir = std::env::temp_dir().join(format!(
-        "vesper-hybrid-verified-one-{}-{driver}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("vesper-hybrid-verified-one-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let mut command = Command::new(hybrid());
-    if !driver {
-        command.env("VESPER_HYBRID_DRIVER_VERIFIED", "0");
-    }
-    let output = command
+    let output = Command::new(hybrid())
         .current_dir(&dir)
         .env("VESPER_HYBRID_STATS", "1")
         .args([
@@ -282,32 +275,18 @@ fn reported(driver: bool, prefix: &str, suffix: &str) -> u64 {
     let stderr = String::from_utf8_lossy(&output.stderr);
     stderr
         .lines()
-        .filter(|l| l.contains(suffix))
-        .find_map(|l| l.strip_prefix(prefix))
-        .and_then(|l| l.split(' ').next())
-        .and_then(|n| n.parse().ok())
-        .unwrap_or_else(|| panic!("no {prefix:?} report in {stderr:?}"))
+        .find(|l| l.contains(what))
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("no {what:?} report in {stderr:?}"))
 }
 
-/// The verified code generator really runs from Vesper in the hybrid build:
-/// the Rust driver's VerifiedBuild pass calls it with the driver step off.
-#[test]
-fn verified_codegen_runs_from_vesper() {
-    let calls = reported(
-        false,
-        "vesper-hybrid: verified_codegen built ",
-        "verified artifacts",
-    );
-    assert!(
-        calls > 0,
-        "the Vesper verified code generator built nothing"
-    );
-}
-
-/// The Vesper driver's VerifiedInput step compiles and writes the
-/// executable itself.
+/// The Vesper driver builds the executable with @vesper/verified-codegen
+/// and writes it itself, with no build left to Rust's code generator.
 #[test]
 fn verified_build_runs_in_the_vesper_driver() {
-    let driven = reported(true, "vesper-hybrid: driver built ", "verified executables");
-    assert!(driven > 0, "the Vesper driver wrote no verified executable");
+    let line = reported(" verified executables in Vesper ");
+    assert_eq!(
+        line,
+        "vesper-hybrid: driver built 1 verified executables in Vesper (0 built by Rust's code generator)",
+    );
 }

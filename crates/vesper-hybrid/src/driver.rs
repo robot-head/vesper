@@ -311,8 +311,6 @@ pub struct Session {
     wasm_input: bool,
     /// `EbpfInput` did.
     ebpf_input: bool,
-    /// `VerifiedInput` did.
-    verified_input: bool,
 }
 
 /// What `check::check` keeps between the parts the Vesper driver
@@ -341,7 +339,8 @@ enum Step {
     // (`IoError`) moved to the Vesper driver (#1896), 17 (`CheckMain`)
     // to the world it holds (#2024), and 11 (`EmitInterface`, the package
     // name of an interface export) to the Vesper driver's manifest read
-    // (#1893); numbers are not reused.
+    // (#1893), and 15 (`VerifiedBuild`) into the Vesper driver's verified
+    // build (#1895); numbers are not reused.
     Load = 2,
     EbpfBuild = 3,
     Parse = 4,
@@ -354,7 +353,6 @@ enum Step {
     Optimize = 12,
     Run = 13,
     Jit = 14,
-    VerifiedBuild = 15,
     WasmBuild = 16,
     NativeObject = 18,
     WindowsLink = 20,
@@ -387,7 +385,7 @@ enum Step {
     WorldBegin = 81,
 }
 
-const STEPS: [Step; 35] = [
+const STEPS: [Step; 34] = [
     Step::Load,
     Step::EbpfBuild,
     Step::Parse,
@@ -400,7 +398,6 @@ const STEPS: [Step; 35] = [
     Step::Optimize,
     Step::Run,
     Step::Jit,
-    Step::VerifiedBuild,
     Step::WasmBuild,
     Step::NativeObject,
     Step::WindowsLink,
@@ -542,7 +539,6 @@ impl Session {
             | Step::Jit => self.native_step(step, arg),
             Step::WasmBuild
             | Step::EbpfBuild
-            | Step::VerifiedBuild
             | Step::WasmInput
             | Step::EbpfInput
             | Step::VerifiedInput => self.backends_step(step, arg),
@@ -639,7 +635,6 @@ pub mod host {
                     text: vec![],
                     wasm_input: false,
                     ebpf_input: false,
-                    verified_input: false,
                 }))
             }
             None => std::ptr::null_mut(),
