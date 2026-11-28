@@ -53,7 +53,7 @@ use @vesper/cranelift::{
     ins_uload32, mem_can_move, mem_readonly, mem_trusted, data_align, data_define, data_new,
     declare_anonymous_data, define_data, import_data, ins_symbol_value, call_conv_default,
     declare_function, ext_none, ext_sext, ext_uext, linkage_import, sig_new, sig_param_ext,
-    sig_return_ext, ty_i16
+    sig_return_ext, ty_i16, SigId, import_signature, ins_call_indirect
 };
 use super::{
     BODY_ERROR, DECLINED, HANDLED, coerce, emit_overflow_test, kind_max_imm, kind_min_imm,
@@ -417,6 +417,7 @@ const FOREIGN_PARAM_SLICE: u64 = 3;
 const FOREIGN_SOURCE_SLICE_LOCAL: u64 = 5;
 const FOREIGN_SOURCE_SLICE_TEMP: u64 = 6;
 const FOREIGN_RESULT_SCALAR: u64 = 1;
+const FOREIGN_CALL_INDIRECT: u64 = 2;
 const FOREIGN_RESULT_OPTION_HANDLE: u64 = 2;
 const FOREIGN_BITS_MASK: u64 = 255;
 const FOREIGN_SIGNED: u64 = 256;
@@ -1361,6 +1362,10 @@ impl Body {
             temps.push(temp(inout b, self.value(at64(in ops, k))).id);
         }
         let sig = sig_new(inout m, call_conv_default());
+        // A callback type's call: its first argument's handle word is the
+        // pointer called, not a C argument.
+        let indirect = w.next() == FOREIGN_CALL_INDIRECT;
+        let mut pointer = Value { id: invalid() };
         let nargs = w.next();
         let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
         let mut ti: u64 = 0;
@@ -1460,6 +1465,8 @@ impl Body {
                 sig_param_ext(inout m, sig, ty_i64(), ext_none());
                 args.push(view.id);
                 args.push(len.id);
+            } else if form == FOREIGN_PARAM_HANDLE && indirect && k == 0 {
+                pointer = value;
             } else if form == FOREIGN_PARAM_HANDLE {
                 // `ParameterType::Handle`: the word, as a C pointer.
                 sig_param_ext(inout m, sig, module_pointer_type(in m), ext_none());
@@ -1489,9 +1496,7 @@ impl Body {
             let offset = w.next();
             let none = w.next();
             sig_return_ext(inout m, sig, module_pointer_type(in m), ext_none());
-            let callee = declare_function(inout m, in name.as_slice(), linkage_import(), sig);
-            let fun = import_function(inout b, inout m, callee);
-            let _ = ins_call(inout b, fun, in args.as_slice());
+            self.foreign_call(inout b, inout m, in name, sig, indirect, pointer, in args);
             let word = inst_result(inout b, 0);
             let present = ins_icmp_imm(inout b, cc_ne(), word, 0);
             let ptr = self.zeroed(inout b, in m, size);
@@ -1506,9 +1511,7 @@ impl Body {
         if result == FOREIGN_RESULT_SCALAR {
             sig_return_ext(inout m, sig, foreign_carrier(scalar), foreign_ext(scalar));
         }
-        let callee = declare_function(inout m, in name.as_slice(), linkage_import(), sig);
-        let fun = import_function(inout b, inout m, callee);
-        let _ = ins_call(inout b, fun, in args.as_slice());
+        self.foreign_call(inout b, inout m, in name, sig, indirect, pointer, in args);
         if result == FOREIGN_RESULT_SCALAR {
             let raw = inst_result(inout b, 0);
             if foreign_bits(scalar) == WORD_BITS {
@@ -1520,6 +1523,29 @@ impl Body {
             }
         } else {
             ins_iconst(inout b, ty_i64(), 0)
+        }
+    }
+
+    // The call of a foreign operation under C signature `sig`: through
+    // `pointer` (`Callee::Indirect`), or of the imported symbol `name`
+    // (`foreign_import`).
+    fn foreign_call(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        in name: ChunkSeq[u8],
+        sig: SigId,
+        indirect: bool,
+        pointer: Value,
+        in args: ChunkSeq[u32]
+    ) eff [Ffi[Cranelift]] {
+        if indirect {
+            let sig_ref = import_signature(inout b, in m, sig);
+            let _ = ins_call_indirect(inout b, sig_ref, pointer, in args.as_slice());
+        } else {
+            let callee = declare_function(inout m, in name.as_slice(), linkage_import(), sig);
+            let fun = import_function(inout b, inout m, callee);
+            let _ = ins_call(inout b, fun, in args.as_slice());
         }
     }
 

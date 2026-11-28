@@ -23,9 +23,9 @@ use @vesper/check-data::types::{TyKind, Types};
 use @vesper/check-data::util::{inc32, n32, u64_at, w};
 use @vesper/check-data::world::{Adt, EffectRow, Field, Variant, World, set_by_symbol};
 use @vesper/ffi-lowering::{
-    BODY_CALL_DIRECT, BODY_CALL_OTHER, S, Sh, Sp, body_call, find_ge, find_gh, find_gs, generate,
-    read_library, s_new, slice_count, sort_funs, sorted_enum_names, sorted_handle_names,
-    sorted_struct_rows
+    BODY_CALL_DIRECT, BODY_CALL_INDIRECT, BODY_CALL_OTHER, S, Sh, Sp, body_call, find_ge, find_gh,
+    find_gs, generate, read_library, s_new, slice_count, sort_funs, sorted_enum_names,
+    sorted_handle_names, sorted_struct_rows
 };
 use @vesper/place-ir::{Program};
 use @vesper/place-ir::codes::{Op};
@@ -1055,9 +1055,8 @@ pub fn put_foreign_facts(in p: Program, in names: Names, inout f: Foreign, inout
     // walk calls another way) stays on the walk (foreign_facts.rs).
     let mut kept: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for k in 0..row_callee.len() {
-        if words.try_get(row_at.try_get(k).unwrap_or(0)).unwrap_or(BODY_CALL_OTHER)
-            != BODY_CALL_DIRECT
-        {
+        let call = words.try_get(row_at.try_get(k).unwrap_or(0)).unwrap_or(BODY_CALL_OTHER);
+        if call != BODY_CALL_DIRECT && call != BODY_CALL_INDIRECT {
             continue;
         }
         let symbol = row_symbol.try_get(k).unwrap_or(NONE32);
