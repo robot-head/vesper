@@ -213,36 +213,6 @@ vesper_crate(
         ],
         # @vesper-std/sort, core and bytes (#1096) as a driver's dependencies.
         "test/std_sort": [":files"],
-        "test/imported_source_tests": glob([
-            "packages/vesper-ast/Loom.toml",
-            "packages/vesper-ast/src/*.ves",
-            "packages/vesper-check-data/Loom.toml",
-            "packages/vesper-check-data/src/*.ves",
-            "packages/vesper-front/Loom.toml",
-            "packages/vesper-front/src/*.ves",
-            "packages/vesper-std/*/Loom.toml",
-            "packages/vesper-std/*/src/*.ves",
-        ]) + [
-            # @vesper/prism-h3 depends on @vesper/prism-bytes.
-            "//crates/vesper-prism:files",
-            "//crates/vesper-prism-h3:files",
-            "//crates/vesper-semver:files",
-        ],
-        # sort imports `guard` and `when` from @vesper-std/sugar and the
-        # Option methods from @vesper-std/core (#2026), so testing
-        # sort/src/unstable.ves resolves sort's manifest and its dependencies.
-        "test/test_runner_cli": glob([
-            "packages/vesper-std/*/src/*.ves",
-        ]) + [
-            "packages/vesper-std/core/Loom.toml",
-            "packages/vesper-std/sort/Loom.toml",
-            "packages/vesper-std/sugar/Loom.toml",
-            "//crates/vesper-crucible:files",
-            "//crates/vesper-lean-syntax:files",
-            "//crates/vesper-simpulse:files",
-            "packages/vesper-ast/src/text.ves",
-            "packages/vesper-front/src/util.ves",
-        ],
         # Self-hosting SH0 lane 7 (#1129): the front end v2 against the Rust
         # parser on the root package's `.ves` files and the parser test suites.
         # Anchored globs: a root `**` glob without the vesper_crate `_NEVER`
@@ -553,11 +523,13 @@ vesper_crate(
             "tests/ffi_handles.rs",
             "tests/ffi_lowering.rs",
             "tests/package_submodule_exports.rs",
-            "tests/test_runner_cli.rs",
             "tests/tree_abi.rs",
             "tests/vsys_packages.rs",
             "src/native_export/directives.rs",
-        ]),
+        ]) + [
+            # tests/test_runner_cli.rs moved there (#2743).
+            "//crates/vesper-cli-tests:files",
+        ],
         # SH4 lane 13 part 2 (#1287): the FFI rewriter in Vesper against
         # src/ffi_lowering's over the FFI suites' sources and fixtures, and
         # the repository's .ves files. Anchored globs.
@@ -570,10 +542,12 @@ vesper_crate(
             "tests/ffi_handles.rs",
             "tests/ffi_lowering.rs",
             "tests/package_submodule_exports.rs",
-            "tests/test_runner_cli.rs",
             "tests/tree_abi.rs",
             "tests/vsys_packages.rs",
-        ]),
+        ]) + [
+            # tests/test_runner_cli.rs moved there (#2743).
+            "//crates/vesper-cli-tests:files",
+        ],
         # SH4 lane 13 part 2 (#1287 / #1714): FFI handle drops in Vesper.
         "test/self_host_ffi_drops": glob([
             "packages/**",
@@ -833,10 +807,11 @@ vesper_crate(
             "src/**/*.ves",
             "tests/**/*.ves",
             "src/test_runner.rs",
-            "tests/anvil_cli.rs",
-            "tests/imported_source_tests.rs",
-            "tests/test_runner_cli.rs",
-        ]) + ["//crates/vesper-syntax:files"],
+        ]) + [
+            # The runner's CLI suites moved there (#2743).
+            "//crates/vesper-cli-tests:files",
+            "//crates/vesper-syntax:files",
+        ],
         # Part 2: doctest fence extraction and the token preflight against
         # doctest_extract on the same .ves files and their mutants.
         "test/self_host_doctest_extract": glob([
@@ -853,9 +828,10 @@ vesper_crate(
             "src/**/*.ves",
             "tests/**/*.ves",
             "src/test_mutants.rs",
-            "tests/anvil_cli.rs",
-            "tests/test_runner_cli.rs",
-        ]),
+        ]) + [
+            # The runner's CLI suites moved there (#2743).
+            "//crates/vesper-cli-tests:files",
+        ],
         # Part 4: the Anvil function graph and digests against
         # anvil_hash::FunctionGraph on the same .ves files and suites.
         "test/self_host_anvil_graph": glob([
@@ -864,9 +840,10 @@ vesper_crate(
             "src/**/*.ves",
             "tests/**/*.ves",
             "src/anvil_hash.rs",
-            "tests/anvil_cli.rs",
-            "tests/test_runner_cli.rs",
-        ]),
+        ]) + [
+            # The runner's CLI suites moved there (#2743).
+            "//crates/vesper-cli-tests:files",
+        ],
         # Part 5: the doctest source guard against doctest_guard::rust_guard
         # on the same .ves files, their functions and the doctest suites.
         "test/self_host_doctest_guard": glob([
@@ -970,13 +947,15 @@ vesper_crate(
             "packages/vesper-lsp-features/**",
             "packages/vesper-lsp-format/**",
             "packages/vesper-lsp-publish/**",
-            # The macro preview's Forge programs (part 11c).
+            # The macro preview's Forge programs (part 11c); the CLI ones are
+            # in crates/vesper-cli-tests (below).
             "tests/forge_*.rs",
             "packages/vesper-ast/**",
             "packages/vesper-check-data/**",
             "packages/vesper-front/**",
             "packages/vesper-std/**",
         ]) + [
+            "//crates/vesper-cli-tests:files",
             "//crates/vesper-diagnostics:files",
             "//crates/vesper-fmt:files",
             "//crates/vesper-span:files",
@@ -1153,10 +1132,6 @@ vesper_crate(
             "resources:memory:6144",
             "resources:cpu:4",
         ],
-        "test/forge_provenance_cli": [
-            "resources:memory:9216",
-            "resources:cpu:1",
-        ],
         # Rust's audit and the port's in turn, each Lean -M8192.
         "test/self_host_proof_audit": [
             "resources:memory:9216",
@@ -1275,11 +1250,6 @@ vesper_crate(
     # Long, platform-neutral Lean replays run on Linux (BuildBuddy) only; see
     # "Linux-only suites" in docs/ci-platforms.md.
     test_target_compatible_with = {
-        # Macro provenance audits replay Std serially, like proof_audit_cli.
-        "test/forge_provenance_cli": select({
-            "@platforms//os:macos": ["@platforms//:incompatible"],
-            "//conditions:default": [],
-        }),
         # proof_audit_cli's replays twice over (Rust and the Vesper port).
         "test/self_host_proof_audit": select({
             "@platforms//os:macos": ["@platforms//:incompatible"],
@@ -1374,10 +1344,7 @@ vesper_crate(
         # SH6 lane 2 (#1397): builds bootstrap/seed/runner/vwasm.c with the
         # host C compiler and runs ~270 corpus programs in Wasmtime and vwasm.
         "test/stage2_seed_runner": "long",
-        "test/forge_provenance_cli": "long",
         "test/verify_extract_cli": "long",
-        # Front-end and AST tests check and lower their full package closures.
-        "test/imported_source_tests": "long",
         "test/replay42_kernel": "long",
         # Runs the Vesper-source front end on every repository source; about
         # 2.5 min on a 4-core Linux host, over 300 s on the macOS runner.
@@ -2411,6 +2378,10 @@ filegroup(
         "lean/**",
         "tools/proof-audit/**",
         "tests/fixtures/format_proof/**",
+        "tests/fixtures/source_macro_parameters/**",
+        "tests/fixtures/source_macro_tuples/**",
+        "tests/fixtures/source_macros/**",
+        "assets/fonts/jetbrains-mono/**",
     ]),
     visibility = ["//crates/vesper-cli-tests:__pkg__"],
 )

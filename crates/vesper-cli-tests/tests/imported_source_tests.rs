@@ -1,9 +1,10 @@
+mod support;
+
 use serde_json::Value;
-use std::process::Command;
 
 fn run_suites(suites: &[(&str, u64)]) {
     for &(path, count) in suites {
-        let output = Command::new(env!("CARGO_BIN_EXE_vesper"))
+        let output = support::vesper()
             .args(["test", path, "--no-cache", "--json"])
             .output()
             .unwrap();

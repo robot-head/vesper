@@ -1,4 +1,6 @@
 //! Actual parameter-aware source compilation and explicit editor preview acceptance.
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -13,8 +15,7 @@ use std::{
 fn binary() -> PathBuf {
     let path = std::env::var_os("VESPER_SOURCE_MACRO_PARAMETERS_BINARY")
         .map(PathBuf::from)
-        .or_else(|| option_env!("CARGO_BIN_EXE_vesper").map(PathBuf::from))
-        .expect("actual vesper or VESPER_SOURCE_MACRO_PARAMETERS_BINARY required");
+        .unwrap_or_else(support::vesper_path);
     let exe = PathBuf::from(format!("{}.exe", path.display()));
     if exe.is_file() { exe } else { path }
 }
@@ -90,7 +91,7 @@ impl Fixture {
     }
     fn command(&self, mode: &str, args: &[&str]) -> Output {
         let output = output(
-            Command::new(binary())
+            support::command(&binary())
                 .args(["forge", mode])
                 .arg(&self.path)
                 .args(args),
@@ -213,7 +214,12 @@ impl Fixture {
     fn run_value(&self, expanded: &str, expected: &str) {
         let path = self.dir.join("expanded.ves");
         fs::write(&path, expanded.as_bytes()).unwrap();
-        let checked = output(Command::new(binary()).arg("check").arg(&path).arg("--json"));
+        let checked = output(
+            support::command(&binary())
+                .arg("check")
+                .arg(&path)
+                .arg("--json"),
+        );
         assert!(
             checked.status.success(),
             "{}",
@@ -223,7 +229,7 @@ impl Fixture {
             serde_json::from_slice::<Value>(&checked.stdout).unwrap(),
             json!([])
         );
-        let run = output(Command::new(binary()).arg("run").arg(&path));
+        let run = output(support::command(&binary()).arg("run").arg(&path));
         assert!(
             run.status.success(),
             "{}",
@@ -249,23 +255,25 @@ fn range(value: &Value, source: &str) -> std::ops::Range<usize> {
     );
     start..end
 }
-const GLOBAL: &str = include_str!("fixtures/source_macro_parameters/global_capture.ves");
-const REPEATED: &str = include_str!("fixtures/source_macro_parameters/repeated.ves");
-const PURE: &str = include_str!("fixtures/source_macro_parameters/helper_pure.ves");
-const DUPLICATE: &str = include_str!("fixtures/source_macro_parameters/linear_duplicate.ves");
-const LEAK: &str = include_str!("fixtures/source_macro_parameters/linear_leak.ves");
+const GLOBAL: &str =
+    include_str!("../../../tests/fixtures/source_macro_parameters/global_capture.ves");
+const REPEATED: &str = include_str!("../../../tests/fixtures/source_macro_parameters/repeated.ves");
+const PURE: &str = include_str!("../../../tests/fixtures/source_macro_parameters/helper_pure.ves");
+const DUPLICATE: &str =
+    include_str!("../../../tests/fixtures/source_macro_parameters/linear_duplicate.ves");
+const LEAK: &str = include_str!("../../../tests/fixtures/source_macro_parameters/linear_leak.ves");
 
 #[test]
 fn actual_parameter_hygiene_and_supported_passes_expand_check_and_run_42() {
     for source in [
         GLOBAL,
         REPEATED,
-        include_str!("fixtures/source_macro_parameters/argument_capture.ves"),
-        include_str!("fixtures/source_macro_parameters/reference_capture.ves"),
-        include_str!("fixtures/source_macro_parameters/initializer.ves"),
-        include_str!("fixtures/source_macro_parameters/passes.ves"),
-        include_str!("fixtures/source_macro_parameters/linear_consume.ves"),
-        include_str!("fixtures/source_macro_parameters/self_parameter.ves"),
+        include_str!("../../../tests/fixtures/source_macro_parameters/argument_capture.ves"),
+        include_str!("../../../tests/fixtures/source_macro_parameters/reference_capture.ves"),
+        include_str!("../../../tests/fixtures/source_macro_parameters/initializer.ves"),
+        include_str!("../../../tests/fixtures/source_macro_parameters/passes.ves"),
+        include_str!("../../../tests/fixtures/source_macro_parameters/linear_consume.ves"),
+        include_str!("../../../tests/fixtures/source_macro_parameters/self_parameter.ves"),
     ] {
         let fixture = Fixture::new(source);
         let checked = fixture.check(&[]);
@@ -318,13 +326,13 @@ fn real_linear_errors_and_invalid_original_headers_never_publish_acceptance() {
         );
     }
     let duplicate = Fixture::new(include_str!(
-        "fixtures/source_macro_parameters/duplicate_names.ves"
+        "../../../tests/fixtures/source_macro_parameters/duplicate_names.ves"
     ))
     .reject(&[]);
     assert_eq!(duplicate["stage"], "parse");
     assert!(duplicate["message"].as_str().unwrap().contains("duplicate"));
     for source in [
-        include_str!("fixtures/source_macro_parameters/projected.ves"),
+        include_str!("../../../tests/fixtures/source_macro_parameters/projected.ves"),
         "macro keep($x:expr)->expr{quote{$x}} fn forward[T:mod copy](in n:T)->T{keep!(n)}",
         "macro keep($x:expr)->expr{quote{$x}} fn forward(in n:i64)->i64{keep!(n)",
     ] {
@@ -385,7 +393,7 @@ fn run(mut messages: Vec<Value>) -> Vec<Value> {
         bytes.extend_from_slice(&body);
         bytes
     });
-    let mut child = Command::new(binary())
+    let mut child = support::command(&binary())
         .arg("lsp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

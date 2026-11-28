@@ -17,11 +17,14 @@ serde_json = { workspace = true }
 # default (#1397 R7).
 vesper-bench = { path = "../vesper-bench/seed", package = "vesper-bench-seed" }
 vesper-chrono = { path = "../vesper-chrono" }
+vesper-doc = { path = "../vesper-doc" }
 vesper-ffi = { path = "../vesper-ffi" }
-vesper-highlight = { path = "../vesper-highlight/seed", package = "vesper-highlight-seed" }
+vesper-highlight = { path = "../vesper-highlight/seed", package = "vesper-highlight-seed", features = ["shot"] }
 vesper-lean-syntax = { path = "../vesper-lean-syntax/seed", package = "vesper-lean-syntax-seed" }
 vesper-loom-calculus = { path = "../vesper-loom-calculus/seed", package = "vesper-loom-calculus-seed" }
 vesper-loom-cas = { path = "../vesper-loom-cas/seed", package = "vesper-loom-cas-seed" }
+# The LSP framing and envelope checks the server output must pass.
+vesper-lsp = { path = "../vesper-lsp" }
 vesper-semver = { path = "../vesper-semver/seed", package = "vesper-semver-seed" }
 vesper-simd = { path = "../vesper-simd/seed", package = "vesper-simd-seed" }
 

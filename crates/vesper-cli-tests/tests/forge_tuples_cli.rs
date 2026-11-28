@@ -1,4 +1,6 @@
 //! Actual tuple-aware source compilation and explicit editor preview acceptance.
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -13,8 +15,7 @@ use std::{
 fn binary() -> PathBuf {
     let path = std::env::var_os("VESPER_SOURCE_MACRO_TUPLES_BINARY")
         .map(PathBuf::from)
-        .or_else(|| option_env!("CARGO_BIN_EXE_vesper").map(PathBuf::from))
-        .expect("actual vesper or VESPER_SOURCE_MACRO_TUPLES_BINARY required");
+        .unwrap_or_else(support::vesper_path);
     let exe = PathBuf::from(format!("{}.exe", path.display()));
     if exe.is_file() { exe } else { path }
 }
@@ -90,7 +91,7 @@ impl Fixture {
     }
     fn command(&self, mode: &str, args: &[&str]) -> Output {
         let output = output(
-            Command::new(binary())
+            support::command(&binary())
                 .args(["forge", mode])
                 .arg(&self.path)
                 .args(args),
@@ -213,7 +214,12 @@ impl Fixture {
     fn run_value(&self, expanded: &str, expected: &str) {
         let path = self.dir.join("expanded.ves");
         fs::write(&path, expanded.as_bytes()).unwrap();
-        let checked = output(Command::new(binary()).arg("check").arg(&path).arg("--json"));
+        let checked = output(
+            support::command(&binary())
+                .arg("check")
+                .arg(&path)
+                .arg("--json"),
+        );
         assert!(
             checked.status.success(),
             "{}",
@@ -223,7 +229,7 @@ impl Fixture {
             serde_json::from_slice::<Value>(&checked.stdout).unwrap(),
             json!([])
         );
-        let run = output(Command::new(binary()).arg("run").arg(&path));
+        let run = output(support::command(&binary()).arg("run").arg(&path));
         assert!(
             run.status.success(),
             "{}",
@@ -250,32 +256,33 @@ fn range(value: &Value, source: &str) -> std::ops::Range<usize> {
     start..end
 }
 const POSITIVE: &[&str] = &[
-    include_str!("fixtures/source_macro_tuples/unit.ves"),
-    include_str!("fixtures/source_macro_tuples/grouped.ves"),
-    include_str!("fixtures/source_macro_tuples/singleton.ves"),
-    include_str!("fixtures/source_macro_tuples/multiple.ves"),
-    include_str!("fixtures/source_macro_tuples/nested.ves"),
-    include_str!("fixtures/source_macro_tuples/unit_slot.ves"),
-    include_str!("fixtures/source_macro_tuples/singleton_slot.ves"),
-    include_str!("fixtures/source_macro_tuples/nested_slot.ves"),
-    include_str!("fixtures/source_macro_tuples/input_slot.ves"),
-    include_str!("fixtures/source_macro_tuples/parameter.ves"),
-    include_str!("fixtures/source_macro_tuples/argument_capture.ves"),
-    include_str!("fixtures/source_macro_tuples/reference_capture.ves"),
-    include_str!("fixtures/source_macro_tuples/global_capture.ves"),
-    include_str!("fixtures/source_macro_tuples/initializer.ves"),
-    include_str!("fixtures/source_macro_tuples/element_scope.ves"),
-    include_str!("fixtures/source_macro_tuples/evaluation_order.ves"),
-    include_str!("fixtures/source_macro_tuples/punctuation.ves"),
-    include_str!("fixtures/source_macro_tuples/repeated.ves"),
-    include_str!("fixtures/source_macro_tuples/linear_consume.ves"),
-    include_str!("fixtures/source_macro_tuples/arity_nine.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/unit.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/grouped.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/singleton.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/multiple.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/nested.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/unit_slot.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/singleton_slot.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/nested_slot.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/input_slot.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/parameter.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/argument_capture.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/reference_capture.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/global_capture.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/initializer.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/element_scope.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/evaluation_order.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/punctuation.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/repeated.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/linear_consume.ves"),
+    include_str!("../../../tests/fixtures/source_macro_tuples/arity_nine.ves"),
 ];
-const REPEATED: &str = include_str!("fixtures/source_macro_tuples/repeated.ves");
-const PURE: &str = include_str!("fixtures/source_macro_tuples/generated_pure.ves");
-const CALLER: &str = include_str!("fixtures/source_macro_tuples/caller_effect.ves");
-const DUPLICATE: &str = include_str!("fixtures/source_macro_tuples/linear_duplicate.ves");
-const LEAK: &str = include_str!("fixtures/source_macro_tuples/linear_leak.ves");
+const REPEATED: &str = include_str!("../../../tests/fixtures/source_macro_tuples/repeated.ves");
+const PURE: &str = include_str!("../../../tests/fixtures/source_macro_tuples/generated_pure.ves");
+const CALLER: &str = include_str!("../../../tests/fixtures/source_macro_tuples/caller_effect.ves");
+const DUPLICATE: &str =
+    include_str!("../../../tests/fixtures/source_macro_tuples/linear_duplicate.ves");
+const LEAK: &str = include_str!("../../../tests/fixtures/source_macro_tuples/linear_leak.ves");
 
 #[test]
 fn real_unit_group_singleton_multiple_nested_and_slot_values_run_42() {
@@ -324,7 +331,7 @@ fn actual_product_linearity_and_tuple_field_types_remain_checked() {
         (DUPLICATE, "E0303"),
         (LEAK, "E0302"),
         (
-            include_str!("fixtures/source_macro_tuples/field_mismatch.ves"),
+            include_str!("../../../tests/fixtures/source_macro_tuples/field_mismatch.ves"),
             "E0200",
         ),
         (
@@ -421,7 +428,7 @@ fn run(mut messages: Vec<Value>) -> Vec<Value> {
         bytes.extend_from_slice(&body);
         bytes
     });
-    let mut child = Command::new(binary())
+    let mut child = support::command(&binary())
         .arg("lsp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

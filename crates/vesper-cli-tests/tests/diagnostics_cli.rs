@@ -1,11 +1,13 @@
 //! Actual CLI and framed stdio acceptance of compiler-produced causal evidence.
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     fs,
     io::{Read, Write},
     ops::Range,
     path::PathBuf,
-    process::{Command, Output, Stdio},
+    process::{Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
@@ -14,7 +16,7 @@ use std::{
 fn binary() -> PathBuf {
     let path = std::env::var_os("VESPER_DIAGNOSTICS_BINARY")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_vesper")));
+        .unwrap_or_else(support::vesper_path);
     let exe = PathBuf::from(format!("{}.exe", path.display()));
     if exe.is_file() { exe } else { path }
 }
@@ -41,7 +43,7 @@ impl File {
         }
     }
     fn check(&self, json: bool) -> Output {
-        let mut command = Command::new(binary());
+        let mut command = support::command(&binary());
         command.arg("check").arg(&self.path);
         if json {
             command.arg("--json");
@@ -327,7 +329,7 @@ fn lsp(mut messages: Vec<Value>) -> Vec<Value> {
         notice("exit", json!({})),
     ]);
     let input = framed(&messages);
-    let mut child = Command::new(binary())
+    let mut child = support::command(&binary())
         .arg("lsp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

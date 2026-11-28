@@ -4625,8 +4625,11 @@ fn macro_sources() -> Vec<String> {
     ] {
         out.extend(std::fs::read_to_string(path).ok());
     }
-    let mut tests: Vec<_> = std::fs::read_dir("tests")
+    // The Forge CLI suites moved to crates/vesper-cli-tests (#2743); sorting
+    // by file name keeps the order the single directory gave.
+    let mut tests: Vec<_> = ["tests", "crates/vesper-cli-tests/tests"]
         .into_iter()
+        .flat_map(std::fs::read_dir)
         .flatten()
         .flatten()
         .map(|e| e.path())
@@ -4636,7 +4639,7 @@ fn macro_sources() -> Vec<String> {
                 .is_some_and(|n| n.starts_with("forge_") && n.ends_with(".rs"))
         })
         .collect();
-    tests.sort();
+    tests.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
     for path in tests {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
