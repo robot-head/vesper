@@ -1371,6 +1371,21 @@ fn call_arg_expr(in a: Ast, e: Ex, ai: u64) -> u64 {
     u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, CALL_ARG_STRIDE), 1)))
 }
 
+// The name a call `e` calls when it is a plain name not bound as a local
+// (a constructor candidate), else NONE32.
+fn lookup_ctor_callee(in tc: Tc, in a: Ast, e: Ex) -> u32 {
+    match a.exs.try_get(e.a) {
+        Option::Some(ce) => {
+            if ce.kind == X_NAME && lookup_var(in tc, n32(ce.a)) == NONE32 {
+                n32(ce.a)
+            } else {
+                NONE32
+            }
+        },
+        Option::None => NONE32,
+    }
+}
+
 // Rust's `constrain_literals`: the integer literals of `eid` (through
 // tuples) take their kinds from `target`, the type their context settled.
 fn constrain_literals(inout tc: Tc, in a: Ast, eid: u64, target: u32) {
@@ -1378,7 +1393,17 @@ fn constrain_literals(inout tc: Tc, in a: Ast, eid: u64, target: u32) {
         Option::Some(v) => v,
         Option::None => return,
     };
-    if e.kind == X_TUPLE {
+    if e.kind == X_TUPLE && e.n == 0 {
+        // `()` against a written `Unit` takes it (`refine_annotation` of
+        // the compatible empty tuple).
+        if !tc.lit_probe
+            && tc.types.kind(target) == TyKind::Named
+            && tc.types.name(target) == tc.world.k.unit
+            && tc.types.arity(target) == 0
+        {
+            retype_span(inout tc, e.s0, e.s1, target);
+        }
+    } else if e.kind == X_TUPLE {
         let dt = default_type(inout tc.types, target);
         if tc.types.kind(dt) == TyKind::Tuple && tc.types.arity(dt) == e.n {
             let mut same = !tc.lit_probe;
@@ -1417,7 +1442,23 @@ fn constrain_literals(inout tc: Tc, in a: Ast, eid: u64, target: u32) {
         retype_span(inout tc, e.s0, e.s1, target);
         tc.lit_never.push(e.s0);
     }
-    if e.kind == X_BLOCK && e.b != NONE64 {
+    if e.kind == X_CALL && lookup_ctor_callee(in tc, in a, e) != NONE32 {
+        // A constructor's arguments take its fields' types, its generics
+        // bound by `target`.
+        let cname = lookup_ctor_callee(in tc, in a, e);
+        let dt = default_type(inout tc.types, target);
+        let (adt, vi, vars) = ctor_info(inout tc, cname, dt);
+        if adt != NONE32 {
+            let v = tc.world.variant(vi);
+            for ai in 0..e.n {
+                if ai < w(v.fc) {
+                    let f = tc.world.field(wrapping_add(w(v.fa), ai));
+                    let pt = substitute(inout tc.types, f.ty, in vars);
+                    constrain_literals(inout tc, in a, call_arg_expr(in a, e, ai), pt);
+                }
+            }
+        }
+    } else if e.kind == X_BLOCK && e.b != NONE64 {
         constrain_literals(inout tc, in a, e.b, target);
     } else if e.kind == X_IF {
         constrain_literals(inout tc, in a, e.b, target);

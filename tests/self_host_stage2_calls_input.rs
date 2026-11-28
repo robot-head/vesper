@@ -81,10 +81,10 @@ const DECLINES: &[&str] = &[
 /// The functions Stage 2 must lower as Rust does today. The rest differ
 /// where Stage 2's checker records less than Rust's: overflow and partial
 /// operations (`fallible`) and the unit type of statements.
-const MIN_SAME_FUNCTIONS: usize = 46;
+const MIN_SAME_FUNCTIONS: usize = 47;
 
 /// The port functions Stage 2 must lower as Rust does today.
-const MIN_SAME_PORT_FUNCTIONS: usize = 18887;
+const MIN_SAME_PORT_FUNCTIONS: usize = 18914;
 
 /// Set to print the Rust and Stage 2 bodies of each function that differs.
 const SHOW_DIFFS: &str = "VESPER_STAGE2_CALLS_DIFFS";
@@ -311,8 +311,9 @@ fn stop() -> Never { loop {} }
 fn take(x: u64) -> u64 { x }
 pub fn pick(t: u64) -> u64 { let c = if t == 1 { 0 } else if t == 2 { 1 } else { stop() }; take(c) }
 pub fn pick2(t: u64) -> u64 { let c = if t == 1 { 0 } else { stop() }; take(c) }
-pub fn pick3(t: u64) -> u64 { let c = if t == 1 { 0 } else { 1 }; take(c) }",
-        &["bounds", "pick", "pick2", "pick3"],
+pub fn pick3(t: u64) -> u64 { let c = if t == 1 { 0 } else { 1 }; take(c) }
+pub fn done(t: u64) -> Result[Unit, u64] { if t == 0 { return Result::Ok(()); } Result::Err(t) }",
+        &["bounds", "done", "pick", "pick2", "pick3"],
     ),
     (
         "floats",
