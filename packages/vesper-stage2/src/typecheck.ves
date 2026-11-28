@@ -1331,9 +1331,25 @@ fn constrain_literals(inout tc: Tc, in a: Ast, eid: u64, target: u32) {
     if e.kind == X_TUPLE {
         let dt = default_type(inout tc.types, target);
         if tc.types.kind(dt) == TyKind::Tuple && tc.types.arity(dt) == e.n {
+            let mut same = !tc.lit_probe;
             for i in 0..e.n {
                 let sub = u64_at(in a.xs, wrapping_add(e.a, i));
                 constrain_literals(inout tc, in a, sub, tc.types.arg(dt, i));
+                match a.exs.try_get(sub) {
+                    Option::Some(se) => {
+                        if span_ty(in tc, se.s0, se.s1) != tc.types.arg(dt, i) {
+                            same = false;
+                        }
+                    },
+                    Option::None => {
+                        same = false;
+                    },
+                }
+            }
+            // The tuple takes the target once its elements do
+            // (`refine_annotation` of a compatible tuple).
+            if same {
+                retype_span(inout tc, e.s0, e.s1, dt);
             }
         }
     } else if is_int_ty(in tc, target)
