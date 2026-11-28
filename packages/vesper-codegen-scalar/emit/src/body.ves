@@ -42,15 +42,16 @@ use @vesper/cranelift::{
     Block, FuncId, Ty, Value, Var, append_block_param, call_args, cc_eq, cc_ne, cc_sge, cc_sgt,
     cc_sle, cc_slt, cc_uge, cc_ugt, cc_ule, cc_ult, create_block, current_block, declare_var,
     def_var, import_function, ins_band, ins_band_imm, ins_binary, ins_bitcast, ins_bnot, ins_bor,
-    ins_brif0, ins_bxor, ins_call, ins_clz, ins_convert, ins_ctz, ins_f32const, ins_f64const,
-    ins_fadd, ins_fcmp, ins_fdiv, ins_fmul, ins_fneg, ins_fsub, ins_iadd, ins_icmp, ins_icmp_imm,
-    ins_iconcat, ins_iconst, ins_imul, ins_ineg, ins_ireduce, ins_ishl, ins_isub, ins_jump,
-    ins_popcnt, ins_return, ins_sdiv, ins_select, ins_sextend, ins_srem, ins_sshr, ins_trap,
-    ins_udiv, ins_uextend, ins_unary, ins_urem, ins_ushr, inst_result, invalid, is_invalid,
-    seal_block, set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i128, ty_i32, ty_i64,
-    ty_i8, use_var, vals1, value_type, create_stack_slot, ins_iadd_imm, ins_load, ins_stack_addr,
-    ins_store, module_pointer_type, ins_imul_imm, ins_uload8, ins_uload16, ins_uload32,
-    mem_can_move, mem_readonly, mem_trusted
+    ins_brif, ins_brif0, ins_bxor, ins_call, ins_clz, ins_convert, ins_ctz, ins_f32const,
+    ins_f64const, ins_fadd, ins_fcmp, ins_fdiv, ins_fmul, ins_fneg, ins_fsub, ins_iadd, ins_icmp,
+    ins_icmp_imm, ins_iconcat, ins_iconst, ins_imul, ins_ineg, ins_ireduce, ins_ishl, ins_isub,
+    ins_jump, ins_popcnt, ins_return, ins_sdiv, ins_select, ins_sextend, ins_srem, ins_sshr,
+    ins_trap, ins_udiv, ins_uextend, ins_unary, ins_urem, ins_ushr, inst_result, invalid,
+    is_invalid, seal_block, set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i128, ty_i32,
+    ty_i64, ty_i8, use_var, vals1, value_type, create_stack_slot, ins_iadd_imm, ins_load,
+    ins_stack_addr, ins_store, module_pointer_type, ins_imul_imm, ins_uload8, ins_uload16,
+    ins_uload32, mem_can_move, mem_readonly, mem_trusted, data_align, data_define, data_new,
+    declare_anonymous_data, define_data, import_data, ins_symbol_value
 };
 use super::{
     BODY_ERROR, DECLINED, HANDLED, coerce, emit_overflow_test, kind_max_imm, kind_min_imm,
@@ -124,6 +125,16 @@ const SEQ_AS_BYTES: u64 = 3;
 const SEQ_BYTE_AT: u64 = 4;
 const SEQ_GET: u64 = 5;
 const SEQ_VIEW_WORD: u64 = 6;
+const SEQ_LAST: u64 = 7;
+const SEQ_LITERAL: u64 = 8;
+// The bits of a literal byte, and the bytes of a literal word.
+const BYTE_BITS: u64 = 8;
+const BYTE_MASK: u64 = 255;
+const STR_CAP: i32 = 8;
+// A literal's static bytes are aligned like the Rust walk's.
+const LITERAL_ALIGN: u64 = 8;
+// A literal byte's position within its word.
+const LITERAL_WORD_MASK: u64 = 7;
 // The header words (src/strings/native.rs, src/seq/native.rs): a
 // string's `{len, cap, data}`, a slice view's `{handle, start, len}`, a
 // sequence header's data pointer.
@@ -142,6 +153,25 @@ const STRIDE_QUARTER: u64 = 4;
 // A struct or tuple destructured (#2654): the pattern's nodes follow.
 const INST_BIND_FIELDS: u64 = 72;
 const CALLEE_ID_MASK: u64 = 4294967295;
+// A `Fail` handler (#2657): its handled body and clauses as nested graphs.
+const INST_HANDLE: u64 = 60;
+// `codegen_swap::body::NESTED_CALLS_SHIFT` (#2657): the callee count word
+// holds the body's own calls below it and its handlers' nested graphs'
+// calls above it.
+const NESTED_CALLS_SHIFT: u64 = 32;
+// A raise a handler in scope takes: the handler's depth above this base
+// (@vesper/codegen-scalar's `handlers.ves`).
+const HANDLER_BASE: u64 = 4294967296;
+// A local's kind word: its kind below `KIND_MASK`; a nested local the
+// optimize path keeps in a register; a function's local a handler names,
+// which keeps its slot on the optimize path too.
+const KIND_MASK: u64 = 65535;
+const NESTED_REGISTER: u64 = 65536;
+const HANDLER_HOME: u64 = 131072;
+// `dispatch_trap`'s code at the end of a handler's return dispatch.
+const DISPATCH_TRAP: u32 = 4;
+// No slot.
+const NONE64: u64 = 18446744073709551615;
 const INST_ICONST: u64 = 16;
 const INST_F64CONST: u64 = 17;
 const INST_DATA: u64 = 32;
@@ -900,6 +930,37 @@ struct Body {
     // (`Codegen::invariant_headers`).
     entry_reads: ChunkSeq[u32],
     invariant: ChunkSeq[u32],
+    // Those views as the request lists them: each one's parameter index,
+    // read count and reads.
+    views: ChunkSeq[u64],
+    nviews: u64,
+    // The graph being emitted's join block (#2657): a nested graph's
+    // `return` jumps there; invalid for the function's own graph.
+    join: u32,
+    // The source location last set (`Codegen::srcloc`), which a nested
+    // graph restores when it is done.
+    cur_loc: u64,
+    // `Codegen::vars` while a handler's graphs are emitted: each local
+    // variable's slot (its variable, kind, address and whether it is a
+    // register local), and the names in scope with their slots.
+    svar: ChunkSeq[u32],
+    skind: ChunkSeq[u64],
+    saddr: ChunkSeq[u32],
+    sreg: ChunkSeq[u64],
+    snames: ChunkSeq[u64],
+    sslots: ChunkSeq[u64],
+    // The handlers in scope, outermost first: exit, dispatch and selector,
+    // the result's kind, the `raise` clause's error name and plan (a word
+    // position), and its captures (names and slots from `hcap_a`).
+    hexit: ChunkSeq[u32],
+    hdispatch: ChunkSeq[u32],
+    hkind: ChunkSeq[u64],
+    herr: ChunkSeq[u64],
+    hclause: ChunkSeq[u64],
+    hcap_a: ChunkSeq[u64],
+    hcap_n: ChunkSeq[u64],
+    hcap_names: ChunkSeq[u64],
+    hcap_slots: ChunkSeq[u64],
 }
 
 impl Body {
@@ -1257,9 +1318,15 @@ impl Body {
     // fresh word-aligned storage, zeroed whole by the unoptimized `alloc`
     // and, optimized, only where no tag lands (every word of a product),
     // then the tag.
-    fn raise_unit(inout self, inout b: Builder, in m: Module, index: u64, size: u64, tag: u64) eff [
-        Ffi[Cranelift]
-    ] {
+    fn raise_unit(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words,
+        index: u64,
+        size: u64,
+        tag: u64
+    ) -> bool eff [Ffi[Cranelift]] {
         let bytes = if size < widen_u64(WORD_BYTES) {
             WORD_BYTES
         } else {
@@ -1282,7 +1349,11 @@ impl Body {
             let t = ins_iconst(inout b, ty_i64(), wrapping_i64(tag));
             ins_store(inout b, PLAIN, t, ptr, 0);
         }
+        if index >= HANDLER_BASE {
+            return self.perform(inout b, inout m, inout w, wrapping_sub(index, HANDLER_BASE), ptr);
+        }
         self.fail_exit(inout b, index, ptr, size);
+        true
     }
 
     // A `fail_only` callee's record of `size` bytes: word-aligned storage,
@@ -1322,9 +1393,14 @@ impl Body {
     // first, then for each of the callee's instances (`reraise_each`) a
     // branch on its tag to the raise of its payload through the caller's
     // instance, each time going on in a fresh block.
-    fn reraise(inout self, inout b: Builder, inout w: Words, record: Value, tag: Value) eff [
-        Ffi[Cranelift]
-    ] {
+    fn reraise(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words,
+        record: Value,
+        tag: Value
+    ) -> bool eff [Ffi[Cranelift]] {
         let n = w.next();
         let no_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
         let mut outer = Block { id: invalid() };
@@ -1345,7 +1421,19 @@ impl Body {
             ins_brif0(inout b, failed, bad, good);
             switch_to_block(inout b, bad);
             let payload = ins_iadd_imm(inout b, record, RECORD_PAYLOAD);
-            if scalar_kind == AGGREGATE_ERROR {
+            if index >= HANDLER_BASE {
+                // A handler in scope takes it (#2657): the payload's
+                // address, or its one word loaded.
+                let error = if scalar_kind == AGGREGATE_ERROR {
+                    payload
+                } else {
+                    ins_load(inout b, ty_i64(), PLAIN, payload, 0)
+                };
+                let depth = wrapping_sub(index, HANDLER_BASE);
+                if !self.perform(inout b, inout m, inout w, depth, error) {
+                    return false;
+                }
+            } else if scalar_kind == AGGREGATE_ERROR {
                 self.fail_exit(inout b, index, payload, size);
             } else {
                 let error = ins_load(inout b, ty_i64(), PLAIN, payload, 0);
@@ -1358,6 +1446,7 @@ impl Body {
             ins_jump(inout b, outer, in no_args.as_slice());
             switch_to_block(inout b, outer);
         }
+        true
     }
 
     // `check_overflow` (`raise_when` true) and `check_divisor` (false): a
@@ -1367,13 +1456,14 @@ impl Body {
     fn raising(
         inout self,
         inout b: Builder,
-        in m: Module,
+        inout m: Module,
+        inout w: Words,
         flag: Value,
         raise_when: bool,
         index: u64,
         size: u64,
         tag: u64
-    ) eff [Ffi[Cranelift]] {
+    ) -> bool eff [Ffi[Cranelift]] {
         let good = create_block(inout b);
         let bad = create_block(inout b);
         if raise_when {
@@ -1382,10 +1472,68 @@ impl Body {
             ins_brif0(inout b, flag, good, bad);
         }
         switch_to_block(inout b, bad);
-        self.raise_unit(inout b, in m, index, size, tag);
+        if !self.raise_unit(inout b, inout m, inout w, index, size, tag) {
+            return false;
+        }
         let no_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
         ins_jump(inout b, good, in no_args.as_slice());
         switch_to_block(inout b, good);
+        true
+    }
+
+    // `Codegen::string_literal`: `{n, 0, &static_bytes}` in fresh zeroed
+    // storage, `{0, 0, null}` when empty. Invalid when the module refuses
+    // the data.
+    fn literal(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words
+    ) -> Value eff [Ffi[Cranelift]] {
+        let n = w.next();
+        let len = ins_iconst(inout b, ty_i64(), wrapping_i64(n));
+        let zero = ins_iconst(inout b, ty_i64(), 0);
+        let data = if n == 0 {
+            zero
+        } else {
+            let mut bytes = ChunkSeq::with_capacity[u8](n);
+            let mut word: u64 = 0;
+            for k in 0..n {
+                if k & LITERAL_WORD_MASK == 0 {
+                    word = w.next();
+                }
+                bytes.push(wrapping_u8(word & BYTE_MASK));
+                word = word >> BYTE_BITS;
+            }
+            let id = declare_anonymous_data(inout m, false, false);
+            let mut d = match data_new() {
+                Some(d) => d,
+                None => return Value { id: invalid() },
+            };
+            data_define(inout d, in bytes.as_slice());
+            data_align(inout d, LITERAL_ALIGN);
+            if !define_data(inout m, id, d) {
+                return Value { id: invalid() };
+            }
+            let gv = import_data(inout b, in m, id);
+            ins_symbol_value(inout b, module_pointer_type(in m), gv)
+        };
+        // `str_value`: `Codegen::alloc(24)`, then the three words.
+        let slot = create_stack_slot(inout b, VIEW_BYTES, SLOT_ALIGN_SHIFT);
+        let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+        let mut offset: u32 = 0;
+        loop {
+            if offset >= VIEW_BYTES {
+                break;
+            }
+            let z = ins_iconst(inout b, ty_i64(), 0);
+            ins_store(inout b, PLAIN, z, ptr, wrapping_i32(offset));
+            offset = wrapping_add(offset, WORD_BYTES);
+        }
+        ins_store(inout b, PLAIN, len, ptr, STR_LEN);
+        ins_store(inout b, PLAIN, zero, ptr, STR_CAP);
+        ins_store(inout b, PLAIN, data, ptr, STR_DATA);
+        ptr
     }
 
     // `Codegen::seq_op` of a string or slice operation (#2653) on
@@ -1397,12 +1545,15 @@ impl Body {
     fn seq(
         inout self,
         inout b: Builder,
-        in m: Module,
+        inout m: Module,
         inout w: Words,
         x: Value,
         y: Value
     ) -> Value eff [Ffi[Cranelift]] {
         let form = w.next();
+        if form == SEQ_LITERAL {
+            return self.literal(inout b, inout m, inout w);
+        }
         if form == SEQ_WORD {
             let offset = w.next();
             return ins_load(inout b, ty_i64(), PLAIN, x, wrapping_i32(offset));
@@ -1441,10 +1592,15 @@ impl Body {
             let tag = w.next();
             let len = ins_load(inout b, ty_i64(), PLAIN, x, STR_LEN);
             let valid = ins_icmp(inout b, cc_ult(), y, len);
-            self.raising(inout b, in m, valid, false, index, size, tag);
+            if !self.raising(inout b, inout m, inout w, valid, false, index, size, tag) {
+                return Value { id: invalid() };
+            }
             let data = ins_load(inout b, ty_i64(), PLAIN, x, STR_DATA);
             let at = ins_iadd(inout b, data, y);
             return ins_uload8(inout b, ty_i64(), PLAIN, at, 0);
+        }
+        if form == SEQ_LAST {
+            return self.seq_last(inout b, inout w, x);
         }
         if form == SEQ_GET {
             let stride = w.next();
@@ -1452,28 +1608,12 @@ impl Body {
             let index = w.next();
             let size = w.next();
             let tag = w.next();
-            // `seq_view`: an invariant view's handle is invariant too.
-            let handle = self.seq_word(inout b, x, VIEW_HANDLE);
-            if self.is_invariant(x) {
-                self.invariant.push(handle.id);
-            }
-            let start = self.seq_word(inout b, x, VIEW_START);
-            let len = self.seq_word(inout b, x, VIEW_LEN);
+            let (handle, start, len) = self.seq_view(inout b, x);
             let valid = ins_icmp(inout b, cc_ult(), y, len);
-            self.raising(inout b, in m, valid, false, index, size, tag);
-            // `seq_elem_addr`: from an invariant handle, `data + start *
-            // stride` first, which Cranelift computes once.
-            let data = self.seq_word(inout b, handle, HEADER_DATA);
-            let addr = if self.is_invariant(handle) {
-                let first = ins_imul_imm(inout b, start, wrapping_i64(stride));
-                let base = ins_iadd(inout b, data, first);
-                let offset = ins_imul_imm(inout b, y, wrapping_i64(stride));
-                ins_iadd(inout b, base, offset)
-            } else {
-                let at = ins_iadd(inout b, start, y);
-                let offset = ins_imul_imm(inout b, at, wrapping_i64(stride));
-                ins_iadd(inout b, data, offset)
-            };
+            if !self.raising(inout b, inout m, inout w, valid, false, index, size, tag) {
+                return Value { id: invalid() };
+            }
+            let addr = self.seq_elem_addr(inout b, handle, start, y, stride);
             return if stride == STRIDE_BYTE {
                 ins_uload8(inout b, ty_i64(), PLAIN, addr, 0)
             } else if stride == STRIDE_HALF {
@@ -1485,6 +1625,107 @@ impl Body {
             };
         }
         Value { id: invalid() }
+    }
+
+    // `seq_view`: a slice view's handle, start and length, the handle
+    // invariant when the view is.
+    fn seq_view(
+        inout self,
+        inout b: Builder,
+        x: Value
+    ) -> (Value, Value, Value) eff [Ffi[Cranelift]] {
+        let handle = self.seq_word(inout b, x, VIEW_HANDLE);
+        if self.is_invariant(x) {
+            self.invariant.push(handle.id);
+        }
+        let start = self.seq_word(inout b, x, VIEW_START);
+        let len = self.seq_word(inout b, x, VIEW_LEN);
+        (handle, start, len)
+    }
+
+    // `seq_elem_addr` of element `i` from `start`: from an invariant
+    // handle, `data + start * stride` first, which Cranelift computes
+    // once.
+    fn seq_elem_addr(
+        inout self,
+        inout b: Builder,
+        handle: Value,
+        start: Value,
+        i: Value,
+        stride: u64
+    ) -> Value eff [Ffi[Cranelift]] {
+        let data = self.seq_word(inout b, handle, HEADER_DATA);
+        if self.is_invariant(handle) {
+            let first = ins_imul_imm(inout b, start, wrapping_i64(stride));
+            let base = ins_iadd(inout b, data, first);
+            let offset = ins_imul_imm(inout b, i, wrapping_i64(stride));
+            ins_iadd(inout b, base, offset)
+        } else {
+            let at = ins_iadd(inout b, start, i);
+            let offset = ins_imul_imm(inout b, at, wrapping_i64(stride));
+            ins_iadd(inout b, data, offset)
+        }
+    }
+
+    // A slice's `last` (#2653) through `seq_option` with a two-word
+    // request: the `Option`'s tag and payload joined at a block of two
+    // words, each then coerced and defined; the walk's zero is the
+    // instruction's own value.
+    fn seq_last(
+        inout self,
+        inout b: Builder,
+        inout w: Words,
+        x: Value
+    ) -> Value eff [Ffi[Cranelift]] {
+        let stride = w.next();
+        let none_tag = w.next();
+        let some_tag = w.next();
+        let (handle, start, len) = self.seq_view(inout b, x);
+        let present = ins_icmp_imm(inout b, cc_ne(), len, 0);
+        let none = create_block(inout b);
+        let some = create_block(inout b);
+        let done = create_block(inout b);
+        let tag_param = append_block_param(inout b, done, ty_i64());
+        let value_param = append_block_param(inout b, done, ty_i64());
+        ins_brif0(inout b, present, some, none);
+        switch_to_block(inout b, none);
+        let tag = ins_iconst(inout b, ty_i64(), wrapping_i64(none_tag));
+        let zero = ins_iconst(inout b, ty_i64(), 0);
+        let mut none_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        none_args.push(tag.id);
+        none_args.push(zero.id);
+        ins_jump(inout b, done, in none_args.as_slice());
+        switch_to_block(inout b, some);
+        let last = ins_iadd_imm(inout b, len, -1);
+        let addr = self.seq_elem_addr(inout b, handle, start, last, stride);
+        let value = if stride == STRIDE_BYTE {
+            ins_uload8(inout b, ty_i64(), PLAIN, addr, 0)
+        } else if stride == STRIDE_HALF {
+            ins_uload16(inout b, ty_i64(), PLAIN, addr, 0)
+        } else if stride == STRIDE_QUARTER {
+            ins_uload32(inout b, PLAIN, addr, 0)
+        } else {
+            ins_load(inout b, ty_i64(), PLAIN, addr, 0)
+        };
+        let some_value = ins_iconst(inout b, ty_i64(), wrapping_i64(some_tag));
+        let mut some_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        some_args.push(some_value.id);
+        some_args.push(value.id);
+        ins_jump(inout b, done, in some_args.as_slice());
+        switch_to_block(inout b, done);
+        let result = ins_iconst(inout b, ty_i64(), 0);
+        let mut params: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        params.push(tag_param.id);
+        params.push(value_param.id);
+        for k in 0..params.len() {
+            let index = w.next();
+            let word_kind = w.next();
+            let raw = Value { id: at32(in params, k) };
+            let v = body_coerce(inout b, raw, word_kind, self.optimize);
+            let ok = self.values.try_set(index, v.id);
+            def_var(inout b, var_at(in self.registers, index), v);
+        }
+        result
     }
 
     // One instruction (`ir_graph_at`'s instruction loop): its operands
@@ -1518,6 +1759,7 @@ impl Body {
         // `expr_located` sets and restores the same location.
         if self.locations && location != NO_LOCATION {
             set_srcloc(inout b, wrapping_u32(location));
+            self.cur_loc = location;
         }
         let none = Value { id: invalid() };
         let x = if n >= 1 {
@@ -1658,7 +1900,9 @@ impl Body {
                 } else {
                     ins_load(inout b, ty_i64(), PLAIN, record, 0)
                 };
-                self.reraise(inout b, inout w, record, tag);
+                if !self.reraise(inout b, inout m, inout w, record, tag) {
+                    return false;
+                }
                 result
             }
         } else if kind == INST_INOUT_CALL {
@@ -1750,7 +1994,9 @@ impl Body {
                 } else {
                     ins_load(inout b, ty_i64(), PLAIN, record, 0)
                 };
-                self.reraise(inout b, inout w, record, tag);
+                if !self.reraise(inout b, inout m, inout w, record, tag) {
+                    return false;
+                }
             }
             for k in 0..lent.len() {
                 let l = at64(in lent, k);
@@ -1782,7 +2028,9 @@ impl Body {
                 let size = w.next();
                 let tag = w.next();
                 let nonzero = ins_icmp_imm(inout b, cc_ne(), rhs, 0);
-                self.raising(inout b, in m, nonzero, false, divisor, size, tag);
+                if !self.raising(inout b, inout m, inout w, nonzero, false, divisor, size, tag) {
+                    return false;
+                }
             }
             let overflow = w.next();
             if overflow != NO_RAISE {
@@ -1794,8 +2042,10 @@ impl Body {
                 } else {
                     emit_overflow_test(inout b, op, ik, lhs, rhs)
                 };
-                if !is_invalid(flag) {
-                    self.raising(inout b, in m, flag, true, overflow, size, tag);
+                if !is_invalid(flag)
+                    && !self.raising(inout b, inout m, inout w, flag, true, overflow, size, tag)
+                {
+                    return false;
                 }
             }
             let unsigned = kind_unsigned(ik);
@@ -2228,7 +2478,7 @@ impl Body {
             }
             ins_load(inout b, lane_type(flane), PLAIN, ptr, 0)
         } else if kind == INST_SEQ {
-            let v = self.seq(inout b, in m, inout w, x, y);
+            let v = self.seq(inout b, inout m, inout w, x, y);
             if is_invalid(v) {
                 return false;
             }
@@ -2248,6 +2498,12 @@ impl Body {
                 off = wrapping_add(off, widen_u64(WORD_BYTES));
             }
             to
+        } else if kind == INST_HANDLE {
+            let out = self.handle(inout b, inout m, inout w);
+            if is_invalid(out) {
+                return false;
+            }
+            out
         } else {
             return false;
         };
@@ -2258,6 +2514,457 @@ impl Body {
     }
 
     // A block's terminator, after its operands' reads.
+    // The rest of a graph after its locals (`ir_graph_at`): each value's
+    // register, the blocks' parameters, then each block in the lowering
+    // order, sealed on the way, with its instructions and terminator.
+    fn graph_rest(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words,
+        nb: u64
+    ) -> bool eff [Ffi[Cranelift]] {
+        let nv = w.next();
+        let mut lanes: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for k in 0..nv {
+            let lane = w.next();
+            lanes.push(lane);
+            self.registers.push(zeroed(inout b, lane));
+            self.params.push(invalid());
+            self.values.push(invalid());
+        }
+        self.refresh_all = !self.optimize && nv <= FULL_REFRESH_VALUES;
+        // Block parameters, and where each block's list is.
+        let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for bi in 0..nb {
+            starts.push(w.at);
+            let n = w.next();
+            for k in 0..n {
+                let i = w.next();
+                let p = append_block_param(inout b, self.block(bi), lane_type(at64(in lanes, i)));
+                let ok = self.params.try_set(i, p.id);
+            }
+        }
+        // The lowering order.
+        let mut order: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut seal: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for k in 0..nb {
+            order.push(w.next());
+            seal.push(w.next());
+        }
+        for k in 0..nb {
+            let bi = at64(in order, k);
+            let blk = self.block(bi);
+            if current_block(inout b).id != blk.id {
+                switch_to_block(inout b, blk);
+            }
+            if at64(in seal, k) != 0 {
+                seal_block(inout b, blk);
+            }
+            // The block's parameters define their registers.
+            let mut pa = at64(in starts, bi);
+            let n = w.arg(pa);
+            for j in 0..n {
+                pa = wrapping_add(pa, 1);
+                let i = w.arg(pa);
+                let p = Value { id: at32(in self.params, i) };
+                def_var(inout b, var_at(in self.registers, i), p);
+                let ok = self.values.try_set(i, p.id);
+            }
+            // `seq_entry_view` in the entry block: each view's parameter
+            // read once, its header words read-only memory from then on.
+            if bi == 0 && self.join == invalid() {
+                let mut v: u64 = 0;
+                for _ in 0..self.nviews {
+                    let p = at64(in self.views, v);
+                    let nr = at64(in self.views, wrapping_add(v, 1));
+                    v = wrapping_add(v, 2);
+                    let var = Var {
+                        id: wrapping_u32(w.arg(wrapping_add(wrapping_add(ARG_PARAMS, 1), p)))
+                    };
+                    let receiver = use_var(inout b, var);
+                    self.invariant.push(receiver.id);
+                    for _ in 0..nr {
+                        let i = at64(in self.views, v);
+                        v = wrapping_add(v, 1);
+                        loop {
+                            if self.entry_reads.len() > i {
+                                break;
+                            }
+                            self.entry_reads.push(invalid());
+                        }
+                        let ok = self.entry_reads.try_set(i, receiver.id);
+                    }
+                }
+            }
+            let ic = w.next();
+            for j in 0..ic {
+                if !self.inst(inout b, inout m, inout w) {
+                    return false;
+                }
+            }
+            if !self.terminator(inout b, inout w) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // A new local slot (#2657).
+    fn new_slot(inout self, var: u32, kind: u64, address: u32, register: bool) -> u64 {
+        let slot = self.svar.len();
+        self.svar.push(var);
+        self.skind.push(kind);
+        self.saddr.push(address);
+        self.sreg.push(if register { 1 } else { 0 });
+        slot
+    }
+
+    // The slot of the name `name` in scope, or NONE64.
+    fn lookup(in self, name: u64) -> u64 {
+        let mut k = self.snames.len();
+        loop {
+            if k == 0 {
+                break;
+            }
+            k = wrapping_sub(k, 1);
+            if at64(in self.snames, k) == name {
+                return at64(in self.sslots, k);
+            }
+        }
+        NONE64
+    }
+
+    // `Codegen::use_var` of a slot's variable: a load through its address
+    // when it has one.
+    fn use_slot(inout self, inout b: Builder, slot: u64) -> Value eff [Ffi[Cranelift]] {
+        let raw = use_var(inout b, Var { id: at32(in self.svar, slot) });
+        let address = at32(in self.saddr, slot);
+        if address == invalid() {
+            return raw;
+        }
+        let pointer = use_var(inout b, Var { id: address });
+        let ty = value_type(inout b, raw);
+        ins_load(inout b, ty, PLAIN, pointer, 0)
+    }
+
+    // `copy_bindings`: each slot's value in a fresh variable, a new slot
+    // under the same name, in order. The new scope is those names only.
+    fn copy_bindings(
+        inout self,
+        inout b: Builder,
+        in names: ChunkSeq[u64],
+        in slots: ChunkSeq[u64],
+        inout out_names: ChunkSeq[u64],
+        inout out_slots: ChunkSeq[u64]
+    ) eff [Ffi[Cranelift]] {
+        for k in 0..names.len() {
+            let slot = at64(in slots, k);
+            let v = self.use_slot(inout b, slot);
+            let ty = value_type(inout b, v);
+            let var = declare_var(inout b, ty);
+            def_var(inout b, var, v);
+            out_names.push(at64(in names, k));
+            out_slots.push(self.new_slot(var.id, at64(in self.skind, slot), invalid(), false));
+        }
+    }
+
+    // `bind_local` of `v` under `name` (NO_LOCAL binds nothing).
+    fn bind_name(inout self, inout b: Builder, name: u64, v: Value) eff [Ffi[Cranelift]] {
+        if name == NO_LOCAL {
+            return;
+        }
+        let ty = value_type(inout b, v);
+        let var = declare_var(inout b, ty);
+        def_var(inout b, var, v);
+        let slot = self.new_slot(var.id, 0, invalid(), false);
+        self.snames.push(name);
+        self.sslots.push(slot);
+    }
+
+    // A nested graph (`shared_control`, #2657) whose words start at `w`:
+    // its join block of the result's lane, the graph (`ir_graph_at` with a
+    // join), then the join's parameter.
+    fn nested(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words
+    ) -> Value eff [Ffi[Cranelift]] {
+        let len = w.next();
+        let end = wrapping_add(w.at, len);
+        let lane = w.next();
+        let join = create_block(inout b);
+        let p = append_block_param(inout b, join, lane_type(lane));
+        if !self.graph(inout b, inout m, inout w, join) || w.at != end {
+            return Value { id: invalid() };
+        }
+        switch_to_block(inout b, join);
+        p
+    }
+
+    // `ir_graph_at` of a nested graph: a fresh entry block jumped to; its
+    // locals by name (a name in scope shares its slot, else a zeroed
+    // variable in a new one; either keeps a home slot unless it is a
+    // register local or has one); then the rest as for the function's own
+    // graph, with `return` jumping to `join`. The source location is
+    // restored when it is done.
+    fn graph(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words,
+        join: Block
+    ) -> bool eff [Ffi[Cranelift]] {
+        let saved_loc = self.cur_loc;
+        let mut blocks: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut locals: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut kinds: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut addresses: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut registers: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut params: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut values: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        // The function's entry reads name its own graph's values.
+        let mut entry_reads: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        swap(inout entry_reads, inout self.entry_reads);
+        swap(inout blocks, inout self.blocks);
+        swap(inout locals, inout self.locals);
+        swap(inout kinds, inout self.kinds);
+        swap(inout addresses, inout self.addresses);
+        swap(inout registers, inout self.registers);
+        swap(inout params, inout self.params);
+        swap(inout values, inout self.values);
+        let refresh_all = self.refresh_all;
+        let outer_join = self.join;
+        self.join = join.id;
+        let no_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let entry = create_block(inout b);
+        ins_jump(inout b, entry, in no_args.as_slice());
+        switch_to_block(inout b, entry);
+        let nb = w.next();
+        self.blocks.push(entry.id);
+        for k in 1..nb {
+            self.blocks.push(create_block(inout b).id);
+        }
+        let nl = w.next();
+        for k in 0..nl {
+            let name = w.next();
+            let lane = w.next();
+            let kind_word = w.next();
+            let mut slot = self.lookup(name);
+            if slot == NONE64 {
+                let var = zeroed(inout b, lane);
+                let register = self.optimize && (kind_word & NESTED_REGISTER) != 0;
+                slot = self.new_slot(var, kind_word & KIND_MASK, invalid(), register);
+                self.snames.push(name);
+                self.sslots.push(slot);
+            }
+            self.locals.push(at32(in self.svar, slot));
+            self.kinds.push(kind_word & KIND_MASK);
+            self.addresses.push(at32(in self.saddr, slot));
+            // A product (a bound error) is its storage's address: no slot.
+            if lane != LANE_PRODUCT
+                && at64(in self.sreg, slot) == 0
+                && at32(in self.saddr, slot) == invalid()
+            {
+                self.spill(inout b, in m, k);
+                let ok = self.saddr.try_set(slot, at32(in self.addresses, k));
+            }
+        }
+        let ok = self.graph_rest(inout b, inout m, inout w, nb);
+        swap(inout entry_reads, inout self.entry_reads);
+        swap(inout blocks, inout self.blocks);
+        swap(inout locals, inout self.locals);
+        swap(inout kinds, inout self.kinds);
+        swap(inout addresses, inout self.addresses);
+        swap(inout registers, inout self.registers);
+        swap(inout params, inout self.params);
+        swap(inout values, inout self.values);
+        self.refresh_all = refresh_all;
+        self.join = outer_join;
+        if self.locations {
+            self.cur_loc = saved_loc;
+            set_srcloc(inout b, wrapping_u32(saved_loc));
+        }
+        ok
+    }
+
+    // `ExprKind::Handle` of a `Fail` handler (#2657): `HANDLE_SETUP`'s exit
+    // and dispatch blocks and zeroed selector; the aliases in scope; the
+    // captures (`copy_bindings`); the handled body with the handler in
+    // scope; the captures again and the `return` pattern's binding; the
+    // `return` clause; the jump to the dispatch, its one `return_to` test
+    // and the trap; then the exit's parameter.
+    fn handle(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words
+    ) -> Value eff [Ffi[Cranelift]] {
+        let bad = Value { id: invalid() };
+        let lane = w.next();
+        let kind = w.next();
+        let exit = create_block(inout b);
+        let out = append_block_param(inout b, exit, lane_type(lane));
+        let dispatch = create_block(inout b);
+        let out_ty = value_type(inout b, out);
+        let dispatched = append_block_param(inout b, dispatch, out_ty);
+        let selector = declare_var(inout b, ty_i64());
+        let zero = ins_iconst(inout b, ty_i64(), 0);
+        def_var(inout b, selector, zero);
+        // The aliases: the handler's scope.
+        let mut names: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut slots: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let na = w.next();
+        for k in 0..na {
+            let name = w.next();
+            let local = w.next();
+            let address = at32(in self.addresses, local);
+            let register = self.optimize && address == invalid();
+            names.push(name);
+            slots.push(
+                self.new_slot(
+                    at32(in self.locals, local),
+                    at64(in self.kinds, local),
+                    address,
+                    register
+                )
+            );
+        }
+        swap(inout names, inout self.snames);
+        swap(inout slots, inout self.sslots);
+        // The captures.
+        let nc = w.next();
+        let mut cap_names: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut cap_slots: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for k in 0..nc {
+            let name = w.next();
+            let ck = w.next();
+            let slot = self.lookup(name);
+            if slot == NONE64 {
+                return bad;
+            }
+            cap_names.push(name);
+            cap_slots.push(slot);
+        }
+        let mut captured_names: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut captured_slots: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        self.copy_bindings(
+            inout b,
+            in cap_names,
+            in cap_slots,
+            inout captured_names,
+            inout captured_slots
+        );
+        let ret_name = w.next();
+        // The `raise` clause, emitted at each raise of the body.
+        let err_name = w.next();
+        let clause = w.at;
+        let clause_len = w.next();
+        w.at = wrapping_add(w.at, clause_len);
+        self.hexit.push(exit.id);
+        self.hdispatch.push(dispatch.id);
+        self.hkind.push(kind);
+        self.herr.push(err_name);
+        self.hclause.push(clause);
+        self.hcap_a.push(self.hcap_names.len());
+        self.hcap_n.push(captured_names.len());
+        self.hcap_names.extend(in captured_names.as_slice());
+        self.hcap_slots.extend(in captured_slots.as_slice());
+        let body = self.nested(inout b, inout m, inout w);
+        let hx = self.hexit.pop();
+        let hd = self.hdispatch.pop();
+        let hk = self.hkind.pop();
+        let he = self.herr.pop();
+        let hc = self.hclause.pop();
+        let ha = self.hcap_a.pop();
+        let hn = self.hcap_n.pop();
+        if is_invalid(body) {
+            return bad;
+        }
+        // The captures again, then the `return` pattern's binding.
+        let mut ret_names: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut ret_slots: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        self.copy_bindings(
+            inout b,
+            in captured_names,
+            in captured_slots,
+            inout ret_names,
+            inout ret_slots
+        );
+        swap(inout ret_names, inout self.snames);
+        swap(inout ret_slots, inout self.sslots);
+        self.bind_name(inout b, ret_name, body);
+        let result = self.nested(inout b, inout m, inout w);
+        if is_invalid(result) {
+            return bad;
+        }
+        let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        args.push(result.id);
+        ins_jump(inout b, dispatch, in args.as_slice());
+        switch_to_block(inout b, dispatch);
+        let sel = use_var(inout b, selector);
+        let next = create_block(inout b);
+        let hit = ins_icmp_imm(inout b, cc_eq(), sel, 0);
+        let mut out_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        out_args.push(dispatched.id);
+        let no_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        ins_brif(inout b, hit, exit, in out_args.as_slice(), next, in no_args.as_slice());
+        switch_to_block(inout b, next);
+        ins_trap(inout b, trap_user(DISPATCH_TRAP));
+        // The scope before the handler.
+        swap(inout names, inout self.snames);
+        swap(inout slots, inout self.sslots);
+        switch_to_block(inout b, exit);
+        body_coerce(inout b, out, kind, self.optimize)
+    }
+
+    // `perform_values` of a raise of `error` that the handler at `depth`
+    // takes (#2657): the handler's captures copied (the clause's whole
+    // scope) and the error bound to the clause's name; the continuation's
+    // entry block; the clause, its result coerced to the handler's and
+    // jumped to its dispatch; then emission goes on in the entry.
+    fn perform(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words,
+        depth: u64,
+        error: Value
+    ) -> bool eff [Ffi[Cranelift]] {
+        let a = at64(in self.hcap_a, depth);
+        let n = at64(in self.hcap_n, depth);
+        let mut cap_names: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut cap_slots: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for k in a..wrapping_add(a, n) {
+            cap_names.push(at64(in self.hcap_names, k));
+            cap_slots.push(at64(in self.hcap_slots, k));
+        }
+        let mut names: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut slots: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        self.copy_bindings(inout b, in cap_names, in cap_slots, inout names, inout slots);
+        swap(inout names, inout self.snames);
+        swap(inout slots, inout self.sslots);
+        self.bind_name(inout b, at64(in self.herr, depth), error);
+        let entry = create_block(inout b);
+        let resumed = append_block_param(inout b, entry, ty_i64());
+        let back = w.at;
+        w.at = at64(in self.hclause, depth);
+        let out = self.nested(inout b, inout m, inout w);
+        w.at = back;
+        swap(inout names, inout self.snames);
+        swap(inout slots, inout self.sslots);
+        if is_invalid(out) {
+            return false;
+        }
+        let output = body_coerce(inout b, out, at64(in self.hkind, depth), self.optimize);
+        let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        args.push(output.id);
+        ins_jump(inout b, Block { id: at32(in self.hdispatch, depth) }, in args.as_slice());
+        switch_to_block(inout b, entry);
+        true
+    }
+
     fn terminator(inout self, inout b: Builder, inout w: Words) -> bool eff [Ffi[Cranelift]] {
         let code = w.next();
         let mut ops: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -2271,6 +2978,13 @@ impl Body {
             } else {
                 self.value(i)
             };
+            if self.join != invalid() {
+                // A nested graph's `return` (#2657): to its join.
+                let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                args.push(v.id);
+                ins_jump(inout b, Block { id: self.join }, in args.as_slice());
+                return true;
+            }
             self.emit_return_value(inout b, v);
             return true;
         }
@@ -2437,7 +3151,8 @@ pub fn emit_body_words(
     if count < wrapping_add(w.at, 3) {
         return BODY_ERROR;
     }
-    let nc = w.next();
+    let ncw = w.next();
+    let nc = wrapping_add(ncw & CALLEE_ID_MASK, ncw >> NESTED_CALLS_SHIFT);
     let mut callees: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for k in 0..nc {
         callees.push(w.next());
@@ -2562,6 +3277,25 @@ pub fn emit_body_words(
         result_words: result_words,
         entry_reads: ChunkSeq::new[u32](),
         invariant: ChunkSeq::new[u32](),
+        views: ChunkSeq::new[u64](),
+        nviews: 0,
+        join: invalid(),
+        cur_loc: NO_LOCATION,
+        svar: ChunkSeq::new[u32](),
+        skind: ChunkSeq::new[u64](),
+        saddr: ChunkSeq::new[u32](),
+        sreg: ChunkSeq::new[u64](),
+        snames: ChunkSeq::new[u64](),
+        sslots: ChunkSeq::new[u64](),
+        hexit: ChunkSeq::new[u32](),
+        hdispatch: ChunkSeq::new[u32](),
+        hkind: ChunkSeq::new[u64](),
+        herr: ChunkSeq::new[u64](),
+        hclause: ChunkSeq::new[u64](),
+        hcap_a: ChunkSeq::new[u64](),
+        hcap_n: ChunkSeq::new[u64](),
+        hcap_names: ChunkSeq::new[u64](),
+        hcap_slots: ChunkSeq::new[u64](),
     };
     // The graph's blocks: the entry is the current block.
     s.blocks.push(current_block(inout b).id);
@@ -2572,9 +3306,12 @@ pub fn emit_body_words(
     let nl = w.next();
     for k in 0..nl {
         let mut entry = w.next();
-        s.kinds.push(w.next());
+        let kind_word = w.next();
+        s.kinds.push(kind_word & KIND_MASK);
         let mut address = invalid();
-        let mut spilled = !optimize;
+        // A local a handler names keeps its slot on the optimize path too
+        // (#2657).
+        let mut spilled = !optimize || (kind_word & HANDLER_HOME) != 0;
         // A local lent to a call that may fail keeps its slot on the
         // optimize path too (#2614).
         if entry >= LOCAL_HOME {
@@ -2605,89 +3342,10 @@ pub fn emit_body_words(
             s.spill(inout b, in m, k);
         }
     }
-    // Each value's register.
-    let nv = w.next();
-    let mut lanes: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for k in 0..nv {
-        let lane = w.next();
-        lanes.push(lane);
-        s.registers.push(zeroed(inout b, lane));
-        s.params.push(invalid());
-        s.values.push(invalid());
-    }
-    s.refresh_all = !optimize && nv <= FULL_REFRESH_VALUES;
-    // Block parameters, and where each block's list is.
-    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for bi in 0..nb {
-        starts.push(w.at);
-        let n = w.next();
-        for k in 0..n {
-            let i = w.next();
-            let p = append_block_param(inout b, s.block(bi), lane_type(at64(in lanes, i)));
-            let ok = s.params.try_set(i, p.id);
-        }
-    }
-    // The lowering order.
-    let mut order: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let mut seal: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for k in 0..nb {
-        order.push(w.next());
-        seal.push(w.next());
-    }
-    for k in 0..nb {
-        let bi = at64(in order, k);
-        let blk = s.block(bi);
-        if current_block(inout b).id != blk.id {
-            switch_to_block(inout b, blk);
-        }
-        if at64(in seal, k) != 0 {
-            seal_block(inout b, blk);
-        }
-        // The block's parameters define their registers.
-        let mut pa = at64(in starts, bi);
-        let n = w.arg(pa);
-        for j in 0..n {
-            pa = wrapping_add(pa, 1);
-            let i = w.arg(pa);
-            let p = Value { id: at32(in s.params, i) };
-            def_var(inout b, var_at(in s.registers, i), p);
-            let ok = s.values.try_set(i, p.id);
-        }
-        // `seq_entry_view` in the entry block: each view's parameter
-        // read once, its header words read-only memory from then on.
-        if bi == 0 {
-            let mut v: u64 = 0;
-            for _ in 0..nviews {
-                let p = at64(in views, v);
-                let nr = at64(in views, wrapping_add(v, 1));
-                v = wrapping_add(v, 2);
-                let var = Var {
-                    id: wrapping_u32(w.arg(wrapping_add(wrapping_add(ARG_PARAMS, 1), p)))
-                };
-                let receiver = use_var(inout b, var);
-                s.invariant.push(receiver.id);
-                for _ in 0..nr {
-                    let i = at64(in views, v);
-                    v = wrapping_add(v, 1);
-                    loop {
-                        if s.entry_reads.len() > i {
-                            break;
-                        }
-                        s.entry_reads.push(invalid());
-                    }
-                    let ok = s.entry_reads.try_set(i, receiver.id);
-                }
-            }
-        }
-        let ic = w.next();
-        for j in 0..ic {
-            if !s.inst(inout b, inout m, inout w) {
-                return BODY_ERROR;
-            }
-        }
-        if !s.terminator(inout b, inout w) {
-            return BODY_ERROR;
-        }
+    s.views = views;
+    s.nviews = nviews;
+    if !s.graph_rest(inout b, inout m, inout w, nb) {
+        return BODY_ERROR;
     }
     HANDLED
 }
