@@ -215,7 +215,9 @@ fn compiler_command(in command: Slice[u8]) -> bool {
         || eq(in command, in "lsp")
         || eq(in command, in "proof-audit")
         || eq(in command, in "run")
+        || eq(in command, in "sim-host")
         || eq(in command, in "test")
+        || eq(in command, in "tool-facts")
         || eq(in command, in "verify")
 }
 
