@@ -736,7 +736,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
 
     if let Some(out_path) = opts.output.as_deref() {
         let receipt_bytes = serde_json::to_vec_pretty(&receipt).map_err(|e| e.to_string())?;
-        vesper::atomic_file::atomic_write(out_path, &receipt_bytes)?;
+        crate::atomic_file::atomic_write(out_path, &receipt_bytes)?;
     }
 
     if opts.json {
