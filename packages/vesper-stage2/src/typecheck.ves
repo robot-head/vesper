@@ -87,7 +87,9 @@ fn tc_new(sink names: Names, sink types: Types, sink world: World, sink sugar: P
     let empty_p = ChunkSeq::new[u8]();
     let mut t = types;
     let infer_ty = t.mk_with(TyKind::Infer, 0, 0, in empty, in empty_p, 0, 0, 0);
-    let unit_ty = t.named0(world.k.unit);
+    // Rust's `Type::unit()`, `Tuple([])`: the type of a block without a tail,
+    // an `if` without `else`, assignments, loops and unit-valued methods.
+    let unit_ty = t.unit;
     let bool_ty = t.named0(world.k.bool_);
     let i64_ty = t.named0(world.k.i64_);
     let u64_ty = t.named0(world.k.u64_);

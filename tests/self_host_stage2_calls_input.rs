@@ -76,7 +76,10 @@ const DECLINES: &[&str] = &[
 /// The functions Stage 2 must lower as Rust does today. The rest differ
 /// where Stage 2's checker records less than Rust's: overflow and partial
 /// operations (`fallible`) and the unit type of statements.
-const MIN_SAME_FUNCTIONS: usize = 8;
+const MIN_SAME_FUNCTIONS: usize = 9;
+
+/// Set to print the Rust and Stage 2 bodies of each function that differs.
+const SHOW_DIFFS: &str = "VESPER_STAGE2_CALLS_DIFFS";
 
 /// The functions of a `place_ir_dump`, by name: each body's lines with
 /// path ids replaced by the paths they name, and the spans (which Stage 2
@@ -279,7 +282,16 @@ fn stage2_calls_inputs_read_as_rust_ones() {
         for (name, body) in &rust_fns {
             match stage2_fns.get(name) {
                 Some(b) if same_body(body, b) => same_fns += 1,
-                Some(_) => differing.push(format!("{library}::{name}")),
+                Some(b) => {
+                    if std::env::var_os(SHOW_DIFFS).is_some() {
+                        eprintln!(
+                            "{library}::{name}\nRust:\n{}\nStage 2:\n{}",
+                            body.join("\n"),
+                            b.join("\n")
+                        );
+                    }
+                    differing.push(format!("{library}::{name}"))
+                }
                 None => failures.push(format!("{library}: Stage 2 did not lower {name}")),
             }
         }
