@@ -17,6 +17,12 @@ Two ways to link the object:
 - A test links it directly with `-Clink-arg=$(location ...)`, as
   crates/vesper-port-pilot/BUILD.bazel does.
 
+Under `--config=stage2-ports` (the `//tools/bazel:stage2_ports` label flag), the object,
+interface and binding come from the Stage 2 port builder
+(`//:vesper-port-builder.wasm`, run by the pinned wasmtime CLI) through
+`vesper-port-build`, which runs `//:bin/vesper` instead for each port the
+builder declines (#2666). The builder itself is built with the flag off.
+
 Port objects must never be dependencies of `//:vesper` or of
 `//crates/vesper-codegen-verified`; crates/vesper-port-harness/BUILD.bazel
 checks that with a query. See docs/maintenance/porting-a-crate.md.
@@ -84,6 +90,65 @@ vesper_package = rule(
     },
 )
 
+Stage2PortToolsInfo = provider(
+    doc = "What vesper_port_object needs to try the Stage 2 port builder; all None when off.",
+    fields = {
+        "builder": "`vesper-port-builder.wasm` (a File), or None.",
+        "tool": "`vesper-port-build` (FilesToRunProvider), or None.",
+        "wasmtime": "The pinned wasmtime CLI (FilesToRunProvider), or None.",
+    },
+)
+
+_STAGE2_PORTS = "//tools/bazel:stage2_ports"
+_NO_STAGE2_PORTS = "//tools/bazel:no_stage2_ports"
+
+def _without_stage2_ports_impl(_settings, _attr):
+    return {_STAGE2_PORTS: _NO_STAGE2_PORTS}
+
+# The builder's own closure is built with the flag off, so the graph has
+# no cycle even if a port object ends up in it.
+_without_stage2_ports = transition(
+    implementation = _without_stage2_ports_impl,
+    inputs = [],
+    outputs = [_STAGE2_PORTS],
+)
+
+def _stage2_port_tools_impl(ctx):
+    # A transitioned attribute is a list, empty when the label is unset.
+    if not ctx.files.builder:
+        return [Stage2PortToolsInfo(builder = None, tool = None, wasmtime = None)]
+    return [Stage2PortToolsInfo(
+        builder = ctx.files.builder[0],
+        tool = ctx.attr.tool[DefaultInfo].files_to_run,
+        wasmtime = ctx.attr.wasmtime[DefaultInfo].files_to_run,
+    )]
+
+stage2_port_tools = rule(
+    implementation = _stage2_port_tools_impl,
+    doc = """The Stage 2 port builder for vesper_port_object (#2666), or none.
+
+`//tools/bazel:stage2_ports` (a label_flag, set by `--config=stage2-ports`)
+names one of these. Its default names one without a builder, so a query of
+a port object's dependencies never reaches the builder.""",
+    attrs = {
+        "builder": attr.label(
+            allow_single_file = [".wasm"],
+            cfg = _without_stage2_ports,
+            doc = "`//:vesper-port-builder.wasm`.",
+        ),
+        "tool": attr.label(
+            executable = True,
+            cfg = "exec",
+            doc = "`vesper-port-build`: the builder, then the Rust compiler where it declines.",
+        ),
+        "wasmtime": attr.label(
+            executable = True,
+            cfg = "exec",
+            doc = "The pinned wasmtime CLI that runs the builder.",
+        ),
+    },
+)
+
 def _package_dir(manifest):
     return manifest.dirname
 
@@ -129,24 +194,50 @@ def _vesper_port_object_impl(ctx):
     out = ctx.actions.declare_file(ctx.label.name + (".obj" if "windows" in ctx.attr.target else ".o"))
     interface = ctx.actions.declare_file(ctx.label.name + ".json")
     binding = ctx.actions.declare_file(ctx.label.name + "_binding.rs")
-    args = ctx.actions.args()
-    args.add_all(["build", "--lib", "--lib-name", ctx.attr.library])
-    if ctx.attr.target:
+    stage2 = ctx.attr._stage2_ports[Stage2PortToolsInfo]
+    if stage2.builder:
+        builder = stage2.builder
+        wasmtime = stage2.wasmtime.executable
+        args = ctx.actions.args()
+        args.add("--builder", builder)
+        args.add("--wasmtime", wasmtime)
+        args.add("--vesper", ctx.executable._vesper)
+        args.add("--library", ctx.attr.library)
         args.add("--target", ctx.attr.target)
-    args.add(input_path)
-    args.add("-o", out)
-    args.add("--interface", interface)
-    args.add("--rust-binding", binding)
-    if ctx.attr.rust_types:
-        args.add("--rust-types", ctx.attr.rust_types)
-    ctx.actions.run(
-        executable = ctx.executable._vesper,
-        arguments = [args],
-        inputs = inputs,
-        outputs = [out, interface, binding],
-        mnemonic = "VesperLib",
-        progress_message = "Compiling Vesper library %s" % ctx.attr.library,
-    )
+        args.add("--input", input_path)
+        args.add("--object", out)
+        args.add("--interface", interface)
+        args.add("--binding", binding)
+        if ctx.attr.rust_types:
+            args.add("--rust-types", ctx.attr.rust_types)
+        ctx.actions.run(
+            executable = stage2.tool,
+            arguments = [args],
+            inputs = inputs + [builder],
+            tools = [ctx.attr._vesper[DefaultInfo].files_to_run, stage2.wasmtime],
+            outputs = [out, interface, binding],
+            mnemonic = "VesperLibStage2",
+            progress_message = "Compiling Vesper library %s with the Stage 2 port builder" % ctx.attr.library,
+        )
+    else:
+        args = ctx.actions.args()
+        args.add_all(["build", "--lib", "--lib-name", ctx.attr.library])
+        if ctx.attr.target:
+            args.add("--target", ctx.attr.target)
+        args.add(input_path)
+        args.add("-o", out)
+        args.add("--interface", interface)
+        args.add("--rust-binding", binding)
+        if ctx.attr.rust_types:
+            args.add("--rust-types", ctx.attr.rust_types)
+        ctx.actions.run(
+            executable = ctx.executable._vesper,
+            arguments = [args],
+            inputs = inputs,
+            outputs = [out, interface, binding],
+            mnemonic = "VesperLib",
+            progress_message = "Compiling Vesper library %s" % ctx.attr.library,
+        )
     return [
         DefaultInfo(files = depset([out]), runfiles = ctx.runfiles([interface])),
         OutputGroupInfo(rust_binding = depset([binding]), interface = depset([interface])),
@@ -170,6 +261,10 @@ vesper_port_object = rule(
             default = "//:bin/vesper",
             executable = True,
             cfg = "target",
+        ),
+        "_stage2_ports": attr.label(
+            default = _STAGE2_PORTS,
+            providers = [Stage2PortToolsInfo],
         ),
     },
 )

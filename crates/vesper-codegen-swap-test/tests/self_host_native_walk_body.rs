@@ -2369,6 +2369,80 @@ fn vesper_scalar_bodies_generic_products_joins_and_struct_calls() {
     });
 }
 
+/// #2654: struct and tuple patterns (`Codegen::bind_ir` and
+/// `pattern_condition` of a product) and enums kept in memory: their
+/// constructors, enum locals and results, and constructor arms with and
+/// without fields.
+const SCALARS_6W: &str = "
+copy struct Pt {
+    x: i64,
+    y: i64,
+}
+copy enum Shape {
+    Dot,
+    Rect(i64, i64),
+    Tagged(i64, bool)
+}
+fn span(p: Pt) -> i64 {
+    let Pt { x, y } = p;
+    wrapping_sub(y, x)
+}
+fn pick(a: i64, b: bool) -> i64 {
+    let t = (a, b);
+    match t {
+        (v, true) => v,
+        (v, false) => wrapping_add(v, 1),
+    }
+}
+fn shape(w: i64, h: i64) -> Shape {
+    Rect(w, h)
+}
+fn area(s: Shape) -> i64 {
+    match s {
+        Dot => 0,
+        Rect(w, h) => wrapping_mul(w, h),
+        Tagged(n, b) => if b { n } else { 0 },
+    }
+}
+fn main() -> i64 {
+    let p = Pt { x: 3, y: 10 };
+    let d = Dot;
+    let t = Tagged(9, true);
+    wrapping_add(
+        wrapping_add(span(p), pick(5, false)),
+        wrapping_add(area(shape(6, 7)), wrapping_add(area(d), area(t)))
+    )
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_product_patterns_and_enums() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6W);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the #2654 program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6w", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6w: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 4 } else { 8 };
+        assert!(
+            emitted >= min_emitted,
+            "#2654 functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
 /// `inout` arguments to `fail_only` callees (#2614), next to struct results
 /// of `fail_only` functions built in the result pointer, with checked arithmetic, a partial division and a call of
 /// another `fail_only` function raising through the failure record, whose
