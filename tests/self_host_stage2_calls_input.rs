@@ -79,7 +79,7 @@ const DECLINES: &[&str] = &[
 /// The functions Stage 2 must lower as Rust does today. The rest differ
 /// where Stage 2's checker records less than Rust's: overflow and partial
 /// operations (`fallible`) and the unit type of statements.
-const MIN_SAME_FUNCTIONS: usize = 34;
+const MIN_SAME_FUNCTIONS: usize = 37;
 
 /// The port functions Stage 2 must lower as Rust does today.
 const MIN_SAME_PORT_FUNCTIONS: usize = 5100;
@@ -279,6 +279,14 @@ pub fn steps() -> u32 eff [Fail[ArithOverflow]] { let mut t: u32 = 0; for i in 0
 pub fn sum_arr() -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] { let t: [u32; 4] = [1, 2, 3, 4]; let mut s: u32 = 0; for i in 0..4 { s = s + t[i]; } s }
 pub fn second(n: u64) -> u64 eff [Fail[RuntimeError]] { let mut v = ChunkSeq::new[u64](); v.push(n); v[0] }",
         &["second", "shift3", "steps", "sum_arr"],
+    ),
+    // Generic arguments inferred from the expected result (`apply`).
+    (
+        "results",
+        "fn fail_with[T](code: u64) -> Result[T, u64] { Result::Err(code) }
+pub fn checked(x: u64) -> Result[bool, u64] { if x == 0 { return fail_with(x); } Result::Ok(true) }
+pub fn tagged(x: u64) -> Result[u8, u64] { fail_with(x) }",
+        &["checked", "tagged"],
     ),
     (
         "floats",

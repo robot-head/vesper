@@ -1027,7 +1027,17 @@ fn check_sugar_value_call(inout tc: Tc, in a: Ast, callable: u32, e: Ex, ce: Ex)
     signature.r
 }
 
-fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: Ex) -> u32 {
+// Rust's `apply`: a generic callee's arguments are first inferred from the
+// type its context expects of the result, then from its arguments.
+fn check_fn_call(
+    inout tc: Tc,
+    in a: Ast,
+    f: FnR,
+    receiver_ty: u32,
+    e: Ex,
+    ce: Ex,
+    expected: u32
+) -> u32 {
     check_sugar_call_access(
         inout tc,
         in a,
@@ -1071,6 +1081,9 @@ fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: E
             },
             Option::None => {},
         }
+    }
+    if e.m == 0 && tc.types.kind(expected) != TyKind::Infer {
+        infer(inout tc.types, tc.world.k, f.result, expected, in gnames, inout vars);
     }
     let has_recv = receiver_ty != NONE32;
     let mut p_off: u64 = 0;
@@ -1919,7 +1932,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                     match fn_opt {
                         Option::Some(f) => {
                             certify_sugar_call(inout tc, eid);
-                            return check_fn_call(inout tc, in a, f, NONE32, e, ce);
+                            return check_fn_call(inout tc, in a, f, NONE32, e, ce, expected);
                         },
                         Option::None => {
                             let local = lookup_var(in tc, cname);
@@ -2110,7 +2123,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                     match find_fn(in a, cname) {
                         Option::Some(f) => {
                             certify_sugar_call(inout tc, eid);
-                            return check_fn_call(inout tc, in a, f, bt, e, ce);
+                            return check_fn_call(inout tc, in a, f, bt, e, ce, expected);
                         },
                         Option::None => {
                             if sugar_applies(inout tc, e) {
