@@ -6781,7 +6781,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "vesper",
  "vesper-port-abi",
  "vesper-port-harness",
  "vesper-simpulse-seed",
