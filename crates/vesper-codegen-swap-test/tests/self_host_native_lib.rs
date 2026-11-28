@@ -11,8 +11,9 @@
 //! names each body's direct callees with @vesper/native-walk over the
 //! calls input of the walk's program, takes the flags from the library
 //! task and the instance's row, and checks the body hook's plain gate
-//! (slice 3e). A function without a Rust-side body plan keeps the library
-//! out of the comparison. A recording `export_plans` hook keeps the calls input of
+//! (slice 3e). It makes the walk's program itself with @vesper/library-ir
+//! from the first lowering (slice 3f). A function without a Rust-side body
+//! plan keeps the library out of the comparison. A recording `export_plans` hook keeps the calls input of
 //! the library's first lowering, from which the driver makes the instances
 //! and their declarations itself (slice 2a-2a); the request names only the
 //! exports' symbols, read from the lent module. The request built from
@@ -166,12 +167,8 @@ struct Record {
     /// functions it has a body plan for.
     program: Option<(Vec<u8>, HashSet<String>)>,
     /// The calls input of the library's first lowering, which the
-    /// `export_plans` hook saw, and its library tasks.
+    /// `export_plans` hook saw.
     calls: Option<Vec<u8>>,
-    tasks: Vec<(String, u64)>,
-    /// The calls input of the program the walk emits from, which the
-    /// driver plans bodies and names callees from.
-    walk_calls: Option<Vec<u8>>,
     /// The definitions' source-locations word (the same for every one).
     locations: Option<u64>,
     /// The library's interface: its 128-bit entries and v2 glue.
@@ -263,14 +260,6 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
         }
         if r.program.is_none() {
             r.program = Some(walk_program(world, program));
-            let tasks = r.tasks.clone();
-            match codegen_calls_words::calls_input_flags_wide(world, program, &tasks) {
-                Some(i) => r.walk_calls = Some(i),
-                None => {
-                    r.refused = Some("the walk's program has no calls input".into());
-                    return;
-                }
-            }
         }
         // The driver plans each body itself (slice 3a of #2349); a function
         // without a plan stays with the walk.
@@ -356,11 +345,13 @@ fn record_calls(
     roots: &[&str],
     optimize: bool,
 ) -> Option<vesper::native::EntryPlans> {
-    let tasks = library_tasks(roots, optimize);
-    let input = codegen_calls_words::calls_input_flags_wide(world, program, &tasks);
+    let input = codegen_calls_words::calls_input_flags_wide(
+        world,
+        program,
+        &library_tasks(roots, optimize),
+    );
     RECORD.with(|cell| {
         let mut r = cell.borrow_mut();
-        r.tasks = tasks;
         match input {
             Some(i) => r.calls = Some(i),
             None => r.refused = Some("the program has no calls input".into()),
@@ -413,7 +404,6 @@ fn request(r: &Record) -> Vec<u8> {
         q.bytes(symbol.as_bytes());
     }
     q.bytes(r.calls.as_deref().unwrap_or_default());
-    q.bytes(r.walk_calls.as_deref().unwrap_or_default());
     q.word(wide.len() as u64);
     for f in wide {
         let inner = r

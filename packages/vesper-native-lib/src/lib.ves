@@ -23,7 +23,11 @@
 // names each body's direct callees (@vesper/native-walk's call words over
 // the walk's program), takes its flags from the library task and its row,
 // and refuses an instance the body hook's plain gate would not hand over
-// (@vesper/native-walk's `frame_plan` and `graph_plain`).
+// (@vesper/native-walk's `frame_plan` and `graph_plain`). Slice 3f makes
+// the walk's program itself: @vesper/library-ir runs the library IR
+// pipeline (widths, optimize, inline, drop elaboration, hoisting) on the
+// first lowering and writes it back as a calls input, which the bodies
+// are planned and the callees named from.
 //
 // Request (little-endian words; a string is its length, then its bytes):
 //
@@ -32,9 +36,6 @@
 //     n exports, each: instance key, symbol,
 //     the calls input (a string: @vesper/codegen-calls' input, whose
 //         first library task names the exports as its roots),
-//     the walk's calls input (a string: the same input over the walk's
-//         program, the place-ir program after optimize, inline, drop
-//         elaboration and hoisting, which the bodies are planned from),
 //     then the 128-bit export entries and the v2 section (exports.ves).
 //
 // Every instance is defined, in instance order.
@@ -63,6 +64,7 @@ use @vesper/check-data::input::{Reader as IrReader, read_ctx};
 use @vesper/place-ir::{read_program};
 use @vesper/native-walk::{native_walk_call_words_bytes};
 use @vesper/native-walk::frame::{graph_plain};
+use @vesper/library-ir::{Status as IrStatus, library_walk_calls_input};
 use self::declare::{Declared, declare_library, declared_new, exports_new};
 
 // The answer's status words.
@@ -86,6 +88,7 @@ const NO_VALUE: u64 = 18446744073709551615;
 pub const MALFORMED: Str = "malformed native-lib request";
 pub const UNKNOWN_FUNCTION: Str = "a definition names an unknown function";
 const NOT_PLAIN: Str = "the body hook's plain gate refuses a definition: ";
+const NO_WALK_PROGRAM: Str = "the library IR pipeline refused the program: status ";
 const NO_CALL_WORDS: Str = "the walk's program has no call words for a definition: ";
 const NO_BUILDER: Str = "the function builder could not be made";
 const DECLINED_BODY: Str = "the body hook declined a definition: ";
@@ -510,10 +513,13 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
         module_free(m);
         return failure(in declare_err.as_slice());
     }
-    let walk = r.bytes(in req);
-    if r.bad {
+    let (status, walk) = library_walk_calls_input(in calls.as_slice(), d.optimize);
+    if status != IrStatus::Ok {
         module_free(m);
-        return failure(in MALFORMED.as_bytes());
+        let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        message.extend(in NO_WALK_PROGRAM.as_bytes());
+        push_dec(inout message, status);
+        return failure(in message.as_slice());
     }
     let plans = plans_of(in walk.as_slice(), in d);
     let count = d.ids.len();
