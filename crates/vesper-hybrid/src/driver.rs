@@ -339,7 +339,8 @@ enum Step {
     // (`IoError`) moved to the Vesper driver (#1896), 17 (`CheckMain`)
     // to the world it holds (#2024), and 11 (`EmitInterface`, the package
     // name of an interface export) to the Vesper driver's manifest read
-    // (#1893); numbers are not reused.
+    // (#1893), and 15 (`VerifiedBuild`) into the Vesper driver's verified
+    // build (#1895); numbers are not reused.
     Load = 2,
     EbpfBuild = 3,
     Parse = 4,
@@ -384,7 +385,7 @@ enum Step {
     WorldBegin = 81,
 }
 
-const STEPS: [Step; 35] = [
+const STEPS: [Step; 34] = [
     Step::Load,
     Step::EbpfBuild,
     Step::Parse,
