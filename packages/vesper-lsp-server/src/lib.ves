@@ -23,8 +23,8 @@ use @vesper/driver-engines::{
     lsp_engine_deadline, lsp_engine_error_text, lsp_engine_exit, lsp_engine_frame, lsp_engine_start,
     lsp_engine_take, lsp_engine_tick
 };
-use @vesper-std/fs::{IoError, error_text, stdout_handle, write_handle};
-use @vesper-std/process::{read_wait, stdin_handle};
+use @vesper-std/fs::{IoError, error_text};
+use @vesper-std/process::{read_wait, stdin_handle, stdout_handle, write_all};
 
 // Where the client stream starts in the input: after the limits.
 const STREAM_AT: u64 = LimitWord::Count * Le::WordBytes;
@@ -499,34 +499,20 @@ fn io_error(inout s: Server, e: IoError) eff [Ffi[StdFs]] {
     s.error.extend(in text[0..text.len()]);
 }
 
-// One write to the client: whether it went through, and if not why.
-copy struct Wrote {
-    ok: bool,
-    error: IoError
-}
-
-fn write_step(stream: u64, in data: Slice[u8]) -> Wrote eff [Ffi[StdFs]] {
-    handle Fail[IoError] in {
-        write_handle(stream, in data);
-        Wrote { ok: true, error: IoError { kind: 0, os: 0 } }
-    } with {
-        return v => v,
-        raise(e, resume) => Wrote { ok: false, error: e },
-    }
-}
-
 // Write the frames the loop has produced to the client.
-fn flush(inout s: Server) -> bool eff [Ffi[StdFs]] {
+fn flush(inout s: Server) -> bool eff [Ffi[StdFs], Ffi[StdProcess]] {
     if s.out.len() == 0 {
         return true;
     }
-    let written = write_step(s.client.output, in s.out[0..s.out.len()]);
+    let written = write_all(s.client.output, in s.out[0..s.out.len()]);
     s.out.truncate(0);
-    if written.ok {
-        return true;
+    match written {
+        Result::Ok(_) => true,
+        Result::Err(e) => {
+            io_error(inout s, e);
+            false
+        },
     }
-    io_error(inout s, written.error);
-    false
 }
 
 // Serve `client` as its bytes arrive, writing each frame as it is

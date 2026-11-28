@@ -1,5 +1,5 @@
 // @vesper-std/process (Windows): child processes directly over kernel32.
-use @vesper-std/fs::{IoError, error_of, invalid_input, program_not_found};
+use @vesper-std/fs::{IoError, error_of, invalid_input, program_not_found, write_zero};
 
 pub copy struct ExitStatus {
     pub code: i64,
@@ -1349,4 +1349,34 @@ pub fn read_wait(
         return Result::Err(error_of(widen_u64(e)));
     }
     Result::Ok(widen_i64(n.v))
+}
+
+// ---------------------------------------------------------------------------
+// This process's standard output.
+
+// This process's standard output, for `write_all`: a `HANDLE`.
+pub fn stdout_handle() -> u64 eff [Ffi[StdProcess]] {
+    StdProcess::GetStdHandle(StdProcess::STD_OUTPUT_HANDLE)
+}
+
+// Write all of `data` to the open stream `stream`: the bytes written, or
+// why the stream took no more.
+pub fn write_all(stream: u64, in data: Slice[u8]) -> Result[u64, IoError] eff [Ffi[StdProcess]] {
+    let end = data.len();
+    let mut done: u64 = 0;
+    loop {
+        if done >= end {
+            break;
+        }
+        let mut n = DwordBox { v: 0 };
+        let (ok, e) = StdProcess::WriteFile(stream, in data[done..end], inout n, 0);
+        if ok == 0 {
+            return Result::Err(error_of(widen_u64(e)));
+        }
+        if n.v == 0 {
+            return Result::Err(IoError { kind: write_zero(), os: 0 });
+        }
+        done = wrapping_add(done, widen_u64(n.v));
+    }
+    Result::Ok(done)
 }

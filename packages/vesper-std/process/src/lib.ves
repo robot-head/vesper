@@ -41,7 +41,7 @@
 //     Result::Err(_) => {},
 // }
 // ```
-use @vesper-std/fs::{IoError, invalid_input};
+use @vesper-std/fs::{IoError, invalid_input, write_zero};
 use @vesper-std/fs::sys::os_error_word;
 
 // How a child ended: `exited` with `code`, or (Unix) killed by `signal`.
@@ -1282,4 +1282,38 @@ pub fn read_wait(
             return Result::Err(io_errno(e));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// This process's standard output.
+
+// Standard output's descriptor.
+const STDOUT_FD: u64 = 1;
+
+// This process's standard output, for `write_all`: a descriptor (on
+// Windows, a `HANDLE`).
+pub fn stdout_handle() -> u64 eff [Ffi[StdProcess]] {
+    STDOUT_FD
+}
+
+// Write all of `data` to the open stream `stream`, retrying `EINTR`: the
+// bytes written, or why the stream took no more.
+pub fn write_all(stream: u64, in data: Slice[u8]) -> Result[u64, IoError] eff [Ffi[StdProcess]] {
+    let fd = wrapping_i32(stream);
+    let end = data.len();
+    let mut done: u64 = 0;
+    loop {
+        if done >= end {
+            break;
+        }
+        let (n, e) = StdProcess::write(fd, in data[done..end]);
+        if n > 0 {
+            done = wrapping_add(done, wrapping_u64(n));
+        } else if n == 0 {
+            return Result::Err(IoError { kind: write_zero(), os: 0 });
+        } else if e != StdProcess::EINTR {
+            return Result::Err(io_errno(e));
+        }
+    }
+    Result::Ok(done)
 }

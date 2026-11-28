@@ -243,27 +243,12 @@ fn write_mode(in path: Slice[u8], in data: Slice[u8], mode: u32, sync: bool) eff
 // descriptor 1 (retrying `EINTR`), so it never reorders with other writers
 // of the descriptor that flush before returning.
 pub fn write_stdout(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
-    write_stream(wrapping_i32(STDOUT_FD), in data);
+    write_stream(1, in data);
 }
 
 // Write all of `data` to standard error (descriptor 2), as `write_stdout`.
 pub fn write_stderr(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
     write_stream(2, in data);
-}
-
-// Standard output's descriptor.
-const STDOUT_FD: u64 = 1;
-
-// Standard output, for `write_handle`: a descriptor (on Windows, a
-// `HANDLE`).
-pub fn stdout_handle() -> u64 eff [Ffi[StdFs]] {
-    STDOUT_FD
-}
-
-// Write all of `data` to the open stream `stream`, as `write_stdout`
-// writes standard output.
-pub fn write_handle(stream: u64, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
-    write_stream(wrapping_i32(stream), in data);
 }
 
 fn write_stream(fd: i32, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {

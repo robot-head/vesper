@@ -107,6 +107,12 @@ sys library StdProcess (
         nocapture inout bytes_read: DwordBox,
         overlapped: u64
     ) -> ForeignVal[i32] errno;
+    fn WriteFile(
+        handle: u64,
+        nocapture in buf: CSlice[u8],
+        nocapture inout bytes_written: DwordBox,
+        overlapped: u64
+    ) -> ForeignVal[i32] errno;
     fn CloseHandle(handle: u64) -> ForeignVal[i32];
     fn WaitForSingleObject(handle: u64, millis: u32) -> ForeignVal[u32];
     fn GetExitCodeProcess(handle: u64, nocapture inout code: DwordBox) -> ForeignVal[i32] errno;

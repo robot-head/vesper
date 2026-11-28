@@ -1566,11 +1566,11 @@ output with 64 KiB reads.
 - `@vesper-std/process`: `stdin_handle` and `read_wait(stream, buf,
   wait_ms)`, which answers bytes read, 0 at the end, or -1 when the wait
   passed. Unix waits with `poll`. Windows watches a pipe with
-  `PeekNamedPipe` and reads any other stream without a limit. WASI
-  answers unsupported. No new imports: each target already declared these
-  functions.
-- `@vesper-std/fs`: `stdout_handle` and `write_handle(stream, data)`, as
-  `write_stdout` writes.
+  `PeekNamedPipe` and reads any other stream without a limit. Also
+  `stdout_handle` and `write_all(stream, data)`, over a new `write`
+  (`WriteFile` on Windows) import. WASI answers unsupported for both.
+  @vesper-std/fs is untouched: the Stage 2 port builder compiles it and
+  runs within a few MiB of its 4 GiB heap.
 - `packages/vesper-driver-engines`: `hc_lsp_engine_read` and
   `hc_lsp_engine_write` are gone (7 hooks left).
 - `crates/vesper-hybrid/src/lsp_engine.rs`: the standard input reader

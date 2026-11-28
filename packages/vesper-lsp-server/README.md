@@ -14,9 +14,8 @@ functions of its `HybridCommands` import):
   and background proof runs while the loop waits for the client.
 
 `serve_live` (part 15b) reads its `Client` as bytes arrive and writes
-its frames there itself (part 16a): `read_wait` of @vesper-std/process
-(`poll` on Unix, `PeekNamedPipe` on Windows) and `write_handle` of
-@vesper-std/fs. `serve_stdio` serves standard input and output.
+its frames there itself (part 16a) with `read_wait` (`poll` on Unix,
+`PeekNamedPipe` on Windows) and `write_all` of @vesper-std/process. `serve_stdio` serves standard input and output.
 
 `serve_stdio` is `vesper lsp` in the hybrid compiler (part 15c), whose
 host is crates/vesper-hybrid/src/lsp_engine.rs. Today the engine is the

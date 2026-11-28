@@ -363,3 +363,16 @@ pub fn read_wait(
 ) -> Result[i64, IoError] eff [Ffi[StdProcess]] {
     Result::Err(io_kind(unsupported()))
 }
+
+// Standard output's handle, for `write_all`.
+const STDOUT_HANDLE: u64 = 1;
+
+// This process's standard output, for `write_all`.
+pub fn stdout_handle() -> u64 eff [Ffi[StdProcess]] {
+    STDOUT_HANDLE
+}
+
+// Writing a stream by handle is not supported on WASI yet.
+pub fn write_all(_stream: u64, in _data: Slice[u8]) -> Result[u64, IoError] eff [Ffi[StdProcess]] {
+    Result::Err(io_kind(unsupported()))
+}

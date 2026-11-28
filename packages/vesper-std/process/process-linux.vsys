@@ -93,6 +93,7 @@ sys library StdProcess (
     fn fcntl(fd: i32, cmd: i32, ..., arg: i64) -> ForeignVal[i32] errno;
     fn close(fd: i32) -> ForeignVal[i32];
     fn read(fd: i32, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64] errno;
+    fn write(fd: i32, nocapture in buf: CSlice[u8]) -> ForeignVal[i64] errno;
     // Each `struct pollfd` is one word: `fd` in the low 32 bits, then
     // `events` and `revents`.
     fn poll(nocapture inout fds: CSlice[u64], timeout: i32) -> ForeignVal[i32] errno;
