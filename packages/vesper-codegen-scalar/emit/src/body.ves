@@ -66,6 +66,7 @@ const LANE_PRODUCT: u64 = 5;
 const LOCAL_PARAM: u64 = 16;
 const LOCAL_PARAM_PRODUCT: u64 = 65536;
 const STORE_AGGREGATE: u64 = 65536;
+const LOCAL_HOME: u64 = 4294967296;
 
 // Instruction kinds (`body.ves`).
 const INST_PLANNED: u64 = 1;
@@ -1673,9 +1674,7 @@ impl Body {
                 return false;
             }
             let word = at64(in self.callees, call_idx);
-            if (word & FAIL_CALL) != 0 {
-                return false;
-            }
+            let fails = (word & FAIL_CALL) != 0;
             let callee = FuncId { id: wrapping_u32(word & CALLEE_ID_MASK) };
             let mut temps: ChunkSeq[u32] = ChunkSeq::new[u32]();
             for k in 0..n {
@@ -1731,9 +1730,28 @@ impl Body {
             if ti != n {
                 return false;
             }
-            let fun = import_function(inout b, inout m, callee);
-            let _ = ins_call(inout b, fun, in args.as_slice());
-            let result = inst_result(inout b, 0);
+            let mut result = Value { id: invalid() };
+            if !fails {
+                let fun = import_function(inout b, inout m, callee);
+                let _ = ins_call(inout b, fun, in args.as_slice());
+                result = inst_result(inout b, 0);
+            } else {
+                // A `fail_only` callee (#2614): its record after the
+                // arguments, the failure raised again before the restores.
+                let status_call = (word & STATUS_CALL) != 0;
+                let size = w.next();
+                let record = self.alloc_record(inout b, in m, size, status_call);
+                args.push(record.id);
+                let fun = import_function(inout b, inout m, callee);
+                let _ = ins_call(inout b, fun, in args.as_slice());
+                result = inst_result(inout b, 0);
+                let tag = if status_call {
+                    inst_result(inout b, 1)
+                } else {
+                    ins_load(inout b, ty_i64(), PLAIN, record, 0)
+                };
+                self.reraise(inout b, inout w, record, tag);
+            }
             for k in 0..lent.len() {
                 let l = at64(in lent, k);
                 let ptr = Value { id: at32(in lent_ptrs, k) };
@@ -2553,10 +2571,16 @@ pub fn emit_body_words(
     // Locals, in name order; on the unoptimized path each one's slot.
     let nl = w.next();
     for k in 0..nl {
-        let entry = w.next();
+        let mut entry = w.next();
         s.kinds.push(w.next());
         let mut address = invalid();
         let mut spilled = !optimize;
+        // A local lent to a call that may fail keeps its slot on the
+        // optimize path too (#2614).
+        if entry >= LOCAL_HOME {
+            entry = wrapping_sub(entry, LOCAL_HOME);
+            spilled = true;
+        }
         if entry >= LOCAL_PARAM_PRODUCT {
             // A product parameter is its storage's address: no slot.
             let p = wrapping_sub(entry, LOCAL_PARAM_PRODUCT);

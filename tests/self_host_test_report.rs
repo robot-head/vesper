@@ -14,6 +14,8 @@
 //! as the hybrid swap does) and the rendering alone over encoded words
 //! (`TEST_REPORT_SPEED=render`, what a Vesper-only compiler pays).
 
+#[path = "common/flip_gate.rs"]
+mod flip_gate;
 #[path = "common/test_report_words.rs"]
 mod words;
 
@@ -444,7 +446,7 @@ fn test_report_matches_rust_unoptimized() {
 #[test]
 #[ignore = "timing; TEST_REPORT_SPEED=1 cargo test --release --test self_host_test_report -- --ignored"]
 fn test_report_speed() {
-    if std::env::var_os("TEST_REPORT_SPEED").is_none() {
+    if std::env::var_os("TEST_REPORT_SPEED").is_none() && !flip_gate::on() {
         return;
     }
     let r = optimized();
@@ -494,6 +496,13 @@ fn test_report_speed() {
         }
         t.elapsed()
     };
+    if flip_gate::on() {
+        // The gate times the swap's path: encoding, rendering, decoding.
+        flip_gate::pairs("test-report-end-to-end", &mut || run(false), &mut || {
+            run(true)
+        });
+        return;
+    }
     let mut rs: Vec<Duration> = vec![];
     let mut vs: Vec<Duration> = vec![];
     for _ in 0..3 {
