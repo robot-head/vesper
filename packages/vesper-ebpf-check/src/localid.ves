@@ -1,0 +1,310 @@
+// `btf_ext::local_root_ids` (crates/vesper-ebpf/src/btf_ext.rs): the id
+// each CO-RE relocation's local root type gets in the BTF that
+// `btf_ext::build(prog, "xdp")` emits. Only the ids matter, so this counts
+// the builder's types in its order instead of writing them: `int`, the
+// map fields' array and pointer types (one pair per distinct value), a
+// struct and a variable per map and the `.maps` section; the function
+// types of `add_func_types`; the kfunc prototype, functions and `.ksyms`;
+// then the local types, each distinct tree once (`Types::local`'s cache),
+// children first, with `__ARRAY_SIZE_TYPE__` made at the first array.
+
+use @vesper/ebpf::btf::{name_span};
+use self::prog::{Prog, word};
+use self::btf::{BtfTable};
+
+const NONE: u64 = 18446744073709551615;
+const LOW32: u64 = 4294967295;
+// `BPF_MAP_TYPE_RINGBUF`: its maps have no key or value size fields.
+const MAP_TYPE_RINGBUF: u64 = 27;
+// The types `add_func_types` makes before one function per subprogram:
+// `int`, `unsigned long long`, `void *` and the two prototypes.
+const FUNC_TYPE_PREFIX: u64 = 5;
+// Local type tree nodes (`port::local`): six words, then the children.
+const NODE_WORDS: u64 = 6;
+const MEMBER_WORDS: u64 = 6;
+const ENUM_VALUE_WORDS: u64 = 3;
+const TAG_VOID: u64 = 0;
+const TAG_INT: u64 = 1;
+const TAG_PTR: u64 = 2;
+const TAG_ARRAY: u64 = 3;
+const TAG_STRUCT: u64 = 4;
+const TAG_ENUM: u64 = 5;
+// `class::JMP | 0x80` with `pseudo::CALL`, and `LD_IMM64` with
+// `pseudo::FUNC`.
+const CALL_CODE: u8 = 133;
+const PSEUDO_CALL: u8 = 1;
+const LD_IMM64_CODE: u8 = 24;
+const PSEUDO_FUNC: u8 = 4;
+
+struct Ids {
+    next: u64,
+    u32_index: u64,
+    pool: ChunkSeq[u8],
+    key_start: ChunkSeq[u64],
+    key_end: ChunkSeq[u64],
+    key_id: ChunkSeq[u64],
+}
+
+fn put_word(inout out: ChunkSeq[u8], v: u64) {
+    for i in 0..8 {
+        out.push(wrapping_u8(
+            wrapping_shr_u64(v, wrapping_u32(wrapping_mul(wrapping_u64(i), 8))) & 255
+        ));
+    }
+}
+
+fn put_name(inout out: ChunkSeq[u8], in strs: Slice[u8], off: u64) {
+    let (s, n) = name_span(in strs, off & LOW32);
+    put_word(inout out, n);
+    out.extend(in strs[s..wrapping_add(s, n)]);
+}
+
+fn tag_of(raw: u64) -> u64 {
+    if raw >= TAG_ENUM { TAG_ENUM } else { raw }
+}
+
+// The canonical bytes of the tree at `at` (two trees are equal as
+// `LocalType`s exactly when their keys are), and where the tree ends.
+fn key_of(in w: ChunkSeq[u64], at: u64, in strs: Slice[u8], inout key: ChunkSeq[u8]) -> u64 {
+    let tag = tag_of(word(in w, at));
+    let name = word(in w, wrapping_add(at, 1));
+    let size = word(in w, wrapping_add(at, 3)) & LOW32;
+    let flag = word(in w, wrapping_add(at, 4)) != 0;
+    let count = word(in w, wrapping_add(at, 5));
+    let mut next = wrapping_add(at, NODE_WORDS);
+    put_word(inout key, tag);
+    if tag == TAG_VOID {
+        return next;
+    }
+    if tag == TAG_INT {
+        put_name(inout key, in strs, name);
+        put_word(inout key, size);
+        put_word(inout key, if flag { 1 } else { 0 });
+        return next;
+    }
+    if tag == TAG_PTR {
+        return key_of(in w, next, in strs, inout key);
+    }
+    if tag == TAG_ARRAY {
+        put_word(inout key, count & LOW32);
+        return key_of(in w, next, in strs, inout key);
+    }
+    if tag == TAG_STRUCT {
+        put_name(inout key, in strs, name);
+        put_word(inout key, if flag { 1 } else { 0 });
+        put_word(inout key, size);
+        put_word(inout key, count);
+        for m in 0..count {
+            let bitfield = word(in w, wrapping_add(next, 3)) != 0;
+            put_name(inout key, in strs, word(in w, next));
+            put_word(inout key, word(in w, wrapping_add(next, 2)) & LOW32);
+            if bitfield {
+                put_word(inout key, 1);
+                put_word(inout key, word(in w, wrapping_add(next, 4)) & LOW32);
+                put_word(inout key, word(in w, wrapping_add(next, 5)) & LOW32);
+            } else {
+                put_word(inout key, 0);
+            }
+            next = key_of(in w, wrapping_add(next, MEMBER_WORDS), in strs, inout key);
+        }
+        return next;
+    }
+    put_name(inout key, in strs, name);
+    put_word(inout key, size);
+    put_word(inout key, count);
+    for v in 0..count {
+        put_name(inout key, in strs, word(in w, next));
+        put_word(inout key, word(in w, wrapping_add(next, 2)));
+        next = wrapping_add(next, ENUM_VALUE_WORDS);
+    }
+    next
+}
+
+fn same_key(in ids: Ids, k: u64, in key: ChunkSeq[u8]) -> bool {
+    let s = word(in ids.key_start, k);
+    let e = word(in ids.key_end, k);
+    if wrapping_sub(e, s) != key.len() {
+        return false;
+    }
+    for i in 0..key.len() {
+        if ids.pool.try_get(wrapping_add(s, i)).unwrap_or(0) != key.try_get(i).unwrap_or(0) {
+            return false;
+        }
+    }
+    true
+}
+
+fn fresh(inout ids: Ids) -> u64 {
+    ids.next = wrapping_add(ids.next, 1);
+    ids.next
+}
+
+// `Types::local`: the id of the tree at `at`, and where it ends.
+fn local(inout ids: Ids, in w: ChunkSeq[u64], at: u64, in strs: Slice[u8]) -> (u64, u64) {
+    let mut key: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let end = key_of(in w, at, in strs, inout key);
+    for k in 0..ids.key_id.len() {
+        if same_key(in ids, k, in key) {
+            return (word(in ids.key_id, k), end);
+        }
+    }
+    let tag = tag_of(word(in w, at));
+    let count = word(in w, wrapping_add(at, 5));
+    let child = wrapping_add(at, NODE_WORDS);
+    let id = if tag == TAG_VOID {
+        0
+    } else if tag == TAG_PTR {
+        let (c, e) = local(inout ids, in w, child, in strs);
+        fresh(inout ids)
+    } else if tag == TAG_ARRAY {
+        let (c, e) = local(inout ids, in w, child, in strs);
+        if ids.u32_index == NONE {
+            ids.u32_index = fresh(inout ids);
+        }
+        fresh(inout ids)
+    } else if tag == TAG_STRUCT {
+        let mut next = child;
+        for m in 0..count {
+            let (c, e) = local(inout ids, in w, wrapping_add(next, MEMBER_WORDS), in strs);
+            next = e;
+        }
+        fresh(inout ids)
+    } else {
+        fresh(inout ids)
+    };
+    let start = ids.pool.len();
+    ids.pool.extend(in key.as_slice());
+    ids.key_start.push(start);
+    ids.key_end.push(ids.pool.len());
+    ids.key_id.push(id);
+    (id, end)
+}
+
+fn contains(in s: ChunkSeq[u64], v: u64) -> bool {
+    for i in 0..s.len() {
+        if word(in s, i) == v {
+            return true;
+        }
+    }
+    false
+}
+
+// `btf::subprog_starts`: how many distinct subprogram entries.
+fn subprog_count(in prog: Prog) -> u64 {
+    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    starts.push(0);
+    let n = prog.insns.len();
+    for pc in 0..n {
+        match prog.insns.try_get(pc) {
+            Option::Some(i) => {
+                let local_call = i.code == CALL_CODE && i.src == PSEUDO_CALL;
+                let func_load = i.code == LD_IMM64_CODE && i.src == PSEUDO_FUNC;
+                if local_call || func_load {
+                    let t = wrapping_add(wrapping_add(wrapping_i64(pc), 1), widen_i64(i.imm));
+                    if t >= 0 && t < wrapping_i64(n) && !contains(in starts, wrapping_u64(t)) {
+                        starts.push(wrapping_u64(t));
+                    }
+                }
+            },
+            Option::None => (),
+        }
+    }
+    starts.len()
+}
+
+fn same_pool(in prog: Prog, a: u64, b: u64) -> bool {
+    let (as, ae) = (prog.kfunc_word(a, 1), prog.kfunc_word(a, 2));
+    let (bs, be) = (prog.kfunc_word(b, 1), prog.kfunc_word(b, 2));
+    if wrapping_sub(ae, as) != wrapping_sub(be, bs) {
+        return false;
+    }
+    for i in 0..wrapping_sub(ae, as) {
+        if prog.pool.try_get(wrapping_add(as, i)).unwrap_or(0)
+            != prog.pool.try_get(wrapping_add(bs, i)).unwrap_or(0)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+// The types `build` makes before the CO-RE local types.
+fn prefix_types(in prog: Prog) -> u64 {
+    // `int`
+    let mut count: u64 = 1;
+    let mut values: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for m in 0..prog.map_count() {
+        let kind = prog.map_word(m, 2);
+        let mut fields: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        fields.push(kind);
+        if kind != MAP_TYPE_RINGBUF {
+            fields.push(prog.map_word(m, 3));
+            fields.push(prog.map_word(m, 4));
+        }
+        fields.push(prog.map_word(m, 5));
+        if prog.map_word(m, 6) != 0 {
+            fields.push(prog.map_word(m, 6));
+        }
+        for f in 0..fields.len() {
+            let v = word(in fields, f) & LOW32;
+            if !contains(in values, v) {
+                values.push(v);
+                // the array and its pointer
+                count = wrapping_add(count, 2);
+            }
+        }
+        // the struct and the variable
+        count = wrapping_add(count, 2);
+    }
+    if prog.map_count() != 0 {
+        count = wrapping_add(count, 1);
+    }
+    count = wrapping_add(wrapping_add(count, FUNC_TYPE_PREFIX), subprog_count(in prog));
+    let nk = prog.kfunc_count();
+    if nk != 0 {
+        let mut distinct: u64 = 0;
+        for k in 0..nk {
+            let mut seen = false;
+            for j in 0..k {
+                if same_pool(in prog, j, k) {
+                    seen = true;
+                    break;
+                }
+            }
+            if !seen {
+                distinct = wrapping_add(distinct, 1);
+            }
+        }
+        // the prototype, the functions and `.ksyms`
+        count = wrapping_add(wrapping_add(count, distinct), 2);
+    }
+    count
+}
+
+// The local root id of each relocation in `relos` (positions in `core`,
+// `parse_ext`'s output).
+pub fn local_ids(
+    in prog: Prog,
+    in t: BtfTable,
+    in core: ChunkSeq[u64],
+    in relos: ChunkSeq[u64]
+) -> ChunkSeq[u64] {
+    let mut ids = Ids {
+        next: prefix_types(in prog),
+        u32_index: NONE,
+        pool: ChunkSeq::new[u8](),
+        key_start: ChunkSeq::new[u64](),
+        key_end: ChunkSeq::new[u64](),
+        key_id: ChunkSeq::new[u64](),
+    };
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..relos.len() {
+        let r = word(in relos, i);
+        let na = word(in core, wrapping_add(r, 2));
+        // the tree's words follow its length
+        let tree = wrapping_add(wrapping_add(r, 4), na);
+        let (id, end) = local(inout ids, in core, tree, in t.strs.as_slice());
+        out.push(id);
+    }
+    out
+}

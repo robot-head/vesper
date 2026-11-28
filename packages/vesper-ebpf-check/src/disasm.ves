@@ -1,0 +1,324 @@
+// `insn::disassemble` (crates/vesper-ebpf/src/insn.rs): one line per
+// instruction, `{pc:4}: {insn:?}`, or `{pc:4}: <{error}>` for a slot that
+// does not decode, as Rust's derived `Debug` writes the typed form.
+
+use @vesper/ebpf::insn::{
+    AluOp, AtomicOp, CallTarget, DecodeError, Endian, Imm64, Insn, JmpOp, Operand, RawInsn, Size,
+    decode, raw_zero
+};
+use self::text::{put, put_u64, put_i64, put_u64_width4};
+use self::prog::{decode_display};
+
+const ASCII_LF: u8 = 10;
+
+fn slot(in slots: Slice[RawInsn], i: u64) -> RawInsn {
+    slots.try_get(i).unwrap_or(raw_zero())
+}
+
+fn put_bool(inout out: ChunkSeq[u8], v: bool) {
+    if v {
+        put(inout out, "true");
+    } else {
+        put(inout out, "false");
+    }
+}
+
+fn put_reg(inout out: ChunkSeq[u8], r: u8) {
+    put(inout out, "Reg(");
+    put_u64(inout out, widen_u64(r));
+    put(inout out, ")");
+}
+
+fn put_operand(inout out: ChunkSeq[u8], o: Operand) {
+    match o {
+        Operand::Reg(r) => {
+            put(inout out, "Reg(");
+            put_reg(inout out, r);
+            put(inout out, ")");
+        },
+        Operand::Imm(i) => {
+            put(inout out, "Imm(");
+            put_i64(inout out, widen_i64(i));
+            put(inout out, ")");
+        },
+    }
+}
+
+fn put_alu_op(inout out: ChunkSeq[u8], op: AluOp) {
+    match op {
+        AluOp::Add => put(inout out, "Add"),
+        AluOp::Sub => put(inout out, "Sub"),
+        AluOp::Mul => put(inout out, "Mul"),
+        AluOp::Div => put(inout out, "Div"),
+        AluOp::SDiv => put(inout out, "SDiv"),
+        AluOp::Or => put(inout out, "Or"),
+        AluOp::And => put(inout out, "And"),
+        AluOp::Lsh => put(inout out, "Lsh"),
+        AluOp::Rsh => put(inout out, "Rsh"),
+        AluOp::Neg => put(inout out, "Neg"),
+        AluOp::Mod => put(inout out, "Mod"),
+        AluOp::SMod => put(inout out, "SMod"),
+        AluOp::Xor => put(inout out, "Xor"),
+        AluOp::Mov => put(inout out, "Mov"),
+        AluOp::MovSx(bits) => {
+            put(inout out, "MovSx(");
+            put_u64(inout out, widen_u64(bits));
+            put(inout out, ")");
+        },
+        AluOp::Arsh => put(inout out, "Arsh"),
+    }
+}
+
+fn put_jmp_op(inout out: ChunkSeq[u8], op: JmpOp) {
+    match op {
+        JmpOp::Eq => put(inout out, "Eq"),
+        JmpOp::Gt => put(inout out, "Gt"),
+        JmpOp::Ge => put(inout out, "Ge"),
+        JmpOp::Set => put(inout out, "Set"),
+        JmpOp::Ne => put(inout out, "Ne"),
+        JmpOp::SGt => put(inout out, "SGt"),
+        JmpOp::SGe => put(inout out, "SGe"),
+        JmpOp::Lt => put(inout out, "Lt"),
+        JmpOp::Le => put(inout out, "Le"),
+        JmpOp::SLt => put(inout out, "SLt"),
+        JmpOp::SLe => put(inout out, "SLe"),
+    }
+}
+
+fn put_size(inout out: ChunkSeq[u8], s: Size) {
+    match s {
+        Size::B => put(inout out, "B"),
+        Size::H => put(inout out, "H"),
+        Size::W => put(inout out, "W"),
+        Size::DW => put(inout out, "DW"),
+    }
+}
+
+fn put_endian(inout out: ChunkSeq[u8], e: Endian) {
+    match e {
+        Endian::ToLe => put(inout out, "ToLe"),
+        Endian::ToBe => put(inout out, "ToBe"),
+        Endian::Swap => put(inout out, "Swap"),
+    }
+}
+
+fn put_fetch(inout out: ChunkSeq[u8], name: Str, fetch: bool) {
+    put(inout out, name);
+    put(inout out, " { fetch: ");
+    put_bool(inout out, fetch);
+    put(inout out, " }");
+}
+
+fn put_atomic(inout out: ChunkSeq[u8], op: AtomicOp) {
+    match op {
+        AtomicOp::Add { fetch } => put_fetch(inout out, "Add", fetch),
+        AtomicOp::Or { fetch } => put_fetch(inout out, "Or", fetch),
+        AtomicOp::And { fetch } => put_fetch(inout out, "And", fetch),
+        AtomicOp::Xor { fetch } => put_fetch(inout out, "Xor", fetch),
+        AtomicOp::Xchg => put(inout out, "Xchg"),
+        AtomicOp::CmpXchg => put(inout out, "CmpXchg"),
+    }
+}
+
+fn put_imm64(inout out: ChunkSeq[u8], imm: Imm64) {
+    match imm {
+        Imm64::Value(v) => {
+            put(inout out, "Value(");
+            put_u64(inout out, v);
+            put(inout out, ")");
+        },
+        Imm64::MapFd(m) => {
+            put(inout out, "MapFd(");
+            put_i64(inout out, widen_i64(m));
+            put(inout out, ")");
+        },
+        Imm64::Pseudo { src, imm_lo, imm_hi } => {
+            put(inout out, "Pseudo { src: ");
+            put_u64(inout out, widen_u64(src));
+            put(inout out, ", imm_lo: ");
+            put_i64(inout out, widen_i64(imm_lo));
+            put(inout out, ", imm_hi: ");
+            put_i64(inout out, widen_i64(imm_hi));
+            put(inout out, " }");
+        },
+    }
+}
+
+fn put_call(inout out: ChunkSeq[u8], t: CallTarget) {
+    match t {
+        CallTarget::Helper(id) => {
+            put(inout out, "Helper(");
+            put_i64(inout out, widen_i64(id));
+        },
+        CallTarget::Local(off) => {
+            put(inout out, "Local(");
+            put_i64(inout out, widen_i64(off));
+        },
+        CallTarget::Kfunc(id) => {
+            put(inout out, "Kfunc(");
+            put_i64(inout out, widen_i64(id));
+        },
+    }
+    put(inout out, ")");
+}
+
+// `{:?}` of one instruction.
+fn put_insn(inout out: ChunkSeq[u8], i: Insn) {
+    match i {
+        Insn::Alu { wide, op, dst, src } => {
+            put(inout out, "Alu { wide: ");
+            put_bool(inout out, wide);
+            put(inout out, ", op: ");
+            put_alu_op(inout out, op);
+            put(inout out, ", dst: ");
+            put_reg(inout out, dst);
+            put(inout out, ", src: ");
+            put_operand(inout out, src);
+            put(inout out, " }");
+        },
+        Insn::Endian { kind, bits, dst } => {
+            put(inout out, "Endian { kind: ");
+            put_endian(inout out, kind);
+            put(inout out, ", bits: ");
+            put_u64(inout out, widen_u64(bits));
+            put(inout out, ", dst: ");
+            put_reg(inout out, dst);
+            put(inout out, " }");
+        },
+        Insn::Ja { off } => {
+            put(inout out, "Ja { off: ");
+            put_i64(inout out, widen_i64(off));
+            put(inout out, " }");
+        },
+        Insn::Jcond { wide, op, dst, src, off } => {
+            put(inout out, "Jcond { wide: ");
+            put_bool(inout out, wide);
+            put(inout out, ", op: ");
+            put_jmp_op(inout out, op);
+            put(inout out, ", dst: ");
+            put_reg(inout out, dst);
+            put(inout out, ", src: ");
+            put_operand(inout out, src);
+            put(inout out, ", off: ");
+            put_i64(inout out, widen_i64(off));
+            put(inout out, " }");
+        },
+        Insn::Call(t) => {
+            put(inout out, "Call(");
+            put_call(inout out, t);
+            put(inout out, ")");
+        },
+        Insn::Exit => put(inout out, "Exit"),
+        Insn::LdImm64 { dst, imm } => {
+            put(inout out, "LdImm64 { dst: ");
+            put_reg(inout out, dst);
+            put(inout out, ", imm: ");
+            put_imm64(inout out, imm);
+            put(inout out, " }");
+        },
+        Insn::Ldx { size, dst, src, off, sign_extend } => {
+            put(inout out, "Ldx { size: ");
+            put_size(inout out, size);
+            put(inout out, ", dst: ");
+            put_reg(inout out, dst);
+            put(inout out, ", src: ");
+            put_reg(inout out, src);
+            put(inout out, ", off: ");
+            put_i64(inout out, widen_i64(off));
+            put(inout out, ", sign_extend: ");
+            put_bool(inout out, sign_extend);
+            put(inout out, " }");
+        },
+        Insn::St { size, dst, off, imm } => {
+            put(inout out, "St { size: ");
+            put_size(inout out, size);
+            put(inout out, ", dst: ");
+            put_reg(inout out, dst);
+            put(inout out, ", off: ");
+            put_i64(inout out, widen_i64(off));
+            put(inout out, ", imm: ");
+            put_i64(inout out, widen_i64(imm));
+            put(inout out, " }");
+        },
+        Insn::Stx { size, dst, src, off } => {
+            put(inout out, "Stx { size: ");
+            put_size(inout out, size);
+            put(inout out, ", dst: ");
+            put_reg(inout out, dst);
+            put(inout out, ", src: ");
+            put_reg(inout out, src);
+            put(inout out, ", off: ");
+            put_i64(inout out, widen_i64(off));
+            put(inout out, " }");
+        },
+        Insn::Atomic { size, op, dst, src, off } => {
+            put(inout out, "Atomic { size: ");
+            put_size(inout out, size);
+            put(inout out, ", op: ");
+            put_atomic(inout out, op);
+            put(inout out, ", dst: ");
+            put_reg(inout out, dst);
+            put(inout out, ", src: ");
+            put_reg(inout out, src);
+            put(inout out, ", off: ");
+            put_i64(inout out, widen_i64(off));
+            put(inout out, " }");
+        },
+        Insn::LdLegacy { size, indirect, src, imm } => {
+            put(inout out, "LdLegacy { size: ");
+            put_size(inout out, size);
+            put(inout out, ", indirect: ");
+            put_bool(inout out, indirect);
+            put(inout out, ", src: ");
+            put_reg(inout out, src);
+            put(inout out, ", imm: ");
+            put_i64(inout out, widen_i64(imm));
+            put(inout out, " }");
+        },
+    }
+}
+
+fn is_wide(i: Insn) -> bool {
+    match i {
+        Insn::LdImm64 { dst, imm } => true,
+        _ => false,
+    }
+}
+
+// `insn::disassemble`.
+pub fn disassemble(in slots: Slice[RawInsn], inout out: ChunkSeq[u8]) {
+    let n = slots.len();
+    let mut pc: u64 = 0;
+    loop {
+        if pc >= n {
+            break;
+        }
+        let lo = slot(in slots, pc);
+        let hi = slot(in slots, wrapping_add(pc, 1));
+        let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let mut step: u64 = 1;
+        let failed = handle Fail[DecodeError] in {
+            let i = decode(narrow_usize(pc), narrow_usize(n), lo, hi);
+            put_insn(inout text, i);
+            if is_wide(i) {
+                step = 2;
+            }
+            ChunkSeq::new[u8]()
+        } with {
+            return x => x,
+            raise(e, k) => decode_display(e),
+        };
+        put_u64_width4(inout out, pc);
+        put(inout out, ": ");
+        if failed.len() != 0 {
+            put(inout out, "<");
+            out.extend(in failed.as_slice());
+            put(inout out, ">");
+            step = 1;
+        } else {
+            out.extend(in text.as_slice());
+        }
+        out.push(ASCII_LF);
+        pc = wrapping_add(pc, step);
+    }
+}

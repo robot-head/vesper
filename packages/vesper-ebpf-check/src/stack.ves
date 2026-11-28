@@ -1,0 +1,218 @@
+// The stack bound of `vesper ebpf check`: `stack_bound_report` on the
+// verifier's call graph (`StackGraph::from(&vesper_ebpf::CallGraph)`) with
+// the root's budget, through @vesper/check-loops-atomics (the analysis the
+// hybrid compiler installs for `stack_bound_report`), then `render` and
+// the findings, as src/ebpf_commands.rs prints them.
+
+use @vesper/check-loops-atomics::{stack_bound_words};
+use self::text::{put, put_u64, put_bytes};
+use self::prog::{word};
+use self::verify::{Verdict};
+
+const WORD_BYTES: u64 = 8;
+const NONE: u64 = 18446744073709551615;
+const TAG_MALFORMED: u64 = 1;
+
+// The report's text (the render lines, then one `error[...]` line per
+// finding), whether it is accepted, or the analysis' error for a
+// malformed graph.
+pub struct StackOut {
+    text: ChunkSeq[u8],
+    accepted: bool,
+    error: ChunkSeq[u8],
+}
+
+fn put_word(inout out: ChunkSeq[u8], v: u64) {
+    for i in 0..WORD_BYTES {
+        out.push(wrapping_u8(wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8))) & 255));
+    }
+}
+
+fn same_name(in names: ChunkSeq[u8], a0: u64, a1: u64, b0: u64, b1: u64) -> bool {
+    if wrapping_sub(a1, a0) != wrapping_sub(b1, b0) {
+        return false;
+    }
+    for i in 0..wrapping_sub(a1, a0) {
+        if names.try_get(wrapping_add(a0, i)).unwrap_or(0)
+            != names.try_get(wrapping_add(b0, i)).unwrap_or(0)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+// The input of `stack_bound_words` (tests/common/stack_words.rs
+// `stack_input`): the names, no types, an empty world, then the graph
+// and the policy (one root, no external bounds or indirect targets).
+fn stack_input(in v: Verdict, budget: u64) -> ChunkSeq[u8] {
+    // distinct names in first-use order: (start, end) in v.names
+    let mut list: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    // per function, its name's index in `list`
+    let mut ids: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let nf = v.fns.len() / 3;
+    for f in 0..nf {
+        let s = word(in v.fns, wrapping_mul(f, 3));
+        let e = word(in v.fns, wrapping_add(wrapping_mul(f, 3), 1));
+        let mut found = NONE;
+        for k in 0..(list.len() / 2) {
+            if same_name(
+                in v.names,
+                word(in list, wrapping_mul(k, 2)),
+                word(in list, wrapping_add(wrapping_mul(k, 2), 1)),
+                s,
+                e
+            ) {
+                found = k;
+                break;
+            }
+        }
+        if found == NONE {
+            found = list.len() / 2;
+            list.push(s);
+            list.push(e);
+        }
+        ids.push(found);
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_word(inout out, list.len() / 2);
+    for k in 0..(list.len() / 2) {
+        let s = word(in list, wrapping_mul(k, 2));
+        let e = word(in list, wrapping_add(wrapping_mul(k, 2), 1));
+        put_word(inout out, wrapping_sub(e, s));
+        out.extend(in v.names[s..e]);
+        loop {
+            if (out.len() & 7) == 0 {
+                break;
+            }
+            out.push(0);
+        }
+    }
+    // no types, the empty world
+    put_word(inout out, 0);
+    for i in 0..6 {
+        put_word(inout out, 0);
+    }
+    // origin eBPF
+    put_word(inout out, 1);
+    put_word(inout out, nf);
+    for f in 0..nf {
+        put_word(inout out, f);
+        put_word(inout out, word(in ids, f));
+        put_word(inout out, word(in v.fns, wrapping_add(wrapping_mul(f, 3), 2)));
+    }
+    let nc = v.calls.len() / 2;
+    put_word(inout out, nc);
+    for c in 0..nc {
+        put_word(inout out, word(in v.calls, wrapping_mul(c, 2)));
+        put_word(inout out, word(in v.calls, wrapping_add(wrapping_mul(c, 2), 1)));
+    }
+    // no indirect or external calls
+    put_word(inout out, 0);
+    put_word(inout out, 0);
+    // the root: the first function
+    put_word(inout out, 1);
+    put_word(inout out, word(in ids, 0));
+    put_word(inout out, budget);
+    // no external bounds, no indirect targets
+    put_word(inout out, 0);
+    put_word(inout out, 0);
+    out
+}
+
+// A text in the report words (`put_text_words`): its length, then its
+// bytes eight per word.
+fn read_text(in w: ChunkSeq[u64], inout at: u64, inout out: ChunkSeq[u8]) {
+    let n = word(in w, at);
+    at = wrapping_add(at, 1);
+    for i in 0..n {
+        let wd = word(in w, wrapping_add(at, i >> 3));
+        out.push(wrapping_u8(wrapping_shr_u64(wd, wrapping_u32(wrapping_mul(i & 7, 8))) & 255));
+    }
+    at = wrapping_add(at, (wrapping_add(n, 7)) >> 3);
+}
+
+pub fn stack_report(in v: Verdict, budget: u64) -> StackOut {
+    let mut res = StackOut {
+        text: ChunkSeq::new[u8](),
+        accepted: true,
+        error: ChunkSeq::new[u8]()
+    };
+    if v.fns.len() == 0 {
+        put(inout res.error, "ebpf check: the verifier returned an empty call graph");
+        return res;
+    }
+    let input = stack_input(in v, budget);
+    let w = stack_bound_words(in input.as_slice());
+    if word(in w, 0) == TAG_MALFORMED {
+        let mut at: u64 = 1;
+        read_text(in w, inout at, inout res.error);
+        return res;
+    }
+    let mut at: u64 = 1;
+    let nroots = word(in w, at);
+    at = wrapping_add(at, 1);
+    for r in 0..nroots {
+        let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        read_text(in w, inout at, inout name);
+        let root_budget = word(in w, at);
+        let worst = word(in w, wrapping_add(at, 1));
+        let within = word(in w, wrapping_add(at, 2)) != 0;
+        let np = word(in w, wrapping_add(at, 3));
+        at = wrapping_add(at, 4);
+        if !within {
+            res.accepted = false;
+        }
+        put(inout res.text, "stack ");
+        put_bytes(inout res.text, in name.as_slice());
+        put(inout res.text, ": worst case ");
+        if worst == 0 {
+            put(inout res.text, "unbounded");
+        } else {
+            put_u64(inout res.text, wrapping_sub(worst, 1));
+            put(inout res.text, " bytes");
+        }
+        put(inout res.text, " of ");
+        put_u64(inout res.text, root_budget);
+        put(inout res.text, " byte budget (");
+        if within {
+            put(inout res.text, "ok");
+        } else {
+            put(inout res.text, "exceeded");
+        }
+        put(inout res.text, ") via ");
+        if np == 0 {
+            put(inout res.text, "-");
+        }
+        for p in 0..np {
+            if p > 0 {
+                put(inout res.text, " -> ");
+            }
+            read_text(in w, inout at, inout res.text);
+        }
+        res.text.push(10);
+    }
+    let nfind = word(in w, at);
+    at = wrapping_add(at, 1);
+    if nfind != 0 {
+        res.accepted = false;
+    }
+    for f in 0..nfind {
+        let mut function: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        read_text(in w, inout at, inout function);
+        // the instruction, unused in the line
+        at = wrapping_add(at, 1);
+        let mut rule: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        read_text(in w, inout at, inout rule);
+        let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        read_text(in w, inout at, inout message);
+        put(inout res.text, "error[");
+        put_bytes(inout res.text, in rule.as_slice());
+        put(inout res.text, "]: ");
+        put_bytes(inout res.text, in function.as_slice());
+        put(inout res.text, ": ");
+        put_bytes(inout res.text, in message.as_slice());
+        res.text.push(10);
+    }
+    res
+}

@@ -2327,6 +2327,19 @@ vesper_package(
     ],
 )
 
+# @vesper/ebpf-check, `vesper ebpf check`'s reader, verifier and report
+# (#1996, slice 4f of #1397).
+vesper_package(
+    name = "ebpf_check_package",
+    srcs = glob(["packages/vesper-ebpf-check/src/**/*.ves"]),
+    manifest = "packages/vesper-ebpf-check/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_loops_atomics_package",
+        "//crates/vesper-ebpf:port_package",
+    ],
+)
+
 # @vesper/driver-commands, the command layers the hybrid's driver hands on
 # (self-hosting SH5 lane 13, #1336).
 vesper_package(
@@ -2337,6 +2350,7 @@ vesper_package(
     deps = [
         ":driver_engines_package",
         ":driver_package",
+        ":ebpf_check_package",
         ":lsp_server_package",
         ":proof_audit_package",
         ":std_env_package",

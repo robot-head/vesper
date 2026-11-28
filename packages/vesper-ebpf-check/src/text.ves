@@ -1,0 +1,185 @@
+// Text output of `vesper ebpf check`: decimal numbers, `{:#04x}` bytes and
+// Rust's `Debug` of a string, as the Rust command formats them.
+
+const ASCII_ZERO: u64 = 48;
+const ASCII_LOWER_A: u64 = 97;
+const ASCII_SPACE: u8 = 32;
+const ASCII_QUOTE: u8 = 34;
+const ASCII_BACKSLASH: u8 = 92;
+const ASCII_DEL: u8 = 127;
+const ASCII_TAB: u8 = 9;
+const ASCII_LF: u8 = 10;
+const ASCII_CR: u8 = 13;
+const DECIMAL: u64 = 10;
+const HEX: u64 = 16;
+const NIBBLE: u64 = 15;
+const NIBBLE_BITS: u64 = 4;
+// The most decimal digits of a u64.
+const MAX_DIGITS: u64 = 20;
+const ASCII_MINUS: u8 = 45;
+
+pub fn put(inout out: ChunkSeq[u8], s: Str) {
+    out.extend(in s.as_bytes());
+}
+
+pub fn put_bytes(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+    out.extend(in s);
+}
+
+pub fn put_u64(inout out: ChunkSeq[u8], value: u64) {
+    let mut digits: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](MAX_DIGITS);
+    let mut v = value;
+    loop {
+        digits.push(wrapping_u8(wrapping_add(ASCII_ZERO, v % DECIMAL)));
+        v = v / DECIMAL;
+        if v == 0 {
+            break;
+        }
+    }
+    let n = digits.len();
+    for i in 0..n {
+        match digits.try_get(wrapping_sub(wrapping_sub(n, 1), i)) {
+            Option::Some(d) => out.push(d),
+            Option::None => (),
+        }
+    }
+}
+
+pub fn put_i64(inout out: ChunkSeq[u8], value: i64) {
+    if value < 0 {
+        out.push(ASCII_MINUS);
+        put_u64(inout out, wrapping_sub(0, wrapping_u64(value)));
+    } else {
+        put_u64(inout out, wrapping_u64(value));
+    }
+}
+
+// `{:4}` of a count: right-aligned in four columns.
+pub fn put_u64_width4(inout out: ChunkSeq[u8], value: u64) {
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_u64(inout digits, value);
+    let mut pad = digits.len();
+    loop {
+        if pad >= 4 {
+            break;
+        }
+        out.push(ASCII_SPACE);
+        pad = wrapping_add(pad, 1);
+    }
+    out.extend(in digits.as_slice());
+}
+
+fn hex_digit(v: u64) -> u8 {
+    if v < DECIMAL {
+        wrapping_u8(wrapping_add(ASCII_ZERO, v))
+    } else {
+        wrapping_u8(wrapping_add(ASCII_LOWER_A, wrapping_sub(v, DECIMAL)))
+    }
+}
+
+// `{:#04x}` of a byte.
+pub fn put_hex_byte(inout out: ChunkSeq[u8], value: u8) {
+    put(inout out, "0x");
+    let v = widen_u64(value);
+    out.push(hex_digit((v >> NIBBLE_BITS) & NIBBLE));
+    out.push(hex_digit(v & NIBBLE));
+}
+
+// `{:x}` of a code point.
+fn put_hex(inout out: ChunkSeq[u8], value: u64) {
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut v = value;
+    loop {
+        digits.push(hex_digit(v % HEX));
+        v = v / HEX;
+        if v == 0 {
+            break;
+        }
+    }
+    let n = digits.len();
+    for i in 0..n {
+        match digits.try_get(wrapping_sub(wrapping_sub(n, 1), i)) {
+            Option::Some(d) => out.push(d),
+            Option::None => (),
+        }
+    }
+}
+
+// Rust's `{:?}` of a `&str`: quoted, with `\"`, `\\`, `\t`, `\r`, `\n`,
+// `\0` and `\u{..}` for the other ASCII controls. Other characters are
+// written as they are.
+pub fn put_debug_str(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+    out.push(ASCII_QUOTE);
+    for i in 0..s.len() {
+        let c = match s.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if c == ASCII_QUOTE {
+            put(inout out, "\\\"");
+        } else if c == ASCII_BACKSLASH {
+            put(inout out, "\\\\");
+        } else if c == ASCII_TAB {
+            put(inout out, "\\t");
+        } else if c == ASCII_LF {
+            put(inout out, "\\n");
+        } else if c == ASCII_CR {
+            put(inout out, "\\r");
+        } else if c == 0 {
+            put(inout out, "\\0");
+        } else if c < ASCII_SPACE || c == ASCII_DEL {
+            put(inout out, "\\u{");
+            put_hex(inout out, widen_u64(c));
+            put(inout out, "}");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push(ASCII_QUOTE);
+}
+
+pub fn same(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if a.try_get(i).unwrap_or(0) != b.try_get(i).unwrap_or(0) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn same_str(in a: Slice[u8], b: Str) -> bool {
+    same(in a, in b.as_bytes())
+}
+
+pub fn byte_at(in s: Slice[u8], i: u64) -> u8 {
+    s.try_get(i).unwrap_or(0)
+}
+
+// `a / b`, 0 for a zero divisor.
+pub fn udiv(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    handle Fail[RuntimeError] in {
+        a / b
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+// `a % b`, 0 for a zero divisor.
+pub fn urem(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    handle Fail[RuntimeError] in {
+        a % b
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}

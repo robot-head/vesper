@@ -768,7 +768,14 @@ fn insert_words(inout st: St, at: u64, k: u64) {
     for i in 0..k {
         st.ws.push(0);
     }
-    st.ws.try_copy_within(at, len, wrapping_add(at, k));
+    // `try_copy_within(at, len, at + k)`, from the end (the ranges overlap)
+    if at < len {
+        for j in 0..wrapping_sub(len, at) {
+            let i = wrapping_sub(wrapping_sub(len, 1), j);
+            let v = st.ws.try_get(i).unwrap_or(0);
+            let _ = st.ws.try_set(wrapping_add(i, k), v);
+        }
+    }
     for i in 0..k {
         setw(inout st, wrapping_add(at, i), 0);
     }
@@ -776,7 +783,14 @@ fn insert_words(inout st: St, at: u64, k: u64) {
 
 fn remove_words(inout st: St, at: u64, k: u64) {
     let len = st.ws.len();
-    st.ws.try_copy_within(wrapping_add(at, k), len, at);
+    // `try_copy_within(at + k, len, at)`, from the start
+    let from = wrapping_add(at, k);
+    if from < len {
+        for j in 0..wrapping_sub(len, from) {
+            let v = st.ws.try_get(wrapping_add(from, j)).unwrap_or(0);
+            let _ = st.ws.try_set(wrapping_add(at, j), v);
+        }
+    }
     st.ws.truncate(wrapping_sub(len, k));
 }
 

@@ -89,7 +89,7 @@ does not touch).
 | `fmt` (one file's read, format and replace) | `fmt_commands::format_file` | `vesper-fmt` (port) | CLI/walk/JSON in Vesper (#1644); bounded no-follow read and checked atomic replace in Vesper over `@vesper-std/fs` (#1996 part 3b); the formatter is @vesper/fmt, the Vesper port of vesper_fmt (#1996 part 3d) |
 | `lint` | `HybridCommands::hc_lint_run` | `vesper::tooling::lint` / `vesper-lint` (port) | CLI option parsing, validation, and `--help` in Vesper (`lint.ves`, #1730) |
 | `forge` | `HybridCommands::hc_forge_run` | `vesper-forge` (port) | CLI option parsing, validation, and `--help` in Vesper (`forge.ves`, #1660) |
-| `ebpf` | `HybridCommands::hc_ebpf_check` | `vesper-ebpf` (port) / `vesper::stack_bound` | CLI option parsing, validation, and `--help` in Vesper (`ebpf.ves`, #1653) |
+| `ebpf check --load` (the kernel load only) | `HybridCommands::hc_ebpf_load` | `vesper-ebpf` `kernel::load` (`bpf(2)`) | The read, decode, disassembly, verifier, stack bound and report run in @vesper/ebpf-check (`ebpf.ves`, #1996); only the syscall stays in Rust |
 | `verify --refute` | `run_tool` (`vesper-refute`) | `vesper-crucible` | Routed in Vesper (`lib.ves`, #1648) |
 | `doc` | `HybridCommands::hc_doc_run` | `vesper-doc` (port) | CLI option parsing, validation, `store-olean`, and `--help` in Vesper (`doc.ves`, #1738) |
 | `test` (and `--doc`) | `HybridCommands::hc_test_run` | test runner, doctests | CLI option parsing, validation, and `--help` in Vesper (`test.ves`, #1745) |
@@ -145,7 +145,7 @@ each tool is SH6's Rust-exit work, not the compiler CLI's.
 ## What is left
 
 - Part 2 is done (below). Next, the layers that need the
-  checked world (`highlight`, `lint`, `forge`, `ebpf`, `shot`),
+  checked world (`highlight`, `lint`, `forge`, `shot`),
   and `verify --refute`'s spawn.
 
 ## Part 2: `vesper fmt`

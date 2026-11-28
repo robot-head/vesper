@@ -1,0 +1,1102 @@
+// The BPF ELF reader of `vesper ebpf check`: vesper_ebpf::elf::read_object
+// (crates/vesper-ebpf/src/elf.rs) over the `object` crate's (0.37) ELF
+// reader, whose checks and error texts this repeats for the parts
+// `read_object` reaches: the file header, the section table and its
+// names, the symbol tables, the relocation sections and the section data.
+// The `.BTF` and `.BTF.ext` contents go through @vesper/ebpf's readers.
+
+use @vesper/ebpf::insn::{DecodeError, RawInsn, slots_from_bytes};
+use @vesper/ebpf::program::{ProgramType};
+use @vesper/ebpf::btf::{name_span, parse_btf};
+use @vesper/ebpf::btf_ext::{maps_from_btf, parse_ext};
+use self::text::{put, put_u64, put_bytes, same, same_str, byte_at, udiv, urem};
+use self::prog::{Prog, prog_new, decode_display, word};
+use self::btf::{
+    btf_error, btf_table, ext_error, maps_error, parse_maps_btf, assign_local_ids, BtfTable
+};
+
+// `ElfError`'s variants.
+pub const ELF_READ: u64 = 1;
+pub const ELF_MALFORMED: u64 = 2;
+
+// The ident bytes (`EI_*`).
+const EI_CLASS: u64 = 4;
+const EI_DATA: u64 = 5;
+const EI_VERSION: u64 = 6;
+const IDENT_LEN: u64 = 16;
+const ELFCLASS32: u8 = 1;
+const ELFCLASS64: u8 = 2;
+const ELFDATA2LSB: u8 = 1;
+const ELFDATA2MSB: u8 = 2;
+const EV_CURRENT: u8 = 1;
+const EM_BPF: u64 = 247;
+const PN_XNUM: u64 = 65535;
+const SHN_UNDEF: u64 = 0;
+const SHN_LORESERVE: u64 = 65280;
+const SHN_XINDEX: u64 = 65535;
+const SHT_SYMTAB: u64 = 2;
+const SHT_STRTAB: u64 = 3;
+const SHT_RELA: u64 = 4;
+const SHT_NOBITS: u64 = 8;
+const SHT_REL: u64 = 9;
+const SHT_DYNSYM: u64 = 11;
+const SHT_SYMTAB_SHNDX: u64 = 18;
+// One `Elf32_Word` section index per symbol.
+const SHNDX_BYTES: u64 = 4;
+const SHT_CREL: u64 = 1073741844;
+const SHT_PROGBITS: u64 = 1;
+const SHF_ALLOC: u64 = 2;
+const SHF_EXECINSTR: u64 = 4;
+const STT_FUNC: u64 = 2;
+const STT_GNU_IFUNC: u64 = 10;
+const ST_TYPE_MASK: u64 = 15;
+const R_BPF_64_64: u64 = 1;
+const R_BPF_64_32: u64 = 10;
+const BPF_CALL_CODE: u8 = 133;
+const BPF_LD_IMM64_CODE: u8 = 24;
+const PSEUDO_MAP_FD: u8 = 1;
+const PSEUDO_KFUNC_CALL: u8 = 2;
+const SLOT_BYTES: u64 = 8;
+const LOW32: u64 = 4294967295;
+const LOW8: u64 = 255;
+const SYM_SHIFT64: u64 = 32;
+const SYM_SHIFT32: u64 = 8;
+const NONE: u64 = 18446744073709551615;
+
+// The 32- and 64-bit layouts: record sizes and field offsets.
+copy struct Layout {
+    wide: bool,
+    ehdr: u64,
+    shdr: u64,
+    phdr: u64,
+    sym: u64,
+    rel: u64,
+    rela: u64,
+}
+
+fn layout(wide: bool) -> Layout {
+    if wide {
+        Layout { wide: true, ehdr: 64, shdr: 64, phdr: 56, sym: 24, rel: 16, rela: 24 }
+    } else {
+        Layout { wide: false, ehdr: 52, shdr: 40, phdr: 32, sym: 16, rel: 8, rela: 12 }
+    }
+}
+
+// One section header's fields.
+copy struct Shdr {
+    name: u64,
+    kind: u64,
+    flags: u64,
+    offset: u64,
+    size: u64,
+    link: u64,
+    info: u64,
+}
+
+// A string table: bytes `start..end` of the file, or none (every lookup
+// fails, as `StringTable::default`).
+copy struct Strings {
+    some: bool,
+    start: u64,
+    end: u64,
+}
+
+// The result of a read: `kind` 0 with `prog`, or an `ElfError` variant
+// with its message.
+pub struct ElfRead {
+    kind: u64,
+    message: ChunkSeq[u8],
+    prog: Prog,
+}
+
+struct Elf {
+    be: bool,
+    lay: Layout,
+    machine: u64,
+    sections: ChunkSeq[Shdr],
+    shstr: Strings,
+    // the symbol table: its section (0 for none), entries `sym_at..`,
+    // `sym_count` of them, names in `sym_str`, extended indices
+    sym_section: u64,
+    sym_at: u64,
+    sym_count: u64,
+    sym_str: Strings,
+    shndx_at: u64,
+    shndx_count: u64,
+    // per section, its first relocation section (chained), 0 for none
+    rel_head: ChunkSeq[u64],
+}
+
+// --------------------------------------------------------------- reading
+
+fn rd(in b: Slice[u8], at: u64, size: u64, be: bool) -> u64 {
+    let mut v: u64 = 0;
+    for i in 0..size {
+        let byte = widen_u64(byte_at(in b, wrapping_add(at, i)));
+        if be {
+            v = (v << 8) | byte;
+        } else {
+            v = v | wrapping_shl_u64(byte, wrapping_u32(wrapping_mul(i, 8)));
+        }
+    }
+    v
+}
+
+// `read_bytes_at(offset, size)`: whether the bytes are in the file.
+fn in_file(in b: Slice[u8], offset: u64, size: u64) -> bool {
+    if size == 0 {
+        return true;
+    }
+    offset <= b.len() && size <= wrapping_sub(b.len(), offset)
+}
+
+// `read_slice_at(offset, count)` of `size`-byte records.
+fn slice_in_file(in b: Slice[u8], offset: u64, count: u64, size: u64) -> bool {
+    if count != 0 && size != 0 && count > udiv(NONE, size) {
+        return false;
+    }
+    in_file(in b, offset, wrapping_mul(count, size))
+}
+
+fn shdr_at(in b: Slice[u8], lay: Layout, be: bool, at: u64) -> Shdr {
+    if lay.wide {
+        Shdr {
+            name: rd(in b, at, 4, be),
+            kind: rd(in b, wrapping_add(at, 4), 4, be),
+            flags: rd(in b, wrapping_add(at, 8), 8, be),
+            offset: rd(in b, wrapping_add(at, 24), 8, be),
+            size: rd(in b, wrapping_add(at, 32), 8, be),
+            link: rd(in b, wrapping_add(at, 40), 4, be),
+            info: rd(in b, wrapping_add(at, 44), 4, be),
+        }
+    } else {
+        Shdr {
+            name: rd(in b, at, 4, be),
+            kind: rd(in b, wrapping_add(at, 4), 4, be),
+            flags: rd(in b, wrapping_add(at, 8), 4, be),
+            offset: rd(in b, wrapping_add(at, 16), 4, be),
+            size: rd(in b, wrapping_add(at, 20), 4, be),
+            link: rd(in b, wrapping_add(at, 24), 4, be),
+            info: rd(in b, wrapping_add(at, 28), 4, be),
+        }
+    }
+}
+
+fn no_strings() -> Strings {
+    Strings { some: false, start: 0, end: 0 }
+}
+
+fn zero_shdr() -> Shdr {
+    Shdr { name: 0, kind: 0, flags: 0, offset: 0, size: 0, link: 0, info: 0 }
+}
+
+fn section(in elf: Elf, i: u64) -> Shdr {
+    elf.sections.try_get(i).unwrap_or(zero_shdr())
+}
+
+// `StringTable::get(offset)`: the NUL-terminated bytes at `offset`, as
+// (start, end) in the file, or `ok` false.
+copy struct Span {
+    ok: bool,
+    start: u64,
+    end: u64,
+}
+
+fn bad_span() -> Span {
+    Span { ok: false, start: 0, end: 0 }
+}
+
+fn string_at(in b: Slice[u8], t: Strings, offset: u64) -> Span {
+    if !t.some {
+        return bad_span();
+    }
+    let start = wrapping_add(t.start, offset);
+    if start < t.start || start > t.end || t.end > b.len() {
+        return bad_span();
+    }
+    let mut i = start;
+    loop {
+        if i >= t.end {
+            return bad_span();
+        }
+        if byte_at(in b, i) == 0 {
+            return Span { ok: true, start: start, end: i };
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+// Whether bytes `start..end` are UTF-8 (`str::from_utf8`).
+pub fn utf8(in b: Slice[u8], start: u64, end: u64) -> bool {
+    let mut i = start;
+    loop {
+        if i >= end {
+            return true;
+        }
+        let c = widen_u64(byte_at(in b, i));
+        let n = if c < 128 {
+            1
+        } else if c >= 194 && c <= 223 {
+            2
+        } else if c >= 224 && c <= 239 {
+            3
+        } else if c >= 240 && c <= 244 {
+            4
+        } else {
+            return false;
+        };
+        if wrapping_add(i, n) > end {
+            return false;
+        }
+        for k in 1..n {
+            let d = widen_u64(byte_at(in b, wrapping_add(i, k)));
+            let mut lo: u64 = 128;
+            let mut hi: u64 = 191;
+            if k == 1 {
+                if c == 224 {
+                    lo = 160;
+                } else if c == 237 {
+                    hi = 159;
+                } else if c == 240 {
+                    lo = 144;
+                } else if c == 244 {
+                    hi = 143;
+                }
+            }
+            if d < lo || d > hi {
+                return false;
+            }
+        }
+        i = wrapping_add(i, n);
+    }
+}
+
+// ----------------------------------------------------------------- parse
+
+struct Parsed {
+    error: ChunkSeq[u8],
+    elf: Elf,
+}
+
+fn parse_fail(s: Str, lay: Layout) -> Parsed {
+    let mut e: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout e, s);
+    Parsed { error: e, elf: empty_elf(lay) }
+}
+
+fn empty_elf(lay: Layout) -> Elf {
+    Elf {
+        be: false,
+        lay: lay,
+        machine: 0,
+        sections: ChunkSeq::new[Shdr](),
+        shstr: no_strings(),
+        sym_section: 0,
+        sym_at: 0,
+        sym_count: 0,
+        sym_str: no_strings(),
+        shndx_at: 0,
+        shndx_count: 0,
+        rel_head: ChunkSeq::new[u64](),
+    }
+}
+
+// `section_0`: the first section header, (present, error).
+copy struct First {
+    present: bool,
+    err: u64,
+    shdr: Shdr,
+}
+
+const FIRST_OK: u64 = 0;
+const FIRST_ENTSIZE: u64 = 1;
+const FIRST_RANGE: u64 = 2;
+
+fn section_0(in b: Slice[u8], lay: Layout, be: bool, shoff: u64, shentsize: u64) -> First {
+    if shoff == 0 {
+        return First { present: false, err: FIRST_OK, shdr: zero_shdr() };
+    }
+    if shentsize != lay.shdr {
+        return First { present: false, err: FIRST_ENTSIZE, shdr: zero_shdr() };
+    }
+    if !in_file(in b, shoff, lay.shdr) {
+        return First { present: false, err: FIRST_RANGE, shdr: zero_shdr() };
+    }
+    First { present: true, err: FIRST_OK, shdr: shdr_at(in b, lay, be, shoff) }
+}
+
+fn first_error(f: First, lay: Layout) -> Parsed {
+    if f.err == FIRST_ENTSIZE {
+        parse_fail("Invalid ELF section header entry size", lay)
+    } else {
+        parse_fail("Invalid ELF section header offset or size", lay)
+    }
+}
+
+// `ElfFile::parse`.
+fn parse(in b: Slice[u8]) -> Parsed {
+    let lay64 = layout(true);
+    if b.len() < IDENT_LEN {
+        return parse_fail("Could not read file magic", lay64);
+    }
+    let class = byte_at(in b, EI_CLASS);
+    if class != ELFCLASS32 && class != ELFCLASS64 {
+        return parse_fail("Unknown file magic", lay64);
+    }
+    let lay = layout(class == ELFCLASS64);
+    if b.len() < lay.ehdr {
+        return parse_fail("Invalid ELF header size or alignment", lay);
+    }
+    let data = byte_at(in b, EI_DATA);
+    if (data != ELFDATA2LSB && data != ELFDATA2MSB) || byte_at(in b, EI_VERSION) != EV_CURRENT {
+        return parse_fail("Unsupported ELF header", lay);
+    }
+    let be = data == ELFDATA2MSB;
+    let mut elf = empty_elf(lay);
+    elf.be = be;
+    elf.machine = rd(in b, 18, 2, be);
+    let (phoff, shoff) = if lay.wide {
+        (rd(in b, 32, 8, be), rd(in b, 40, 8, be))
+    } else {
+        (rd(in b, 28, 4, be), rd(in b, 32, 4, be))
+    };
+    let tail = if lay.wide { 54 } else { 42 };
+    let phentsize = rd(in b, tail, 2, be);
+    let e_phnum = rd(in b, wrapping_add(tail, 2), 2, be);
+    let shentsize = rd(in b, wrapping_add(tail, 4), 2, be);
+    let e_shnum = rd(in b, wrapping_add(tail, 6), 2, be);
+    let e_shstrndx = rd(in b, wrapping_add(tail, 8), 2, be);
+    // program headers
+    if phoff != 0 {
+        let mut phnum = e_phnum;
+        if e_phnum >= PN_XNUM {
+            let f = section_0(in b, lay, be, shoff, shentsize);
+            if f.err != FIRST_OK {
+                return first_error(f, lay);
+            }
+            if !f.present {
+                return parse_fail("Missing ELF section headers for e_phnum overflow", lay);
+            }
+            phnum = f.shdr.info;
+        }
+        if phnum != 0 {
+            if phentsize != lay.phdr {
+                return parse_fail("Invalid ELF program header entry size", lay);
+            }
+            if !slice_in_file(in b, phoff, phnum, lay.phdr) {
+                return parse_fail("Invalid ELF program header size or alignment", lay);
+            }
+        }
+    }
+    // section headers
+    if shoff != 0 {
+        let mut shnum = e_shnum;
+        if e_shnum == 0 {
+            let f = section_0(in b, lay, be, shoff, shentsize);
+            if f.err != FIRST_OK {
+                return first_error(f, lay);
+            }
+            shnum = if f.present { f.shdr.size } else { 0 };
+        }
+        if shnum != 0 {
+            if shentsize != lay.shdr {
+                return parse_fail("Invalid ELF section header entry size", lay);
+            }
+            if !slice_in_file(in b, shoff, shnum, lay.shdr) {
+                return parse_fail("Invalid ELF section header offset/size/alignment", lay);
+            }
+            for i in 0..shnum {
+                elf.sections
+                    .push(shdr_at(in b, lay, be, wrapping_add(shoff, wrapping_mul(i, lay.shdr))));
+            }
+        }
+    }
+    let n = elf.sections.len();
+    if n != 0 {
+        let mut index = e_shstrndx;
+        if e_shstrndx == SHN_XINDEX {
+            let f = section_0(in b, lay, be, shoff, shentsize);
+            if f.err != FIRST_OK {
+                return first_error(f, lay);
+            }
+            if !f.present {
+                return parse_fail("Missing ELF section headers for e_shstrndx overflow", lay);
+            }
+            index = f.shdr.link;
+        }
+        if index == 0 {
+            return parse_fail("Missing ELF e_shstrndx", lay);
+        }
+        if index >= n {
+            return parse_fail("Invalid ELF e_shstrndx", lay);
+        }
+        let s = section(in elf, index);
+        if s.kind != SHT_NOBITS {
+            let end = wrapping_add(s.offset, s.size);
+            if end < s.offset {
+                return parse_fail("Invalid ELF shstrtab size", lay);
+            }
+            elf.shstr = Strings { some: true, start: s.offset, end: end };
+        }
+    }
+    // the symbol tables (the dynamic one only for its errors)
+    let symtab = find_type(in elf, SHT_SYMTAB);
+    if symtab != NONE {
+        let err = symbol_table(in b, inout elf, symtab, true);
+        if err.len() != 0 {
+            return Parsed { error: err, elf: elf };
+        }
+    }
+    let dynsym = find_type(in elf, SHT_DYNSYM);
+    if dynsym != NONE {
+        let err = symbol_table(in b, inout elf, dynsym, false);
+        if err.len() != 0 {
+            return Parsed { error: err, elf: elf };
+        }
+    }
+    let err = relocation_sections(inout elf);
+    if err.len() != 0 {
+        return Parsed { error: err, elf: elf };
+    }
+    Parsed { error: ChunkSeq::new[u8](), elf: elf }
+}
+
+fn find_type(in elf: Elf, kind: u64) -> u64 {
+    for i in 0..elf.sections.len() {
+        if section(in elf, i).kind == kind {
+            return i;
+        }
+    }
+    NONE
+}
+
+fn text_of(s: Str) -> ChunkSeq[u8] {
+    let mut e: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout e, s);
+    e
+}
+
+// `SymbolTable::parse`; `keep` records the table (SHT_SYMTAB).
+fn symbol_table(in b: Slice[u8], inout elf: Elf, index: u64, keep: bool) -> ChunkSeq[u8] {
+    let s = section(in elf, index);
+    let mut at: u64 = 0;
+    let mut size: u64 = 0;
+    if s.kind != SHT_NOBITS {
+        // `slice_from_all_bytes`: whole entries only
+        if !in_file(in b, s.offset, s.size) || urem(s.size, elf.lay.sym) != 0 {
+            return text_of("Invalid ELF symbol table data");
+        }
+        at = s.offset;
+        size = s.size;
+    }
+    let count = udiv(size, elf.lay.sym);
+    // `sections.strings(link)`
+    let mut strings = no_strings();
+    if s.link != 0 {
+        if s.link >= elf.sections.len() {
+            return text_of("Invalid ELF section index");
+        }
+        let t = section(in elf, s.link);
+        if t.kind != SHT_STRTAB {
+            return text_of("Invalid ELF string section type");
+        }
+        if t.kind != SHT_NOBITS {
+            let end = wrapping_add(t.offset, t.size);
+            if end < t.offset {
+                return text_of("Invalid ELF string section offset or size");
+            }
+            strings = Strings { some: true, start: t.offset, end: end };
+        }
+    }
+    let mut shndx_at: u64 = 0;
+    let mut shndx_count: u64 = 0;
+    for i in 0..elf.sections.len() {
+        let x = section(in elf, i);
+        if x.kind == SHT_SYMTAB_SHNDX && x.link == index {
+            if x.kind != SHT_NOBITS
+                && (!in_file(in b, x.offset, x.size) || urem(x.size, SHNDX_BYTES) != 0)
+            {
+                return text_of("Invalid ELF symtab_shndx data");
+            }
+            shndx_at = x.offset;
+            shndx_count = udiv(x.size, SHNDX_BYTES);
+        }
+    }
+    if keep {
+        elf.sym_section = index;
+        elf.sym_at = at;
+        elf.sym_count = count;
+        elf.sym_str = strings;
+        elf.shndx_at = shndx_at;
+        elf.shndx_count = shndx_count;
+    }
+    ChunkSeq::new[u8]()
+}
+
+fn is_rel(kind: u64) -> bool {
+    kind == SHT_REL || kind == SHT_RELA || kind == SHT_CREL
+}
+
+// `RelocationSections::parse`: chains each section's relocation sections.
+fn relocation_sections(inout elf: Elf) -> ChunkSeq[u8] {
+    let n = elf.sections.len();
+    let mut heads: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    heads.resize(n, 0);
+    let mut i = n;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let s = section(in elf, i);
+        if !is_rel(s.kind) {
+            continue;
+        }
+        if s.link != elf.sym_section {
+            continue;
+        }
+        if s.info == 0 {
+            continue;
+        }
+        if s.info >= n {
+            return text_of("Invalid ELF sh_info for relocation section");
+        }
+        if is_rel(section(in elf, s.info).kind) {
+            return text_of("Unsupported ELF sh_info for relocation section");
+        }
+        let next = heads.try_get(s.info).unwrap_or(0);
+        let ok = heads.try_set(s.info, i);
+        let ok2 = heads.try_set(i, next);
+    }
+    elf.rel_head = heads;
+    ChunkSeq::new[u8]()
+}
+
+// ---------------------------------------------------------------- symbols
+
+copy struct Sym {
+    name: u64,
+    info: u64,
+    shndx: u64,
+    value: u64,
+}
+
+fn sym_at(in b: Slice[u8], in elf: Elf, i: u64) -> Sym {
+    let at = wrapping_add(elf.sym_at, wrapping_mul(i, elf.lay.sym));
+    let be = elf.be;
+    if elf.lay.wide {
+        Sym {
+            name: rd(in b, at, 4, be),
+            info: rd(in b, wrapping_add(at, 4), 1, be),
+            shndx: rd(in b, wrapping_add(at, 6), 2, be),
+            value: rd(in b, wrapping_add(at, 8), 8, be),
+        }
+    } else {
+        Sym {
+            name: rd(in b, at, 4, be),
+            value: rd(in b, wrapping_add(at, 4), 4, be),
+            info: rd(in b, wrapping_add(at, 12), 1, be),
+            shndx: rd(in b, wrapping_add(at, 14), 2, be),
+        }
+    }
+}
+
+// `ObjectSymbol::section_index` (NONE for none).
+fn sym_section(in b: Slice[u8], in elf: Elf, i: u64, s: Sym) -> u64 {
+    if s.shndx == SHN_UNDEF {
+        return NONE;
+    }
+    if s.shndx == SHN_XINDEX {
+        if i >= elf.shndx_count {
+            return NONE;
+        }
+        let x = rd(in b, wrapping_add(elf.shndx_at, wrapping_mul(i, 4)), 4, elf.be);
+        if x == 0 {
+            return NONE;
+        }
+        return x;
+    }
+    if s.shndx < SHN_LORESERVE {
+        return s.shndx;
+    }
+    NONE
+}
+
+// A symbol's name, or the error of `ObjectSymbol::name`.
+copy struct Name {
+    err: u64,
+    start: u64,
+    end: u64,
+}
+
+const NAME_OK: u64 = 0;
+const NAME_OFFSET: u64 = 1;
+const NAME_UTF8: u64 = 2;
+
+fn sym_name(in b: Slice[u8], in elf: Elf, s: Sym) -> Name {
+    let span = string_at(in b, elf.sym_str, s.name);
+    if !span.ok {
+        return Name { err: NAME_OFFSET, start: 0, end: 0 };
+    }
+    if !utf8(in b, span.start, span.end) {
+        return Name { err: NAME_UTF8, start: 0, end: 0 };
+    }
+    Name { err: NAME_OK, start: span.start, end: span.end }
+}
+
+fn sym_name_error(n: Name) -> Str {
+    if n.err == NAME_OFFSET {
+        "Invalid ELF symbol name offset"
+    } else {
+        "Non UTF-8 ELF symbol name"
+    }
+}
+
+// --------------------------------------------------------------- program
+
+fn read_fail(kind: u64, in message: Slice[u8]) -> ElfRead {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in message);
+    ElfRead { kind: kind, message: m, prog: prog_new() }
+}
+
+fn fail_str(kind: u64, s: Str) -> ElfRead {
+    read_fail(kind, in s.as_bytes())
+}
+
+// `parse_section`: the program type and attach target of a section name.
+copy struct SectionType {
+    ok: bool,
+    ptype: ProgramType,
+    attach_start: u64,
+}
+
+fn parse_section(in b: Slice[u8], start: u64, end: u64) -> SectionType {
+    let none = SectionType { ok: false, ptype: ProgramType::Xdp, attach_start: end };
+    let mut slash = end;
+    for i in start..end {
+        if byte_at(in b, i) == 47 {
+            slash = i;
+            break;
+        }
+    }
+    let head = b[start..slash];
+    let ptype = if same_str(in head, "xdp") {
+        ProgramType::Xdp
+    } else if same_str(in head, "tc") || same_str(in head, "classifier") {
+        ProgramType::SchedCls
+    } else if same_str(in head, "tracepoint") || same_str(in head, "tp") {
+        ProgramType::Tracepoint
+    } else if same_str(in head, "kprobe") {
+        ProgramType::Kprobe
+    } else {
+        return none;
+    };
+    let attach_start = if slash < end {
+        wrapping_add(slash, 1)
+    } else {
+        end
+    };
+    let is_xdp = match ptype {
+        ProgramType::Xdp => true,
+        _ => false,
+    };
+    if is_xdp && attach_start < end {
+        return none;
+    }
+    SectionType { ok: true, ptype: ptype, attach_start: attach_start }
+}
+
+// A section's name (`ObjectSection::name`): (start, end) or the error.
+fn section_name(in b: Slice[u8], in elf: Elf, s: Shdr) -> Name {
+    let span = string_at(in b, elf.shstr, s.name);
+    if !span.ok {
+        return Name { err: NAME_OFFSET, start: 0, end: 0 };
+    }
+    if !utf8(in b, span.start, span.end) {
+        return Name { err: NAME_UTF8, start: 0, end: 0 };
+    }
+    Name { err: NAME_OK, start: span.start, end: span.end }
+}
+
+fn section_name_error(n: Name) -> Str {
+    if n.err == NAME_OFFSET {
+        "Invalid ELF section name offset"
+    } else {
+        "Non UTF-8 ELF section name"
+    }
+}
+
+// `section_by_name`: the first section whose name reads as `name`.
+fn section_by_name(in b: Slice[u8], in elf: Elf, name: Str) -> u64 {
+    for i in 0..elf.sections.len() {
+        let s = section(in elf, i);
+        let span = string_at(in b, elf.shstr, s.name);
+        if span.ok && same(in b[span.start..span.end], in name.as_bytes()) {
+            return i;
+        }
+    }
+    NONE
+}
+
+// `ObjectSection::data`: whether the section's bytes are in the file
+// (an SHT_NOBITS section has none).
+fn data_ok(in b: Slice[u8], s: Shdr) -> bool {
+    s.kind == SHT_NOBITS || in_file(in b, s.offset, s.size)
+}
+
+fn data_span(s: Shdr) -> (u64, u64) {
+    if s.kind == SHT_NOBITS {
+        (0, 0)
+    } else {
+        (s.offset, wrapping_add(s.offset, s.size))
+    }
+}
+
+fn is_text(s: Shdr) -> bool {
+    s.kind == SHT_PROGBITS && (s.flags & SHF_ALLOC) != 0 && (s.flags & SHF_EXECINSTR) != 0
+}
+
+// `read_object`.
+pub fn read_object(in b: Slice[u8]) -> ElfRead {
+    let parsed = parse(in b);
+    if parsed.error.len() != 0 {
+        return read_fail(ELF_READ, in parsed.error.as_slice());
+    }
+    let elf = parsed.elf;
+    if elf.machine != EM_BPF {
+        return fail_str(ELF_MALFORMED, "not a BPF object");
+    }
+    let mut prog = prog_new();
+    // the program section
+    let mut found = NONE;
+    let mut found_type = SectionType { ok: false, ptype: ProgramType::Xdp, attach_start: 0 };
+    let mut found_name = Name { err: NAME_OK, start: 0, end: 0 };
+    for i in 1..elf.sections.len() {
+        let s = section(in elf, i);
+        if !is_text(s) {
+            continue;
+        }
+        let n = section_name(in b, in elf, s);
+        if n.err != NAME_OK {
+            return fail_str(ELF_READ, section_name_error(n));
+        }
+        let t = parse_section(in b, n.start, n.end);
+        if t.ok {
+            if found != NONE {
+                return fail_str(ELF_MALFORMED, "more than one program section");
+            }
+            found = i;
+            found_type = t;
+            found_name = n;
+        }
+    }
+    if found == NONE {
+        return fail_str(ELF_MALFORMED, "no program section");
+    }
+    let text = section(in elf, found);
+    prog.ptype = found_type.ptype;
+    if !data_ok(in b, text) {
+        return fail_str(ELF_READ, "Invalid ELF section size or offset");
+    }
+    let (code_start, code_end) = data_span(text);
+    let mut slots: ChunkSeq[RawInsn] = ChunkSeq::new[RawInsn]();
+    let derr = handle Fail[DecodeError] in {
+        slots = slots_from_bytes(in b[code_start..code_end]);
+        ChunkSeq::new[u8]()
+    } with {
+        return x => x,
+        raise(e, k) => decode_display(e),
+    };
+    if derr.len() != 0 {
+        return read_fail(ELF_MALFORMED, in derr.as_slice());
+    }
+    prog.insns = slots;
+    // the license
+    let lic = section_by_name(in b, in elf, "license");
+    if lic == NONE {
+        return fail_str(ELF_MALFORMED, "no license section");
+    }
+    let ls = section(in elf, lic);
+    if !data_ok(in b, ls) {
+        return fail_str(ELF_READ, "Invalid ELF section size or offset");
+    }
+    let (lic_start, lic_data_end) = data_span(ls);
+    let mut lic_end = lic_data_end;
+    for i in lic_start..lic_data_end {
+        if byte_at(in b, i) == 0 {
+            lic_end = i;
+            break;
+        }
+    }
+    if !utf8(in b, lic_start, lic_end) {
+        return fail_str(ELF_MALFORMED, "license is not UTF-8");
+    }
+    prog.license.extend(in b[lic_start..lic_end]);
+    // the maps, from the BTF
+    let maps_index = section_by_name(in b, in elf, ".maps");
+    // (offset in .maps) per map, in prog.maps order
+    let mut map_at: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let btf_i = section_by_name(in b, in elf, ".BTF");
+    let ext_i = section_by_name(in b, in elf, ".BTF.ext");
+    let mut core: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut has_ext = false;
+    let mut table = BtfTable {
+        tab: ChunkSeq::new[u64](),
+        idx: ChunkSeq::new[u64](),
+        strs: ChunkSeq::new[u8](),
+        count: 0
+    };
+    if btf_i != NONE && ext_i != NONE {
+        let bs = section(in elf, btf_i);
+        if !data_ok(in b, bs) {
+            return fail_str(ELF_READ, "Invalid ELF section size or offset");
+        }
+        let (bt_start, bt_end) = data_span(bs);
+        let words = parse_btf(in b[bt_start..bt_end], false, 1, in "".as_bytes());
+        if words.try_get(0).unwrap_or(1) == 1 {
+            let btf_text = btf_error(in words);
+            return read_fail(ELF_MALFORMED, in btf_text.as_slice());
+        }
+        table = btf_table(in b[bt_start..bt_end], in words);
+        let mw = maps_from_btf(
+            in table.tab.as_slice(),
+            in table.idx.as_slice(),
+            in table.strs.as_slice()
+        );
+        if mw.try_get(0).unwrap_or(1) == 1 {
+            let maps_text = maps_error(in table, in mw);
+            return read_fail(ELF_MALFORMED, in maps_text.as_slice());
+        }
+        let count = mw.try_get(1).unwrap_or(0);
+        for m in 0..count {
+            let base = wrapping_add(2, wrapping_mul(m, 7));
+            map_at.push(word(in mw, base));
+            let (ns, nl) = name_span(in table.strs.as_slice(), word(in mw, wrapping_add(base, 1)));
+            prog.add_map(
+                in table.strs[ns..wrapping_add(ns, nl)],
+                word(in mw, wrapping_add(base, 2)),
+                word(in mw, wrapping_add(base, 3)),
+                word(in mw, wrapping_add(base, 4)),
+                word(in mw, wrapping_add(base, 5)),
+                word(in mw, wrapping_add(base, 6))
+            );
+        }
+        let xs = section(in elf, ext_i);
+        if !data_ok(in b, xs) {
+            return fail_str(ELF_READ, "Invalid ELF section size or offset");
+        }
+        let (x_start, x_end) = data_span(xs);
+        let ew = parse_ext(
+            in table.tab.as_slice(),
+            in table.idx.as_slice(),
+            in table.strs.as_slice(),
+            in b[x_start..x_end],
+            in b[found_name.start..found_name.end]
+        );
+        if ew.try_get(0).unwrap_or(1) == 1 {
+            let ext_text = ext_error(in table, in ew);
+            return read_fail(ELF_MALFORMED, in ext_text.as_slice());
+        }
+        core = ew;
+        has_ext = true;
+    } else if btf_i != NONE {
+        let bs = section(in elf, btf_i);
+        if !data_ok(in b, bs) {
+            return fail_str(ELF_READ, "Invalid ELF section size or offset");
+        }
+        let (bt_start, bt_end) = data_span(bs);
+        let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        parse_maps_btf(in b[bt_start..bt_end], inout prog, inout map_at, inout err);
+        if err.len() != 0 {
+            return read_fail(ELF_MALFORMED, in err.as_slice());
+        }
+    } else if ext_i != NONE {
+        return fail_str(ELF_MALFORMED, ".BTF.ext without .BTF");
+    }
+    // relocations of the program section
+    let rel_err = relocate(in b, in elf, found, maps_index, in map_at, inout prog);
+    if rel_err.kind != 0 {
+        return rel_err;
+    }
+    // the program's name and its subprograms, from the symbols
+    for i in 1..elf.sym_count {
+        let s = sym_at(in b, in elf, i);
+        let t = s.info & ST_TYPE_MASK;
+        if sym_section(in b, in elf, i, s) == found && (t == STT_FUNC || t == STT_GNU_IFUNC) {
+            let n = sym_name(in b, in elf, s);
+            if n.err != NAME_OK {
+                return fail_str(ELF_READ, sym_name_error(n));
+            }
+            if s.value == 0 {
+                prog.name.truncate(0);
+                prog.name.extend(in b[n.start..n.end]);
+            } else {
+                prog.add_function(in b[n.start..n.end], udiv(s.value, SLOT_BYTES));
+            }
+        }
+    }
+    prog.sort_functions();
+    prog.sort_kfuncs();
+    if has_ext {
+        let err = assign_local_ids(inout prog, in table, in core);
+        if err.len() != 0 {
+            return read_fail(ELF_MALFORMED, in err.as_slice());
+        }
+    }
+    ElfRead { kind: 0, message: ChunkSeq::new[u8](), prog: prog }
+}
+
+// The program section's relocations: kfunc calls (R_BPF_64_32 against an
+// undefined symbol) and map loads (R_BPF_64_64 against a `.maps` symbol).
+fn relocate(
+    in b: Slice[u8],
+    in elf: Elf,
+    target: u64,
+    maps_index: u64,
+    in map_at: ChunkSeq[u64],
+    inout prog: Prog
+) -> ElfRead {
+    let mut rs = elf.rel_head.try_get(target).unwrap_or(0);
+    loop {
+        if rs == 0 {
+            break;
+        }
+        let s = section(in elf, rs);
+        // `data_as_array`; an unreadable section has no relocations
+        let size = if s.kind == SHT_RELA {
+            elf.lay.rela
+        } else {
+            elf.lay.rel
+        };
+        let readable = s.kind != SHT_CREL
+            && data_ok(in b, s)
+            && (s.kind == SHT_NOBITS || urem(s.size, size) == 0);
+        let count = if readable && s.kind != SHT_NOBITS {
+            udiv(s.size, size)
+        } else {
+            0
+        };
+        for k in 0..count {
+            let at = wrapping_add(s.offset, wrapping_mul(k, size));
+            let (off, sym, rtype) = if elf.lay.wide {
+                let info = rd(in b, wrapping_add(at, 8), 8, elf.be);
+                (rd(in b, at, 8, elf.be), info >> SYM_SHIFT64, info & LOW32)
+            } else {
+                let info = rd(in b, wrapping_add(at, 4), 4, elf.be);
+                (rd(in b, at, 4, elf.be), info >> SYM_SHIFT32, info & LOW8)
+            };
+            let r = one_relocation(
+                in b,
+                in elf,
+                off,
+                sym,
+                rtype,
+                maps_index,
+                in map_at,
+                inout prog
+            );
+            if r.kind != 0 {
+                return r;
+            }
+        }
+        rs = elf.rel_head.try_get(rs).unwrap_or(0);
+    }
+    ElfRead { kind: 0, message: ChunkSeq::new[u8](), prog: prog_new() }
+}
+
+fn one_relocation(
+    in b: Slice[u8],
+    in elf: Elf,
+    off: u64,
+    sym: u64,
+    rtype: u64,
+    maps_index: u64,
+    in map_at: ChunkSeq[u64],
+    inout prog: Prog
+) -> ElfRead {
+    let ok = ElfRead { kind: 0, message: ChunkSeq::new[u8](), prog: prog_new() };
+    if rtype == R_BPF_64_32 {
+        if sym == 0 {
+            return fail_str(ELF_MALFORMED, "relocation without symbol");
+        }
+        if sym >= elf.sym_count {
+            return fail_str(ELF_READ, "Invalid ELF symbol index");
+        }
+        let s = sym_at(in b, in elf, sym);
+        if s.shndx != SHN_UNDEF || urem(off, SLOT_BYTES) != 0 {
+            let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            put(inout m, "unsupported call relocation at ");
+            put_u64(inout m, off);
+            return read_fail(ELF_MALFORMED, in m.as_slice());
+        }
+        let slot = udiv(off, SLOT_BYTES);
+        let insn = match prog.insns.try_get(slot) {
+            Option::Some(i) => i,
+            Option::None => return fail_str(ELF_MALFORMED, "relocation past the code"),
+        };
+        if insn.code != BPF_CALL_CODE {
+            return fail_str(ELF_MALFORMED, "kfunc relocation on a non-call");
+        }
+        let fixed = RawInsn {
+            code: insn.code,
+            dst: insn.dst,
+            src: PSEUDO_KFUNC_CALL,
+            off: insn.off,
+            imm: 0
+        };
+        let set = prog.insns.try_set(slot, fixed);
+        let n = sym_name(in b, in elf, s);
+        if n.err != NAME_OK {
+            return fail_str(ELF_READ, sym_name_error(n));
+        }
+        prog.add_kfunc(slot, in b[n.start..n.end]);
+        return ok;
+    }
+    if rtype != R_BPF_64_64 {
+        let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put(inout m, "unsupported relocation at ");
+        put_u64(inout m, off);
+        return read_fail(ELF_MALFORMED, in m.as_slice());
+    }
+    if sym == 0 {
+        return fail_str(ELF_MALFORMED, "relocation without symbol");
+    }
+    if sym >= elf.sym_count {
+        return fail_str(ELF_READ, "Invalid ELF symbol index");
+    }
+    let s = sym_at(in b, in elf, sym);
+    if maps_index == NONE || sym_section(in b, in elf, sym, s) != maps_index {
+        return fail_str(ELF_MALFORMED, "relocation to a non-map symbol");
+    }
+    let mut m = NONE;
+    for i in 0..map_at.len() {
+        if map_at.try_get(i).unwrap_or(NONE) == s.value {
+            m = i;
+            break;
+        }
+    }
+    if m == NONE {
+        return fail_str(ELF_MALFORMED, "relocation to unknown map");
+    }
+    if urem(off, SLOT_BYTES) != 0 {
+        return fail_str(ELF_MALFORMED, "misaligned relocation");
+    }
+    let slot = udiv(off, SLOT_BYTES);
+    let insn = match prog.insns.try_get(slot) {
+        Option::Some(i) => i,
+        Option::None => return fail_str(ELF_MALFORMED, "relocation past the code"),
+    };
+    if insn.code != BPF_LD_IMM64_CODE {
+        return fail_str(ELF_MALFORMED, "map relocation on a non-ld_imm64");
+    }
+    let fixed = RawInsn {
+        code: insn.code,
+        dst: insn.dst,
+        src: PSEUDO_MAP_FD,
+        off: insn.off,
+        imm: wrapping_i32(wrapping_u32(m))
+    };
+    let set = prog.insns.try_set(slot, fixed);
+    ok
+}
