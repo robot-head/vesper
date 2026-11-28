@@ -37,8 +37,6 @@ vesper_crate(
         # Stage 2 slice 3 (#2662): self_host_library_ir reads the hybrid's
         # port libraries (crates/vesper-hybrid/modules).
         "//crates/vesper-hybrid:files",
-        # ... and the port pilot's Box libraries (kit, widen).
-        "//crates/vesper-port-pilot:files",
         # backend_checks and ebpf_backend depend on the Loom packages in
         # vesper-resonance and vesper-ebpf, whose BUILD files keep them out
         # of //:files.
