@@ -1,0 +1,1034 @@
+// Linear ownership in Stage 2 (#2701): every owned binding of a linear type
+// that names a `.vsys` `linear extern type` (`@vesper/cranelift`'s `Module`,
+// `Builder`, `Data` and `Object`, also inside `Option[..]` or a tuple) is
+// consumed exactly once on every returning path, as src/check.rs requires:
+//
+// - E0302: an owned linear binding is still live where its scope ends, at
+//   a `return`, or where a `break` or `continue` leaves its scope;
+// - E0303: a moved linear binding is used again (including by the next
+//   iteration of the loop that moved it);
+// - E0309: the branches of an `if` or `match` leave a linear binding
+//   consumed on some paths and live on others.
+//
+// The pass walks each function body of the typed IR AST after
+// `typecheck_ast`, reading binding types from the spans it records. A
+// binding is consumed by a by-value use: a `sink` (bare) call argument, a
+// `let` or field initializer, a returned or block-tail value, or a `match`
+// that binds its payload. `in` and `inout` arguments, field reads and
+// method receivers only borrow. Where the walk cannot follow ownership (a
+// handler, a closure body, a move out of a field) the bindings involved
+// are no longer checked, so the pass never refuses what Rust accepts.
+
+use @vesper/check-data::input::{Ctx};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, TyMode, TyPass, Types};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, w};
+use @vesper/check-data::world::{Bounds, World, bounds_new, constructor, mode_of};
+use @vesper/place-ir::codes::{Pat};
+use @vesper/place-ir-lower::ast::{Ast, Ex, FnR};
+use self::vcl_decls::{vcl_decl, vcl_decl_count};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+
+// Expression kinds (place-ir-lower ast.ves).
+const X_LITERAL: u8 = 1;
+const X_NAME: u8 = 2;
+const X_TUPLE: u8 = 3;
+const X_STRUCT: u8 = 4;
+const X_FIELD: u8 = 5;
+const X_INDEX: u8 = 6;
+const X_UNARY: u8 = 7;
+const X_BINARY: u8 = 8;
+const X_ASSIGN: u8 = 9;
+const X_BLOCK: u8 = 10;
+const X_CALL: u8 = 11;
+const X_TRY: u8 = 12;
+const X_IF: u8 = 13;
+const X_MATCH: u8 = 14;
+const X_LOOP: u8 = 15;
+const X_FOR: u8 = 16;
+const X_RANGE: u8 = 17;
+const X_BREAK: u8 = 18;
+const X_CONTINUE: u8 = 19;
+const X_RETURN: u8 = 20;
+const X_CLOSURE: u8 = 21;
+const X_HANDLE: u8 = 22;
+
+// Words per block statement (is let, pattern, expression) and per call
+// argument or match arm (pass or pattern, expression).
+const STATEMENT_WORDS: u64 = 3;
+const PAIR_WORDS: u64 = 2;
+// `::` in a path, and the bytes it takes.
+const COLON: u8 = 58;
+const PATH_SEPARATOR_BYTES: u64 = 2;
+// A parameter range packs its start into the high half of a word.
+const HALF_WORD_BITS: u32 = 32;
+const HALF_WORD_MASK: u64 = 4294967295;
+// A call argument whose pass is not known (beyond `TyPass`).
+const PASS_UNRESOLVED: u8 = 255;
+// Deeper types are not searched for handles.
+const MAX_TYPE_DEPTH: u64 = 64;
+// The vcl rows: words split at spaces, `Option[..]` results, `Unit`.
+const SPACE: u8 = 32;
+const OPEN_BRACKET: u8 = 91;
+const UPPER_A: u8 = 65;
+const UPPER_Z: u8 = 90;
+const OPTION_OPEN: Str = "Option[";
+const UNIT_TYPE: Str = "Unit";
+// The effect collect.ves declares for a program that names Cranelift.
+const CRANELIFT_EFFECT: Str = "Ffi$Cranelift";
+
+// A binding's ownership state.
+enum Own: _ {
+    Live = 0,
+    Moved = 1,
+    // Not followed (see the module comment): never reported.
+    Unknown = 2,
+}
+
+// What a fault reports.
+pub enum LinearCode: _ {
+    None = 0,
+    // E0302: a linear value is not consumed.
+    Leaked = 1,
+    // E0303: a moved linear value is used again.
+    Reused = 2,
+    // E0309: branches disagree on whether a linear value is consumed.
+    Merged = 3,
+}
+
+copy struct Lb {
+    name: u32,
+    // Owned (`let`, a sink parameter, a pattern over an owned value) and of
+    // a linear type: the only bindings checked.
+    tracked: bool,
+    // Whether a pattern over this binding binds owned values.
+    owned: bool,
+    state: u8,
+    s0: u64,
+    s1: u64,
+}
+
+// The first fault: its code, the binding's name and span, and the function.
+pub copy struct LinearFault {
+    code: u8,
+    name: u32,
+    s0: u64,
+    s1: u64,
+    func: u32,
+}
+
+// A loop being walked: the bindings outside it (env[..outer]), their
+// states at its head, and the joined states of its `break`s.
+struct Lp {
+    outer: u64,
+    head: ChunkSeq[u8],
+    exit: ChunkSeq[u8],
+    has_exit: bool,
+}
+
+struct Lc {
+    env: ChunkSeq[Lb],
+    // After a `return`, `break`, `continue` or a call that never returns.
+    dead: bool,
+    loops: ChunkSeq[Lp],
+    fault: LinearFault,
+    func: u32,
+    bounds: Bounds,
+    never_ty: u32,
+    // The `.vsys` handle types (`cranelift_handles`).
+    handles: ChunkSeq[u32],
+}
+
+fn no_fault() -> LinearFault {
+    LinearFault { code: LinearCode::None, name: 0, s0: 0, s1: 0, func: 0 }
+}
+
+fn report(inout lc: Lc, code: u8, b: Lb) {
+    if lc.fault.code == LinearCode::None {
+        lc.fault = LinearFault { code: code, name: b.name, s0: b.s0, s1: b.s1, func: lc.func };
+    }
+}
+
+fn is_linear(inout c: Ctx, in lc: Lc, ty: u32) -> bool {
+    ty != NONE32
+        && lc.handles.len() > 0
+        && mentions_handle(in c.types, in lc.handles, ty, 0)
+        && mode_of(inout c.types, in c.names, in c.world, ty, in lc.bounds) == TyMode::Linear
+}
+
+// Whether type `ty` names one of the `handles` (in its arguments or
+// tuple items too).
+fn mentions_handle(in types: Types, in handles: ChunkSeq[u32], ty: u32, depth: u64) -> bool {
+    if depth > MAX_TYPE_DEPTH {
+        return false;
+    }
+    let kind = types.kind(ty);
+    if kind == TyKind::Named {
+        let name = types.name(ty);
+        if has_name(in handles, name) {
+            return true;
+        }
+    } else if kind != TyKind::Tuple {
+        return false;
+    }
+    for i in 0..types.arity(ty) {
+        if mentions_handle(in types, in handles, types.arg(ty, i), inc(depth)) {
+            return true;
+        }
+    }
+    false
+}
+
+// The `linear extern type`s of `cranelift.vsys` (`Module`, `Builder`, ...):
+// the names its operations (vcl_decls.ves rows) take or return that are
+// not scalars, once a program names the library (collect.ves declares its
+// operations then). Stage 2 types no other `.vsys` handle.
+fn cranelift_handles(in names: Names) -> ChunkSeq[u32] {
+    let mut handles = ChunkSeq::new[u32]();
+    if names.lookup(in CRANELIFT_EFFECT.as_bytes()) == NONE32 {
+        return handles;
+    }
+    for i in 0..vcl_decl_count() {
+        let text = vcl_decl(i);
+        let row = text.as_bytes();
+        let mut start: u64 = 0;
+        let mut word: u64 = 0;
+        for j in 0..inc(row.len()) {
+            if j < row.len() && row.try_get(j) != Option::Some(SPACE) {
+                continue;
+            }
+            if word > 0 && j > start {
+                // A parameter starts with its pass letter; the result has none.
+                let last = j == row.len();
+                let from = if last { start } else { inc(start) };
+                let name = handle_name(in names, in row[from..j]);
+                if name != NONE32 && !has_name(in handles, name) {
+                    handles.push(name);
+                }
+            }
+            word = inc(word);
+            start = inc(j);
+        }
+    }
+    handles
+}
+
+// The handle a vcl row type names, through `Option[..]`, or NONE32.
+fn handle_name(in names: Names, in t: Slice[u8]) -> u32 {
+    let open = OPTION_OPEN.as_bytes();
+    if t.len() > open.len() && same_bytes(in t[0..open.len()], in open) {
+        return handle_name(in names, in t[open.len()..wrapping_sub(t.len(), 1)]);
+    }
+    if t.len() == 0 {
+        return NONE32;
+    }
+    let first = t.try_get(0).unwrap_or(0);
+    if first < UPPER_A || first > UPPER_Z || same_bytes(in t, in UNIT_TYPE.as_bytes()) {
+        return NONE32;
+    }
+    for i in 0..t.len() {
+        if t.try_get(i) == Option::Some(OPEN_BRACKET) {
+            return NONE32;
+        }
+    }
+    names.lookup(in t)
+}
+
+fn same_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if a.try_get(i) != b.try_get(i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn has_name(in syms: ChunkSeq[u32], name: u32) -> bool {
+    for i in 0..syms.len() {
+        if syms.try_get(i) == Option::Some(name) {
+            return true;
+        }
+    }
+    false
+}
+
+// The newest binding named `name`, or NONE64.
+fn find(in lc: Lc, name: u32) -> u64 {
+    let mut i = lc.env.len();
+    loop {
+        if i == 0 {
+            return NONE64;
+        }
+        i = wrapping_sub(i, 1);
+        match lc.env.try_get(i) {
+            Option::Some(b) => {
+                if b.name == name {
+                    return i;
+                }
+            },
+            Option::None => {},
+        }
+    }
+}
+
+fn binding(in lc: Lc, i: u64) -> Lb {
+    match lc.env.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => Lb {
+            name: 0,
+            tracked: false,
+            owned: false,
+            state: Own::Unknown,
+            s0: 0,
+            s1: 0
+        },
+    }
+}
+
+fn set_state(inout lc: Lc, i: u64, state: u8) {
+    let b = binding(in lc, i);
+    let _ = lc.env.try_set(
+        i,
+        Lb { name: b.name, tracked: b.tracked, owned: b.owned, state: state, s0: b.s0, s1: b.s1 }
+    );
+}
+
+fn snapshot(in lc: Lc, n: u64) -> ChunkSeq[u8] {
+    let mut states = ChunkSeq::new[u8]();
+    for i in 0..n {
+        states.push(binding(in lc, i).state);
+    }
+    states
+}
+
+fn restore(inout lc: Lc, in states: ChunkSeq[u8]) {
+    for i in 0..states.len() {
+        set_state(inout lc, i, states.try_get(i).unwrap_or(Own::Unknown));
+    }
+}
+
+// Joins `other` into `into` over the bindings both cover.
+fn join_into(inout lc: Lc, inout into: ChunkSeq[u8], in other: ChunkSeq[u8]) {
+    for i in 0..into.len() {
+        let a = into.try_get(i).unwrap_or(Own::Unknown);
+        let b = other.try_get(i).unwrap_or(Own::Unknown);
+        if a == b {
+            continue;
+        }
+        let joined = if a == Own::Unknown || b == Own::Unknown {
+            Own::Unknown
+        } else {
+            let lb = binding(in lc, i);
+            if lb.tracked {
+                report(inout lc, LinearCode::Merged, lb);
+            }
+            Own::Unknown
+        };
+        let _ = into.try_set(i, joined);
+    }
+}
+
+// E0302 for tracked bindings env[from..] still live.
+fn check_live(inout lc: Lc, from: u64) {
+    for i in from..lc.env.len() {
+        let b = binding(in lc, i);
+        if b.tracked && b.state == Own::Live {
+            report(inout lc, LinearCode::Leaked, b);
+        }
+    }
+}
+
+// Leaves a scope that began at env[mark].
+fn pop_to(inout lc: Lc, mark: u64) {
+    if !lc.dead {
+        check_live(inout lc, mark);
+    }
+    lc.env.truncate(mark);
+}
+
+fn bind(inout c: Ctx, inout lc: Lc, name: u32, ty: u32, owned: bool, s0: u64, s1: u64) {
+    let tracked = owned && is_linear(inout c, in lc, ty);
+    lc.env
+        .push(Lb { name: name, tracked: tracked, owned: owned, state: Own::Live, s0: s0, s1: s1 });
+}
+
+// Binds the names of pattern `pid` (types from the spans the checker
+// recorded); owned when the value matched is.
+fn bind_pattern(inout c: Ctx, inout lc: Lc, in a: Ast, pid: u64, owned: bool) {
+    if pid == NONE64 {
+        return;
+    }
+    let p = a.pt(pid);
+    if p.kind == Pat::Bind {
+        let ty = c.world.expr_type(p.s0, p.s1);
+        bind(inout c, inout lc, n32(p.a), ty, owned, p.s0, p.s1);
+    } else if p.kind == Pat::Tuple {
+        for i in 0..p.n {
+            bind_pattern(inout c, inout lc, in a, a.px(add(p.b, i)), owned);
+        }
+    } else if p.kind == Pat::Constructor {
+        for i in 0..p.n {
+            bind_pattern(
+                inout c,
+                inout lc,
+                in a,
+                a.px(add(p.b, inc(wrapping_mul(i, PAIR_WORDS)))),
+                owned
+            );
+        }
+    }
+}
+
+// Whether pattern `pid` binds a name.
+fn binds(in a: Ast, pid: u64) -> bool {
+    if pid == NONE64 {
+        return false;
+    }
+    let p = a.pt(pid);
+    if p.kind == Pat::Bind {
+        return true;
+    }
+    if p.kind == Pat::Tuple {
+        for i in 0..p.n {
+            if binds(in a, a.px(add(p.b, i))) {
+                return true;
+            }
+        }
+    } else if p.kind == Pat::Constructor {
+        for i in 0..p.n {
+            if binds(in a, a.px(add(p.b, inc(wrapping_mul(i, PAIR_WORDS))))) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// A use of binding `name`: a move when `moving`, else a borrow.
+fn use_name(inout lc: Lc, name: u32, moving: bool) {
+    let i = find(in lc, name);
+    if i == NONE64 {
+        return;
+    }
+    let b = binding(in lc, i);
+    if !b.tracked || b.state == Own::Unknown {
+        return;
+    }
+    if b.state == Own::Moved {
+        report(inout lc, LinearCode::Reused, b);
+        set_state(inout lc, i, Own::Unknown);
+        return;
+    }
+    if moving {
+        set_state(inout lc, i, Own::Moved);
+    }
+}
+
+fn forget_name(inout lc: Lc, name: u32) {
+    let i = find(in lc, name);
+    if i != NONE64 {
+        set_state(inout lc, i, Own::Unknown);
+    }
+}
+
+// The root binding name of place expression `id` (names and fields), or
+// NONE32.
+fn place_root(in a: Ast, id: u64) -> u32 {
+    let mut cur = id;
+    loop {
+        let e = a.ex(cur);
+        if e.kind == X_NAME {
+            return n32(e.a);
+        }
+        if e.kind != X_FIELD {
+            return NONE32;
+        }
+        cur = e.a;
+    }
+}
+
+// Whether the value of expression `id` is owned: a temporary, or a place
+// rooted at an owned binding.
+fn owned_value(in lc: Lc, in a: Ast, id: u64) -> bool {
+    let root = place_root(in a, id);
+    if root == NONE32 {
+        return true;
+    }
+    let i = find(in lc, root);
+    i == NONE64 || binding(in lc, i).owned
+}
+
+// Every binding a subtree names stops being checked (a construct the walk
+// does not follow).
+fn forget(inout lc: Lc, in a: Ast, id: u64) {
+    if id == NONE64 {
+        return;
+    }
+    let e = a.ex(id);
+    let k = e.kind;
+    if k == X_NAME {
+        forget_name(inout lc, n32(e.a));
+    } else if k == X_TUPLE {
+        for i in 0..e.n {
+            forget(inout lc, in a, a.x(add(e.a, i)));
+        }
+    } else if k == X_STRUCT {
+        for i in 0..e.n {
+            forget(inout lc, in a, a.x(add(e.b, inc(wrapping_mul(i, PAIR_WORDS)))));
+        }
+    } else if k == X_FIELD || k == X_TRY || k == X_LOOP {
+        forget(inout lc, in a, e.a);
+    } else if k == X_INDEX || k == X_RANGE {
+        forget(inout lc, in a, e.a);
+        forget(inout lc, in a, e.b);
+    } else if k == X_UNARY {
+        forget(inout lc, in a, e.b);
+    } else if k == X_BINARY || k == X_ASSIGN {
+        forget(inout lc, in a, e.b);
+        forget(inout lc, in a, e.c);
+    } else if k == X_BLOCK {
+        for i in 0..e.n {
+            forget(
+                inout lc,
+                in a,
+                a.x(add(e.a, add(wrapping_mul(i, STATEMENT_WORDS), PAIR_WORDS)))
+            );
+        }
+        forget(inout lc, in a, e.b);
+    } else if k == X_CALL {
+        forget(inout lc, in a, e.a);
+        for i in 0..e.n {
+            forget(inout lc, in a, a.x(add(e.b, inc(wrapping_mul(i, PAIR_WORDS)))));
+        }
+    } else if k == X_IF {
+        forget(inout lc, in a, e.a);
+        forget(inout lc, in a, e.b);
+        forget(inout lc, in a, e.c);
+    } else if k == X_MATCH {
+        forget(inout lc, in a, e.a);
+        for i in 0..e.n {
+            forget(inout lc, in a, a.x(add(e.b, inc(wrapping_mul(i, PAIR_WORDS)))));
+        }
+    } else if k == X_FOR {
+        forget(inout lc, in a, e.b);
+        forget(inout lc, in a, e.c);
+    } else if k == X_BREAK || k == X_RETURN {
+        forget(inout lc, in a, e.a);
+    } else if k == X_CLOSURE {
+        forget(inout lc, in a, e.c);
+    } else if k == X_HANDLE {
+        let h = a.handler(e.a);
+        if h.has_state {
+            forget(inout lc, in a, h.state_expr);
+        }
+        forget(inout lc, in a, h.body);
+        for ci in 0..inc(h.op_count) {
+            forget(inout lc, in a, a.clause(add(h.return_clause, ci)).body);
+        }
+    }
+}
+
+// Walks expression `id`; `moving` when its value is consumed.
+fn walk(inout c: Ctx, inout lc: Lc, in a: Ast, id: u64, moving: bool) {
+    if id == NONE64 || lc.dead {
+        return;
+    }
+    let e = a.ex(id);
+    let k = e.kind;
+    if k == X_NAME {
+        use_name(inout lc, n32(e.a), moving);
+    } else if k == X_TUPLE {
+        for i in 0..e.n {
+            walk(inout c, inout lc, in a, a.x(add(e.a, i)), true);
+        }
+    } else if k == X_STRUCT {
+        for i in 0..e.n {
+            walk(inout c, inout lc, in a, a.x(add(e.b, inc(wrapping_mul(i, PAIR_WORDS)))), true);
+        }
+    } else if k == X_FIELD {
+        walk(inout c, inout lc, in a, e.a, false);
+        if moving && is_linear(inout c, in lc, c.world.expr_type(e.s0, e.s1)) {
+            // A move out of a field: not followed.
+            let root = place_root(in a, id);
+            if root != NONE32 {
+                forget_name(inout lc, root);
+            }
+        }
+    } else if k == X_INDEX || k == X_RANGE {
+        walk(inout c, inout lc, in a, e.a, false);
+        walk(inout c, inout lc, in a, e.b, false);
+    } else if k == X_UNARY {
+        walk(inout c, inout lc, in a, e.b, false);
+    } else if k == X_BINARY {
+        walk(inout c, inout lc, in a, e.b, false);
+        walk(inout c, inout lc, in a, e.c, false);
+    } else if k == X_ASSIGN {
+        walk(inout c, inout lc, in a, e.c, true);
+        let target = a.ex(e.b);
+        if target.kind == X_NAME {
+            // An assignment gives the binding a new value.
+            let i = find(in lc, n32(target.a));
+            if i != NONE64 && binding(in lc, i).state != Own::Unknown {
+                set_state(inout lc, i, Own::Live);
+            }
+        } else {
+            walk(inout c, inout lc, in a, e.b, false);
+        }
+    } else if k == X_BLOCK {
+        let mark = lc.env.len();
+        for i in 0..e.n {
+            let at = add(e.a, wrapping_mul(i, STATEMENT_WORDS));
+            let is_let = a.x(at) != 0;
+            let value = a.x(add(at, PAIR_WORDS));
+            if is_let {
+                let owned = owned_value(in lc, in a, value);
+                walk(inout c, inout lc, in a, value, true);
+                bind_pattern(inout c, inout lc, in a, a.x(inc(at)), owned);
+            } else {
+                walk(inout c, inout lc, in a, value, false);
+            }
+        }
+        walk(inout c, inout lc, in a, e.b, moving);
+        pop_to(inout lc, mark);
+    } else if k == X_CALL {
+        walk_call(inout c, inout lc, in a, e);
+        if c.world.expr_type(e.s0, e.s1) == lc.never_ty {
+            lc.dead = true;
+        }
+    } else if k == X_TRY {
+        walk(inout c, inout lc, in a, e.a, true);
+    } else if k == X_IF {
+        walk(inout c, inout lc, in a, e.a, false);
+        let n = lc.env.len();
+        let before = snapshot(in lc, n);
+        walk(inout c, inout lc, in a, e.b, moving);
+        let then_dead = lc.dead;
+        let mut joined = snapshot(in lc, n);
+        restore(inout lc, in before);
+        lc.dead = false;
+        walk(inout c, inout lc, in a, e.c, moving);
+        merge(inout lc, inout joined, then_dead, n);
+    } else if k == X_MATCH {
+        let owned = owned_value(in lc, in a, e.a);
+        let mut binding_arms = false;
+        for i in 0..e.n {
+            if binds(in a, a.x(add(e.b, wrapping_mul(i, PAIR_WORDS)))) {
+                binding_arms = true;
+            }
+        }
+        walk(inout c, inout lc, in a, e.a, binding_arms);
+        if lc.dead {
+            return;
+        }
+        let n = lc.env.len();
+        let before = snapshot(in lc, n);
+        let mut joined = snapshot(in lc, n);
+        let mut all_dead = true;
+        for i in 0..e.n {
+            let at = add(e.b, wrapping_mul(i, PAIR_WORDS));
+            restore(inout lc, in before);
+            lc.dead = false;
+            bind_pattern(inout c, inout lc, in a, a.x(at), owned);
+            walk(inout c, inout lc, in a, a.x(inc(at)), moving);
+            pop_to(inout lc, n);
+            if !lc.dead {
+                let arm = snapshot(in lc, n);
+                if all_dead {
+                    joined = arm;
+                } else {
+                    join_into(inout lc, inout joined, in arm);
+                }
+                all_dead = false;
+            }
+        }
+        restore(inout lc, in joined);
+        lc.dead = all_dead && e.n > 0;
+    } else if k == X_LOOP {
+        walk_loop(inout c, inout lc, in a, NONE64, e.a, false);
+    } else if k == X_FOR {
+        let iter = a.ex(e.b);
+        walk(inout c, inout lc, in a, e.b, iter.kind != X_NAME && iter.kind != X_FIELD);
+        walk_loop(inout c, inout lc, in a, e.a, e.c, true);
+    } else if k == X_BREAK {
+        walk(inout c, inout lc, in a, e.a, true);
+        leave_loop(inout lc, true);
+    } else if k == X_CONTINUE {
+        leave_loop(inout lc, false);
+    } else if k == X_RETURN {
+        walk(inout c, inout lc, in a, e.a, true);
+        if !lc.dead {
+            check_live(inout lc, 0);
+        }
+        lc.dead = true;
+    } else if k == X_CLOSURE {
+        // Captured moves leave the bindings; the body is a function of its
+        // own.
+        for i in 0..e.m {
+            forget_name(inout lc, n32(a.x(add(e.x, wrapping_mul(i, PAIR_WORDS)))));
+        }
+        forget(inout lc, in a, e.c);
+    } else if k == X_HANDLE {
+        forget(inout lc, in a, id);
+    } else if k != X_LITERAL {
+        forget(inout lc, in a, id);
+    }
+}
+
+// `Qual::short` as (qual, short) symbols, or (NONE32, sym) for a name with
+// no `::`; (NONE32, NONE32) when either part is not interned or there is
+// more than one `::`.
+fn split_path(in names: Names, sym: u32) -> (u32, u32) {
+    let size = names.size(sym);
+    let mut count: u64 = 0;
+    let mut sep_at: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if inc(i) >= size {
+            break;
+        }
+        if names.byte(sym, i) == COLON && names.byte(sym, inc(i)) == COLON {
+            count = inc(count);
+            sep_at = i;
+            i = add(i, PATH_SEPARATOR_BYTES);
+        } else {
+            i = inc(i);
+        }
+    }
+    if count == 0 {
+        return (NONE32, sym);
+    }
+    if count > 1 {
+        return (NONE32, NONE32);
+    }
+    let mut qual_bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut short_bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for j in 0..size {
+        let byte = names.byte(sym, j);
+        if j < sep_at {
+            qual_bytes.push(byte);
+        } else if j >= add(sep_at, PATH_SEPARATOR_BYTES) {
+            short_bytes.push(byte);
+        }
+    }
+    let qual = names.lookup(in qual_bytes.as_slice());
+    let short = names.lookup(in short_bytes.as_slice());
+    if qual == NONE32 || short == NONE32 {
+        return (NONE32, NONE32);
+    }
+    (qual, short)
+}
+
+// The parameters of callee `name` as `start << 32 | count` over `pms`: a
+// world function's or an effect operation's (`Effect::op`), or NONE64.
+fn callee_params(in c: Ctx, in a: Ast, name: u32) -> u64 {
+    let func_index = a.fn_index(name);
+    if func_index != NONE64 {
+        let func = a.function(func_index);
+        return wrapping_shl_u64(func.param_start, HALF_WORD_BITS) | func.param_count;
+    }
+    let (qual, op) = split_path(in c.names, name);
+    if qual == NONE32 {
+        return NONE64;
+    }
+    let eff_index = a.effect_index(qual);
+    if eff_index == NONE64 {
+        return NONE64;
+    }
+    let eff_decl = a.effect_decl(eff_index);
+    for j in 0..eff_decl.op_count {
+        let op_sig = a.eop(add(eff_decl.op_start, j));
+        if op_sig.name == op {
+            return wrapping_shl_u64(op_sig.param_start, HALF_WORD_BITS) | op_sig.param_count;
+        }
+    }
+    NONE64
+}
+
+fn is_constructor(in c: Ctx, name: u32) -> bool {
+    let (qual, short) = split_path(in c.names, name);
+    short != NONE32 && constructor(in c.world, qual, short) != NONE64
+}
+
+// A call: each argument is moved, lent or read by the pass of its
+// parameter (a world function's, an effect operation's, or the receiver
+// method's, as place-ir-lower resolves them); a constructor moves its
+// arguments. A bare argument to anything else is not followed.
+fn walk_call(inout c: Ctx, inout lc: Lc, in a: Ast, e: Ex) {
+    let callee = a.ex(e.a);
+    let mut receiver = NONE64;
+    let mut name = NONE32;
+    if callee.kind == X_NAME && find(in lc, n32(callee.a)) == NONE64 {
+        name = n32(callee.a);
+    } else if callee.kind == X_FIELD {
+        let base = a.ex(callee.a);
+        let base_ty = c.world.expr_type(base.s0, base.s1);
+        if base_ty != NONE32 {
+            let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            push_name(in c.names, c.types.name(base_ty), inout text);
+            text.push(COLON);
+            text.push(COLON);
+            push_name(in c.names, n32(callee.b), inout text);
+            let qualified = c.names.lookup(in text.as_slice());
+            if qualified != NONE32 && a.fn_index(qualified) != NONE64 {
+                receiver = callee.a;
+                name = qualified;
+            }
+        }
+    }
+    let range = if name == NONE32 {
+        NONE64
+    } else {
+        callee_params(in c, in a, name)
+    };
+    let constructs = range == NONE64 && name != NONE32 && is_constructor(in c, name);
+    let param_start = wrapping_shr_u64(range, HALF_WORD_BITS);
+    let param_count = if range == NONE64 {
+        0
+    } else {
+        range & HALF_WORD_MASK
+    };
+    let mut i: u64 = 0;
+    if receiver != NONE64 {
+        walk_arg(
+            inout c,
+            inout lc,
+            in a,
+            receiver,
+            param_pass(in a, param_start, param_count, 0, TyPass::In)
+        );
+        i = 1;
+    } else if callee.kind == X_FIELD {
+        walk(inout c, inout lc, in a, callee.a, false);
+    } else if name == NONE32 {
+        walk(inout c, inout lc, in a, e.a, false);
+    }
+    for j in 0..e.n {
+        let at = add(e.b, wrapping_mul(j, PAIR_WORDS));
+        let written = wrapping_u8(a.x(at));
+        let pass = if constructs {
+            TyPass::Sink
+        } else if range != NONE64 {
+            param_pass(in a, param_start, param_count, i, TyPass::In)
+        } else if written == TyPass::In {
+            // A bare argument and an `in` one read alike here.
+            PASS_UNRESOLVED
+        } else {
+            written
+        };
+        walk_arg(inout c, inout lc, in a, a.x(inc(at)), pass);
+        i = inc(i);
+    }
+}
+
+fn param_pass(in a: Ast, param_start: u64, param_count: u64, i: u64, otherwise: u8) -> u8 {
+    if i < param_count {
+        return a.param(add(param_start, i)).pass;
+    }
+    otherwise
+}
+
+fn walk_arg(inout c: Ctx, inout lc: Lc, in a: Ast, id: u64, pass: u8) {
+    if pass == PASS_UNRESOLVED {
+        walk(inout c, inout lc, in a, id, false);
+        let e = a.ex(id);
+        if e.kind == X_NAME {
+            forget_name(inout lc, n32(e.a));
+        }
+        return;
+    }
+    walk(inout c, inout lc, in a, id, pass == TyPass::Sink);
+}
+
+// Joins the current states (after the second branch) with `joined` (after
+// the first, dead when `first_dead`) over env[..n].
+fn merge(inout lc: Lc, inout joined: ChunkSeq[u8], first_dead: bool, n: u64) {
+    let second_dead = lc.dead;
+    if second_dead && first_dead {
+        return;
+    }
+    if second_dead {
+        restore(inout lc, in joined);
+        lc.dead = false;
+        return;
+    }
+    if !first_dead {
+        let now = snapshot(in lc, n);
+        join_into(inout lc, inout joined, in now);
+        restore(inout lc, in joined);
+    }
+}
+
+// A `loop` (no pattern) or a `for` over `pattern`, whose body may run
+// zero times.
+fn walk_loop(inout c: Ctx, inout lc: Lc, in a: Ast, pattern: u64, body: u64, may_skip: bool) {
+    if lc.dead {
+        return;
+    }
+    let outer = lc.env.len();
+    let head = snapshot(in lc, outer);
+    lc.loops.push(Lp {
+        outer: outer,
+        head: snapshot(in lc, outer),
+        exit: snapshot(in lc, outer),
+        has_exit: may_skip,
+    });
+    if pattern != NONE64 {
+        // A `for` element is a copy or a view of the iterated sequence.
+        bind_pattern(inout c, inout lc, in a, pattern, false);
+    }
+    walk(inout c, inout lc, in a, body, false);
+    leave_loop(inout lc, false);
+    lc.env.truncate(outer);
+    match lc.loops.pop() {
+        Option::Some(lp) => {
+            if lp.has_exit {
+                restore(inout lc, in lp.exit);
+                lc.dead = false;
+            } else {
+                restore(inout lc, in head);
+                lc.dead = true;
+            }
+        },
+        Option::None => {},
+    }
+}
+
+// A jump out of the innermost loop's body: to its exit (`break`) or its
+// head (`continue`, or the body's end). Bindings of the body still live
+// leak (E0302); an outer binding moved since the head is moved again by
+// the next iteration (E0303).
+fn leave_loop(inout lc: Lc, to_exit: bool) {
+    if lc.dead {
+        return;
+    }
+    match lc.loops.pop() {
+        Option::Some(lp) => {
+            let mut frame = lp;
+            check_live(inout lc, frame.outer);
+            let now = snapshot(in lc, frame.outer);
+            if to_exit {
+                if frame.has_exit {
+                    join_into(inout lc, inout frame.exit, in now);
+                } else {
+                    frame.exit = now;
+                    frame.has_exit = true;
+                }
+            } else {
+                for i in 0..frame.outer {
+                    let b = binding(in lc, i);
+                    if b.tracked
+                        && frame.head.try_get(i).unwrap_or(Own::Unknown) == Own::Live
+                        && now.try_get(i).unwrap_or(Own::Unknown) == Own::Moved
+                    {
+                        report(inout lc, LinearCode::Reused, b);
+                    }
+                }
+            }
+            lc.loops.push(frame);
+        },
+        Option::None => {},
+    }
+    lc.dead = true;
+}
+
+fn check_fn(inout c: Ctx, in a: Ast, func: FnR, in handles: ChunkSeq[u32]) -> LinearFault {
+    let mut bounds = bounds_new();
+    for i in 0..func.generic_count {
+        let g = a.generic(add(func.generic_start, i));
+        if !g.is_row {
+            bounds.set(g.name, g.bound);
+        }
+    }
+    let never_ty = c.types.named0(c.world.k.never);
+    let mut lc = Lc {
+        env: ChunkSeq::new[Lb](),
+        dead: false,
+        loops: ChunkSeq::new[Lp](),
+        fault: no_fault(),
+        func: func.name,
+        bounds: bounds,
+        never_ty: never_ty,
+        handles: copy_u32s(in handles),
+    };
+    for i in 0..func.param_count {
+        let pm = a.param(add(func.param_start, i));
+        bind(inout c, inout lc, pm.name, pm.ty, pm.pass == TyPass::Sink, pm.s0, pm.s1);
+    }
+    walk(inout c, inout lc, in a, func.body, true);
+    if !lc.dead {
+        check_live(inout lc, 0);
+    }
+    lc.fault
+}
+
+// The first linear-ownership fault of the program's function bodies.
+pub fn check_linear(in a: Ast, inout c: Ctx) -> LinearFault {
+    let handles = cranelift_handles(in c.names);
+    if handles.len() == 0 {
+        return no_fault();
+    }
+    for fi in 0..a.fns.len() {
+        let func = a.function(fi);
+        if !func.has_body || func.body == NONE64 {
+            continue;
+        }
+        let fault = check_fn(inout c, in a, func, in handles);
+        if fault.code != LinearCode::None {
+            return fault;
+        }
+    }
+    no_fault()
+}
+
+// The fault as `E0302: ...` text.
+pub fn write_linear_fault(in names: Names, fault: LinearFault, inout out: ChunkSeq[u8]) {
+    if fault.code == LinearCode::Leaked {
+        out.extend(in "E0302".as_bytes());
+    } else if fault.code == LinearCode::Reused {
+        out.extend(in "E0303".as_bytes());
+    } else {
+        out.extend(in "E0309".as_bytes());
+    }
+    out.extend(in ": linear value '".as_bytes());
+    push_name(in names, fault.name, inout out);
+    out.extend(in "'".as_bytes());
+    if fault.code == LinearCode::Leaked {
+        out.extend(
+            in " must be consumed exactly once; destructure it or pass it to a sink parameter"
+                .as_bytes()
+        );
+    } else if fault.code == LinearCode::Reused {
+        out.extend(in " is used after it was moved".as_bytes());
+    } else {
+        out.extend(in " is consumed on some paths and not others".as_bytes());
+    }
+    out.extend(in " (in fn ".as_bytes());
+    push_name(in names, fault.func, inout out);
+    out.extend(in ", bytes ".as_bytes());
+    push_decimal(inout out, fault.s0);
+    out.extend(in "..".as_bytes());
+    push_decimal(inout out, fault.s1);
+    out.extend(in ")".as_bytes());
+}
+
+fn push_name(in names: Names, sym: u32, inout out: ChunkSeq[u8]) {
+    for i in 0..names.size(sym) {
+        out.push(names.byte(sym, i));
+    }
+}
+
+fn copy_u32s(in syms: ChunkSeq[u32]) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    for i in 0..syms.len() {
+        match syms.try_get(i) {
+            Option::Some(s) => out.push(s),
+            Option::None => {},
+        }
+    }
+    out
+}
