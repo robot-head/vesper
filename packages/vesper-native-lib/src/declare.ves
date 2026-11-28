@@ -13,10 +13,14 @@ use @vesper/check-data::input::{Reader, read_ctx};
 use @vesper/check-layout::{layouts_new};
 use @vesper/place-ir::{read_program};
 use @vesper/codegen-calls::data::{read_calls};
-use @vesper/codegen-calls::instances::{concrete, discover_roots, is_root, program_facts, syms_new};
+use @vesper/codegen-calls::instances::{
+    Conc, Syms, concrete, discover_roots, is_root, program_facts, syms_new
+};
 use @vesper/codegen-calls::abi::{
     Errs, Sig, V_F32, V_F64, V_I128, default_abi, internal, push_symbol_key, signature
 };
+use @vesper/native-walk::frame::{frame_plan};
+use @vesper/check-data::types::{Types};
 
 const NO_LIBRARY: Str = "the calls input has no library task";
 const NOT_STANDALONE: Str = " is not compiled as a standalone native function";
@@ -107,6 +111,14 @@ pub struct Declared {
     pub names: ChunkSeq[u8],
     pub name_at: ChunkSeq[u64],
     pub status: ChunkSeq[u64],
+    // per instance: the instance half of the body hook's plain gate
+    // (`native::BodyGate::instance`: `frame_plan`'s `plain`, and no
+    // `ConstDenorm` span in the world), and whether its row names
+    // `ConstTime` (no cold outlining); 1 or 0
+    pub plain: ChunkSeq[u64],
+    pub const_time: ChunkSeq[u64],
+    // the library task's optimize flag (every definition's `optimize`)
+    pub optimize: bool,
 }
 
 pub fn declared_new() -> Declared {
@@ -121,6 +133,9 @@ pub fn declared_new() -> Declared {
         names: ChunkSeq::new[u8](),
         name_at: ChunkSeq::new[u64](),
         status: ChunkSeq::new[u64](),
+        plain: ChunkSeq::new[u64](),
+        const_time: ChunkSeq::new[u64](),
+        optimize: false,
     }
 }
 
@@ -141,6 +156,18 @@ fn push_dec(inout out: ChunkSeq[u8], value: u64) {
         push_dec(inout out, value / DECIMAL_BASE);
     }
     out.push(wrapping_u8(wrapping_add(value % DECIMAL_BASE, DIGIT_ZERO)));
+}
+
+// Whether the instance's effect row names `ConstTime`
+// (`capability_effects::capabilities(..).contains(&Capability::ConstTime)`).
+fn row_const_time(in types: Types, syms: Syms, in f: Conc) -> bool {
+    let row = types.row(f.row);
+    for i in 0..widen_u64(row.n) {
+        if syms.is_const_time(types.effect_at(wrapping_add(widen_u64(row.a), i)).name) {
+            return true;
+        }
+    }
+    false
 }
 
 fn has_wide(in sig: Sig) -> bool {
@@ -187,6 +214,7 @@ pub fn declare_library(
         return err;
     }
     let task = calls.task(first);
+    d.optimize = task.optimize;
     let mut roots: ChunkSeq[u32] = ChunkSeq::new[u32]();
     roots.push(task.entry);
     let mut tj = wrapping_add(first, 1);
@@ -267,6 +295,39 @@ pub fn declare_library(
             err.extend(in errs.text.as_slice());
             return err;
         }
+        // The instance half of the plain gate: a library task has no
+        // trace host, so no instance takes the trace flag.
+        let mut plain = false;
+        let mut plan_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        if !frame_plan(
+            inout ls,
+            inout c.types,
+            inout c.names,
+            in c.world,
+            in calls,
+            k,
+            inst.name,
+            in f,
+            in vars,
+            abi,
+            task.optimize,
+            false,
+            false,
+            inout plan_text,
+            inout errs,
+            inout plain
+        ) {
+            err.extend(in errs.text.as_slice());
+            return err;
+        }
+        d.plain.push(if plain && !calls.const_denorm { 1 } else { 0 });
+        d.const_time.push(
+            if row_const_time(in c.types, k, in f) {
+                1
+            } else {
+                0
+            }
+        );
         let mut key: ChunkSeq[u8] = ChunkSeq::new[u8]();
         c.names.write(inst.key, inout key);
         let e = exports.find(in key.as_slice());

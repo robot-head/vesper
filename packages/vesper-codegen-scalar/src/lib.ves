@@ -20,7 +20,7 @@
 // 0 I64, 1 F32, 2 F64, 3 I128.
 
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, w};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, w};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{Types, default_type, TyKind};
 use @vesper/check-data::world::{set_by_symbol};
@@ -29,6 +29,8 @@ use @vesper/check-layout::{Layouts, layout_of, layouts_new};
 use @vesper/place-ir::{FnRow, InstRow, Program, read_program};
 use self::blocks::{block_layout};
 use @vesper/codegen-aggregates::{EnumWords, enum_words_none, scalar_enum_words};
+use self::handlers::{HandlerFacts, read_handler_facts};
+use self::body::{NO_LOCAL};
 use @vesper/place-ir::codes::{Lit, Op, Tag, Term};
 
 const NONE32: u32 = 4294967295;
@@ -355,6 +357,9 @@ copy struct Ops {
     seq_str_as_bytes: u32,
     seq_slice_len: u32,
     seq_slice_get: u32,
+    seq_last: u32,
+    option_some: u32,
+    option_none: u32,
 }
 
 fn mark(inout table: ChunkSeq[u32], symbol: u32, flag: u32) {
@@ -518,6 +523,9 @@ fn ops_new(inout names: Names, inout tables: Tables) -> Ops {
         seq_str_as_bytes: intern(inout names, in "Str(AsBytes)"),
         seq_slice_len: intern(inout names, in "SliceLen"),
         seq_slice_get: intern(inout names, in "SliceGet"),
+        seq_last: intern(inout names, in "Last"),
+        option_some: intern(inout names, in "Some"),
+        option_none: intern(inout names, in "None"),
         amp: intern(inout names, in "&"),
         pipe: intern(inout names, in "|"),
         caret: intern(inout names, in "^"),
@@ -564,6 +572,20 @@ pub struct Gen {
     enums: EnumWords,
     // The function `body` plans.
     fi: u64,
+    // What each `Op::Handle` holds (#2657), from the facts after the
+    // program; the handled error type names in scope while a nested graph
+    // is planned, innermost last; and the facts row + 1 and first nested
+    // call of the handler `body_inst` plans.
+    handlers: HandlerFacts,
+    hstack: ChunkSeq[u64],
+    // The `raise` clause's error name while its plan is made: a product
+    // error bound to its storage's address (NO_LOCAL otherwise).
+    bound_error: u64,
+    handle_row: u64,
+    handle_base: u64,
+    // Each function's records in `plan`: plan[plan_from[fi]..plan_to[fi]].
+    plan_from: ChunkSeq[u64],
+    plan_to: ChunkSeq[u64],
 }
 
 impl Gen {
@@ -1451,6 +1473,8 @@ fn read_gen_with(in bytes: Slice[u8], facts: bool) -> Gen {
     let mut reader = Reader { pos: 0 };
     let mut ctx = read_ctx(inout reader, in bytes);
     let mut program = read_program(inout reader, in bytes, in ctx);
+    // The handler facts (#2657), when the input has them.
+    let handlers = read_handler_facts(inout reader, in bytes, inout ctx.names, program.fn_count());
     // `scalar_enums` facts after the program (the optimize path's body
     // plans): the graphs as the walk lowers them, small enums as words.
     let enums = if facts && reader.pos < bytes.len() {
@@ -1478,7 +1502,14 @@ fn read_gen_with(in bytes: Slice[u8], facts: bool) -> Gen {
         out: ChunkSeq::new[u8](),
         plan: ChunkSeq::new[u64](),
         enums: enums,
-        fi: 0
+        fi: 0,
+        handlers: handlers,
+        hstack: ChunkSeq::new[u64](),
+        bound_error: NO_LOCAL,
+        handle_row: 0,
+        handle_base: 0,
+        plan_from: ChunkSeq::new[u64](),
+        plan_to: ChunkSeq::new[u64]()
     }
 }
 
@@ -1530,9 +1561,15 @@ pub fn codegen_scalar_body_plan_prefix(in bytes: Slice[u8]) -> ChunkSeq[u64] {
 fn body_plans(sink codegen: Gen) -> ChunkSeq[u64] {
     let mut codegen = codegen;
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    // Every function's instruction plan first: a handler's nested graphs
+    // are planned inside the function that holds it (#2657).
     for func_index in 0..codegen.program.fn_count() {
-        let from = codegen.plan.len();
+        codegen.plan_from.push(codegen.plan.len());
         codegen.plan_function(func_index);
+        codegen.plan_to.push(codegen.plan.len());
+    }
+    for func_index in 0..codegen.program.fn_count() {
+        let from = u64_at(in codegen.plan_from, func_index);
         codegen.body(func_index, from, inout out);
     }
     out

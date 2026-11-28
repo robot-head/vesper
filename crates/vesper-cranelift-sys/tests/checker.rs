@@ -1,29 +1,19 @@
-//! The checker refuses a leaked builder handle (E0302) and a builder
-//! defined twice (E0303), through `@vesper/cranelift`'s linear `.vsys`
-//! types.
-//!
-//! This is the one test here still on the Rust compiler: Stage 2 accepts
-//! both programs (it does not check linear foreign handles yet, #2701).
-//! Move it onto `stage2::Stage2::build` once Stage 2 refuses them.
+//! Stage 2 refuses a leaked builder handle (E0302) and a builder defined
+//! twice (E0303), through `@vesper/cranelift`'s linear `.vsys` types
+//! (#2701), as the Rust checker does.
 mod support;
 
-use support::*;
+use support::stage2;
 
 #[test]
 fn the_checker_refuses_leaked_and_reused_handles() {
-    let target = host_target().unwrap_or(("x86_64-unknown-linux-gnu", "sysv64"));
-    let package = package_source();
-    let mut imports = vesper::ffi_lowering::Imports::new();
-    imports
-        .add(
-            &vsys(&package, target),
-            vesper::ffi_lowering::Handler::Direct,
-        )
-        .unwrap();
+    let Some(stage2) = stage2::stage2() else {
+        return;
+    };
     for (name, body, code) in [
         (
             "leaked builder",
-            "pub fn f() -> u64 eff [Ffi[Cranelift]] {
+            "pub fn main() -> u64 eff [Ffi[Cranelift]] {
                 match module_new(in \"\".as_bytes(), in \"\".as_bytes(), in \"\".as_bytes()) {
                     Some(m) => {
                         let mut m = m;
@@ -39,7 +29,7 @@ fn the_checker_refuses_leaked_and_reused_handles() {
         ),
         (
             "builder defined twice",
-            "pub fn f() -> u64 eff [Ffi[Cranelift]] {
+            "pub fn main() -> u64 eff [Ffi[Cranelift]] {
                 match module_new(in \"\".as_bytes(), in \"\".as_bytes(), in \"\".as_bytes()) {
                     Some(m) => {
                         let mut m = m;
@@ -61,15 +51,13 @@ fn the_checker_refuses_leaked_and_reused_handles() {
             "E0303",
         ),
     ] {
-        let source = format!("{package}\n{body}");
-        let e = match vesper::ffi_lowering::check_source(&source, &imports) {
+        let e = match stage2.build(body) {
             Ok(_) => panic!("{name}: accepted"),
             Err(e) => e,
         };
-        let codes: Vec<&str> = e.diagnostics.iter().map(|d| d.code.as_str()).collect();
         assert!(
-            codes.contains(&code),
-            "{name}: want {code}, got {e} {codes:?}"
+            e.contains(&format!("{code}: linear value")),
+            "{name}: want {code}, got:\n{e}"
         );
     }
 }
