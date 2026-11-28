@@ -18,13 +18,8 @@ pub fn forge_run(
     refused(in "forge")
 }
 
-pub fn ebpf_check(
-    in _path: Slice[u8],
-    _load: bool,
-    _disassemble: bool,
-    _budget: u64
-) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
-    refused(in "ebpf check")
+pub fn ebpf_load(in _path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    refused(in "ebpf check --load")
 }
 
 pub fn test_run(in _packed: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {

@@ -241,6 +241,11 @@ vesper_hybrid(
             # package load's manifest decode (#1986 slice 2b).
             "//crates/vesper-loom-calculus:port_package",
             "//crates/vesper-serde:port_package",
+            # `vesper ebpf check` (#1996): @vesper/ebpf-check over the
+            # @vesper/ebpf verifier and the stack bound.
+            "//:check_loops_atomics_package",
+            "//:ebpf_check_package",
+            "//crates/vesper-ebpf:port_package",
         ],
         # The eBPF backend swap (#1290) builds on @vesper/ebpf-backend.
         "hybrid_ebpf_backend": [

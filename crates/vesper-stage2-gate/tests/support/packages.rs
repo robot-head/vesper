@@ -175,6 +175,13 @@ pub const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::Exact(11),
     ),
     (
+        "ebpf-check",
+        "@vesper/ebpf-check",
+        "packages/vesper-ebpf-check",
+        "{ let r = check(in \"p\".as_bytes(), in \"\".as_bytes(), false, 512, 168, false); r.error.len() }",
+        CompilerExecCheck::Exact(30),
+    ),
+    (
         "egraph",
         "@vesper/egraph",
         "packages/vesper-egraph",

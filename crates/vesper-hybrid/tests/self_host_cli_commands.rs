@@ -993,6 +993,95 @@ fn seed_ebpf_tree(dir: &Path) {
     std::fs::write(dir.join("bad.hex"), "bf01000000000000\n9500000000000000\n").unwrap();
     // Malformed hex line.
     std::fs::write(dir.join("malformed.hex"), "not-hex\n").unwrap();
+    // A raw program that is not whole 8-byte slots, and an empty one.
+    std::fs::write(
+        dir.join("odd.bin"),
+        [0xb7, 0, 0, 0, 2, 0, 0, 0, 0x95, 0, 0, 0],
+    )
+    .unwrap();
+    std::fs::write(dir.join("empty.bin"), []).unwrap();
+    // The mitigator object cut short: the ELF reader's error.
+    let object = vesper_ebpf::elf::write_object(&prog).unwrap();
+    std::fs::write(dir.join("cut.o"), &object[..EBPF_CUT_OBJECT_BYTES]).unwrap();
+    // CO-RE relocations: a kprobe's field and type relocations, and the
+    // local type ids TYPE_ID relocations renumber.
+    std::fs::write(
+        dir.join("core.o"),
+        vesper_ebpf::elf::write_object(&ebpf_core_probe()).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("ids.o"),
+        vesper_ebpf::elf::write_object(&ebpf_type_ids()).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Where `cut.o` ends: inside the mitigator's section headers.
+const EBPF_CUT_OBJECT_BYTES: usize = 200;
+
+fn ebpf_ulong() -> vesper_ebpf::core::LocalType {
+    vesper_ebpf::core::LocalType::int("long unsigned int", 8, false)
+}
+
+fn ebpf_core_probe() -> vesper_ebpf::Program {
+    use vesper_ebpf::core::{CoreKind, CoreSpec, LocalType};
+    use vesper_ebpf::insn::{Reg, Size};
+    let mut a = vesper_ebpf::Asm::new();
+    let regs = LocalType::structure(
+        "pt_regs",
+        16,
+        vec![("di", ebpf_ulong(), 0), ("si", ebpf_ulong(), 8)],
+    );
+    let di = CoreSpec::field(CoreKind::FieldByteOffset, regs.clone(), &["di"]).unwrap();
+    a.core_ldx(Size::DW, Reg::R2, Reg::R1, di).unwrap();
+    a.core(
+        Reg::R4,
+        CoreSpec::of_type(CoreKind::TypeSize, regs.clone()).unwrap(),
+    )
+    .unwrap();
+    a.core(
+        Reg::R0,
+        CoreSpec::field(CoreKind::FieldExists, regs, &["si"]).unwrap(),
+    )
+    .unwrap();
+    a.mov64(Reg::R0, 0);
+    a.exit();
+    let mut p = a
+        .finish("core_probe", vesper_ebpf::ProgramType::Kprobe)
+        .unwrap();
+    p.attach = "do_unlinkat".into();
+    p
+}
+
+fn ebpf_type_ids() -> vesper_ebpf::Program {
+    use vesper_ebpf::core::{CoreKind, CoreSpec, LocalType};
+    use vesper_ebpf::insn::Reg;
+    let u32t = || LocalType::int("unsigned int", 4, false);
+    let flags = LocalType::structure_bits(
+        "vflags",
+        8,
+        vec![
+            ("a", u32t(), 0, 3),
+            ("b", u32t(), 3, 13),
+            ("c", u32t(), 16, 16),
+            ("d", LocalType::int("short unsigned int", 2, false), 32, 0),
+        ],
+    );
+    let mut a = vesper_ebpf::Asm::new();
+    a.core(
+        Reg::R1,
+        CoreSpec::of_type(CoreKind::TypeIdLocal, flags.clone()).unwrap(),
+    )
+    .unwrap();
+    a.core(
+        Reg::R2,
+        CoreSpec::of_type(CoreKind::TypeIdTarget, flags).unwrap(),
+    )
+    .unwrap();
+    a.mov64(Reg::R0, 0);
+    a.exit();
+    a.finish("ids", vesper_ebpf::ProgramType::Xdp).unwrap()
 }
 
 #[test]
@@ -1021,6 +1110,13 @@ fn ebpf_matches_the_default_compiler() {
         &["ebpf", "check", "mitigator.o"],
         &["ebpf", "check", "mitigator.o", "--load"],
         &["ebpf", "check", "mitigator.o", "--stack-budget", "8"],
+        &["ebpf", "check", "mitigator.o", "--disassemble"],
+        &["ebpf", "check", "bad.hex", "--disassemble"],
+        &["ebpf", "check", "odd.bin"],
+        &["ebpf", "check", "empty.bin"],
+        &["ebpf", "check", "cut.o"],
+        &["ebpf", "check", "core.o", "--disassemble"],
+        &["ebpf", "check", "ids.o", "--disassemble"],
     ];
     let mut diffs = vec![];
     for argv in cases {

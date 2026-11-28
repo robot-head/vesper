@@ -1,0 +1,236 @@
+// The program `vesper ebpf check` verifies (`vesper_ebpf::Program`, the
+// parts the check reads): its name, type, slots, license, maps,
+// subprogram symbols and kfunc calls. Strings live in `pool`.
+
+use @vesper/ebpf::insn::{DecodeError, RawInsn};
+use @vesper/ebpf::program::{ProgramType};
+use self::text::{put, put_u64, put_hex_byte, udiv};
+
+// Words per map: name start, name end, kernel type, key size, value
+// size, max entries, flags.
+pub const MAP_WORDS: u64 = 7;
+// Words per function: name start, name end, entry slot.
+pub const FN_WORDS: u64 = 3;
+// Words per kfunc call: slot, name start, name end.
+pub const KF_WORDS: u64 = 3;
+
+pub struct Prog {
+    name: ChunkSeq[u8],
+    ptype: ProgramType,
+    insns: ChunkSeq[RawInsn],
+    license: ChunkSeq[u8],
+    pool: ChunkSeq[u8],
+    maps: ChunkSeq[u64],
+    fns: ChunkSeq[u64],
+    kfuncs: ChunkSeq[u64],
+}
+
+pub fn prog_new() -> Prog {
+    Prog {
+        name: ChunkSeq::new[u8](),
+        ptype: ProgramType::Xdp,
+        insns: ChunkSeq::new[RawInsn](),
+        license: ChunkSeq::new[u8](),
+        pool: ChunkSeq::new[u8](),
+        maps: ChunkSeq::new[u64](),
+        fns: ChunkSeq::new[u64](),
+        kfuncs: ChunkSeq::new[u64](),
+    }
+}
+
+pub fn word(in s: ChunkSeq[u64], i: u64) -> u64 {
+    s.try_get(i).unwrap_or(0)
+}
+
+impl Prog {
+    fn pool_add(inout self, in bytes: Slice[u8]) -> (u64, u64) {
+        let start = self.pool.len();
+        self.pool.extend(in bytes);
+        (start, self.pool.len())
+    }
+
+    pub fn add_map(
+        inout self,
+        in name: Slice[u8],
+        kernel_type: u64,
+        key: u64,
+        value: u64,
+        max: u64,
+        flags: u64
+    ) {
+        let (start, end) = self.pool_add(in name);
+        self.maps.push(start);
+        self.maps.push(end);
+        self.maps.push(kernel_type);
+        self.maps.push(key);
+        self.maps.push(value);
+        self.maps.push(max);
+        self.maps.push(flags);
+    }
+
+    pub fn map_count(in self) -> u64 {
+        self.maps.len() / MAP_WORDS
+    }
+
+    pub fn map_word(in self, m: u64, k: u64) -> u64 {
+        word(in self.maps, wrapping_add(wrapping_mul(m, MAP_WORDS), k))
+    }
+
+    pub fn add_function(inout self, in name: Slice[u8], entry: u64) {
+        let (start, end) = self.pool_add(in name);
+        self.fns.push(start);
+        self.fns.push(end);
+        self.fns.push(entry);
+    }
+
+    pub fn fn_count(in self) -> u64 {
+        self.fns.len() / FN_WORDS
+    }
+
+    pub fn fn_word(in self, f: u64, k: u64) -> u64 {
+        word(in self.fns, wrapping_add(wrapping_mul(f, FN_WORDS), k))
+    }
+
+    pub fn add_kfunc(inout self, slot: u64, in name: Slice[u8]) {
+        let (start, end) = self.pool_add(in name);
+        self.kfuncs.push(slot);
+        self.kfuncs.push(start);
+        self.kfuncs.push(end);
+    }
+
+    pub fn kfunc_count(in self) -> u64 {
+        self.kfuncs.len() / KF_WORDS
+    }
+
+    pub fn kfunc_word(in self, f: u64, k: u64) -> u64 {
+        word(in self.kfuncs, wrapping_add(wrapping_mul(f, KF_WORDS), k))
+    }
+
+    // `functions.sort_by_key(|(_, e)| *e)`: stable, by entry slot.
+    pub fn sort_functions(inout self) {
+        stable_sort_records(inout self.fns, FN_WORDS, 2);
+    }
+
+    // `kfuncs.sort_by_key(|k| k.slot)`: stable, by slot.
+    pub fn sort_kfuncs(inout self) {
+        stable_sort_records(inout self.kfuncs, KF_WORDS, 0);
+    }
+}
+
+// Insertion sort of `width`-word records by word `key`, keeping equal
+// keys in order.
+fn stable_sort_records(inout seq: ChunkSeq[u64], width: u64, key: u64) {
+    let n = udiv(seq.len(), width);
+    for i in 1..n {
+        let mut rec: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](width);
+        for k in 0..width {
+            rec.push(word(in seq, wrapping_add(wrapping_mul(i, width), k)));
+        }
+        let rk = word(in rec, key);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev = wrapping_sub(j, 1);
+            if word(in seq, wrapping_add(wrapping_mul(prev, width), key)) <= rk {
+                break;
+            }
+            for k in 0..width {
+                let v = word(in seq, wrapping_add(wrapping_mul(prev, width), k));
+                let ok = seq.try_set(wrapping_add(wrapping_mul(j, width), k), v);
+            }
+            j = prev;
+        }
+        for k in 0..width {
+            let ok = seq.try_set(wrapping_add(wrapping_mul(j, width), k), word(in rec, k));
+        }
+    }
+}
+
+// `insn::DecodeError`'s `Display`.
+pub fn decode_display(e: DecodeError) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    match e {
+        DecodeError::TruncatedProgram { len } => {
+            put(inout out, "program length ");
+            put_u64(inout out, widen_u64(len));
+            put(inout out, " is not a multiple of 8");
+        },
+        DecodeError::BadRegister { pc, reg } => {
+            put(inout out, "insn ");
+            put_u64(inout out, widen_u64(pc));
+            put(inout out, ": invalid register ");
+            put_u64(inout out, widen_u64(reg));
+        },
+        DecodeError::InvalidOpcode { pc, code } => {
+            put(inout out, "insn ");
+            put_u64(inout out, widen_u64(pc));
+            put(inout out, ": invalid opcode ");
+            put_hex_byte(inout out, code);
+        },
+        DecodeError::ReservedFieldSet { pc, field } => {
+            put(inout out, "insn ");
+            put_u64(inout out, widen_u64(pc));
+            put(inout out, ": reserved field ");
+            put(inout out, field_name(field));
+            put(inout out, " must be zero");
+        },
+        DecodeError::BrokenLdImm64 { pc } => {
+            put(inout out, "insn ");
+            put_u64(inout out, widen_u64(pc));
+            put(inout out, ": incomplete ld_imm64");
+        },
+    }
+    out
+}
+
+// `DecodeError`'s `Debug`.
+pub fn decode_debug(e: DecodeError) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    match e {
+        DecodeError::TruncatedProgram { len } => {
+            put(inout out, "TruncatedProgram { len: ");
+            put_u64(inout out, widen_u64(len));
+        },
+        DecodeError::BadRegister { pc, reg } => {
+            put(inout out, "BadRegister { pc: ");
+            put_u64(inout out, widen_u64(pc));
+            put(inout out, ", reg: ");
+            put_u64(inout out, widen_u64(reg));
+        },
+        DecodeError::InvalidOpcode { pc, code } => {
+            put(inout out, "InvalidOpcode { pc: ");
+            put_u64(inout out, widen_u64(pc));
+            put(inout out, ", code: ");
+            put_u64(inout out, widen_u64(code));
+        },
+        DecodeError::ReservedFieldSet { pc, field } => {
+            put(inout out, "ReservedFieldSet { pc: ");
+            put_u64(inout out, widen_u64(pc));
+            put(inout out, ", field: \"");
+            put(inout out, field_name(field));
+            put(inout out, "\"");
+        },
+        DecodeError::BrokenLdImm64 { pc } => {
+            put(inout out, "BrokenLdImm64 { pc: ");
+            put_u64(inout out, widen_u64(pc));
+        },
+    }
+    put(inout out, " }");
+    out
+}
+
+// The reserved field's name (`["dst", "src", "off", "imm"][field & 3]`).
+fn field_name(field: u8) -> Str {
+    let f = field & 3;
+    if f == 0 {
+        "dst"
+    } else if f == 1 {
+        "src"
+    } else if f == 2 {
+        "off"
+    } else {
+        "imm"
+    }
+}

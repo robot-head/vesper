@@ -1,0 +1,701 @@
+// The BTF parts of `read_object`: the error texts of vesper_ebpf's BTF
+// readers (src/btf.rs, src/btf_ext.rs), the type table @vesper/ebpf's
+// readers take (`Btf::table`/`Btf::index`), `elf::parse_maps_btf` for
+// objects without `.BTF.ext`, and `btf_ext::assign_local_ids`.
+
+use @vesper/ebpf::btf::{name_span};
+use @vesper/ebpf::insn::{RawInsn};
+use @vesper/ebpf::program::{map_from_kernel_type};
+use self::elf::{utf8};
+use self::text::{put, put_u64, put_i64, put_bytes, put_debug_str, same_str, byte_at};
+use self::prog::{Prog, word};
+use self::localid::{local_ids};
+
+const BTF_MAGIC: u64 = 60319;
+const BTF_HDR_LEN: u64 = 24;
+const HDR_HDR_LEN: u64 = 4;
+const HDR_TYPE_OFF: u64 = 8;
+const HDR_TYPE_LEN: u64 = 12;
+const HDR_STR_OFF: u64 = 16;
+const HDR_STR_LEN: u64 = 20;
+// Words of a type record in `Btf::table` before its entries.
+const REC_WORDS: u64 = 7;
+const KIND_INT: u64 = 1;
+const KIND_PTR: u64 = 2;
+const KIND_ARRAY: u64 = 3;
+const KIND_STRUCT: u64 = 4;
+const KIND_UNION: u64 = 5;
+const KIND_ENUM: u64 = 6;
+const KIND_FWD: u64 = 7;
+const KIND_TYPEDEF: u64 = 8;
+const KIND_VOLATILE: u64 = 9;
+const KIND_CONST: u64 = 10;
+const KIND_RESTRICT: u64 = 11;
+const KIND_FUNC: u64 = 12;
+const KIND_FUNC_PROTO: u64 = 13;
+const KIND_VAR: u64 = 14;
+const KIND_DATASEC: u64 = 15;
+const KIND_FLOAT: u64 = 16;
+const KIND_DECL_TAG: u64 = 17;
+const KIND_ENUM64: u64 = 19;
+const KIND_SHIFT: u64 = 24;
+const KIND_MASK: u64 = 31;
+const VLEN_MASK: u64 = 65535;
+const REC_HEAD_BYTES: u64 = 12;
+// CO-RE kinds whose immediate is a local type id.
+const CORE_TYPE_ID_LOCAL: u64 = 6;
+const CORE_TYPE_ID_TARGET: u64 = 7;
+const LOW32: u64 = 4294967295;
+const U32_BYTES: u64 = 4;
+
+pub struct BtfTable {
+    tab: ChunkSeq[u64],
+    idx: ChunkSeq[u64],
+    strs: ChunkSeq[u8],
+    count: u64,
+}
+
+fn rd32(in b: Slice[u8], at: u64) -> u64 {
+    let mut v: u64 = 0;
+    for i in 0..U32_BYTES {
+        v = v
+            | wrapping_shl_u64(
+                widen_u64(byte_at(in b, wrapping_add(at, i))),
+                wrapping_u32(wrapping_mul(i, 8))
+            );
+    }
+    v
+}
+
+fn entry_words(kind: u64) -> u64 {
+    if kind == KIND_STRUCT || kind == KIND_UNION {
+        4
+    } else if kind == KIND_ENUM || kind == KIND_ENUM64 || kind == KIND_FUNC_PROTO {
+        2
+    } else if kind == KIND_DATASEC {
+        3
+    } else {
+        0
+    }
+}
+
+// `Btf::parse_with` after the port accepted the blob: the table, the
+// index and the string section.
+pub fn btf_table(in blob: Slice[u8], in w: ChunkSeq[u64]) -> BtfTable {
+    let mut t = BtfTable {
+        tab: ChunkSeq::new[u64](),
+        idx: ChunkSeq::new[u64](),
+        strs: ChunkSeq::new[u8](),
+        count: word(in w, 1),
+    };
+    for i in 0..REC_WORDS {
+        t.tab.push(0);
+    }
+    t.idx.push(0);
+    for i in 2..w.len() {
+        t.tab.push(word(in w, i));
+    }
+    let mut r: u64 = 2;
+    for k in 0..t.count {
+        t.idx.push(wrapping_sub(wrapping_add(REC_WORDS, r), 2));
+        let kind = word(in w, r);
+        let n = word(in w, wrapping_add(r, 6));
+        r = wrapping_add(wrapping_add(r, REC_WORDS), wrapping_mul(entry_words(kind), n));
+    }
+    let hdr_len = rd32(in blob, HDR_HDR_LEN);
+    let start = wrapping_add(hdr_len, rd32(in blob, HDR_STR_OFF));
+    let end = wrapping_add(start, rd32(in blob, HDR_STR_LEN));
+    if start <= end && end <= blob.len() {
+        t.strs.extend(in blob[start..end]);
+    }
+    t
+}
+
+fn bad(s: Str) -> ChunkSeq[u8] {
+    let mut e: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout e, "BTF: ");
+    put(inout e, s);
+    e
+}
+
+// `Btf::parse` errors ([1, code, x]).
+pub fn btf_error(in w: ChunkSeq[u64]) -> ChunkSeq[u8] {
+    let code = word(in w, 1);
+    let x = word(in w, 2);
+    if code == 0 {
+        bad("bad header")
+    } else if code == 1 {
+        let mut e = bad("unsupported version ");
+        put_u64(inout e, x);
+        e
+    } else if code == 2 {
+        bad("header too short")
+    } else if code == 3 {
+        bad("section out of range")
+    } else if code == 4 {
+        bad("string section must start and end with NUL")
+    } else if code == 5 {
+        bad("truncated")
+    } else if code == 6 {
+        let mut e = bad("unknown kind ");
+        put_u64(inout e, x);
+        e
+    } else if code == 7 {
+        let mut e = bad("type ");
+        put_u64(inout e, x);
+        put(inout e, " refers past the type table");
+        e
+    } else if code == 8 {
+        bad("name offset out of range")
+    } else if code == 9 {
+        bad("unterminated name")
+    } else {
+        bad("non-UTF-8 name")
+    }
+}
+
+fn name_of(in t: BtfTable, off: u64, inout out: ChunkSeq[u8]) {
+    let (s, n) = name_span(in t.strs.as_slice(), off);
+    put_bytes(inout out, in t.strs[s..wrapping_add(s, n)]);
+}
+
+// `btf_ext::maps_from_btf` errors ([1, code, x]).
+pub fn maps_error(in t: BtfTable, in w: ChunkSeq[u64]) -> ChunkSeq[u8] {
+    let code = word(in w, 1);
+    let x = word(in w, 2);
+    if code == 1 {
+        bad(".maps entry is not a VAR")
+    } else if code == 2 {
+        bad("map is not a struct")
+    } else if code == 3 {
+        bad("map member is not __uint()")
+    } else if code == 4 {
+        let mut e = bad("unsupported map type ");
+        put_u64(inout e, x);
+        e
+    } else if code == 5 {
+        let mut e = bad("unsupported map member ");
+        name_of(in t, x, inout e);
+        e
+    } else {
+        bad("map without type")
+    }
+}
+
+// `btf_ext::parse_ext` errors ([1, code, x, y], `port::error`).
+pub fn ext_error(in t: BtfTable, in w: ChunkSeq[u64]) -> ChunkSeq[u8] {
+    let code = word(in w, 1);
+    let x = word(in w, 2);
+    let y = word(in w, 3);
+    if code == 1 {
+        bad(".BTF.ext: bad header")
+    } else if code == 2 {
+        bad(".BTF.ext header too short")
+    } else if code == 3 {
+        bad(".BTF.ext subsection out of range")
+    } else if code == 4 {
+        bad(".BTF.ext truncated")
+    } else if code == 5 {
+        let mut e = bad(".BTF.ext record size ");
+        put_u64(inout e, x);
+        e
+    } else if code == 6 {
+        bad(".BTF.ext records past the end")
+    } else if code == 7 {
+        let mut e = bad("instruction offset ");
+        put_u64(inout e, x);
+        put(inout e, " is not a slot");
+        e
+    } else if code == 8 {
+        let mut e = bad("func info type ");
+        put_u64(inout e, x);
+        put(inout e, " is not a FUNC");
+        e
+    } else if code == 9 {
+        let mut e = bad("unsupported CO-RE relocation kind ");
+        put_u64(inout e, x);
+        e
+    } else if code == 10 {
+        let mut e = bad("CO-RE access string ");
+        let end = wrapping_add(x, y);
+        if x <= end && end <= t.strs.len() {
+            put_debug_str(inout e, in t.strs[x..end]);
+        } else {
+            put(inout e, "\"\"");
+        }
+        e
+    } else if code == 11 {
+        bad("CO-RE local type nests too deeply")
+    } else if code == 12 {
+        let mut e = bad("no type ");
+        put_u64(inout e, x);
+        e
+    } else if code == 13 {
+        bad("bad bitfield member in a CO-RE local type")
+    } else {
+        let mut e = bad("unsupported CO-RE local type ");
+        type_debug(in t, x, inout e);
+        e
+    }
+}
+
+fn put_bool(inout out: ChunkSeq[u8], v: bool) {
+    if v {
+        put(inout out, "true");
+    } else {
+        put(inout out, "false");
+    }
+}
+
+fn field(inout out: ChunkSeq[u8], first: bool, name: Str, v: u64) {
+    if !first {
+        put(inout out, ", ");
+    }
+    put(inout out, name);
+    put(inout out, ": ");
+    put_u64(inout out, v);
+}
+
+// `BtfType`'s `Debug` from its table record.
+fn type_debug(in t: BtfTable, id: u64, inout out: ChunkSeq[u8]) {
+    let at = word(in t.idx, id);
+    let kind = if id == 0 { 0 } else { word(in t.tab, at) };
+    let name = word(in t.tab, wrapping_add(at, 1));
+    let a = word(in t.tab, wrapping_add(at, 2)) & LOW32;
+    let b = word(in t.tab, wrapping_add(at, 3)) & LOW32;
+    let c = word(in t.tab, wrapping_add(at, 4)) & LOW32;
+    let d = word(in t.tab, wrapping_add(at, 5)) & LOW32;
+    let n = word(in t.tab, wrapping_add(at, 6));
+    let e = wrapping_add(at, REC_WORDS);
+    if kind == 0 {
+        put(inout out, "Void");
+        return;
+    }
+    if kind == KIND_INT {
+        put(inout out, "Int { ");
+        field(inout out, true, "name", name);
+        field(inout out, false, "size", a);
+        field(inout out, false, "encoding", b);
+        field(inout out, false, "offset", c);
+        field(inout out, false, "bits", d);
+    } else if kind == KIND_PTR {
+        put(inout out, "Ptr { ");
+        field(inout out, true, "ty", a);
+    } else if kind == KIND_ARRAY {
+        put(inout out, "Array { ");
+        field(inout out, true, "elem", a);
+        field(inout out, false, "index", b);
+        field(inout out, false, "len", c);
+    } else if kind == KIND_STRUCT || kind == KIND_UNION {
+        put(inout out, "Struct { ");
+        field(inout out, true, "name", name);
+        field(inout out, false, "size", a);
+        put(inout out, ", union: ");
+        put_bool(inout out, kind == KIND_UNION);
+        put(inout out, ", members: [");
+        for m in 0..n {
+            if m > 0 {
+                put(inout out, ", ");
+            }
+            let base = wrapping_add(e, wrapping_mul(m, 4));
+            put(inout out, "Member { ");
+            field(inout out, true, "name", word(in t.tab, base) & LOW32);
+            field(inout out, false, "ty", word(in t.tab, wrapping_add(base, 1)) & LOW32);
+            field(inout out, false, "bit_offset", word(in t.tab, wrapping_add(base, 2)) & LOW32);
+            field(inout out, false, "bitfield_size", word(in t.tab, wrapping_add(base, 3)) & LOW32);
+            put(inout out, " }");
+        }
+        put(inout out, "]");
+    } else if kind == KIND_ENUM || kind == KIND_ENUM64 {
+        put(inout out, "Enum { ");
+        field(inout out, true, "name", name);
+        field(inout out, false, "size", a);
+        put(inout out, ", signed: ");
+        put_bool(inout out, b != 0);
+        put(inout out, ", values: [");
+        for m in 0..n {
+            if m > 0 {
+                put(inout out, ", ");
+            }
+            let base = wrapping_add(e, wrapping_mul(m, 2));
+            put(inout out, "(");
+            put_u64(inout out, word(in t.tab, base) & LOW32);
+            put(inout out, ", ");
+            put_i64(inout out, wrapping_i64(word(in t.tab, wrapping_add(base, 1))));
+            put(inout out, ")");
+        }
+        put(inout out, "]");
+    } else if kind == KIND_FWD {
+        put(inout out, "Fwd { ");
+        field(inout out, true, "name", name);
+        put(inout out, ", union: ");
+        put_bool(inout out, a != 0);
+    } else if kind == KIND_TYPEDEF {
+        put(inout out, "Typedef { ");
+        field(inout out, true, "name", name);
+        field(inout out, false, "ty", a);
+    } else if kind == KIND_VOLATILE {
+        put(inout out, "Volatile { ");
+        field(inout out, true, "ty", a);
+    } else if kind == KIND_CONST {
+        put(inout out, "Const { ");
+        field(inout out, true, "ty", a);
+    } else if kind == KIND_RESTRICT {
+        put(inout out, "Restrict { ");
+        field(inout out, true, "ty", a);
+    } else if kind == KIND_FUNC {
+        put(inout out, "Func { ");
+        field(inout out, true, "name", name);
+        field(inout out, false, "proto", a);
+        field(inout out, false, "linkage", b);
+    } else if kind == KIND_FUNC_PROTO {
+        put(inout out, "FuncProto { ");
+        field(inout out, true, "ret", a);
+        put(inout out, ", params: [");
+        for m in 0..n {
+            if m > 0 {
+                put(inout out, ", ");
+            }
+            let base = wrapping_add(e, wrapping_mul(m, 2));
+            put(inout out, "(");
+            put_u64(inout out, word(in t.tab, base) & LOW32);
+            put(inout out, ", ");
+            put_u64(inout out, word(in t.tab, wrapping_add(base, 1)) & LOW32);
+            put(inout out, ")");
+        }
+        put(inout out, "]");
+    } else if kind == KIND_VAR {
+        put(inout out, "Var { ");
+        field(inout out, true, "name", name);
+        field(inout out, false, "ty", a);
+        field(inout out, false, "linkage", b);
+    } else if kind == KIND_DATASEC {
+        put(inout out, "Datasec { ");
+        field(inout out, true, "name", name);
+        field(inout out, false, "size", a);
+        put(inout out, ", vars: [");
+        for m in 0..n {
+            if m > 0 {
+                put(inout out, ", ");
+            }
+            let base = wrapping_add(e, wrapping_mul(m, 3));
+            put(inout out, "(");
+            put_u64(inout out, word(in t.tab, base) & LOW32);
+            put(inout out, ", ");
+            put_u64(inout out, word(in t.tab, wrapping_add(base, 1)) & LOW32);
+            put(inout out, ", ");
+            put_u64(inout out, word(in t.tab, wrapping_add(base, 2)) & LOW32);
+            put(inout out, ")");
+        }
+        put(inout out, "]");
+    } else if kind == KIND_FLOAT {
+        put(inout out, "Float { ");
+        field(inout out, true, "name", name);
+        field(inout out, false, "size", a);
+    } else if kind == KIND_DECL_TAG {
+        put(inout out, "DeclTag { ");
+        field(inout out, true, "name", name);
+        field(inout out, false, "ty", a);
+        put(inout out, ", component: ");
+        put_i64(inout out, widen_i64(wrapping_i32(wrapping_u32(b))));
+    } else {
+        put(inout out, "TypeTag { ");
+        field(inout out, true, "name", name);
+        field(inout out, false, "ty", a);
+    }
+    put(inout out, " }");
+}
+
+// ---------------------------------------------------------- parse_maps_btf
+
+// `elf::parse_maps_btf` (an object with `.BTF` and no `.BTF.ext`): the
+// `.maps` map variables of the raw blob, appended to `prog` with their
+// offsets in `.maps`; `err` gets the message on a malformed blob.
+pub fn parse_maps_btf(
+    in btf: Slice[u8],
+    inout prog: Prog,
+    inout map_at: ChunkSeq[u64],
+    inout err: ChunkSeq[u8]
+) {
+    if btf.len() < BTF_HDR_LEN
+        || (widen_u64(byte_at(in btf, 0)) | (widen_u64(byte_at(in btf, 1)) << 8)) != BTF_MAGIC
+    {
+        err = bad("bad header");
+        return;
+    }
+    let hdr_len = rd32(in btf, HDR_HDR_LEN);
+    let type_off = rd32(in btf, HDR_TYPE_OFF);
+    let type_len = rd32(in btf, HDR_TYPE_LEN);
+    let str_off = rd32(in btf, HDR_STR_OFF);
+    let str_len = rd32(in btf, HDR_STR_LEN);
+    let ts = wrapping_add(hdr_len, type_off);
+    let te = wrapping_add(ts, type_len);
+    let ss = wrapping_add(hdr_len, str_off);
+    let se = wrapping_add(ss, str_len);
+    if te > btf.len() || te < ts {
+        err = bad("section out of range");
+        return;
+    }
+    if se > btf.len() || se < ss {
+        err = bad("section out of range");
+        return;
+    }
+    // type id -> (kind, name, size_or_type, vlen, first extra word in `extra`)
+    let mut kinds: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut names: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut sots: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut vlens: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut extra: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    kinds.push(0);
+    names.push(0);
+    sots.push(0);
+    vlens.push(0);
+    starts.push(0);
+    let tlen = wrapping_sub(te, ts);
+    let mut at: u64 = 0;
+    loop {
+        if at >= tlen {
+            break;
+        }
+        if wrapping_add(at, REC_HEAD_BYTES) > tlen {
+            err = bad("truncated");
+            return;
+        }
+        let n = rd32(in btf, wrapping_add(ts, at));
+        let info = rd32(in btf, wrapping_add(ts, wrapping_add(at, 4)));
+        let sot = rd32(in btf, wrapping_add(ts, wrapping_add(at, 8)));
+        at = wrapping_add(at, REC_HEAD_BYTES);
+        let kind = (info >> KIND_SHIFT) & KIND_MASK;
+        let vlen = info & VLEN_MASK;
+        let words = if kind == KIND_INT || kind == KIND_VAR {
+            1
+        } else if kind == KIND_PTR {
+            0
+        } else if kind == KIND_ARRAY {
+            3
+        } else if kind == KIND_STRUCT || kind == KIND_DATASEC {
+            wrapping_mul(3, vlen)
+        } else {
+            let mut e = bad("unsupported kind ");
+            put_u64(inout e, kind);
+            err = e;
+            return;
+        };
+        starts.push(extra.len());
+        for i in 0..words {
+            if wrapping_add(at, 4) > tlen {
+                err = bad("truncated");
+                return;
+            }
+            extra.push(rd32(in btf, wrapping_add(ts, at)));
+            at = wrapping_add(at, 4);
+        }
+        kinds.push(kind);
+        names.push(n);
+        sots.push(sot);
+        vlens.push(vlen);
+    }
+    let strs = btf[ss..se];
+    let count = kinds.len();
+    for id in 0..count {
+        if word(in kinds, id) != KIND_DATASEC {
+            continue;
+        }
+        let (nm_start, nm_end) = raw_name(in strs, word(in names, id), inout err);
+        if err.len() != 0 {
+            return;
+        }
+        if !same_str(in strs[nm_start..nm_end], ".maps") {
+            continue;
+        }
+        let ex = word(in starts, id);
+        let nvars = word(in vlens, id);
+        for v in 0..nvars {
+            let var_id = word(in extra, wrapping_add(ex, wrapping_mul(v, 3)));
+            let off = word(in extra, wrapping_add(ex, wrapping_add(wrapping_mul(v, 3), 1)));
+            if var_id >= count {
+                err = bad("type id out of range");
+                return;
+            }
+            if word(in kinds, var_id) != KIND_VAR {
+                err = bad("datasec entry is not a VAR");
+                return;
+            }
+            let st = word(in sots, var_id);
+            if st >= count {
+                err = bad("type id out of range");
+                return;
+            }
+            if word(in kinds, st) != KIND_STRUCT {
+                err = bad("map variable is not a struct");
+                return;
+            }
+            let (vn_start, vn_end) = raw_name(in strs, word(in names, var_id), inout err);
+            if err.len() != 0 {
+                return;
+            }
+            let mut kind_set = false;
+            let mut map_type: u64 = 0;
+            let mut key: u64 = 0;
+            let mut value: u64 = 0;
+            let mut max: u64 = 0;
+            let mut flags: u64 = 0;
+            let sx = word(in starts, st);
+            // `extra.chunks(3).take(vlen)`
+            let members = word(in vlens, st);
+            for mi in 0..members {
+                let mname = word(in extra, wrapping_add(sx, wrapping_mul(mi, 3)));
+                let mty = word(in extra, wrapping_add(sx, wrapping_add(wrapping_mul(mi, 3), 1)));
+                if mty >= count {
+                    err = bad("type id out of range");
+                    return;
+                }
+                if word(in kinds, mty) != KIND_PTR {
+                    err = bad("map member is not __uint()");
+                    return;
+                }
+                let arr = word(in sots, mty);
+                if arr >= count {
+                    err = bad("type id out of range");
+                    return;
+                }
+                if word(in kinds, arr) != KIND_ARRAY {
+                    err = bad("map member is not __uint()");
+                    return;
+                }
+                let val = word(in extra, wrapping_add(word(in starts, arr), 2));
+                let (mn_start, mn_end) = raw_name(in strs, mname, inout err);
+                if err.len() != 0 {
+                    return;
+                }
+                let member = strs[mn_start..mn_end];
+                if same_str(in member, "type") {
+                    if !known_map_type(val) {
+                        let mut e = bad("unsupported map type ");
+                        put_u64(inout e, val);
+                        err = e;
+                        return;
+                    }
+                    kind_set = true;
+                    map_type = val;
+                } else if same_str(in member, "key_size") {
+                    key = val;
+                } else if same_str(in member, "value_size") {
+                    value = val;
+                } else if same_str(in member, "max_entries") {
+                    max = val;
+                } else if same_str(in member, "map_flags") {
+                    flags = val;
+                } else {
+                    let mut e = bad("unsupported map member ");
+                    put_bytes(inout e, in member);
+                    err = e;
+                    return;
+                }
+            }
+            if !kind_set {
+                err = bad("map without type");
+                return;
+            }
+            prog.add_map(in strs[vn_start..vn_end], map_type, key, value, max, flags);
+            map_at.push(off);
+        }
+    }
+}
+
+// `MapKind::from_kernel_type` accepts it.
+fn known_map_type(t: u64) -> bool {
+    match map_from_kernel_type(wrapping_u32(t)) {
+        Option::Some(k) => true,
+        Option::None => false,
+    }
+}
+
+// `parse_maps_btf`'s `name(o)`: the NUL-terminated UTF-8 name at `o`.
+fn raw_name(in strs: Slice[u8], o: u64, inout err: ChunkSeq[u8]) -> (u64, u64) {
+    if o > strs.len() {
+        err = bad("name offset");
+        return (0, 0);
+    }
+    let mut e = o;
+    loop {
+        if e >= strs.len() {
+            err = bad("unterminated name");
+            return (0, 0);
+        }
+        if byte_at(in strs, e) == 0 {
+            break;
+        }
+        e = wrapping_add(e, 1);
+    }
+    if !utf8(in strs, o, e) {
+        err = bad("non-UTF-8 name");
+        return (0, 0);
+    }
+    (o, e)
+}
+
+// -------------------------------------------------------- assign_local_ids
+
+// `btf_ext::assign_local_ids`: each TYPE_ID_* relocation's immediate
+// becomes its local type's id in the BTF vesper_ebpf emits for the
+// program. `core` is `parse_ext`'s output.
+pub fn assign_local_ids(inout prog: Prog, in t: BtfTable, in core: ChunkSeq[u64]) -> ChunkSeq[u8] {
+    let relos = core_relocations(in core);
+    let mut any = false;
+    for i in 0..relos.len() {
+        let kind = word(in core, wrapping_add(word(in relos, i), 1));
+        if kind == CORE_TYPE_ID_LOCAL || kind == CORE_TYPE_ID_TARGET {
+            any = true;
+        }
+    }
+    if !any {
+        return ChunkSeq::new[u8]();
+    }
+    let ids = local_ids(in prog, in t, in core, in relos);
+    for i in 0..relos.len() {
+        let at = word(in relos, i);
+        let slot = word(in core, at);
+        let kind = word(in core, wrapping_add(at, 1));
+        if kind == CORE_TYPE_ID_LOCAL || kind == CORE_TYPE_ID_TARGET {
+            let insn = match prog.insns.try_get(slot) {
+                Option::Some(x) => x,
+                Option::None => {
+                    let mut e = bad("CO-RE relocation past the end at ");
+                    put_u64(inout e, slot);
+                    return e;
+                },
+            };
+            let fixed = RawInsn {
+                code: insn.code,
+                dst: insn.dst,
+                src: insn.src,
+                off: insn.off,
+                imm: wrapping_i32(wrapping_u32(word(in ids, i)))
+            };
+            let ok = prog.insns.try_set(slot, fixed);
+        }
+    }
+    ChunkSeq::new[u8]()
+}
+
+// Where each CO-RE relocation's words start in `parse_ext`'s output.
+pub fn core_relocations(in core: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut r: u64 = 1;
+    let nf = word(in core, r);
+    r = wrapping_add(wrapping_add(r, 1), wrapping_mul(nf, 2));
+    let nl = word(in core, r);
+    r = wrapping_add(wrapping_add(r, 1), wrapping_mul(nl, 5));
+    let nc = word(in core, r);
+    r = wrapping_add(r, 1);
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..nc {
+        out.push(r);
+        let na = word(in core, wrapping_add(r, 2));
+        r = wrapping_add(wrapping_add(r, 3), na);
+        let nt = word(in core, r);
+        r = wrapping_add(wrapping_add(r, 1), nt);
+    }
+    out
+}

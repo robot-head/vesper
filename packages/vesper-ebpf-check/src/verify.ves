@@ -1,0 +1,317 @@
+// `vesper_ebpf::verify` (crates/vesper-ebpf/src/port.rs `verify`): the
+// program-type and map checks, the @vesper/ebpf verifier with the
+// default `VerifierPolicy`, and its outcome as a report with the call
+// graph (`VerifyReport`) or a rejection (`VerifyError`).
+
+use @vesper/ebpf::program::{ProgramType, map_from_kernel_type, map_validate};
+use @vesper/ebpf::helpers::{gpl_compatible};
+use @vesper/ebpf::verifier::{Outcome, new_pools, verify_program};
+use self::text::{put, put_u64, put_bytes, put_debug_str, put_hex_byte, same_str};
+use self::prog::{Prog, word};
+
+// The default `VerifierPolicy`.
+const MAX_INSNS: u64 = 1000000;
+const MAX_STATES: u64 = 64;
+// Outcome tags.
+const OUTCOME_ACCEPTED: u64 = 0;
+const OUTCOME_REJECTED: u64 = 1;
+// Header words of an accepted outcome before the subprogram stacks.
+const ACCEPT_HEAD: u64 = 8;
+const NONE: u64 = 18446744073709551615;
+const LOW32: u64 = 4294967295;
+// The verifier's frames are rounded to 32 bytes (`div_ceil(32) * 32`).
+const FRAME_ROUND: u64 = 32;
+const FRAME_ROUND_LESS_ONE: u64 = 31;
+// `VERIFIER_KFUNCS`'s count: a kfunc not in it gets this code.
+const KFUNC_COUNT: u64 = 9;
+const DECODE_TRUNCATED: u64 = 0;
+const DECODE_BAD_REGISTER: u64 = 1;
+const DECODE_INVALID_OPCODE: u64 = 2;
+const DECODE_RESERVED_FIELD: u64 = 3;
+
+// A rejection: the instruction (NONE for none), the rule and message.
+// Otherwise the report: insns processed, paths, worst stack, and the
+// call graph's functions (names in `names`) and calls.
+pub struct Verdict {
+    accepted: bool,
+    insn: u64,
+    rule: ChunkSeq[u8],
+    message: ChunkSeq[u8],
+    processed: u64,
+    paths: u64,
+    worst: u64,
+    names: ChunkSeq[u8],
+    // per function: name start, name end, frame bytes
+    fns: ChunkSeq[u64],
+    // (from, to) pairs
+    calls: ChunkSeq[u64],
+}
+
+fn verdict_new() -> Verdict {
+    Verdict {
+        accepted: false,
+        insn: NONE,
+        rule: ChunkSeq::new[u8](),
+        message: ChunkSeq::new[u8](),
+        processed: 0,
+        paths: 0,
+        worst: 0,
+        names: ChunkSeq::new[u8](),
+        fns: ChunkSeq::new[u64](),
+        calls: ChunkSeq::new[u64](),
+    }
+}
+
+fn reject(insn: u64, rule: Str, in message: Slice[u8]) -> Verdict {
+    let mut v = verdict_new();
+    v.insn = insn;
+    put(inout v.rule, rule);
+    put_bytes(inout v.message, in message);
+    v
+}
+
+fn is_kprobe(t: ProgramType) -> bool {
+    match t {
+        ProgramType::Kprobe => true,
+        _ => false,
+    }
+}
+
+// The index of a kfunc in `VERIFIER_KFUNCS`.
+fn kfunc_code(in name: Slice[u8]) -> u64 {
+    if same_str(in name, "bpf_preempt_disable") {
+        0
+    } else if same_str(in name, "bpf_preempt_enable") {
+        1
+    } else if same_str(in name, "bpf_rcu_read_lock") {
+        2
+    } else if same_str(in name, "bpf_rcu_read_unlock") {
+        3
+    } else if same_str(in name, "bpf_local_irq_save") {
+        4
+    } else if same_str(in name, "bpf_local_irq_restore") {
+        5
+    } else if same_str(in name, "bpf_iter_num_new") {
+        6
+    } else if same_str(in name, "bpf_iter_num_next") {
+        7
+    } else if same_str(in name, "bpf_iter_num_destroy") {
+        8
+    } else {
+        KFUNC_COUNT
+    }
+}
+
+// `MapDef::validate`'s message for a failed rule.
+fn map_message(rule: u64, in name: Slice[u8], inout out: ChunkSeq[u8]) {
+    if rule == 1 {
+        put(inout out, "map name ");
+        put_debug_str(inout out, in name);
+        put(inout out, " must be 1..=15 ASCII bytes");
+    } else if rule == 2 {
+        put(inout out, "ringbuf key and value size must be 0");
+    } else if rule == 3 {
+        put(inout out, "ringbuf size must be a power of two >= 4096");
+    } else if rule == 4 {
+        put(inout out, "max_entries and value_size must be nonzero");
+    } else if rule == 5 {
+        put(inout out, "array maps have 4-byte keys");
+    } else if rule == 6 {
+        put(inout out, "program arrays have 4-byte values");
+    } else if rule == 7 {
+        put(inout out, "key size must be 1..=512");
+    } else {
+        put(inout out, "value size too large");
+    }
+}
+
+// `verify(prog, &VerifierPolicy::default())` with `PT_REGS_SIZE`
+// `pt_regs`.
+pub fn verify(in prog: Prog, pt_regs: i64) -> Verdict {
+    if is_kprobe(prog.ptype) && pt_regs == 0 {
+        return reject(
+            NONE,
+            "prog.unsupported_type",
+            in "kprobe programs: the pt_regs layout of this architecture is unknown".as_bytes()
+        );
+    }
+    let mut maps: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for m in 0..prog.map_count() {
+        let start = prog.map_word(m, 0);
+        let end = prog.map_word(m, 1);
+        let name = prog.pool[start..end];
+        let kind = match map_from_kernel_type(wrapping_u32(prog.map_word(m, 2))) {
+            Option::Some(k) => k,
+            Option::None => return reject(NONE, "map.invalid", in "unknown map type".as_bytes()),
+        };
+        let name_text = match String::from_utf8(in name) {
+            Option::Some(s) => s,
+            Option::None => String::new(),
+        };
+        let rule = map_validate(
+            in name_text.as_str(),
+            kind,
+            wrapping_u32(prog.map_word(m, 3)),
+            wrapping_u32(prog.map_word(m, 4)),
+            wrapping_u32(prog.map_word(m, 5))
+        );
+        if rule != 0 {
+            let mut msg: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            put(inout msg, "map ");
+            put_bytes(inout msg, in name);
+            put(inout msg, ": ");
+            map_message(rule, in name, inout msg);
+            return reject(NONE, "map.invalid", in msg.as_slice());
+        }
+    }
+    for m in 0..prog.map_count() {
+        let start = prog.map_word(m, 0);
+        let end = prog.map_word(m, 1);
+        maps.push(prog.map_word(m, 2));
+        maps.push(prog.map_word(m, 3));
+        maps.push(prog.map_word(m, 4));
+        maps.push(prog.map_word(m, 5));
+        maps.push(text.len());
+        maps.push(wrapping_sub(end, start));
+        text.extend(in prog.pool[start..end]);
+    }
+    let mut kf: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..prog.kfunc_count() {
+        let start = prog.kfunc_word(k, 1);
+        let end = prog.kfunc_word(k, 2);
+        kf.push(prog.kfunc_word(k, 0));
+        kf.push(kfunc_code(in prog.pool[start..end]));
+        kf.push(text.len());
+        kf.push(wrapping_sub(end, start));
+        text.extend(in prog.pool[start..end]);
+    }
+    let license = match String::from_utf8(in prog.license.as_slice()) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
+    };
+    let gpl = gpl_compatible(in license.as_str());
+    let mut pools = new_pools();
+    let out = verify_program(
+        in prog.insns.as_slice(),
+        prog.ptype,
+        pt_regs,
+        gpl,
+        in maps.as_slice(),
+        in kf.as_slice(),
+        in text.as_slice(),
+        MAX_INSNS,
+        MAX_STATES,
+        true,
+        inout pools
+    );
+    outcome_verdict(in prog, in out)
+}
+
+fn outcome_verdict(in prog: Prog, in out: Outcome) -> Verdict {
+    let w = copy_words(in out.words);
+    let tag = word(in w, 0);
+    if tag == OUTCOME_REJECTED {
+        let mut v = verdict_new();
+        v.insn = word(in w, 1);
+        v.rule.extend(in out.rule.as_slice());
+        v.message.extend(in out.msg.as_slice());
+        return v;
+    }
+    if tag != OUTCOME_ACCEPTED {
+        // a decode error: [2, variant, a, b]
+        let variant = word(in w, 1);
+        let a = word(in w, 2);
+        let b = word(in w, 3);
+        let mut msg: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let mut insn = a;
+        if variant == DECODE_TRUNCATED {
+            insn = NONE;
+            put(inout msg, "program length ");
+            put_u64(inout msg, a);
+            put(inout msg, " is not a multiple of 8");
+        } else if variant == DECODE_BAD_REGISTER {
+            put(inout msg, "insn ");
+            put_u64(inout msg, a);
+            put(inout msg, ": invalid register ");
+            put_u64(inout msg, b);
+        } else if variant == DECODE_INVALID_OPCODE {
+            put(inout msg, "insn ");
+            put_u64(inout msg, a);
+            put(inout msg, ": invalid opcode ");
+            put_hex_byte(inout msg, wrapping_u8(b));
+        } else if variant == DECODE_RESERVED_FIELD {
+            put(inout msg, "insn ");
+            put_u64(inout msg, a);
+            put(inout msg, ": reserved field ");
+            let f = b & 3;
+            put(
+                inout msg,
+                if f == 0 {
+                    "dst"
+                } else if f == 1 {
+                    "src"
+                } else if f == 2 {
+                    "off"
+                } else {
+                    "imm"
+                }
+            );
+            put(inout msg, " must be zero");
+        } else {
+            put(inout msg, "insn ");
+            put_u64(inout msg, a);
+            put(inout msg, ": incomplete ld_imm64");
+        }
+        return reject(insn, "decode.invalid", in msg.as_slice());
+    }
+    let mut v = verdict_new();
+    v.accepted = true;
+    v.processed = word(in w, 1);
+    v.paths = word(in w, 3);
+    v.worst = word(in w, 6) & LOW32;
+    let nsub = word(in w, 7);
+    for i in 0..nsub {
+        let start = word(in w, wrapping_add(ACCEPT_HEAD, wrapping_mul(i, 2)));
+        let depth = word(in w, wrapping_add(ACCEPT_HEAD, wrapping_add(wrapping_mul(i, 2), 1)))
+            & LOW32;
+        let name_start = v.names.len();
+        let mut named = false;
+        for f in 0..prog.fn_count() {
+            if prog.fn_word(f, 2) == start {
+                v.names.extend(in prog.pool[prog.fn_word(f, 0)..prog.fn_word(f, 1)]);
+                named = true;
+                break;
+            }
+        }
+        if !named {
+            if i == 0 {
+                v.names.extend(in prog.name.as_slice());
+            } else {
+                put(inout v.names, "subprog_");
+                put_u64(inout v.names, start);
+            }
+        }
+        v.fns.push(name_start);
+        v.fns.push(v.names.len());
+        let d = if depth == 0 { 1 } else { depth };
+        v.fns.push(wrapping_mul(wrapping_add(d, FRAME_ROUND_LESS_ONE) / FRAME_ROUND, FRAME_ROUND));
+    }
+    let edges_at = wrapping_add(ACCEPT_HEAD, wrapping_mul(nsub, 2));
+    let mut e = edges_at;
+    loop {
+        if wrapping_add(e, 1) >= w.len() {
+            break;
+        }
+        v.calls.push(word(in w, e));
+        v.calls.push(word(in w, wrapping_add(e, 1)));
+        e = wrapping_add(e, 2);
+    }
+    v
+}
+
+fn copy_words(in s: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](s.len());
+    out.extend(in s.as_slice());
+    out
+}

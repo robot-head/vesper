@@ -1,0 +1,15 @@
+[package]
+name = "@vesper/ebpf-check"
+version = "0.1.0"
+edition = "2026"
+# `vesper ebpf check` (src/ebpf_commands.rs, #1996, slice 4f of #1397):
+# the program's decoding (hex, raw slots or a BPF ELF object, the port of
+# vesper_ebpf::elf::read_object), the disassembly, the pre-flight
+# verifier (@vesper/ebpf) and the stack bound (@vesper/check-loops-atomics)
+# with their report. It only computes: the caller reads the file, prints
+# the report and loads the program into the kernel.
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/ebpf" = { version = "^0.1", path = "../../crates/vesper-ebpf/vesper" }
+"@vesper/check-loops-atomics" = { version = "^0.1", path = "../vesper-check-loops-atomics" }

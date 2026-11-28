@@ -36,14 +36,11 @@ pub fn forge_run(
     take_error(Engine::Forge, n)
 }
 
-// `vesper ebpf check` on `path` (`src/ebpf_commands.rs`).
-pub fn ebpf_check(
-    in path: Slice[u8],
-    load: bool,
-    disassemble: bool,
-    budget: u64
-) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
-    let n = HybridCommands::hc_ebpf_check(in path, load, disassemble, budget);
+// `vesper ebpf check --load`'s kernel load of the program at `path`, once
+// @vesper/ebpf-check accepted it (`ebpf_kernel_load` in
+// `src/ebpf_commands.rs`): it prints the `kernel: ...` line.
+pub fn ebpf_load(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let n = HybridCommands::hc_ebpf_load(in path);
     take_error(Engine::Ebpf, n)
 }
 

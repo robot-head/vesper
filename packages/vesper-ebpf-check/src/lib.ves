@@ -1,0 +1,404 @@
+// @vesper/ebpf-check: `vesper ebpf check` (src/ebpf_commands.rs
+// `run_check` after its file read, #1996, slice 4f of #1397). `check`
+// decodes the program (`ebpf_program`: a BPF ELF object, hex slots or raw
+// slots), disassembles it on request, runs the pre-flight verifier and
+// the stack bound, and returns the text the Rust command prints with its
+// error. The caller reads the file, prints, and loads the program into
+// the kernel (`--load`).
+
+use @vesper/ebpf::insn::{DecodeError, RawInsn, slots_from_bytes};
+use @vesper/ebpf::program::{ProgramType};
+use self::text::{put, put_u64, put_bytes, put_debug_str, byte_at, same_str};
+use self::prog::{Prog, prog_new, decode_debug};
+use self::elf::{ELF_READ, read_object};
+use self::disasm::{disassemble};
+use self::verify::{verify};
+use self::stack::{stack_report};
+
+const ASCII_HASH: u8 = 35;
+const ASCII_LF: u8 = 10;
+const ASCII_CR: u8 = 13;
+const ASCII_DOT: u8 = 46;
+const ASCII_SLASH: u8 = 47;
+const ASCII_BACKSLASH: u8 = 92;
+const ASCII_QUOTE: u8 = 39;
+const SLOT_BYTES: u64 = 8;
+const HEX_DIGITS_PER_SLOT: u64 = 16;
+const NONE: u64 = 18446744073709551615;
+const ELF_MAGIC_LEN: u64 = 4;
+
+// What `check` returns: the text to print to stdout, and the error (empty
+// on success).
+pub struct Checked {
+    pub out: ChunkSeq[u8],
+    pub error: ChunkSeq[u8],
+}
+
+// -------------------------------------------------------------- the path
+
+// `Path::file_name`: the last normal component, as (start, end), or
+// (NONE, NONE). `windows` also splits at backslashes.
+fn file_name(in path: Slice[u8], windows: bool) -> (u64, u64) {
+    let n = path.len();
+    let mut end = n;
+    loop {
+        // drop trailing separators and `.` components
+        if end == 0 {
+            return (NONE, NONE);
+        }
+        let c = byte_at(in path, wrapping_sub(end, 1));
+        if is_sep(c, windows) {
+            end = wrapping_sub(end, 1);
+            continue;
+        }
+        let mut start = end;
+        loop {
+            if start == 0 || is_sep(byte_at(in path, wrapping_sub(start, 1)), windows) {
+                break;
+            }
+            start = wrapping_sub(start, 1);
+        }
+        let len = wrapping_sub(end, start);
+        if len == 1 && byte_at(in path, start) == ASCII_DOT {
+            // `.`: a current-dir component only at the start of a
+            // relative path; elsewhere it is skipped
+            if start == 0 {
+                return (NONE, NONE);
+            }
+            end = start;
+            continue;
+        }
+        if len == 2
+            && byte_at(in path, start) == ASCII_DOT
+            && byte_at(in path, wrapping_add(start, 1)) == ASCII_DOT
+        {
+            return (NONE, NONE);
+        }
+        return (start, end);
+    }
+}
+
+fn is_sep(c: u8, windows: bool) -> bool {
+    c == ASCII_SLASH || (windows && c == ASCII_BACKSLASH)
+}
+
+// The last dot of a file name, NONE when there is none or it starts the
+// name (`rsplit_file_at_dot`).
+fn last_dot(in path: Slice[u8], start: u64, end: u64) -> u64 {
+    let mut i = end;
+    loop {
+        if i <= start {
+            return NONE;
+        }
+        i = wrapping_sub(i, 1);
+        if byte_at(in path, i) == ASCII_DOT {
+            if i == start {
+                return NONE;
+            }
+            return i;
+        }
+    }
+}
+
+// `path.extension()` is `hex` or `txt`.
+fn text_extension(in path: Slice[u8], windows: bool) -> bool {
+    let (start, end) = file_name(in path, windows);
+    if start == NONE {
+        return false;
+    }
+    let dot = last_dot(in path, start, end);
+    if dot == NONE {
+        return false;
+    }
+    let ext = path[wrapping_add(dot, 1)..end];
+    same_str(in ext, "hex") || same_str(in ext, "txt")
+}
+
+// `path.file_stem()`, or `prog`.
+fn stem(in path: Slice[u8], windows: bool, inout out: ChunkSeq[u8]) {
+    let (start, end) = file_name(in path, windows);
+    if start == NONE {
+        put(inout out, "prog");
+        return;
+    }
+    let dot = last_dot(in path, start, end);
+    if dot == NONE {
+        out.extend(in path[start..end]);
+    } else {
+        out.extend(in path[start..dot]);
+    }
+}
+
+// ------------------------------------------------------------- hex input
+
+// The length of a Unicode whitespace character (`char::is_whitespace`)
+// encoded at `i`, or 0.
+fn space_len(in s: Slice[u8], i: u64) -> u64 {
+    let c = widen_u64(byte_at(in s, i));
+    if c == 32 || (c >= 9 && c <= 13) {
+        return 1;
+    }
+    if c == 194 {
+        let d = widen_u64(byte_at(in s, wrapping_add(i, 1)));
+        if d == 133 || d == 160 {
+            return 2;
+        }
+        return 0;
+    }
+    if c == 225 {
+        // U+1680
+        if wrapping_add(i, 2) < s.len()
+            && byte_at(in s, wrapping_add(i, 1)) == 154
+            && byte_at(in s, wrapping_add(i, 2)) == 128
+        {
+            return 3;
+        }
+        return 0;
+    }
+    if c == 226 {
+        let d = widen_u64(byte_at(in s, wrapping_add(i, 1)));
+        let e = widen_u64(byte_at(in s, wrapping_add(i, 2)));
+        if wrapping_add(i, 2) >= s.len() {
+            return 0;
+        }
+        // U+2000..U+200A, U+2028, U+2029, U+202F
+        if d == 128 && ((e >= 128 && e <= 138) || e == 168 || e == 169 || e == 175) {
+            return 3;
+        }
+        // U+205F
+        if d == 129 && e == 159 {
+            return 3;
+        }
+        return 0;
+    }
+    if c == 227 {
+        // U+3000
+        if wrapping_add(i, 2) < s.len()
+            && byte_at(in s, wrapping_add(i, 1)) == 128
+            && byte_at(in s, wrapping_add(i, 2)) == 128
+        {
+            return 3;
+        }
+        return 0;
+    }
+    0
+}
+
+fn hex_value(c: u8) -> u64 {
+    let v = widen_u64(c);
+    if v >= 48 && v <= 57 {
+        wrapping_sub(v, 48)
+    } else if v >= 97 && v <= 102 {
+        wrapping_sub(v, 87)
+    } else if v >= 65 && v <= 70 {
+        wrapping_sub(v, 55)
+    } else {
+        NONE
+    }
+}
+
+// The slots of a `.hex`/`.txt` program: one 8-byte slot as 16 hex
+// digits per line, `#` comments and whitespace ignored. `err` gets the
+// line number of a bad line.
+fn hex_slots(in text: Slice[u8], inout raw: ChunkSeq[u8]) -> u64 {
+    let n = text.len();
+    let mut line: u64 = 0;
+    let mut start: u64 = 0;
+    loop {
+        if start >= n {
+            return 0;
+        }
+        let mut end = start;
+        loop {
+            if end >= n || byte_at(in text, end) == ASCII_LF {
+                break;
+            }
+            end = wrapping_add(end, 1);
+        }
+        line = wrapping_add(line, 1);
+        // before the comment, without whitespace
+        let mut cut = end;
+        for i in start..end {
+            if byte_at(in text, i) == ASCII_HASH {
+                cut = i;
+                break;
+            }
+        }
+        let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let mut i = start;
+        loop {
+            if i >= cut {
+                break;
+            }
+            let sp = space_len(in text, i);
+            if sp != 0 {
+                i = wrapping_add(i, sp);
+                continue;
+            }
+            digits.push(byte_at(in text, i));
+            i = wrapping_add(i, 1);
+        }
+        if digits.len() != 0 {
+            if digits.len() != HEX_DIGITS_PER_SLOT {
+                return line;
+            }
+            for k in 0..HEX_DIGITS_PER_SLOT {
+                if hex_value(byte_at(in digits.as_slice(), k)) == NONE {
+                    return line;
+                }
+            }
+            for k in 0..SLOT_BYTES {
+                let hi = hex_value(byte_at(in digits.as_slice(), wrapping_mul(k, 2)));
+                let lo = hex_value(byte_at(
+                    in digits.as_slice(),
+                    wrapping_add(wrapping_mul(k, 2), 1)
+                ));
+                raw.push(wrapping_u8((hi << 4) | lo));
+            }
+        }
+        start = wrapping_add(end, 1);
+    }
+}
+
+// ----------------------------------------------------------------- check
+
+fn is_elf(in bytes: Slice[u8]) -> bool {
+    bytes.len() >= ELF_MAGIC_LEN
+        && byte_at(in bytes, 0) == 127
+        && byte_at(in bytes, 1) == 69
+        && byte_at(in bytes, 2) == 76
+        && byte_at(in bytes, 3) == 70
+}
+
+// `{path}: ` before an error.
+fn path_error(in path: Slice[u8]) -> ChunkSeq[u8] {
+    let mut e: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    e.extend(in path);
+    put(inout e, ": ");
+    e
+}
+
+// `ebpf_program`: the program in `bytes`, or `err` set.
+fn ebpf_program(
+    in path: Slice[u8],
+    in bytes: Slice[u8],
+    windows: bool,
+    inout err: ChunkSeq[u8]
+) -> Prog {
+    if is_elf(in bytes) {
+        let r = read_object(in bytes);
+        if r.kind != 0 {
+            let mut e = path_error(in path);
+            if r.kind == ELF_READ {
+                put(inout e, "Read(");
+            } else {
+                put(inout e, "Malformed(");
+            }
+            put_debug_str(inout e, in r.message.as_slice());
+            put(inout e, ")");
+            err = e;
+        }
+        return r.prog;
+    }
+    let mut slots_bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if text_extension(in path, windows) {
+        let bad_line = hex_slots(in bytes, inout slots_bytes);
+        if bad_line != 0 {
+            let mut e = path_error(in path);
+            put(inout e, "line ");
+            put_u64(inout e, bad_line);
+            put(inout e, ": expected one 8-byte slot as 16 hex digits");
+            err = e;
+            return prog_new();
+        }
+    } else {
+        slots_bytes.extend(in bytes);
+    }
+    if slots_bytes.len() == 0 {
+        let mut e = path_error(in path);
+        put(inout e, "program has no instructions");
+        err = e;
+        return prog_new();
+    }
+    let mut prog = prog_new();
+    let derr = handle Fail[DecodeError] in {
+        prog.insns = slots_from_bytes(in slots_bytes.as_slice());
+        ChunkSeq::new[u8]()
+    } with {
+        return x => x,
+        raise(e, k) => decode_debug(e),
+    };
+    if derr.len() != 0 {
+        let mut e = path_error(in path);
+        e.extend(in derr.as_slice());
+        err = e;
+        return prog;
+    }
+    stem(in path, windows, inout prog.name);
+    prog.ptype = ProgramType::Xdp;
+    put(inout prog.license, "Dual MIT/GPL");
+    prog
+}
+
+// `vesper ebpf check` on the program `bytes` read from `path`:
+// `disassemble` prints the instructions first, `budget` is the root's
+// stack budget, `pt_regs` the host's `PT_REGS_SIZE` and `windows` whether
+// paths split at backslashes too.
+pub fn check(
+    in path: Slice[u8],
+    in bytes: Slice[u8],
+    disassemble_first: bool,
+    budget: u64,
+    pt_regs: i64,
+    windows: bool
+) -> Checked {
+    let mut res = Checked { out: ChunkSeq::new[u8](), error: ChunkSeq::new[u8]() };
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let prog = ebpf_program(in path, in bytes, windows, inout err);
+    if err.len() != 0 {
+        res.error = err;
+        return res;
+    }
+    if disassemble_first {
+        disassemble(in prog.insns.as_slice(), inout res.out);
+    }
+    let v = verify(in prog, pt_regs);
+    if !v.accepted {
+        put(inout res.out, "error[");
+        put_bytes(inout res.out, in v.rule.as_slice());
+        put(inout res.out, "]: ");
+        put_bytes(inout res.out, in prog.name.as_slice());
+        if v.insn != NONE {
+            put(inout res.out, " at insn ");
+            put_u64(inout res.out, v.insn);
+        }
+        put(inout res.out, ": ");
+        put_bytes(inout res.out, in v.message.as_slice());
+        res.out.push(ASCII_LF);
+        put(inout res.error, "ebpf check: '");
+        put_bytes(inout res.error, in prog.name.as_slice());
+        put(inout res.error, "' rejected (");
+        put_bytes(inout res.error, in v.rule.as_slice());
+        put(inout res.error, ")");
+        return res;
+    }
+    put(inout res.out, "ebpf check: '");
+    put_bytes(inout res.out, in prog.name.as_slice());
+    put(inout res.out, "' accepted (");
+    put_u64(inout res.out, v.processed);
+    put(inout res.out, " insn(s) processed, ");
+    put_u64(inout res.out, v.paths);
+    put(inout res.out, " path(s), worst stack ");
+    put_u64(inout res.out, v.worst);
+    put(inout res.out, " bytes)\n");
+    let s = stack_report(in v, budget);
+    if s.error.len() != 0 {
+        res.error = s.error;
+        return res;
+    }
+    res.out.extend(in s.text.as_slice());
+    if !s.accepted {
+        put(inout res.error, "ebpf check: stack bound exceeded");
+    }
+    res
+}

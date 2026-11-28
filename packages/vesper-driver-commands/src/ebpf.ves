@@ -1,14 +1,82 @@
-// `vesper ebpf`: CLI subcommand/flag parsing and error formatting in Vesper,
-// delegating ELF/hex/raw decoding, pre-flight verification, stack-bound
-// checking, and optional Linux kernel load (`src/ebpf_commands.rs`) to
-// `@vesper/driver-engines::ebpf_check`.
-use @vesper/driver-engines::{ebpf_check};
+// `vesper ebpf` (`src/ebpf_commands.rs`): CLI subcommand/flag parsing and
+// error formatting here; @vesper/ebpf-check reads the ELF, hex or raw
+// program, verifies it, bounds its stack and renders the report. Only the
+// optional kernel load (`bpf(2)`) still runs in Rust, through
+// `@vesper/driver-engines::ebpf_load` (#1996).
+use @vesper/driver-engines::{ebpf_load};
 use @vesper/driver::{Args, args_count, arg_start, arg_end, eq};
+use @vesper/ebpf-check::{check};
+use @vesper-std/env::{os, os_windows};
+use @vesper-std/fs::{IoError, error_text, read_path, arch, arch_x86_64, arch_aarch64};
 use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream};
 
 const BPF_MAX_STACK_BYTES: u64 = 512;
+// `sizeof(bpf_user_pt_regs_t)` (`verifier::PT_REGS_SIZE`): the kprobe
+// context of the host architecture, 0 where its layout is unknown.
+const PT_REGS_X86_64: i64 = 168;
+const PT_REGS_AARCH64: i64 = 272;
+const PT_REGS_UNKNOWN: i64 = 0;
 
-pub fn run_ebpf(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
+// The program file's bytes, or `io::Error`'s text.
+struct ProgramRead {
+    ok: bool,
+    bytes: ChunkSeq[u8],
+    error: ChunkSeq[u8]
+}
+
+fn read_program(in path: Slice[u8]) -> ProgramRead eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        read_path(in path)
+    } with {
+        return v => ProgramRead { ok: true, bytes: v, error: ChunkSeq::new[u8]() },
+        raise(e, _) => ProgramRead { ok: false, bytes: ChunkSeq::new[u8](), error: error_text(e) },
+    }
+}
+
+fn pt_regs_size() -> i64 eff [Ffi[StdFs]] {
+    let host = arch();
+    if host == arch_x86_64() {
+        PT_REGS_X86_64
+    } else if host == arch_aarch64() {
+        PT_REGS_AARCH64
+    } else {
+        PT_REGS_UNKNOWN
+    }
+}
+
+// `ebpf_check_impl`: the report on stdout, then the kernel load.
+fn ebpf_check(
+    in path: Slice[u8],
+    load: bool,
+    disassemble: bool,
+    budget: u64
+) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands], Fail[PrintFailed]] {
+    let read = read_program(in path);
+    if !read.ok {
+        let mut err: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](path.len());
+        err.extend(in path);
+        err.extend(in ": ".as_bytes());
+        err.extend(in read.error.as_slice());
+        return err;
+    }
+    let checked = check(
+        in path,
+        in read.bytes.as_slice(),
+        disassemble,
+        budget,
+        pt_regs_size(),
+        os() == os_windows()
+    );
+    print(stdout_stream(), in checked.out.as_slice());
+    if checked.error.len() != 0 || !load {
+        return checked.error;
+    }
+    ebpf_load(in path)
+}
+
+pub fn run_ebpf(
+    in args: Args
+) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands], Fail[PrintFailed]] {
     let n = args_count(in args);
     if n <= 1 {
         print_help();

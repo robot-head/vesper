@@ -54,26 +54,21 @@ pub mod host {
         unsafe { std::slice::from_raw_parts(ptr, len) }
     }
 
-    /// Run `vesper ebpf check` on `path`, printing verification/stack-bound
-    /// output to stdout as `src/ebpf_commands.rs` does. Returns `0` on success
-    /// or `err.len()` (`> 0`) on error, storing the error bytes in `LAST_EBPF_ERR`.
+    /// Load the program at `path` into the running kernel for `vesper ebpf
+    /// check --load`, once @vesper/ebpf-check accepted it, printing the
+    /// `kernel: ...` line as `src/ebpf_commands.rs` does. Returns `0` on
+    /// success or `err.len()` (`> 0`) on error, storing the error bytes in
+    /// `LAST_EBPF_ERR`.
     ///
     /// # Safety
     /// `path` is a lent byte slice.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_ebpf_check(
-        path: *const u8,
-        len: usize,
-        load: bool,
-        disassemble: bool,
-        budget: u64,
-    ) -> u64 {
+    pub unsafe extern "C" fn hc_ebpf_load(path: *const u8, len: usize) -> u64 {
         let _flush = FlushOnReturn;
         // SAFETY: lent for the call.
         let path =
             Path::new(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(bytes(path, len)) });
-        let budget = u32::try_from(budget).unwrap_or(u32::MAX);
-        match ebpf_check_impl(path, load, disassemble, budget) {
+        match ebpf_load_impl(path) {
             Ok(()) => 0,
             Err(err) => {
                 let bytes = err.into_bytes();
@@ -153,60 +148,10 @@ pub mod host {
         })
     }
 
-    fn ebpf_check_impl(
-        input: &Path,
-        load: bool,
-        disassemble: bool,
-        budget: u32,
-    ) -> Result<(), String> {
-        use vesper::stack_bound;
-        use vesper_ebpf::{VerifierPolicy, insn};
+    fn ebpf_load_impl(input: &Path) -> Result<(), String> {
         let bytes = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
         let prog = ebpf_program(input, &bytes)?;
-        if disassemble {
-            print!("{}", insn::disassemble(&prog.insns));
-        }
-        let report = match vesper_ebpf::verify(&prog, &VerifierPolicy::default()) {
-            Ok(report) => report,
-            Err(e) => {
-                for f in vesper_ebpf::findings(&prog, &VerifierPolicy::default()) {
-                    let at = f.inst.map_or_else(String::new, |i| format!(" at insn {i}"));
-                    println!("error[{}]: {}{at}: {}", f.rule, f.function, f.message);
-                }
-                return Err(format!("ebpf check: '{}' rejected ({})", prog.name, e.rule));
-            }
-        };
-        println!(
-            "ebpf check: '{}' accepted ({} insn(s) processed, {} path(s), worst stack {} bytes)",
-            prog.name, report.insns_processed, report.paths_completed, report.worst_stack
-        );
-        let graph = stack_bound::StackGraph::from(&report.call_graph);
-        let root = graph
-            .functions
-            .first()
-            .map(|f| f.name.clone())
-            .ok_or("ebpf check: the verifier returned an empty call graph")?;
-        let bound = stack_bound::stack_bound_report(
-            &graph,
-            &stack_bound::StackBoundPolicy {
-                roots: vec![stack_bound::StackBudget {
-                    function: root,
-                    budget_bytes: budget,
-                }],
-                ..Default::default()
-            },
-        )?;
-        print!("{}", stack_bound::render(&bound));
-        for f in &bound.findings {
-            println!("error[{}]: {}: {}", f.rule, f.function, f.message);
-        }
-        if !bound.accepted() {
-            return Err("ebpf check: stack bound exceeded".into());
-        }
-        if load {
-            ebpf_kernel_load(&prog)?;
-        }
-        Ok(())
+        ebpf_kernel_load(&prog)
     }
 
     #[cfg(target_os = "linux")]

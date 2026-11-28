@@ -29,3 +29,5 @@ capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdEnv]", "Ffi[StdProc
 "@vesper/verify" = { version = "^0.1", path = "../vesper-verify" }
 # `vesper lsp`'s loop (#1828 part 15c).
 "@vesper/lsp-server" = { version = "^0.1", path = "../vesper-lsp-server" }
+# `vesper ebpf check`'s reader, verifier and report (#1996).
+"@vesper/ebpf-check" = { version = "^0.1", path = "../vesper-ebpf-check" }
