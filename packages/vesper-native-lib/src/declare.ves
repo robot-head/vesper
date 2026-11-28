@@ -17,20 +17,12 @@ use @vesper/codegen-calls::instances::{
     Conc, Syms, concrete, discover_roots, is_root, program_facts, syms_new
 };
 use @vesper/codegen-calls::abi::{
-    Errs, Sig, V_F32, V_F64, V_I128, check_entry, default_abi, internal, push_symbol_key, signature
+    Errs, Sig, V_F32, V_F64, V_I128, default_abi, internal, push_symbol_key, signature
 };
 use @vesper/native-walk::frame::{frame_plan};
 use @vesper/check-data::types::{Types};
 
 const NO_LIBRARY: Str = "the calls input has no library task";
-const NO_ENTRY: Str = "the calls input has no executable entry task";
-// `vesper build`'s check of an executable entry (src/main.rs).
-const BAD_MAIN: Str = "executable main must take no arguments and return an integer or Unit";
-// `Calls::function` of a name that is no function.
-const NO_FUNCTION: u32 = 4294967295;
-// `Types::name` of a type that is not `Named`: Rust's `Type::name` is ""
-// then, which `vesper build` takes as Unit.
-const NO_NAME: u32 = 0;
 const NOT_STANDALONE: Str = " is not compiled as a standalone native function";
 const DECLARE_FAILED: Str = "declaring a function failed: ";
 // `local_symbol`'s prefix (src/native.rs, #1451): the instance index and
@@ -252,30 +244,6 @@ pub fn declare_library(
     in exports: Exports,
     inout d: Declared
 ) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
-    declare_task(inout m, in input, in exports, false, inout d)
-}
-
-// Declares the instances of the first executable entry task of `input`
-// (slice 4e, #2752), as `compile_entry` declares an object entry's
-// (`declare_instances_with_trace`): the entry exported under the one
-// symbol `exports` names for it, every other instance local. Empty on
-// success, else the error.
-pub fn declare_executable(
-    inout m: Module,
-    in input: Slice[u8],
-    in exports: Exports,
-    inout d: Declared
-) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
-    declare_task(inout m, in input, in exports, true, inout d)
-}
-
-fn declare_task(
-    inout m: Module,
-    in input: Slice[u8],
-    in exports: Exports,
-    executable: bool,
-    inout d: Declared
-) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in input);
@@ -286,54 +254,22 @@ fn declare_task(
     let mut ls = layouts_new();
     let mut first = calls.tasks.len();
     for ti in 0..calls.tasks.len() {
-        let t = calls.task(ti);
-        let mut wanted = t.library;
-        if executable {
-            wanted = !t.library && !t.more_roots;
-        }
-        if wanted {
+        if calls.task(ti).library {
             first = ti;
             break;
         }
     }
     if first == calls.tasks.len() {
-        err.extend(in (if executable { NO_ENTRY } else { NO_LIBRARY }).as_bytes());
+        err.extend(in NO_LIBRARY.as_bytes());
         return err;
     }
     let task = calls.task(first);
     d.optimize = task.optimize;
     let mut roots: ChunkSeq[u32] = ChunkSeq::new[u32]();
     roots.push(task.entry);
-    if executable {
-        // `vesper build`'s check of `main`, then `compile_entry`'s.
-        let func_index = calls.function(task.entry);
-        let mut entry_ok = false;
-        if func_index != NO_FUNCTION {
-            let info = calls.fn_info(func_index);
-            let result = c.types.name(info.result);
-            entry_ok = info.param_count == 0
-                && (k.is_integer(result) || result == k.unit || result == NO_NAME);
-        }
-        if !entry_ok {
-            err.extend(in BAD_MAIN.as_bytes());
-            return err;
-        }
-        let mut entry_errs = Errs { text: ChunkSeq::new[u8]() };
-        if !check_entry(
-            inout c.types,
-            in c.names,
-            in c.world,
-            in calls,
-            task.entry,
-            inout entry_errs
-        ) {
-            err.extend(in entry_errs.text.as_slice());
-            return err;
-        }
-    }
     let mut tj = wrapping_add(first, 1);
     loop {
-        if executable || tj >= calls.tasks.len() || !calls.task(tj).more_roots {
+        if tj >= calls.tasks.len() || !calls.task(tj).more_roots {
             break;
         }
         roots.push(calls.task(tj).entry);
@@ -453,7 +389,7 @@ fn declare_task(
         // An export with a by-value 128-bit parameter or result is local
         // under `local_symbol`; its `define_wide_entry` adapter takes the
         // export symbol (exports.ves).
-        let linkage = if e < exports.count() && (executable || !has_wide(in sig)) {
+        let linkage = if e < exports.count() && !has_wide(in sig) {
             exports.push_symbol(e, inout symbol);
             linkage_export()
         } else {

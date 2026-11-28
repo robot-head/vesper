@@ -2,9 +2,7 @@
 
 packages/vesper-port-builder (`vesper build --lib`'s interface, binding and
 object for one port) built by Stage 2, with no Rust compiler, then composed
-with the Cranelift component so the pinned wasmtime CLI runs it alone. With
-`builder_package`, it builds another builder the same way, such as
-packages/vesper-exe-builder (an executable's object, #2752):
+with the Cranelift component so the pinned wasmtime CLI runs it alone:
 
 1. The committed seed (bootstrap/stage2-seed, #2671) builds today's
    @vesper/stage2 (stage A).
@@ -69,7 +67,7 @@ def _stage2_port_builder_impl(ctx):
     stage_a = ctx.actions.declare_file(ctx.label.name + "_stage2.wasm")
     _stage2_run(ctx, ctx.file.seed, tree_dir, tree, _STAGE2_PACKAGE, stage_a, "Stage2Self", "Building Stage 2 with the seed")
     core = ctx.actions.declare_file(ctx.label.name + "_core.wasm")
-    _stage2_run(ctx, stage_a, tree_dir, tree, ctx.attr.builder_package, core, "Stage2PortBuilder", "Building %s with Stage 2" % ctx.attr.builder_package)
+    _stage2_run(ctx, stage_a, tree_dir, tree, _BUILDER_PACKAGE, core, "Stage2PortBuilder", "Building the port builder with Stage 2")
     out = ctx.outputs.out
     plug = ctx.actions.args()
     plug.add("plug", core)
@@ -84,7 +82,7 @@ def _stage2_port_builder_impl(ctx):
         inputs = [core, cranelift[0]],
         outputs = [out],
         mnemonic = "WacPlug",
-        progress_message = "Composing %s with the Cranelift component" % ctx.attr.builder_package,
+        progress_message = "Composing the port builder with the Cranelift component",
     )
     return [DefaultInfo(files = depset([out]))]
 
@@ -92,10 +90,6 @@ stage2_port_builder = rule(
     implementation = _stage2_port_builder_impl,
     doc = "packages/vesper-port-builder built by Stage 2 and composed with the Cranelift component.",
     attrs = {
-        "builder_package": attr.string(
-            default = _BUILDER_PACKAGE,
-            doc = "The package Stage 2 builds (packages/vesper-exe-builder for `//:vesper-exe-builder.wasm`, #2752).",
-        ),
         "cranelift": attr.label(
             allow_files = True,
             mandatory = True,
