@@ -4495,7 +4495,16 @@ impl<M: Module> Codegen<'_, '_, M> {
             .iter()
             .flat_map(|b| &b.instructions)
             .any(|i| matches!(i.op, Op::Seq { .. }));
-        if !has_seq {
+        // A sequence value with no sequence op (#2750), such as a `sink`
+        // parameter moved into a product, can still own a drop.
+        let seq_values = body
+            .params
+            .iter()
+            .map(|p| &p.ty)
+            .chain(body.locals.values())
+            .chain(body.values.values())
+            .any(crate::seq::is_seq_type);
+        if !has_seq && !seq_values {
             return true;
         }
         // The graph `ir_graph_at` lowers: small enums kept as words.
@@ -4512,11 +4521,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             && self.entry_views(body).is_some()
     }
     /// The header hoists of graph `body` the body hook emits (#2653): on
-    /// the optimize path, the slice parameters `ir_graph_at` reads once
-    /// at entry (`seq_entry_view`), as (parameter index, the indexes of
-    /// the reads given that receiver among the graph's values). `None`
-    /// when a hoist is any other (a loop preheader's, a sequence's, a
-    /// field's).
+    /// the optimize path, the slice and sequence parameters (#2750)
+    /// `ir_graph_at` reads once at entry (`seq_entry_view`), as (parameter
+    /// index, the indexes of the reads given that receiver among the
+    /// graph's values). `None` when a hoist is any other (a loop
+    /// preheader's, a field's).
     fn entry_views(&self, body: &crate::ir::FunctionIr) -> Option<Vec<(usize, Vec<u64>)>> {
         if !self.operands_only {
             return Some(vec![]);
@@ -4526,7 +4535,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         let graph = scalar_graph.as_ref().map_or(body, |s| &s.f);
         let mut views = vec![];
         for hoist in crate::bounds_hoist::header_hoists(graph) {
-            if !hoist.entry || !hoist.place.path.is_empty() || !crate::seq::is_slice_type(&hoist.ty)
+            if !hoist.entry
+                || !hoist.place.path.is_empty()
+                || !(crate::seq::is_slice_type(&hoist.ty) || crate::seq::is_seq_type(&hoist.ty))
             {
                 return None;
             }

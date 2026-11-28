@@ -35,6 +35,7 @@
 // writes, negations, narrowing or shifts) stays on the Rust walk.
 
 use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at};
+use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{TyKind, default_type};
 use @vesper/check-layout::{L_ENUM, L_PRODUCT, layout_of};
 use @vesper/codegen-aggregates::{short_name};
@@ -131,6 +132,17 @@ const SEQ_FUSED_TRY_GET: u64 = 18;
 // A string literal (`Codegen::string_literal`): its byte count, then its
 // bytes packed little-endian into words.
 const SEQ_LITERAL: u64 = 8;
+// A `ChunkSeq` (#2750): a checked element (`seq_view` of the sequence,
+// then as `SEQ_GET`), and `as_slice` (`seq_slice_value`).
+const SEQ_CHUNK_GET: u64 = 32;
+const SEQ_AS_SLICE: u64 = 33;
+// A `ChunkSeq`'s `try_set` (`seq_op`'s plain-word store on the optimize
+// path) and checked `set`: the element's stride and the kind its store
+// coerces to, then for `set` the raise of `IndexOutOfBounds`.
+const SEQ_TRY_SET: u64 = 34;
+const SEQ_SET: u64 = 35;
+// A sequence header's length word (src/seq/native.rs `LEN`).
+const HEADER_LEN_OFFSET: u64 = 0;
 // The bits of a literal byte and of the word it is packed into.
 const BYTE_BITS: u32 = 8;
 const WORD_BITS: u32 = 64;
@@ -340,6 +352,13 @@ const CALL_ARG_PATH_OFFSET: u64 = 3;
 const PASS_IN: u64 = 0;
 const PASS_INOUT: u64 = 1;
 const PASS_SINK: u64 = 2;
+// An `Op::Seq` pool row of a `SeqOp` (place-ir), not a hoisted header
+// read or a bounds guard.
+const POOL_SEQ: u64 = 0;
+// The `.` between a place's root and its path.
+const PLACE_DOT: u8 = 46;
+// How deep `body_pattern_end` reads nested patterns.
+const MAX_PATTERN_DEPTH: u64 = 512;
 // `INST_INOUT_CALL`'s argument tags.
 pub const ARG_IN: u64 = 0;
 pub const ARG_INOUT: u64 = 1;
@@ -416,6 +435,24 @@ fn kind_narrow(k: u32) -> bool {
     (k >= KIND_U8 && k <= KIND_U32) || (k >= KIND_I8 && k <= KIND_I32)
 }
 
+// `bounds_hoist::keeps_length` of a `SeqOp`'s `Debug` text, with the
+// hoisted header reads and bounds guards `calls_out` also passes.
+fn keeps_length(in names: Names, s: u32) -> bool {
+    names.spells(s, in "Get".as_bytes())
+        || names.spells(s, in "SliceGet".as_bytes())
+        || names.spells(s, in "Set".as_bytes())
+        || names.spells(s, in "SliceSet".as_bytes())
+        || names.spells(s, in "TryGet".as_bytes())
+        || names.spells(s, in "TrySet".as_bytes())
+        || names.spells(s, in "Len".as_bytes())
+        || names.spells(s, in "SliceLen".as_bytes())
+        || names.spells(s, in "AsSlice".as_bytes())
+        || names.spells(s, in "SubSlice".as_bytes())
+        || names.has_prefix(s, in "Wide(".as_bytes())
+        || names.has_prefix(s, in "Hoisted(".as_bytes())
+        || names.has_prefix(s, in "BoundsGuard".as_bytes())
+}
+
 fn f32_bits_of_f64(bits64: u64) -> u64 {
     widen_u64(to_bits_f32(nearest_f32(from_bits_f64(bits64))))
 }
@@ -455,8 +492,9 @@ pub struct Header {
     // local index -> its name and type
     lname: ChunkSeq[u64],
     lty: ChunkSeq[u64],
-    // parameter types, in order
+    // parameter types and passes, in order
     pty: ChunkSeq[u64],
+    ppass: ChunkSeq[u64],
     // the defaulted error type of each `Fail` instance of a `fail_only`
     // row, in row order (record tag `k + 1` is the `k`-th; #2425)
     fails: ChunkSeq[u64],
@@ -487,6 +525,10 @@ impl Gen {
             return self.body_product_lane(d);
         }
         let k = self.ctx.world.k;
+        // A sequence is its header's handle, one word (#2750).
+        if n.kind == TyKind::Named && n.n == 1 && n.name == k.chunk_seq {
+            return LANE_I64;
+        }
         // A slice is its view `{handle, start, len}` (#2653).
         if n.kind == TyKind::Named && n.n == 1 && n.name == k.slice {
             return self.body_product_lane(d);
@@ -831,6 +873,7 @@ impl Gen {
             lname: ChunkSeq::new[u64](),
             lty: ChunkSeq::new[u64](),
             pty: ChunkSeq::new[u64](),
+            ppass: ChunkSeq::new[u64](),
             fails: ChunkSeq::new[u64](),
             plain: true,
             captures: 0
@@ -840,6 +883,7 @@ impl Gen {
         i = inc(i);
         for k in 0..np {
             h.params.push(self.program.op(i));
+            h.ppass.push(self.program.op(inc(i)));
             let nproj = self.program.op(add(i, 2));
             i = add(add(i, 3), nproj);
             h.pty.push(self.program.op(i));
@@ -2834,6 +2878,7 @@ impl Gen {
             && node.n == 0
             && (node.name == k.string || node.name == k.str_);
         let slice = node.kind == TyKind::Named && node.n == 1 && node.name == k.slice;
+        let chunk = node.kind == TyKind::Named && node.n == 1 && node.name == k.chunk_seq;
         let ops_s = self.ops;
         // A `try_get` fused with its block's `match`: the bounds check and
         // the element address (`seq_fused_try_get`), its stride and lane
@@ -2887,12 +2932,42 @@ impl Gen {
                 inout extra
             );
         }
-        if slice && n == 2 && label == ops_s.seq_slice_get {
+        if chunk && n == 1 && label == ops_s.seq_len {
+            extra.push(SEQ_VIEW_WORD);
+            extra.push(HEADER_LEN_OFFSET);
+            return true;
+        }
+        if chunk && n == 1 && label == ops_s.seq_as_slice {
+            extra.push(SEQ_AS_SLICE);
+            return true;
+        }
+        if chunk && n == 3 && (label == ops_s.seq_try_set || label == ops_s.seq_set) {
+            let (stride, lane) = self.body_elem(receiver);
+            if stride == 0 || lane != LANE_I64 {
+                return false;
+            }
+            let elem = default_type(inout self.ctx.types, self.ctx.types.arg(receiver, 0));
+            let try_set = label == ops_s.seq_try_set;
+            extra.push(if try_set { SEQ_TRY_SET } else { SEQ_SET });
+            extra.push(stride);
+            extra.push(self.body_kind(elem));
+            if try_set {
+                return true;
+            }
+            return self.body_raise(
+                in h,
+                ops_s.runtime_error,
+                ops_s.index_out_of_bounds,
+                inout extra
+            );
+        }
+        let get = (slice && label == ops_s.seq_slice_get) || (chunk && label == ops_s.seq_get);
+        if n == 2 && get {
             let (stride, lane) = self.body_elem(receiver);
             if stride == 0 {
                 return false;
             }
-            extra.push(SEQ_GET);
+            extra.push(if chunk { SEQ_CHUNK_GET } else { SEQ_GET });
             extra.push(stride);
             extra.push(lane);
             return self.body_raise(
@@ -3364,6 +3439,146 @@ impl Gen {
     // The locals that keep a home slot on the optimize path as well
     // (`register_locals`): those lent `inout` or `sink` to a call that may
     // fail, which writes through the slot before it can leave (#2614).
+    // Whether `t` is a `ChunkSeq[T]` (#2750).
+    fn body_seq_type(inout self, t: u32) -> bool {
+        let d = default_type(inout self.ctx.types, t);
+        let n = self.ctx.types.node(d);
+        n.kind == TyKind::Named && n.n == 1 && n.name == self.ctx.world.k.chunk_seq
+    }
+
+    // `in_param_registers` (src/native.rs) of parameter `name`, a word:
+    // an `in` parameter stays a register when the graph calls nothing
+    // (`bounds_hoist::calls_out`) and nothing writes or binds it or lends
+    // it other than `in`.
+    fn body_in_register(inout self, f: FnRow, in h: Header, name: u64) -> bool {
+        let mut pass = NONE64;
+        for j in 0..h.params.len() {
+            if u64_at(in h.params, j) == name {
+                pass = u64_at(in h.ppass, j);
+            }
+        }
+        if pass != PASS_IN {
+            return false;
+        }
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            for ii in 0..row.ic {
+                let i = self.program.inst(add(row.i0, ii));
+                if self.body_calls_out(i) {
+                    return false;
+                }
+                if i.op == Op::Write {
+                    let root = self.body_place_root(n32(self.program.op(i.a)));
+                    if widen_u64(root) == name {
+                        return false;
+                    }
+                } else if i.op == Op::Bind {
+                    if self.body_binds(inc(i.a), name, 0) {
+                        return false;
+                    }
+                } else if i.op == Op::Read {
+                    if self.program.op(i.a) == name && self.program.op(add(i.a, 2)) != PASS_IN {
+                        return false;
+                    }
+                } else if i.op == Op::Seq {
+                    let n = self.program.op(inc(i.a));
+                    for k in 0..n {
+                        let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
+                        let root = self.program.op(add(at, CALL_ARG_ROOT_OFFSET));
+                        if self.program.op(at) != PASS_IN && root == inc(name) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    // `bounds_hoist::calls_out`: whether instruction `i` may call out of
+    // the function. A sequence operation does unless it keeps its
+    // receiver's length (`keeps_length`) or reads a hoisted header.
+    fn body_calls_out(inout self, i: InstRow) -> bool {
+        if i.op == Op::Call
+            || i.op == Op::Tiled
+            || i.op == Op::Fip
+            || i.op == Op::Indirect
+            || i.op == Op::Closure
+            || i.op == Op::Handle
+        {
+            return true;
+        }
+        if i.op != Op::Seq {
+            return false;
+        }
+        let pool = self.program.pool_row(self.program.op(i.a));
+        if pool.kind != POOL_SEQ {
+            return false;
+        }
+        ! keeps_length(in self.ctx.names, pool.label)
+    }
+
+    // The root symbol of a written place (`place.split('.').next()`).
+    fn body_place_root(inout self, place: u32) -> u32 {
+        let size = self.ctx.names.size(place);
+        let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for k in 0..size {
+            let c = self.ctx.names.byte(place, k);
+            if c == PLACE_DOT {
+                return self.ctx.names.intern(in text.as_slice());
+            }
+            text.push(c);
+        }
+        place
+    }
+
+    // Whether the pattern at `i` binds `name` (`bound_names`).
+    fn body_binds(in self, i: u64, name: u64, depth: u64) -> bool {
+        self.body_pattern_end(i, name, depth) == NONE64
+    }
+
+    // The end of the pattern at `i`, or NONE64 when it binds `name`
+    // (`bound_names`): a constructor's fields each follow their name.
+    fn body_pattern_end(in self, i: u64, name: u64, depth: u64) -> u64 {
+        if depth > MAX_PATTERN_DEPTH {
+            return NONE64;
+        }
+        let kind = self.program.op(i);
+        if kind == Pat::Bind {
+            return if self.program.op(add(i, PAT_BIND_NAME_OFFSET)) == name {
+                NONE64
+            } else {
+                add(i, PAT_BIND_WORDS)
+            };
+        }
+        if kind == Pat::Literal {
+            return add(i, PAT_LIT_WORDS);
+        }
+        if kind == Pat::Tuple {
+            let n = self.program.op(add(i, PAT_TUPLE_COUNT_OFFSET));
+            let mut j = add(i, PAT_TUPLE_WORDS);
+            for k in 0..n {
+                j = self.body_pattern_end(j, name, inc(depth));
+                if j == NONE64 {
+                    return NONE64;
+                }
+            }
+            return j;
+        }
+        if kind == Pat::Constructor {
+            let n = self.program.op(add(i, PAT_CTOR_COUNT_OFFSET));
+            let mut j = add(i, PAT_CTOR_WORDS);
+            for k in 0..n {
+                j = self.body_pattern_end(inc(j), name, inc(depth));
+                if j == NONE64 {
+                    return NONE64;
+                }
+            }
+            return j;
+        }
+        add(i, PAT_WILD_WORDS)
+    }
+
     fn body_homed(inout self, f: FnRow) -> ChunkSeq[u64] {
         let mut homed: ChunkSeq[u64] = ChunkSeq::new[u64]();
         for bi in 0..f.bc {
@@ -3725,11 +3940,18 @@ impl Gen {
                     is_param = true;
                 }
             }
-            if !self.body_register(t) && self.body_lane(t) != LANE_PRODUCT {
+            let seq = self.body_seq_type(t);
+            if !self.body_register(t) && self.body_lane(t) != LANE_PRODUCT && !seq {
                 return;
             }
             if entry == 0 {
                 return;
+            }
+            // A sequence keeps a home slot (`register_locals` keeps only
+            // numbers), unless it is an `in` parameter
+            // `in_param_registers` leaves in a register (#2750).
+            if seq && !(is_param && self.body_in_register(f, in h, name)) {
+                entry = add(entry, LOCAL_HOME);
             }
             for j in 0..homed.len() {
                 if u64_at(in homed, j) == name {

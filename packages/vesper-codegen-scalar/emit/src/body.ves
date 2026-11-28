@@ -51,7 +51,8 @@ use @vesper/cranelift::{
     ty_i64, ty_i8, use_var, vals1, value_type, create_stack_slot, ins_iadd_imm, ins_load,
     ins_stack_addr, ins_store, module_pointer_type, ins_imul_imm, ins_uload8, ins_uload16,
     ins_uload32, mem_can_move, mem_readonly, mem_trusted, data_align, data_define, data_new,
-    declare_anonymous_data, define_data, import_data, ins_symbol_value
+    declare_anonymous_data, define_data, import_data, ins_symbol_value, Slot, ins_istore8,
+    ins_istore16, ins_istore32
 };
 use super::{
     BODY_ERROR, DECLINED, HANDLED, coerce, emit_overflow_test, kind_max_imm, kind_min_imm,
@@ -140,6 +141,15 @@ const FUSED_WORDS: u64 = 3;
 const FUSED_VALID: u64 = 1;
 const FUSED_ADDR: u64 = 2;
 const SEQ_LITERAL: u64 = 8;
+// A `ChunkSeq` (#2750): a checked element, and the slice view of the
+// whole sequence (`as_slice`).
+const SEQ_CHUNK_GET: u64 = 32;
+const SEQ_AS_SLICE: u64 = 33;
+// A `ChunkSeq`'s `try_set` and checked `set` (#2750).
+const SEQ_TRY_SET: u64 = 34;
+const SEQ_SET: u64 = 35;
+// `try_set`'s private slot for a store past the end (`discard_slot`).
+const DISCARD_BYTES: u32 = 16;
 // The bits of a literal byte, and the bytes of a literal word.
 const BYTE_BITS: u64 = 8;
 const BYTE_MASK: u64 = 255;
@@ -156,6 +166,7 @@ const STR_DATA: i32 = 16;
 const VIEW_HANDLE: i32 = 0;
 const VIEW_START: i32 = 8;
 const VIEW_LEN: i32 = 16;
+const HEADER_LEN: i32 = 0;
 const HEADER_DATA: i32 = 16;
 // A slice view's storage (`seq_slice_value`, `str_value`).
 const VIEW_BYTES: u32 = 24;
@@ -1012,6 +1023,9 @@ struct Body {
     hcap_n: ChunkSeq[u64],
     hcap_names: ChunkSeq[u64],
     hcap_slots: ChunkSeq[u64],
+    // the function's `try_set` discard slot (`Codegen::discard_slot`), or
+    // invalid
+    discard: u32,
 }
 
 impl Body {
@@ -1616,9 +1630,28 @@ impl Body {
         inout w: Words,
         x: Value,
         y: Value,
+        z: Value,
         dest: u64
     ) -> Value eff [Ffi[Cranelift]] {
         let form = w.next();
+        if form == SEQ_TRY_SET {
+            return self.seq_try_set(inout b, inout m, inout w, x, y, z);
+        }
+        if form == SEQ_SET {
+            let stride = w.next();
+            let kind = w.next();
+            let index = w.next();
+            let size = w.next();
+            let tag = w.next();
+            let (handle, start, len) = self.chunk_view(inout b, x);
+            let valid = ins_icmp(inout b, cc_ult(), y, len);
+            if !self.raising(inout b, inout m, inout w, valid, false, index, size, tag) {
+                return Value { id: invalid() };
+            }
+            let addr = self.seq_elem_addr(inout b, handle, start, y, stride);
+            self.store_elem(inout b, addr, z, stride, kind);
+            return ins_iconst(inout b, ty_i64(), 0);
+        }
         if form == SEQ_LITERAL {
             return self.literal(inout b, inout m, inout w);
         }
@@ -1670,13 +1703,37 @@ impl Body {
         if form == SEQ_LAST {
             return self.seq_last(inout b, inout w, x);
         }
-        if form == SEQ_GET {
+        if form == SEQ_AS_SLICE {
+            // `seq_slice_value` of the sequence's `seq_view`: the view
+            // `{handle, 0, len}` in fresh zeroed storage.
+            let (handle, start, len) = self.chunk_view(inout b, x);
+            let slot = create_stack_slot(inout b, VIEW_BYTES, SLOT_ALIGN_SHIFT);
+            let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+            let mut offset: u32 = 0;
+            loop {
+                if offset >= VIEW_BYTES {
+                    break;
+                }
+                let z = ins_iconst(inout b, ty_i64(), 0);
+                ins_store(inout b, PLAIN, z, ptr, wrapping_i32(offset));
+                offset = wrapping_add(offset, WORD_BYTES);
+            }
+            ins_store(inout b, PLAIN, handle, ptr, VIEW_HANDLE);
+            ins_store(inout b, PLAIN, start, ptr, VIEW_START);
+            ins_store(inout b, PLAIN, len, ptr, VIEW_LEN);
+            return ptr;
+        }
+        if form == SEQ_GET || form == SEQ_CHUNK_GET {
             let stride = w.next();
             let lane = w.next();
             let index = w.next();
             let size = w.next();
             let tag = w.next();
-            let (handle, start, len) = self.seq_view(inout b, x);
+            let (handle, start, len) = if form == SEQ_GET {
+                self.seq_view(inout b, x)
+            } else {
+                self.chunk_view(inout b, x)
+            };
             let valid = ins_icmp(inout b, cc_ult(), y, len);
             if !self.raising(inout b, inout m, inout w, valid, false, index, size, tag) {
                 return Value { id: invalid() };
@@ -1879,6 +1936,77 @@ impl Body {
         (handle, start, len)
     }
 
+    // `seq_store_elem` of a one-word element: the value coerced to the
+    // element's kind, stored at its stride.
+    fn store_elem(inout self, inout b: Builder, addr: Value, v: Value, stride: u64, kind: u64) eff [
+        Ffi[Cranelift]
+    ] {
+        let value = body_coerce(inout b, v, kind, self.optimize);
+        if stride == STRIDE_BYTE {
+            ins_istore8(inout b, PLAIN, value, addr, 0);
+        } else if stride == STRIDE_HALF {
+            ins_istore16(inout b, PLAIN, value, addr, 0);
+        } else if stride == STRIDE_QUARTER {
+            ins_istore32(inout b, PLAIN, value, addr, 0);
+        } else {
+            ins_store(inout b, PLAIN, value, addr, 0);
+        }
+    }
+
+    // A sequence's `try_set` of element `y` to `z`: on the optimize path
+    // a store with no branch, past the end into the function's discard
+    // slot (#1151); else a store behind the bounds test. Its value is the
+    // test, widened.
+    fn seq_try_set(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words,
+        x: Value,
+        y: Value,
+        z: Value
+    ) -> Value eff [Ffi[Cranelift]] {
+        let stride = w.next();
+        let kind = w.next();
+        let (handle, start, len) = self.chunk_view(inout b, x);
+        let valid = ins_icmp(inout b, cc_ult(), y, len);
+        if self.optimize {
+            if self.discard == invalid() {
+                self.discard = create_stack_slot(inout b, DISCARD_BYTES, SLOT_ALIGN_SHIFT).id;
+            }
+            let slot = Slot { id: self.discard };
+            let discard = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+            let addr = self.seq_elem_addr(inout b, handle, start, y, stride);
+            let target = ins_select(inout b, valid, addr, discard);
+            self.store_elem(inout b, target, z, stride, kind);
+        } else {
+            let yes = create_block(inout b);
+            let no = create_block(inout b);
+            let done = create_block(inout b);
+            let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            ins_brif0(inout b, valid, yes, no);
+            switch_to_block(inout b, yes);
+            let addr = self.seq_elem_addr(inout b, handle, start, y, stride);
+            self.store_elem(inout b, addr, z, stride, kind);
+            ins_jump(inout b, done, in none.as_slice());
+            switch_to_block(inout b, no);
+            ins_jump(inout b, done, in none.as_slice());
+            switch_to_block(inout b, done);
+        }
+        ins_uextend(inout b, ty_i64(), valid)
+    }
+
+    // `seq_view` of a sequence: its handle, a zero start and its length.
+    fn chunk_view(
+        inout self,
+        inout b: Builder,
+        x: Value
+    ) -> (Value, Value, Value) eff [Ffi[Cranelift]] {
+        let len = self.seq_word(inout b, x, HEADER_LEN);
+        let start = ins_iconst(inout b, ty_i64(), 0);
+        (x, start, len)
+    }
+
     // `seq_elem_addr` of element `i` from `start`: from an invariant
     // handle, `data + start * stride` first, which Cranelift computes
     // once.
@@ -2005,6 +2133,11 @@ impl Body {
         };
         let y = if n >= 2 {
             self.value(at64(in ops, 1))
+        } else {
+            none
+        };
+        let z = if n >= 3 {
+            self.value(at64(in ops, 2))
         } else {
             none
         };
@@ -2757,7 +2890,7 @@ impl Body {
             }
             ins_load(inout b, lane_type(flane), PLAIN, ptr, 0)
         } else if kind == INST_SEQ {
-            let v = self.seq(inout b, inout m, inout w, x, y, dest);
+            let v = self.seq(inout b, inout m, inout w, x, y, z, dest);
             if is_invalid(v) {
                 return false;
             }
@@ -2864,10 +2997,19 @@ impl Body {
                     let p = at64(in self.views, v);
                     let nr = at64(in self.views, wrapping_add(v, 1));
                     v = wrapping_add(v, 2);
-                    let var = Var {
-                        id: wrapping_u32(w.arg(wrapping_add(wrapping_add(ARG_PARAMS, 1), p)))
-                    };
-                    let receiver = use_var(inout b, var);
+                    let var = wrapping_u32(w.arg(wrapping_add(wrapping_add(ARG_PARAMS, 1), p)));
+                    // A sequence parameter is read as the walk reads its
+                    // name (#2750): through its address when it is
+                    // `inout`, or its home slot.
+                    let mut receiver = Value { id: invalid() };
+                    for l in 0..self.locals.len() {
+                        if at32(in self.locals, l) == var && receiver.id == invalid() {
+                            receiver = self.use_local(inout b, l);
+                        }
+                    }
+                    if receiver.id == invalid() {
+                        receiver = use_var(inout b, Var { id: var });
+                    }
                     self.invariant.push(receiver.id);
                     for _ in 0..nr {
                         let i = at64(in self.views, v);
@@ -3603,6 +3745,7 @@ pub fn emit_body_words(
         hcap_n: ChunkSeq::new[u64](),
         hcap_names: ChunkSeq::new[u64](),
         hcap_slots: ChunkSeq::new[u64](),
+        discard: invalid(),
     };
     // The graph's blocks: the entry is the current block.
     s.blocks.push(current_block(inout b).id);
