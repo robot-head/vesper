@@ -1,0 +1,87 @@
+// `vesper emit --format ir` in Vesper (hd_step group 3, #1894; slice 4f of
+// #1397): the Place IR lowering (@vesper/place-ir-lower), with
+// `--optimize` the native optimizer policy (@vesper/ir-opt-policy's block
+// screen around @vesper/ir-opt's memory forwarding, then
+// @vesper/library-ir's token threading), and the JSON of @vesper/place-ir.
+// Rust's policy also re-validates the optimized program's ownership, which
+// only an optimizer bug fails; the IR check's input is its own encoding
+// of a Rust program, so that check stays with the swap tests
+// (tests/self_host_ir_opt.rs), which hold the two optimizers equal. The session only encodes
+// its checked world (`EmitIr` with `EMIT_VESPER_LOWER`,
+// crates/vesper-hybrid/src/driver/native.rs).
+//
+// The input is @vesper/check-data's names, types and world, the lowering
+// section of tests/common/ir_lower_words.rs, then the JSON extras
+// `read_json_extras` reads: the closure and handler expressions' JSON by
+// payload index, and the JSON of every float literal of the world's
+// bodies. A program this does not finish as Rust would (`IrStatus` other
+// than `Ok`) goes back to the session's own pass.
+
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/place-ir::{json_program, read_json_extras};
+use @vesper/place-ir-lower::ast::{read_ast};
+use @vesper/place-ir-lower::lower::{l_new, lower_all};
+use @vesper/ir-opt::view::{type_classes};
+use @vesper/ir-opt::forward::{forward_program_kept};
+use @vesper/ir-opt-policy::screen::{screen_program};
+use @vesper/library-ir::tokens::{thread_tokens};
+
+// What `emit_ir_json` did.
+pub enum IrStatus: _ {
+    // `emit_ir_json`'s second value is the program's JSON.
+    Ok = 0,
+    // The lowering skipped a function.
+    Skipped = 1,
+    // The world has the `Box` prelude: the optimizer's `@fip` reuse needs
+    // facts only the session computes.
+    BoxActive = 2,
+    // @vesper/ir-opt stopped (a read lacks state evidence, egglog would
+    // refuse a block, a `slot_key` error): the session reports it.
+    Optimizer = 3,
+}
+
+// @vesper/ir-opt's status for a program it optimized.
+const OPT_OK: u8 = 0;
+
+// The program the lowering session's input `input` describes, as JSON
+// (`serde_json::to_string_pretty` of Rust's `Program`), optimized when
+// `optimize`: the status, and the JSON when it is `IrStatus::Ok`.
+pub fn emit_ir_json(in input: Slice[u8], optimize: bool) -> (u64, ChunkSeq[u8]) {
+    let mut r = Reader { pos: 0 };
+    let ctx = read_ctx(inout r, in input);
+    let ast = read_ast(inout r, in input, in ctx);
+    let extras = read_json_extras(inout r, in input, in ctx);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut l = l_new(sink ctx, sink ast);
+    lower_all(inout l);
+    if l.skipped != 0 {
+        return (IrStatus::Skipped, out);
+    }
+    if optimize {
+        if l.ctx.world.box_active {
+            return (IrStatus::BoxActive, out);
+        }
+        let cls = type_classes(in l.ctx.types, in l.ctx.names);
+        let (keep, kept) = screen_program(in l.program, in l.ctx.names, in cls);
+        if kept != 0 {
+            let n = l.program.insts.len();
+            let mut orig: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+            for k in 0..n {
+                orig.push(k);
+            }
+            let (st, forwarded) = forward_program_kept(
+                inout l.program,
+                in l.ctx.names,
+                in cls,
+                inout orig,
+                in keep
+            );
+            if st != OPT_OK {
+                return (IrStatus::Optimizer, out);
+            }
+        }
+        thread_tokens(inout l.program, in l.ctx.names);
+    }
+    json_program(in l.program, in l.ctx.types, in l.ctx.names, in extras, inout out);
+    (IrStatus::Ok, out)
+}

@@ -133,6 +133,9 @@ pub struct Lw<'a> {
     /// The closure and handler expressions `Op::Closure` and `Op::Handle`
     /// refer to, in the order the section names them.
     pub pool: Pool,
+    /// The bits of every float literal the section holds (for the JSON
+    /// extras of the hybrid driver's `vesper emit --format ir`, #1894).
+    pub floats: BTreeSet<u64>,
     pats: Vec<u64>,
     pat_count: u64,
     exprs: Vec<u64>,
@@ -145,6 +148,7 @@ impl<'a> Lw<'a> {
             enc,
             world,
             pool: Pool::default(),
+            floats: BTreeSet::new(),
             pats: vec![],
             pat_count: 0,
             exprs: vec![],
@@ -167,7 +171,11 @@ impl<'a> Lw<'a> {
     fn literal(&mut self, l: &Literal, out: &mut Vec<u64>) {
         match l {
             Literal::Int(n) => out.extend([0, *n as u64, (*n >> 64) as u64]),
-            Literal::Float(x) => out.extend([1, x.to_bits(), 0]),
+            Literal::Float(x) => {
+                let bits = x.to_bits();
+                self.floats.insert(bits);
+                out.extend([1, bits, 0]);
+            }
             Literal::Bool(b) => out.extend([2, *b as u64, 0]),
             Literal::String(s) => {
                 let n = self.name(s);
