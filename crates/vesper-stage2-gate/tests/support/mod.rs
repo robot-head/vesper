@@ -17,6 +17,8 @@ pub const ENTRY_INTERFACE: &str = "vesper:program/entry@0.1.0";
 pub const COMPONENT_HEADER: &[u8] = b"\0asm\x0d\x00\x01\x00";
 /// The committed seed, relative to the repository.
 pub const SEED: &str = "bootstrap/stage2-seed/stage2.wasm";
+/// How a Git LFS pointer file starts (the seed is stored in LFS).
+const LFS_POINTER: &[u8] = b"version https://git-lfs";
 /// The package Stage 2 is built from, relative to the repository.
 pub const STAGE2_PACKAGE: &str = "packages/vesper-stage2";
 /// Wasmtime fuel of a run that sets none.
@@ -578,6 +580,11 @@ impl Chain {
 pub fn seed() -> Compiler {
     let path = repo().join(SEED);
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    assert!(
+        !bytes.starts_with(LFS_POINTER),
+        "{} is a Git LFS pointer: run `git lfs pull` (or `aspect ci fetch-stage2-seed`)",
+        path.display()
+    );
     assert!(
         bytes.starts_with(COMPONENT_HEADER),
         "{} is not a component",

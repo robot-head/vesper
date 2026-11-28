@@ -236,3 +236,31 @@ install_wac = task(
     summary = "Install the verified wac CLI for the Linux Stage 2 workflow",
     implementation = _install_wac,
 )
+
+# A Git LFS pointer file is about 130 bytes; the seed is megabytes.
+_LFS_POINTER_MAX_BYTES = 1024
+
+def _fetch_seed(ctx: TaskContext) -> int:
+    # The seed is stored in Git LFS (.gitattributes). A checkout without LFS
+    # leaves its pointer file, which the Stage 2 gate cannot run.
+    root = ctx.std.env.aspect_root_dir()
+    seed = root + "/" + _SEED
+    metadata = ctx.std.fs.try_metadata(seed)
+    if metadata != None and metadata.size > _LFS_POINTER_MAX_BYTES:
+        ctx.std.io.stdout.write("== %s is present (%d bytes)\n" % (_SEED, metadata.size))
+        return 0
+    if not command(ctx, "git", ["lfs", "version"], root).stdout("null").stderr("null").status().success:
+        check(ctx, "sudo", ["apt-get", "install", "-y", "git-lfs"], root)
+    check(ctx, "git", ["lfs", "pull", "--include", _SEED], root)
+    metadata = ctx.std.fs.try_metadata(seed)
+    if metadata == None or metadata.size <= _LFS_POINTER_MAX_BYTES:
+        ctx.std.process.exit(1, "git lfs pull left no seed at " + _SEED)
+    ctx.std.io.stdout.write("== Fetched %s (%d bytes)\n" % (_SEED, metadata.size))
+    return 0
+
+fetch_stage2_seed = task(
+    kind = "fetch-stage2-seed",
+    group = ["ci"],
+    summary = "Fetch the Git LFS Stage 2 seed when the checkout has only its pointer",
+    implementation = _fetch_seed,
+)

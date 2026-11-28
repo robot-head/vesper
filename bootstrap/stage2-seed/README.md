@@ -4,7 +4,9 @@
 component, built by Stage 2 itself. It is the compiler the Stage 2 gate
 (crates/vesper-stage2-gate, #2671) starts from, so the gate needs no Rust
 compiler, as the owner's 2026-11-21 decision ("bootstraps from a committed
-wasm seed") asks. The frozen C runner in [../seed](../seed) is not involved.
+wasm seed") asks. It is stored in Git LFS (`.gitattributes`): run
+`git lfs pull` after cloning, or `aspect ci fetch-stage2-seed`, which CI
+calls. The frozen C runner in [../seed](../seed) is not involved.
 
 The gate builds a chain from it:
 

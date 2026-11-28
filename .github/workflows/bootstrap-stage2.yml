@@ -26,6 +26,9 @@ jobs:
       VESPER_DEFAULT_COMPILER: ${{ github.workspace }}/target/debug/vesper
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The Stage 2 seed is in Git LFS (#2671).
+          lfs: true
       - uses: ./.github/actions/aspect
       - name: Install the bootstrap toolchain
         # wasm32-wasip2 builds the Cranelift component Stage 2 calls (#2210).

@@ -26,6 +26,12 @@ vesper_crate(
         "//crates/vesper-serde:files",
         "//crates/vesper-span:files",
     ],
+    # Stage 2 preopens the repository under WASI, which refuses runfiles
+    # symlinks that leave it: run in a copy made of regular files.
+    copy_test_cwd = [
+        "test/compiler_packages",
+        "test/fixed_point",
+    ],
     test_path_binaries = {
         "test/fixed_point": ["@wasmtime//:wasmtime"],
     },
