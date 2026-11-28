@@ -554,7 +554,7 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
     }
     // `compile_exports` after the walk: the 128-bit export entries, then
     // a v2 library's runtime glue.
-    let err = self::exports::define_wide_entries(inout m, in req, inout r, in d);
+    let err = self::exports::define_wide_entries(inout m, in req, inout r, in d, in exports);
     if err.len() != 0 {
         module_free(m);
         return failure(in err.as_slice());

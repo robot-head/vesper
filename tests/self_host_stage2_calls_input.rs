@@ -25,7 +25,7 @@ use check_harness::{Entry, Package, repo};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The driver: `driver <package> <roots file> <optimize: 0 or 1> <out>`
+/// The driver: `driver <package> <roots file> <optimize: 0 or 1> <out> <os>`
 /// writes the Stage 2 calls input and exits 0, or exits with the reason it
 /// declined (`CALLS_*` in packages/vesper-export-build/src/calls_input.ves)
 /// after writing the front end's error.
@@ -45,6 +45,7 @@ pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv]] {
     let roots_path = arg(2);
     let optimize = arg(3);
     let out = arg(4);
+    let os = arg(5);
     let mut roots: ChunkSeq[u8] = ChunkSeq::new[u8]();
     handle Fail[IoError] in {
         roots = read_path(in roots_path.as_slice());
@@ -54,6 +55,7 @@ pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv]] {
     }
     let made = stage2_calls_input(
         in root.as_slice(),
+        in os.as_slice(),
         in roots.as_slice(),
         optimize.try_get(0).unwrap_or(0) == 49
     );
@@ -79,10 +81,10 @@ const DECLINES: &[&str] = &[
 /// The functions Stage 2 must lower as Rust does today. The rest differ
 /// where Stage 2's checker records less than Rust's: overflow and partial
 /// operations (`fallible`) and the unit type of statements.
-const MIN_SAME_FUNCTIONS: usize = 37;
+const MIN_SAME_FUNCTIONS: usize = 38;
 
 /// The port functions Stage 2 must lower as Rust does today.
-const MIN_SAME_PORT_FUNCTIONS: usize = 5300;
+const MIN_SAME_PORT_FUNCTIONS: usize = 18880;
 
 /// Set to print the Rust and Stage 2 bodies of each function that differs.
 const SHOW_DIFFS: &str = "VESPER_STAGE2_CALLS_DIFFS";
@@ -288,6 +290,12 @@ pub fn checked(x: u64) -> Result[bool, u64] { if x == 0 { return fail_with(x); }
 pub fn tagged(x: u64) -> Result[u8, u64] { fail_with(x) }",
         &["checked", "tagged"],
     ),
+    // A `break` statement ends its block, not the `if` around it.
+    (
+        "breaks",
+        "pub fn digits(n: u64) -> u64 { let mut d: u64 = 1; let mut x = n; loop { if x < 10 { break; } x = x / 10; d = wrapping_add(d, 1); } d }",
+        &["digits"],
+    ),
     (
         "floats",
         "pub fn lerp(a: f64, b: f64, t: f64) -> f64 { a + (b - a) * t }
@@ -339,14 +347,6 @@ fn rust_input(dir: &Path, roots: &[&str]) -> Result<Vec<u8>, String> {
     if !p.ok() {
         return Err(format!("{:?} {:?}", p.diagnostics, p.manifest_errors));
     }
-    let checked = vesper::check::check(&p.module);
-    if let Some(d) = checked.diagnostics.first() {
-        return Err(format!(
-            "Rust's checker: {} diagnostics, first {d:?}",
-            checked.diagnostics.len()
-        ));
-    }
-    let program = vesper::ir_swap::lower(&checked.world);
     let tasks: Vec<(String, u64)> = roots
         .iter()
         .enumerate()
@@ -359,8 +359,43 @@ fn rust_input(dir: &Path, roots: &[&str]) -> Result<Vec<u8>, String> {
             (r.to_string(), OPTIMIZE_TASK | place)
         })
         .collect();
-    codegen_calls_words::calls_input_flags_wide(&checked.world, &program, &tasks)
-        .ok_or_else(|| "Rust does not encode the library".to_string())
+    let encode = |world: &vesper::check::World| {
+        let program = vesper::ir_swap::lower(world);
+        codegen_calls_words::calls_input_flags_wide(world, &program, &tasks)
+            .ok_or_else(|| "Rust does not encode the library".to_string())
+    };
+    // The `.vsys` imports `vesper build --lib` reads: the root source's
+    // `@export vsys` directives and each package's `[package] vsys`
+    // (native_export.rs `compile_package_module`).
+    let root_source = std::fs::read_to_string(dir.join("src/lib.ves")).unwrap_or_default();
+    let mut directives = vesper::native::export::Directives::parse(&root_source, None)
+        .map_err(|e| format!("directives: {e}"))?;
+    directives
+        .add_packages(&p.vsys, None)
+        .map_err(|e| format!("directives: {e}"))?;
+    if directives.vsys.is_empty() {
+        let checked = vesper::check::check(&p.module);
+        if let Some(d) = checked.diagnostics.first() {
+            return Err(format!(
+                "Rust's checker: {} diagnostics, first {d:?}",
+                checked.diagnostics.len()
+            ));
+        }
+        return encode(&checked.world);
+    }
+    // A library with `.vsys` imports checks its `Ffi` calls against them
+    // (native_export.rs `compile_foreign`).
+    let mut imports = vesper::ffi_lowering::Imports::new();
+    for v in &directives.vsys {
+        imports
+            .add(&v.source, v.handler)
+            .map_err(|e| format!("{}: {e}", v.library))?;
+    }
+    let checked = vesper::ffi_lowering::check_module(&p.module, &imports)
+        .map_err(|e| format!("Rust's foreign checker: {e}"))?;
+    checked
+        .with_lowering(None, encode)
+        .map_err(|e| e.to_string())
 }
 
 /// What comparing one library found.
@@ -406,6 +441,7 @@ fn compare(
         .arg(&roots_file)
         .arg("1")
         .arg(&out)
+        .arg(std::env::consts::OS)
         .status()
         .unwrap();
     let written = std::fs::read(&out).unwrap_or_default();

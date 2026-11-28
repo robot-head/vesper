@@ -416,13 +416,7 @@ fn request(r: &Record) -> Vec<u8> {
     q.bytes(r.calls.as_deref().unwrap_or_default());
     q.word(wide.len() as u64);
     for f in wide {
-        let inner = r
-            .defined
-            .iter()
-            .find(|d| d.key == f.name)
-            .map_or(u64::MAX, |d| d.func);
         q.bytes(f.symbol.as_bytes());
-        q.word(inner);
         q.word(u64::from(f.result_pointer));
         q.word(u64::from(wide_by_pointer(&f.result)));
         q.word(u64::from(f.fail_record_words.is_some()));
