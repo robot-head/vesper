@@ -43,6 +43,9 @@ use self::regions::{
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
+// Rounds of `check::check`'s inference loop past one per function before
+// it reports E0408.
+const INFERENCE_SLACK_ROUNDS: u64 = 4;
 const P_IN: u8 = 0;
 const P_INOUT: u8 = 1;
 const P_SINK: u8 = 2;
@@ -5813,12 +5816,53 @@ pub fn check_exprs(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) {
         ck.trait_methods.push(method);
     }
     let fn_count = reader.word(in bytes);
+    let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut spans: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut bodies: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut firsts: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for i in 0..fn_count {
-        let name = sym(in ck.ctx, reader.word(in bytes));
-        let start = reader.word(in bytes);
-        let end = reader.word(in bytes);
-        let first = n32(ck.exs.len());
-        let body = read_expr(inout reader, in bytes, inout ck);
-        check_function(inout ck, name, start, end, body, first);
+        names.push(sym(in ck.ctx, reader.word(in bytes)));
+        spans.push(reader.word(in bytes));
+        spans.push(reader.word(in bytes));
+        firsts.push(n32(ck.exs.len()));
+        bodies.push(read_expr(inout reader, in bytes, inout ck));
+    }
+    // `check::check`'s inference loop: every function is checked with the
+    // results of the round before (the input's, at first), until no
+    // checked function's result changes. Over an input that already holds
+    // the checked world's results, one round suffices.
+    let out_mark = ck.out.len();
+    let mut round: u64 = 0;
+    loop {
+        round = inc(round);
+        ck.out.truncate(out_mark);
+        let mut updates: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..fn_count {
+            let name = u32_at(in names, i);
+            let start = u64_at(in spans, wrapping_mul(i, 2));
+            let end = u64_at(in spans, inc(wrapping_mul(i, 2)));
+            check_function(inout ck, name, start, end, u32_at(in bodies, i), u32_at(in firsts, i));
+            let sig_index = fn_index(in ck, name);
+            if !ck.skip && sig_index != NONE32 && ck.fn_actual != NONE32 {
+                if ck.fsig(sig_index).inferred != ck.fn_actual {
+                    updates.push(sig_index);
+                    updates.push(ck.fn_actual);
+                }
+            }
+        }
+        if updates.len() == 0 {
+            break;
+        }
+        if round > add(fn_count, INFERENCE_SLACK_ROUNDS) {
+            // E0408: inference did not converge.
+            put(inout ck.out, "D E0408 0 0\n");
+            break;
+        }
+        for u in 0..updates.len() / 2 {
+            let sig_index = u32_at(in updates, wrapping_mul(u, 2));
+            let mut sig = ck.fsig(sig_index);
+            sig.inferred = u32_at(in updates, inc(wrapping_mul(u, 2)));
+            let ok = ck.fns.try_set(w(sig_index), sig);
+        }
     }
 }
