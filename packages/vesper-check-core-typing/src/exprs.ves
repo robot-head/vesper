@@ -434,6 +434,9 @@ pub struct Ck {
     // and the join of every `return` value so far (NONE32 for `Never`).
     fn_result: u32,
     returned: u32,
+    // The checked body's result (`Checker::results`): the declared result
+    // refined by the body's type, or NONE32.
+    fn_actual: u32,
     // Diagnostics of the function being checked, and whether it has an
     // open literal binding (`LiteralTyping::open`).
     errors: u64,
@@ -532,6 +535,7 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
         static_text: false,
         fn_result: NONE32,
         returned: NONE32,
+        fn_actual: NONE32,
         errors: 0,
         open_literal: false,
         lt_open: ChunkSeq::new[u32](),
@@ -5363,6 +5367,7 @@ fn run_body(
     ck.frames.truncate(0);
     ck.observed.truncate(0);
     ck.lent_closure = NONE64;
+    ck.fn_actual = NONE32;
     if ck.skip {
         return;
     }
@@ -5378,11 +5383,13 @@ fn run_body(
         join(inout ck, body_actual, ck.returned, body_ex.start, body_ex.end)
     };
     expect_type(inout ck, sig.result, actual, body_ex.start, body_ex.end);
+    ck.fn_actual = refine_annotation(inout ck.ctx.types, sig.result, actual);
 }
 
 // `Checker::function_body` for the expression types: the parameters bound,
-// the body checked against the declared result. Writes `F start end` and a
-// `T start end type` row per recorded expression, or `S start end`.
+// the body checked against the declared result. Writes `F start end`, the
+// function's result `R type` (`Checker::results`) and a `T start end type`
+// row per recorded expression, or `S start end`.
 pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32, first: u32) {
     let sig_index = fn_index(in ck, fname);
     ck.current = sig_index;
@@ -5446,6 +5453,11 @@ pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32,
         put_u64(inout ck.out, end);
         ck.out.push(10);
         return;
+    }
+    if ck.fn_actual != NONE32 {
+        put(inout ck.out, "R ");
+        debug_type(in ck.ctx.types, in ck.ctx.names, ck.fn_actual, inout ck.out);
+        ck.out.push(10);
     }
     for e in w(first)..ck.exs.len() {
         let ty = u32_at(in ck.ex_types, e);
