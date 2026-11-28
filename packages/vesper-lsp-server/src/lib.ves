@@ -9,7 +9,9 @@
 //
 // The loop is single-threaded: each frame is handled before the next is
 // read, so a cancellation only ever names an answered request (which the
-// protocol lets the server ignore), and debounce timers wait for part 15b.
+// protocol lets the server ignore). `serve_live` (part 15b) reads the
+// client through the host as bytes arrive and, while it waits, runs the
+// debounce timers the engine armed.
 use @vesper/lsp::{
     Env, Envelope, Gate, Id, Le, LimitWord, NO_TOKEN, Perr, Plimits, Cursor, decoded, encode_frame,
     gate_new, gate_note, gate_request, new_doc, parse_envelope, perr_name, read_frame, read_limits,
@@ -29,6 +31,19 @@ const STATE_SHUTDOWN: u64 = 2;
 const ENGINE_CONTINUE: u64 = 0;
 const ENGINE_CLEAN: u64 = 1;
 const ENGINE_UNCLEAN: u64 = 2;
+
+// `lsp_engine_read`'s answers besides a byte count, and the wait that has
+// no limit.
+const READ_END: i64 = 0;
+const READ_WAITED: i64 = -1;
+const WAIT_FOREVER: i64 = -1;
+// `lsp_engine_write`'s answer for a write that went through.
+const WRITE_OK: u64 = 0;
+
+// How many bytes the live loop asks the host for at a time, and how many
+// handled bytes it keeps before dropping them from its buffer.
+const READ_CHUNK: u64 = 65536;
+const KEEP_HANDLED: u64 = 1048576;
 
 const BYTE_BITS: u32 = 8;
 
@@ -226,6 +241,17 @@ fn refuse_note(inout s: Server, r: Refusal, limits: Plimits) -> Next {
 // Hand a frame to the engine and write what it answered.
 fn engine(inout s: Server, in body: Slice[u8]) -> Next eff [Ffi[LspEngine]] {
     let n = LspEngine::lsp_engine_frame(in body);
+    answered(inout s, n)
+}
+
+// Run the timers that fired and write what they answered.
+fn tick(inout s: Server) -> Next eff [Ffi[LspEngine]] {
+    let n = LspEngine::lsp_engine_tick();
+    answered(inout s, n)
+}
+
+// Copy the engine's `n` bytes of frames out and act on how it ended.
+fn answered(inout s: Server, n: u64) -> Next eff [Ffi[LspEngine]] {
     if n > 0 {
         let at = s.out.len();
         s.out.resize(wrapping_add(at, n), 0);
@@ -241,10 +267,16 @@ fn engine(inout s: Server, in body: Slice[u8]) -> Next eff [Ffi[LspEngine]] {
     if exit == ENGINE_UNCLEAN {
         return fail(inout s, in "LSP exit before shutdown");
     }
-    let len = LspEngine::lsp_engine_error(inout s.error[0..0]);
-    s.error.resize(len, 0);
-    let _copied = LspEngine::lsp_engine_error(inout s.error[0..len]);
+    host_error(inout s);
     Next::NextFailed
+}
+
+// Append the host's error text to the loop's.
+fn host_error(inout s: Server) eff [Ffi[LspEngine]] {
+    let at = s.error.len();
+    let len = LspEngine::lsp_engine_error(inout s.error[at..at]);
+    s.error.resize(wrapping_add(at, len), 0);
+    let _copied = LspEngine::lsp_engine_error(inout s.error[at..s.error.len()]);
 }
 
 fn method_is(in m: Slice[u8], in name: Str) -> bool {
@@ -390,6 +422,140 @@ pub fn serve(
     ok
 }
 
+// What the live loop's wait for client bytes found.
+copy enum Fill {
+    FillMore,
+    FillEnd,
+    FillTick,
+    FillFailed
+}
+
+// Wait for more client bytes, at most until the engine's next timer.
+fn fill(inout s: Server, inout pending: ChunkSeq[u8]) -> Fill eff [Ffi[LspEngine]] {
+    let deadline = LspEngine::lsp_engine_deadline();
+    let wait = if deadline < 0 { WAIT_FOREVER } else { deadline };
+    let at = pending.len();
+    pending.resize(wrapping_add(at, READ_CHUNK), 0);
+    let n = LspEngine::lsp_engine_read(inout pending[at..pending.len()], wait);
+    if n > READ_END {
+        pending.truncate(wrapping_add(at, wrapping_u64(n)));
+        return Fill::FillMore;
+    }
+    pending.truncate(at);
+    if n == READ_END {
+        return Fill::FillEnd;
+    }
+    if n == READ_WAITED {
+        return Fill::FillTick;
+    }
+    host_error(inout s);
+    Fill::FillFailed
+}
+
+// Write the frames the loop has produced to the client.
+fn flush(inout s: Server) -> bool eff [Ffi[LspEngine]] {
+    if s.out.len() == 0 {
+        return true;
+    }
+    let written = LspEngine::lsp_engine_write(in s.out[0..s.out.len()]);
+    s.out.truncate(0);
+    if written == WRITE_OK {
+        return true;
+    }
+    host_error(inout s);
+    false
+}
+
+// Serve the client the host reads as its bytes arrive, writing each frame
+// as it is produced: the error text when the server stops with an error.
+// A frame is read only once its bytes are all in (`read_frame` reports a
+// partial one as truncated, and the client's later bytes never turn an
+// error into success), so chunking does not change what the client sees.
+pub fn serve_live(limits: Plimits, inout error: ChunkSeq[u8]) -> bool eff [Ffi[LspEngine]] {
+    let mut s = Server {
+        out: ChunkSeq::new(),
+        error: ChunkSeq::new(),
+        state: STATE_UNINITIALIZED,
+        gate: gate_new(),
+        method: ChunkSeq::new()
+    };
+    let mut pending: ChunkSeq[u8] = ChunkSeq::new();
+    let mut start: u64 = 0;
+    let mut ended = false;
+    let mut doc = new_doc();
+    let mut ok = true;
+    loop {
+        let mut cursor = Cursor { pos: 0 };
+        let read = read_step(in pending[start..pending.len()], inout cursor, limits);
+        let partial = match read.step {
+            Step::ReadFrame => false,
+            Step::ReadEnd => true,
+            Step::ReadBroken => match read.broken {
+                Perr::PTruncated => true,
+                _ => false,
+            },
+        };
+        if partial && !ended {
+            match fill(inout s, inout pending) {
+                Fill::FillMore => {}
+                Fill::FillEnd => ended = true,
+                Fill::FillTick => match tick(inout s) {
+                    Next::NextGo => {}
+                    Next::NextDone => break,
+                    Next::NextFailed => {
+                        ok = false;
+                        break;
+                    }
+                },
+                Fill::FillFailed => {
+                    ok = false;
+                    break;
+                }
+            }
+            if !flush(inout s) {
+                ok = false;
+                break;
+            }
+            continue;
+        }
+        match read.step {
+            Step::ReadEnd => break,
+            Step::ReadBroken => {
+                s.error.extend(in "LSP ".as_bytes());
+                s.error.extend(in perr_name(read.broken).as_bytes());
+                ok = false;
+                break;
+            }
+            Step::ReadFrame => {}
+        }
+        let from = wrapping_add(start, read.start);
+        let end = wrapping_add(from, read.len);
+        start = wrapping_add(start, cursor.pos);
+        let next = frame(inout s, inout doc, in pending[from..end], limits);
+        if !flush(inout s) {
+            ok = false;
+            break;
+        }
+        match next {
+            Next::NextGo => {}
+            Next::NextDone => break,
+            Next::NextFailed => {
+                ok = false;
+                break;
+            }
+        }
+        if start >= KEEP_HANDLED {
+            let mut rest: ChunkSeq[u8] = ChunkSeq::new();
+            rest.extend(in pending[start..pending.len()]);
+            pending = rest;
+            start = 0;
+        }
+    }
+    let _flushed = flush(inout s);
+    error.extend(in s.error[0..s.error.len()]);
+    ok
+}
+
 fn put_bytes(inout out: ChunkSeq[u64], in bytes: Slice[u8]) {
     out.push(bytes.len());
     let mut k: u64 = 0;
@@ -430,6 +596,18 @@ pub fn lsp_server_run(in input: Str) -> ChunkSeq[u64] eff [Ffi[LspEngine]] {
     let mut words: ChunkSeq[u64] = ChunkSeq::new();
     words.push(if ok { OUTCOME_OK } else { OUTCOME_ERR });
     put_bytes(inout words, in out[0..out.len()]);
+    put_bytes(inout words, in error[0..error.len()]);
+    words
+}
+
+// Task "server live": the input is the limits; the client is the host's.
+// The result is `OUTCOME_OK` or `OUTCOME_ERR`, then the error text.
+pub fn lsp_server_live(in input: Str) -> ChunkSeq[u64] eff [Ffi[LspEngine]] {
+    let limits = read_limits(in input.as_bytes(), 0);
+    let mut error: ChunkSeq[u8] = ChunkSeq::new();
+    let ok = serve_live(limits, inout error);
+    let mut words: ChunkSeq[u64] = ChunkSeq::new();
+    words.push(if ok { OUTCOME_OK } else { OUTCOME_ERR });
     put_bytes(inout words, in error[0..error.len()]);
     words
 }

@@ -4,7 +4,12 @@
 // A call hands one frame body over and returns the length of the frames
 // it wrote; `lsp_engine_take` copies them out with the copy-out protocol
 // of @vesper-std (a call returns the length `n` and copies only when `buf`
-// is big enough). The linux, macos and windows files are the same.
+// is big enough). The host also owns the client's byte streams and the
+// debounce timers (part 15b): `lsp_engine_read` waits up to `wait_ms`
+// milliseconds (negative: no limit) for client bytes, `lsp_engine_write`
+// writes frames to the client, `lsp_engine_deadline` says how long the
+// loop may wait before `lsp_engine_tick` runs the timers that fired. The
+// linux, macos and windows files are the same.
 sys library LspEngine (
     target = "@TARGET@", abi = "@ABI@",
     link = "static", name = "vesper_hybrid",
@@ -14,4 +19,13 @@ sys library LspEngine (
     fn lsp_engine_take(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
     fn lsp_engine_exit() -> ForeignVal[u64];
     fn lsp_engine_error(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    // Bytes read, 0 at end of input, -1 when `wait_ms` passed, -2 on an
+    // error (its text through `lsp_engine_error`).
+    fn lsp_engine_read(nocapture inout buf: CSlice[u8], wait_ms: i64) -> ForeignVal[i64];
+    // 0, or 1 when the write failed (its text through `lsp_engine_error`).
+    fn lsp_engine_write(nocapture in buf: CSlice[u8]) -> ForeignVal[u64];
+    // Milliseconds until a timer may fire, or -1 when none is armed.
+    fn lsp_engine_deadline() -> ForeignVal[i64];
+    // Run the fired timers, as `lsp_engine_frame` runs a frame.
+    fn lsp_engine_tick() -> ForeignVal[u64];
 }

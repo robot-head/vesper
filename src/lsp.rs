@@ -1087,15 +1087,25 @@ impl MacroPreviewForPort {
 /// request and notification gates; it hands each frame that passes them to
 /// this engine, which runs it through the same `handle_work` as [`serve`]
 /// and returns the frames that answer it. A `vesper.proofAudit` job runs to
-/// completion before the call returns, and debounce timers are not armed:
-/// the loop is single-threaded until it gains timers (part 15b).
+/// completion before the call returns. Debounce timers and background
+/// proof runs fire on their own threads, as in [`serve`]; the loop polls
+/// [`Engine::tick`] for them every [`Engine::deadline`] milliseconds while
+/// it waits for client bytes (part 15b).
 #[doc(hidden)]
 pub struct Engine {
     session: session::Session,
     shared: Shared<Vec<u8>>,
     events: Sender<Event>,
     inbox: Receiver<Event>,
+    /// Timer and background events that arrived while a proof job was
+    /// awaited, handled by the next [`Engine::tick`].
+    deferred: std::collections::VecDeque<Event>,
 }
+
+/// How often the loop polls [`Engine::tick`] while the client has
+/// background proof runs on: the debounce delays are hundreds of
+/// milliseconds.
+const ENGINE_POLL_MS: i64 = 10;
 
 /// What a frame handed to [`Engine::frame`] ended in.
 #[doc(hidden)]
@@ -1116,6 +1126,7 @@ impl Engine {
     pub fn new(config: LensConfig) -> Result<Self, String> {
         let (events, inbox) = mpsc::channel::<Event>();
         Ok(Self {
+            deferred: std::collections::VecDeque::new(),
             session: session::Session::with_config(config)?,
             shared: Shared {
                 pending: Mutex::new(PendingRequests::new(MAX_PENDING).map_err(|e| e.to_string())?),
@@ -1138,6 +1149,53 @@ impl Engine {
         (frames, exit, error)
     }
 
+    /// Milliseconds the loop may wait for client bytes before it calls
+    /// [`Engine::tick`], or -1 when no timer can fire.
+    pub fn deadline(&self) -> i64 {
+        if self.session.debouncing() || !self.deferred.is_empty() {
+            ENGINE_POLL_MS
+        } else {
+            -1
+        }
+    }
+
+    /// Handle the timers and background runs that finished, in arrival
+    /// order, returning the frames they wrote as [`Engine::frame`] does.
+    pub fn tick(&mut self) -> (Vec<u8>, EngineExit, String) {
+        let (exit, error) = match self.fired() {
+            Ok(()) => (EngineExit::Continue, String::new()),
+            Err(error) => (EngineExit::Failed, error),
+        };
+        let frames = std::mem::take(&mut *lock(&self.shared.writer));
+        (frames, exit, error)
+    }
+
+    fn fired(&mut self) -> Result<(), String> {
+        while let Some(event) = self
+            .deferred
+            .pop_front()
+            .or_else(|| self.inbox.try_recv().ok())
+        {
+            let work = match event {
+                Event::Timer { uri } => Work::Timer { uri },
+                Event::Background {
+                    uri,
+                    generation,
+                    job,
+                    outcome: Some(outcome),
+                } => Work::BackgroundDone {
+                    uri,
+                    generation,
+                    job,
+                    outcome,
+                },
+                _ => continue,
+            };
+            handle_work(&mut self.session, work, &self.events, &self.shared)?;
+        }
+        Ok(())
+    }
+
     fn handle(&mut self, body: &[u8]) -> Result<EngineExit, String> {
         let message = parse_envelope(body, self.shared.limits).map_err(|e| e.to_string())?;
         let work = match message {
@@ -1155,21 +1213,27 @@ impl Engine {
                 // A proof job answers from its own thread: wait for it.
                 if lock(&self.shared.pending).is_pending(&id, &token) {
                     while let Ok(event) = self.inbox.recv() {
-                        if let Event::Proof {
-                            id,
-                            token,
-                            job,
-                            outcome: Some(outcome),
-                        } = event
-                        {
-                            let done = Work::ProofDone {
+                        match event {
+                            Event::Proof {
                                 id,
                                 token,
                                 job,
-                                outcome,
-                            };
-                            handle_work(&mut self.session, done, &self.events, &self.shared)?;
-                            break;
+                                outcome: Some(outcome),
+                            } => {
+                                let done = Work::ProofDone {
+                                    id,
+                                    token,
+                                    job,
+                                    outcome,
+                                };
+                                handle_work(&mut self.session, done, &self.events, &self.shared)?;
+                                break;
+                            }
+                            // Timers keep their turn for the next tick.
+                            event @ (Event::Timer { .. } | Event::Background { .. }) => {
+                                self.deferred.push_back(event)
+                            }
+                            _ => {}
                         }
                     }
                 }
