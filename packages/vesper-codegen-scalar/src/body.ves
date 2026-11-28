@@ -2873,6 +2873,7 @@ impl Gen {
                 && kind != INST_READ
                 && kind != INST_READ_COPY
                 && kind != INST_CALL
+                && kind != INST_FOREIGN
             {
                 return false;
             }

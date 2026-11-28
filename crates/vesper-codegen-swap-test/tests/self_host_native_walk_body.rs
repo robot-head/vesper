@@ -2918,6 +2918,15 @@ fn words(in w: Slice[u32], n: u64) -> u32 eff [Ffi[Probe]] {
 fn fill(inout b: Slice[u8]) eff [Ffi[Probe]] {
     Probe::probe_fill(inout b, 7);
 }
+fn opened() -> bool eff [Ffi[Probe]] {
+    match Probe::probe_new() {
+        Some(c) => {
+            Probe::probe_free(c);
+            true
+        },
+        None => false,
+    }
+}
 fn main() -> u64 eff [Ffi[Probe]] {
     let mut v: ChunkSeq[u8] = ChunkSeq::new[u8]();
     v.push(1);
@@ -2931,6 +2940,7 @@ fn main() -> u64 eff [Ffi[Probe]] {
     let u = unit(4);
     let v = small(5);
     let w = signed(-6);
+    let _o = opened();
     match Probe::probe_new() {
         Some(c) => {
             let mut c = c;
@@ -3034,10 +3044,10 @@ fn vesper_bodies_with_foreign_calls_match() {
 
 /// `FFI_SOURCE`'s `sum`, `word`, `small`, `signed`, `unit` (foreign calls of
 /// scalars, narrow results and `bool`s), `use_ctx`, `peek` and `close`
-/// (handles lent `inout`, `in` and `sink`) and `twice` (calls of an `Ffi`
-/// function), at both optimizer settings. `main` (an `Option` result)
-/// stays on the walk.
-const MIN_FOREIGN_BODIES: u64 = 26;
+/// (handles lent `inout`, `in` and `sink`), `twice` (calls of an `Ffi`
+/// function), `blen`, `blen_text`, `words` and `fill` (slices) and
+/// `opened` (a nullable handle result), at both optimizer settings.
+const MIN_FOREIGN_BODIES: u64 = 28;
 
 // #2654 slice 3: the `Option` results of `try_byte_at` and a slice's
 // `try_get`, kept as words or built in memory (`seq_option`).

@@ -2959,6 +2959,8 @@ pub const BODY_PARAM_HANDLE: u64 = 2;
 pub const BODY_PARAM_SLICE: u64 = 3;
 pub const BODY_RESULT_UNIT: u64 = 0;
 pub const BODY_RESULT_SCALAR: u64 = 1;
+// A nullable handle: an `Option` of its struct.
+pub const BODY_RESULT_OPTION_HANDLE: u64 = 2;
 // The bit of a scalar word above its width: whether it is signed.
 const BODY_SIGNED: u64 = 256;
 // A scalar word's bits.
@@ -3101,6 +3103,9 @@ pub fn body_call(inout state: S, eff_name: u32, op: u32, inout words: ChunkSeq[u
     } else if func.result.tag == VT_SCALAR {
         words.push(BODY_RESULT_SCALAR);
         words.push(body_scalar(func.result.scalar));
+    } else if func.result.tag == VT_HANDLE && func.result.nullable {
+        words.push(BODY_RESULT_OPTION_HANDLE);
+        words.push(0);
     } else {
         plain = false;
     }

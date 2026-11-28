@@ -6,17 +6,20 @@
 // its C symbol and its form (tests/common/foreign_facts.rs,
 // `ffi_lowering::plan_probe::body_call`).
 //
-// The plan covers direct calls whose parameters are scalars, `bool`s and
-// handles and whose result is `Unit` or a scalar. Each argument is
-// evaluated where the walk evaluates it: an `in` or `inout` argument with
-// a place reads its whole local at the call (`ir_place_expr`), any other
-// is a temporary of the value already computed (`ir_temp`). A handle is
-// its struct's one word, copied first as `expr` copies an aggregate.
-// Slices, C strings, pointers, wire structs, enums and validated or handle
-// results stay on the walk.
+// The plan covers direct calls whose parameters are scalars, `bool`s,
+// handles and slices and whose result is `Unit`, a scalar or a nullable
+// handle. Each argument is evaluated where the walk evaluates it: an `in`
+// or `inout` argument with a place reads its whole local at the call
+// (`ir_place_expr`), any other is a temporary of the value already
+// computed (`ir_temp`). A handle is its struct's one word, copied first as
+// `expr` copies an aggregate; a slice is its view's data and length. A
+// nullable handle result is an `Option` of its struct in fresh storage.
+// C strings, pointers, wire structs, enums and validated results stay on
+// the walk.
 
 use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at};
 use @vesper/check-data::types::{TyKind, default_type};
+use @vesper/check-layout::{L_ENUM, layout_of};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::input::{Reader};
 use @vesper/place-ir::{InstRow};
@@ -28,6 +31,9 @@ use super::body::{Header, LANE_PRODUCT};
 pub const FOREIGN_FACTS: u64 = 6002813733352656710;
 const NONE64: u64 = 18446744073709551615;
 const NONE32: u32 = 4294967295;
+// The variant names `foreign_result` builds an `Option` from.
+const OPTION_SOME: Str = "Some";
+const OPTION_NONE: Str = "None";
 
 // `plan_probe::body_call`'s forms.
 const CALL_DIRECT: u64 = 1;
@@ -39,6 +45,9 @@ pub const PARAM_HANDLE: u64 = 2;
 pub const PARAM_SLICE: u64 = 3;
 const RESULT_UNIT: u64 = 0;
 const RESULT_SCALAR: u64 = 1;
+// A nullable handle (`ValueType::Handle { nullable: true }`): an
+// `Option` of its struct, built from the word.
+const RESULT_OPTION_HANDLE: u64 = 2;
 // A plan form's words: the form, then its scalar word.
 const FORM_WORDS: u64 = 2;
 
@@ -229,9 +238,58 @@ impl Gen {
         } else if result == RESULT_SCALAR {
             extra.push(result);
             extra.push(self.foreign.word(row, inc(at)));
+        } else if result == RESULT_OPTION_HANDLE {
+            if !self.body_foreign_option(i.ty, inout extra) {
+                return false;
+            }
         } else {
             return false;
         }
+        true
+    }
+
+    // The result words of a nullable handle of `Option` type `t`
+    // (`foreign_result_layout`): `RESULT_OPTION_HANDLE`, then its storage
+    // size, the `Some` tag, the payload's offset and the `None` tag.
+    fn body_foreign_option(inout self, t: u32, inout extra: ChunkSeq[u64]) -> bool {
+        if self.body_lane(t) != LANE_PRODUCT {
+            return false;
+        }
+        let mark = self.layouts.mark();
+        let d = default_type(inout self.ctx.types, t);
+        let l = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            d
+        );
+        let node = self.layouts.node(l);
+        let mut some = NONE64;
+        let mut none = NONE64;
+        let mut offset: u64 = 0;
+        if node.kind == L_ENUM {
+            for k in 0..widen_u64(node.n) {
+                let v = self.layouts.lvariant(add(widen_u64(node.a), k));
+                if self.ctx.names.spells(v.name, in OPTION_SOME.as_bytes()) && v.fc != 0 {
+                    some = k;
+                    let field = self.layouts.lfield(widen_u64(v.fa));
+                    offset = wrapping_u64(widen_i64(field.offset));
+                } else if self.ctx.names.spells(v.name, in OPTION_NONE.as_bytes()) {
+                    none = k;
+                }
+            }
+        }
+        let size = widen_u64(node.size);
+        self.layouts.reset(mark);
+        if some == NONE64 || none == NONE64 {
+            return false;
+        }
+        extra.push(RESULT_OPTION_HANDLE);
+        extra.push(size);
+        extra.push(some);
+        extra.push(offset);
+        extra.push(none);
         true
     }
 
