@@ -58,6 +58,10 @@ pub const OPEN_TYPE: Str = "$open";
 // A handle type's one field (`ffi_lowering::HANDLE_FIELD`) and its type.
 const HANDLE_FIELD: Str = "$handle";
 const HANDLE_WORD: Str = "u64";
+// The error of a validated foreign result (`ffi_lowering::INVALID_TYPE`)
+// and its one field, the raw word C returned.
+const INVALID_TYPE: Str = "ForeignInvalid";
+const INVALID_FIELD: Str = "raw";
 const SLICE_TYPE: Str = "Slice";
 const OPTION_TYPE: Str = "Option";
 const PATH_SEPARATOR: u8 = 58;
@@ -264,9 +268,10 @@ fn push_adt(inout world: World, name: u32, mode: u8, is_enum: bool, in d: AdtDra
 }
 
 // The pass-1 declarations `types::Generated::append` adds, in its order:
-// the wire structs, enums and handle types by name, then one linear
-// effect per library with an operation per function that has a source
-// shape (slice parameters `$open`).
+// the wire structs, enums and handle types by name, `ForeignInvalid` when
+// a result is validated, then one linear effect per library with an
+// operation per function that has a source shape (slice parameters
+// `$open`).
 pub fn add_foreign_decls(inout cp: CollectedProgram, inout f: Foreign) {
     if f.order.len() == 0 {
         return;
@@ -319,6 +324,15 @@ pub fn add_foreign_decls(inout cp: CollectedProgram, inout f: Foreign) {
         draft_variant(inout d, name);
         draft_field(inout d, handle_field, word);
         push_adt(inout cp.world, name, mode, false, in d);
+    }
+    // `ForeignInvalid { raw: u64 }`, when a result is validated.
+    if f.st.invalid {
+        let name = cp.names.intern(in INVALID_TYPE.as_bytes());
+        let raw = cp.names.intern(in INVALID_FIELD.as_bytes());
+        let mut d = draft();
+        draft_variant(inout d, name);
+        draft_field(inout d, raw, word);
+        push_adt(inout cp.world, name, MODE_COPY, false, in d);
     }
     let open = cp.types.named0(cp.names.intern(in OPEN_TYPE.as_bytes()));
     for k in 0..f.order.len() {
