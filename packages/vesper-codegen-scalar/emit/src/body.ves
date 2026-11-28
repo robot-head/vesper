@@ -395,6 +395,7 @@ const FOREIGN_PARAM_SLICE: u64 = 3;
 const FOREIGN_SOURCE_SLICE_LOCAL: u64 = 5;
 const FOREIGN_SOURCE_SLICE_TEMP: u64 = 6;
 const FOREIGN_RESULT_SCALAR: u64 = 1;
+const FOREIGN_RESULT_OPTION_HANDLE: u64 = 2;
 const FOREIGN_BITS_MASK: u64 = 255;
 const FOREIGN_SIGNED: u64 = 256;
 const WORD_BYTES_64: u64 = 8;
@@ -1412,6 +1413,28 @@ impl Body {
             }
         }
         let result = w.next();
+        if result == FOREIGN_RESULT_OPTION_HANDLE {
+            // `ValueType::Handle { nullable: true }`: the word, as a C
+            // pointer, then `Some(handle)` when it is not `NULL`, else
+            // `None`, in fresh zeroed storage.
+            let size = w.next();
+            let some = w.next();
+            let offset = w.next();
+            let none = w.next();
+            sig_return_ext(inout m, sig, module_pointer_type(in m), ext_none());
+            let callee = declare_function(inout m, in name.as_slice(), linkage_import(), sig);
+            let fun = import_function(inout b, inout m, callee);
+            let _ = ins_call(inout b, fun, in args.as_slice());
+            let word = inst_result(inout b, 0);
+            let present = ins_icmp_imm(inout b, cc_ne(), word, 0);
+            let ptr = self.zeroed(inout b, in m, size);
+            let some_tag = ins_iconst(inout b, ty_i64(), wrapping_i64(some));
+            let none_tag = ins_iconst(inout b, ty_i64(), wrapping_i64(none));
+            let tag = ins_select(inout b, present, some_tag, none_tag);
+            ins_store(inout b, PLAIN, tag, ptr, 0);
+            ins_store(inout b, PLAIN, word, ptr, wrapping_i32(offset));
+            return ptr;
+        }
         let scalar = w.next();
         if result == FOREIGN_RESULT_SCALAR {
             sig_return_ext(inout m, sig, foreign_carrier(scalar), foreign_ext(scalar));
@@ -1435,11 +1458,7 @@ impl Body {
 
     // A zeroed word's address (`Codegen::alloc` of a word, on either path).
     fn zeroed_word(inout self, inout b: Builder, in m: Module) -> Value eff [Ffi[Cranelift]] {
-        let slot = create_stack_slot(inout b, WORD_BYTES, SLOT_ALIGN_SHIFT);
-        let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
-        let zero = ins_iconst(inout b, ty_i64(), 0);
-        ins_store(inout b, PLAIN, zero, ptr, 0);
-        ptr
+        self.zeroed(inout b, in m, widen_u64(WORD_BYTES))
     }
 
     // A struct's own storage, of at least a word: `Codegen::alloc_uninit`
@@ -1451,6 +1470,21 @@ impl Body {
         in m: Module,
         size: u64
     ) -> Value eff [Ffi[Cranelift]] {
+        if !self.optimize {
+            return self.zeroed(inout b, in m, size);
+        }
+        let bytes = if size < widen_u64(WORD_BYTES) {
+            WORD_BYTES
+        } else {
+            wrapping_u32(size)
+        };
+        let slot = create_stack_slot(inout b, bytes, SLOT_ALIGN_SHIFT);
+        ins_stack_addr(inout b, module_pointer_type(in m), slot, 0)
+    }
+
+    // Storage of at least a word, zeroed a word at a time on either path
+    // (`Codegen::alloc`).
+    fn zeroed(inout self, inout b: Builder, in m: Module, size: u64) -> Value eff [Ffi[Cranelift]] {
         let bytes = if size < widen_u64(WORD_BYTES) {
             WORD_BYTES
         } else {
@@ -1458,16 +1492,14 @@ impl Body {
         };
         let slot = create_stack_slot(inout b, bytes, SLOT_ALIGN_SHIFT);
         let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
-        if !self.optimize {
-            let mut offset: u32 = 0;
-            loop {
-                if offset >= bytes {
-                    break;
-                }
-                let zero = ins_iconst(inout b, ty_i64(), 0);
-                ins_store(inout b, PLAIN, zero, ptr, wrapping_i32(offset));
-                offset = wrapping_add(offset, WORD_BYTES);
+        let mut offset: u32 = 0;
+        loop {
+            if offset >= bytes {
+                break;
             }
+            let zero = ins_iconst(inout b, ty_i64(), 0);
+            ins_store(inout b, PLAIN, zero, ptr, wrapping_i32(offset));
+            offset = wrapping_add(offset, WORD_BYTES);
         }
         ptr
     }

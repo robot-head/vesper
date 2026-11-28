@@ -1988,13 +1988,15 @@ pub mod plan_probe {
     /// A plain direct call has the `direct` handler and no callback
     /// pointer, `errno`, variadic tail, mapping, `@vesper-std/cpu` code or
     /// runtime-shared symbol, its parameters are scalars, `bool`s, handles
-    /// or slices and its result is `Unit` or a scalar. Its words are the
+    /// or slices and its result is `Unit`, a scalar or a nullable handle
+    /// (an `Option` of its struct). Its words are the
     /// parameter count, then two words per parameter, its form
     /// ([`BODY_PARAM_SCALAR`], [`BODY_PARAM_BOOL`], [`BODY_PARAM_HANDLE`] or
     /// [`BODY_PARAM_SLICE`]) and its word (`bits | signed << 8` for a
     /// scalar, the element's bytes for a slice, 0 for the others), then
-    /// the result's two: [`BODY_RESULT_UNIT`] and 0, or
-    /// [`BODY_RESULT_SCALAR`] and its scalar word.
+    /// the result's two: [`BODY_RESULT_UNIT`] and 0,
+    /// [`BODY_RESULT_SCALAR`] and its scalar word, or
+    /// [`BODY_RESULT_OPTION_HANDLE`] and 0.
     pub fn body_call(effect: &str, op: &str, target: &str) -> Option<(String, Vec<u64>)> {
         let installed = PLAN.with(|p| p.borrow().is_some());
         if !installed {
@@ -2024,6 +2026,9 @@ pub mod plan_probe {
         match function.result() {
             sys::ValueType::Unit => words.extend([BODY_RESULT_UNIT, 0]),
             sys::ValueType::Scalar(s) => words.extend([BODY_RESULT_SCALAR, scalar(*s)]),
+            sys::ValueType::Handle { nullable: true, .. } => {
+                words.extend([BODY_RESULT_OPTION_HANDLE, 0])
+            }
             _ => return Some((symbol, vec![BODY_CALL_OTHER])),
         }
         let plain = plan.handler == Handler::Direct
@@ -2044,6 +2049,7 @@ pub mod plan_probe {
     pub const BODY_PARAM_SLICE: u64 = 3;
     pub const BODY_RESULT_UNIT: u64 = 0;
     pub const BODY_RESULT_SCALAR: u64 = 1;
+    pub const BODY_RESULT_OPTION_HANDLE: u64 = 2;
     /// The bit of a scalar word above its width: whether it is signed.
     const SIGNED_SHIFT: u32 = 8;
 
