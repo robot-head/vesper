@@ -387,6 +387,10 @@ const PLAIN: u32 = 0;
 const INST_FOREIGN: u64 = 96;
 const FOREIGN_SOURCE_TEMP: u64 = 0;
 const FOREIGN_PARAM_BOOL: u64 = 1;
+const FOREIGN_PARAM_HANDLE: u64 = 2;
+const FOREIGN_SOURCE_HANDLE_IN: u64 = 2;
+const FOREIGN_SOURCE_HANDLE_INOUT: u64 = 3;
+const FOREIGN_SOURCE_HANDLE_TEMP: u64 = 4;
 const FOREIGN_RESULT_SCALAR: u64 = 1;
 const FOREIGN_BITS_MASK: u64 = 255;
 const FOREIGN_SIGNED: u64 = 256;
@@ -1291,7 +1295,37 @@ impl Body {
         let mut ti: u64 = 0;
         for k in 0..nargs {
             let source = w.next();
-            let value = if source == FOREIGN_SOURCE_TEMP {
+            let value = if source == FOREIGN_SOURCE_HANDLE_TEMP {
+                // `expr` of a `sink` handle's temporary copies it too; the
+                // call loads the word from the copy.
+                if ti >= temps.len() {
+                    return Value { id: invalid() };
+                }
+                let from = use_var(inout b, Var { id: at32(in temps, ti) });
+                ti = wrapping_add(ti, 1);
+                let copy = self.storage(inout b, in m, widen_u64(WORD_BYTES));
+                let word = ins_load(inout b, ty_i64(), PLAIN, from, 0);
+                ins_store(inout b, PLAIN, word, copy, 0);
+                ins_load(inout b, ty_i64(), PLAIN, copy, 0)
+            } else if source == FOREIGN_SOURCE_HANDLE_IN || source == FOREIGN_SOURCE_HANDLE_INOUT {
+                // `expr` copies the handle struct (`Codegen::alloc` and its
+                // word); the call loads the word from the copy (`in`) or
+                // from the local's own storage (`inout`, `address`).
+                let l = w.next();
+                if l >= self.locals.len() {
+                    return Value { id: invalid() };
+                }
+                let from = self.use_local(inout b, l);
+                let copy = self.storage(inout b, in m, widen_u64(WORD_BYTES));
+                let word = ins_load(inout b, ty_i64(), PLAIN, from, 0);
+                ins_store(inout b, PLAIN, word, copy, 0);
+                let ptr = if source == FOREIGN_SOURCE_HANDLE_IN {
+                    copy
+                } else {
+                    self.use_local(inout b, l)
+                };
+                ins_load(inout b, ty_i64(), PLAIN, ptr, 0)
+            } else if source == FOREIGN_SOURCE_TEMP {
                 let read = w.next();
                 if ti >= temps.len() {
                     return Value { id: invalid() };
@@ -1310,7 +1344,11 @@ impl Body {
             };
             let form = w.next();
             let scalar = w.next();
-            if form == FOREIGN_PARAM_BOOL {
+            if form == FOREIGN_PARAM_HANDLE {
+                // `ParameterType::Handle`: the word, as a C pointer.
+                sig_param_ext(inout m, sig, module_pointer_type(in m), ext_none());
+                args.push(value.id);
+            } else if form == FOREIGN_PARAM_BOOL {
                 // `ValueType::Bool`: a `uint8_t` carrier.
                 sig_param_ext(inout m, sig, ty_i8(), ext_uext());
                 args.push(ins_ireduce(inout b, ty_i8(), value).id);

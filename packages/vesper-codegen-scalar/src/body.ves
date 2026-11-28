@@ -2404,7 +2404,12 @@ impl Gen {
                 let local_ty = self.body_local_type(in h, k);
                 if self.body_lane(local_ty) == LANE_PRODUCT {
                     let pass = self.program.op(add(i.a, 2));
-                    if pass == PASS_IN {
+                    if pass == PASS_IN || pass == PASS_INOUT {
+                        // An `inout` read lends the storage itself, as an
+                        // `in` one does (a foreign handle argument, #2751).
+                        if pass == PASS_INOUT && !self.body_foreign_lends(widen_u64(i.dest)) {
+                            return false;
+                        }
                         kind = INST_READ;
                         extra.push(k);
                         extra.push(0);
@@ -2704,6 +2709,7 @@ impl Gen {
                 && kind != INST_BIND
                 && kind != INST_BIND_FIELDS
                 && kind != INST_CALL
+                && kind != INST_FOREIGN
             {
                 for k in 0..ops.len() {
                     if self.body_lane(n32(u64_at(in h.vty, u64_at(in ops, k)))) == LANE_PRODUCT {
