@@ -2,13 +2,15 @@
 // native lowering's decisions read, beyond @vesper/check-data's world
 // section: the function table (`world.functions`), the body expressions
 // (in `native::visit` order), the call instantiations (`world.calls`),
-// the `dyn` tables (`world.dyn_objects`) and two facts other passes own
-// (`trace_effects::active` and the fip caller-slot functions).
+// the `dyn` tables (`world.dyn_objects`) and three facts other passes own
+// (`trace_effects::active`, whether a `ConstDenorm` span exists and the fip
+// caller-slot functions).
 //
 // The section follows @vesper/place-ir's program section; the encoder is
 // `calls_section` in tests/self_host_codegen_calls.rs:
 //
-//   trace_active
+//   world flags: 1 trace_active | 2 a ConstDenorm span
+//     (`capability_effects::const_denorm_spans` is not empty)
 //   nf, nf x (name, fip, span start, end, ng, ng generic names,
 //             np, np x (name, pass, type), result type, effects (a Row
 //             type), body root expression + 1 or 0)
@@ -28,6 +30,9 @@ use @vesper/check-data::input::{Ctx, Reader};
 use @vesper/check-data::world::{set_by_symbol};
 
 const NONE32: u32 = 4294967295;
+// The world flags word's bits.
+const WORLD_TRACE_ACTIVE: u64 = 1;
+const WORLD_CONST_DENORM: u64 = 2;
 
 // `ExprKind` tags (the encoder's `expr_kind`).
 pub enum ExprKind: _ {
@@ -107,6 +112,9 @@ pub copy struct Task {
 
 pub struct Calls {
     trace_active: bool,
+    // A `ConstDenorm` function or closure exists, so the native walk flushes
+    // subnormals somewhere (`capability_effects::const_denorm_spans`).
+    const_denorm: bool,
     fns: ChunkSeq[FnInfo],
     generics: ChunkSeq[u32],
     params: ChunkSeq[ParamInfo],
@@ -310,6 +318,7 @@ fn read_names_into(
 pub fn read_calls(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Calls {
     let mut calls = Calls {
         trace_active: false,
+        const_denorm: false,
         fns: ChunkSeq::new[FnInfo](),
         generics: ChunkSeq::new[u32](),
         params: ChunkSeq::new[ParamInfo](),
@@ -326,7 +335,9 @@ pub fn read_calls(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Cal
         caller_slot_fns: ChunkSeq::new[u32](),
         tasks: ChunkSeq::new[Task](),
     };
-    calls.trace_active = reader.word(in bytes) != 0;
+    let world_flags = reader.word(in bytes);
+    calls.trace_active = world_flags & WORLD_TRACE_ACTIVE != 0;
+    calls.const_denorm = world_flags & WORLD_CONST_DENORM != 0;
     let fn_count = reader.word(in bytes);
     for i in 0..fn_count {
         let name = sym(in ctx, reader.word(in bytes));

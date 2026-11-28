@@ -1287,6 +1287,39 @@ pub fn object(
     m.finish().emit().map_err(|e| e.to_string())
 }
 
+/// Turns a library build's first lowering into the program the walk
+/// defines its instances from: bit builtins and wide tuples lowered, then
+/// optimized and inlined (`optimize`) or fip reuse slots assigned, `Box`
+/// drops elaborated and, optimized, loop invariants hoisted.
+fn prepare_walk_program(
+    world: &World,
+    optimize: bool,
+    program: &mut crate::ir::Program,
+) -> Result<(), String> {
+    crate::integer_widths::lower_bit_builtin_calls(world, program);
+    super::wide_native::refine_wide_tuples(program);
+    if optimize {
+        crate::ir_swap::optimize(world, program)?;
+        let budget = crate::ir_inline::Budget::for_program(world, program);
+        crate::ir_swap::inline(world, program, &budget);
+    } else {
+        crate::ir_opt::fip_reuse_pass(world, program)?;
+    }
+    crate::fip::elaborate_non_fip_drops(world, program);
+    if optimize {
+        // Native only, never the verified backend (Stage 1 perf lane 3).
+        crate::ir_swap::hoist(program);
+    }
+    Ok(())
+}
+/// The program the walk defines a library build's instances from
+/// ([`prepare_walk_program`] of the first lowering): the graphs whose fip
+/// side tables `native::BodyGate::graph` reads (#2661).
+pub fn library_walk_program(world: &World, optimize: bool) -> Result<crate::ir::Program, String> {
+    let mut program = crate::ir_swap::lower(world);
+    prepare_walk_program(world, optimize, &mut program)?;
+    Ok(program)
+}
 fn compile_exports<M: Module>(
     m: &mut M,
     world: &World,
@@ -1321,20 +1354,7 @@ fn compile_exports<M: Module>(
             ));
         }
     }
-    crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
-    super::wide_native::refine_wide_tuples(&mut program);
-    if optimize {
-        crate::ir_swap::optimize(world, &mut program)?;
-        let budget = crate::ir_inline::Budget::for_program(world, &program);
-        crate::ir_swap::inline(world, &mut program, &budget);
-    } else {
-        crate::ir_opt::fip_reuse_pass(world, &mut program)?;
-    }
-    crate::fip::elaborate_non_fip_drops(world, &mut program);
-    if optimize {
-        // Native only, never the verified backend (Stage 1 perf lane 3).
-        crate::ir_swap::hoist(&mut program);
-    }
+    prepare_walk_program(world, optimize, &mut program)?;
     // Exported symbols keep the failure-record ABI that foreign callers and
     // the v2 glue use; internal calls use the register conventions of [`NativeAbi`] (#935).
     let abi = match &plans {
