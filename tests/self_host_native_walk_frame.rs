@@ -928,3 +928,381 @@ fn compile_one(
         native::object_with_options(w, entry, None, optimize)
     }
 }
+
+// ----- the body hook's plain gate (#2661) -----------------------------------
+
+/// The gate entries, compiled with hooks off.
+fn gates_entry() -> &'static Entry {
+    static E: OnceLock<Entry> = OnceLock::new();
+    E.get_or_init(|| {
+        codegen_swap::with_hooks(CodegenHooks::default(), || {
+            package().entry("native_walk_gates", true)
+        })
+    })
+}
+
+fn graph_gates_entry() -> &'static Entry {
+    static E: OnceLock<Entry> = OnceLock::new();
+    E.get_or_init(|| {
+        codegen_swap::with_hooks(CodegenHooks::default(), || {
+            package().entry("native_walk_graph_gates", true)
+        })
+    })
+}
+
+/// One task's `G` lines: each instance's source function and the instance
+/// half of its gate, by key; `refused` when the task ends with `X`.
+#[derive(Default)]
+struct VesperGates {
+    instances: BTreeMap<String, (String, bool)>,
+    refused: bool,
+}
+
+/// The tasks of a `native_walk_gates` answer, in order.
+fn vesper_gates(text: &str) -> Vec<VesperGates> {
+    let mut tasks: Vec<VesperGates> = vec![];
+    let mut source = String::new();
+    for l in text.lines() {
+        if l.starts_with("E ") {
+            tasks.push(VesperGates::default());
+        } else if let Some(name) = l.strip_prefix("I ") {
+            source = name.to_string();
+        } else if let Some(gate) = l.strip_prefix("G ")
+            && let Some((key, bit)) = gate.rsplit_once(' ')
+            && let Some(task) = tasks.last_mut()
+        {
+            task.instances
+                .insert(key.to_string(), (source.clone(), bit == "1"));
+        } else if l.starts_with("X ")
+            && let Some(task) = tasks.last_mut()
+        {
+            task.refused = true;
+        }
+    }
+    tasks
+}
+
+/// The graph half of every graph of `program`, by function name; `None`
+/// when the program does not fit the place-ir decoder.
+fn vesper_graph_gates(w: &World, program: &Program) -> Option<BTreeMap<String, bool>> {
+    let (input, _) = ir_words::program_input(w, program)?;
+    let text = graph_gates_entry().text(&input);
+    Some(
+        text.lines()
+            .filter_map(|l| l.rsplit_once(' '))
+            .map(|(name, bit)| (name.to_string(), bit == "1"))
+            .collect(),
+    )
+}
+
+#[derive(Default, Debug)]
+struct GateTally {
+    worlds: usize,
+    skipped: usize,
+    tasks: usize,
+    unverified_tasks: usize,
+    functions: usize,
+    plain: usize,
+    instance_refused: usize,
+    graph_refused: usize,
+    /// Functions whose graph half could not be compared (the walk's program
+    /// did not fit the decoder).
+    graph_unverified: usize,
+    instance_diffs: usize,
+    graph_diffs: usize,
+}
+
+/// Compares the gate of every function each sampled entry compile of `w`
+/// defined: the Rust walk's `BodyGate` (`EmittedFunction::body_gate`)
+/// against the package's instance half over the calls input and its graph
+/// half over the program the walk defined from.
+fn check_gates_world(name: &str, w: &World, per: usize, tally: &mut GateTally) {
+    let names = entries(w, per);
+    if names.is_empty() {
+        return;
+    }
+    let tasks: Vec<(String, bool)> = names
+        .iter()
+        .flat_map(|n| [(n.clone(), false), (n.clone(), true)])
+        .collect();
+    let program = vesper::ir_swap::lower(w);
+    let Some(input) = calls_input(w, &program, &tasks) else {
+        tally.skipped += 1;
+        return;
+    };
+    tally.worlds += 1;
+    let gates = vesper_gates(&gates_entry().text(&input));
+    assert_eq!(gates.len(), tasks.len(), "{name}: one block per task");
+    for ((entry, optimize), vesper) in tasks.iter().zip(gates) {
+        tally.tasks += 1;
+        let quiet = quiet_panics();
+        let rust = std::panic::catch_unwind(|| {
+            let mut defined = vec![];
+            let mut observe = |f: native::EmittedFunction| {
+                if let Some(gate) = f.body_gate {
+                    defined.push((f.key, f.source, gate));
+                }
+            };
+            let _ = native::object_with_observer(w, entry, None, *optimize, Some(&mut observe));
+            let walked = native::entry_walk_program(w, entry, *optimize).ok();
+            (defined, walked)
+        });
+        drop(quiet);
+        let Ok((defined, walked)) = rust else {
+            tally.unverified_tasks += 1;
+            continue;
+        };
+        let graphs = walked.and_then(|p| vesper_graph_gates(w, &p));
+        let label = format!("{name} {entry} opt={optimize}");
+        for (key, source, gate) in defined {
+            tally.functions += 1;
+            tally.plain += gate.plain() as usize;
+            tally.instance_refused += !gate.instance as usize;
+            tally.graph_refused += !gate.graph as usize;
+            match vesper.instances.get(&key) {
+                Some((_, v)) if *v == gate.instance => {}
+                Some((_, v)) => {
+                    tally.instance_diffs += 1;
+                    eprintln!(
+                        "{label}: {key}: instance half rust {} vesper {v}",
+                        gate.instance
+                    );
+                }
+                None => {
+                    tally.instance_diffs += 1;
+                    eprintln!(
+                        "{label}: {key}: no Vesper gate (task refused: {})",
+                        vesper.refused
+                    );
+                }
+            }
+            match graphs.as_ref().and_then(|g| g.get(&source)) {
+                Some(v) if *v == gate.graph => {}
+                Some(v) => {
+                    tally.graph_diffs += 1;
+                    eprintln!("{label}: {key}: graph half rust {} vesper {v}", gate.graph);
+                }
+                None => tally.graph_unverified += 1,
+            }
+        }
+    }
+}
+
+/// Small programs that pass and fail each part of the gate.
+const GATE_FIXTURES: &[&str] = &[
+    "fn square(x: i64) -> i64 { wrapping_mul(x, x) }
+fn main() -> i64 { wrapping_add(square(3), square(4)) }",
+    "fn step(a: u64, b: u64) -> u64 eff [Fail[ArithOverflow]] { a * b + 1 }
+fn total(a: u64, b: u64) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] { step(a, b) / b }",
+    "fn bump(inout x: u64) { x = wrapping_add(x, 1); }
+fn main() -> u64 { let mut y: u64 = 1; bump(inout y); bump(inout y); y }",
+    "fn flush(x: f64) -> f64 eff [ConstDenorm] { x * 0.5 }
+fn half(x: f64) -> f64 { x * 0.5 }",
+    "fn id[T](x: T) -> T { x }
+fn main() -> u64 { wrapping_add(id(3), id(4)) }",
+    "fn apply(f: fn(u64) -> u64, x: u64) -> u64 { f(f(x)) }
+fn inc(x: u64) -> u64 { wrapping_add(x, 1) }
+fn main() -> u64 { apply(inc, 3) }",
+    "struct P { a: u64, b: u64 }
+fn swap(p: P) -> P { P { a: p.b, b: p.a } }
+fn main() -> u64 { let q = swap(P { a: 1, b: 2 }); q.a }",
+];
+
+/// The fixtures that parse and check clean, with their worlds.
+fn gate_fixture_worlds() -> Vec<(String, World)> {
+    let quiet = quiet_panics();
+    let worlds = GATE_FIXTURES
+        .iter()
+        .enumerate()
+        .filter_map(|(i, src)| {
+            std::panic::catch_unwind(|| {
+                let parsed = vesper::parser::parse(src);
+                if !parsed.diagnostics.is_empty() {
+                    return None;
+                }
+                let checked = vesper::check::check(&parsed.module);
+                checked
+                    .diagnostics
+                    .is_empty()
+                    .then(|| (format!("fixture {i}"), checked.world))
+            })
+            .ok()
+            .flatten()
+        })
+        .collect();
+    drop(quiet);
+    worlds
+}
+
+/// The fixtures that must check: plain functions, failure records, an
+/// `inout` scalar, `ConstDenorm`, generics, a function value, a struct.
+const MIN_GATE_FIXTURES: usize = 4;
+
+/// The package's gate is the Rust walk's on every function the sampled
+/// entry compiles of the corpus, the test sources and the fixtures define
+/// (`NATIVE_WALK_FRAME_STEP`, `NATIVE_WALK_FRAME_ENTRIES` as above).
+#[test]
+fn body_gates_match_rust() {
+    let tally = big_stack(|| {
+        let mut t = GateTally::default();
+        let step = env_or("NATIVE_WALK_FRAME_STEP", 4);
+        let per = env_or("NATIVE_WALK_FRAME_ENTRIES", 2);
+        let fixtures = gate_fixture_worlds();
+        assert!(
+            fixtures.len() >= MIN_GATE_FIXTURES,
+            "only {} gate fixtures check",
+            fixtures.len()
+        );
+        for (name, w) in &fixtures {
+            check_gates_world(name, w, per.max(GATE_FIXTURE_ENTRIES), &mut t);
+        }
+        for case in corpus().iter().step_by(step) {
+            check_gates_world(&case.name, &case.world, per, &mut t);
+        }
+        for (name, w) in source_worlds() {
+            check_gates_world(&name, &w, per, &mut t);
+        }
+        t
+    });
+    eprintln!("native walk body gates: {tally:#?}");
+    assert!(tally.functions > 1000, "only {} functions", tally.functions);
+    assert!(
+        tally.plain > 0 && tally.instance_refused > 0,
+        "the gate no longer sees both answers"
+    );
+    assert_eq!(tally.instance_diffs + tally.graph_diffs, 0);
+}
+
+/// Entries per fixture world: every function of a fixture.
+const GATE_FIXTURE_ENTRIES: usize = 4;
+
+/// The library build in progress.
+#[derive(Default)]
+struct LibraryGates {
+    /// The package's whole gate, by instance key.
+    gates: Option<BTreeMap<String, bool>>,
+    /// The functions the walk asked the `body` hook for.
+    asked: Vec<String>,
+}
+
+thread_local! {
+    static LIBRARY_GATES: std::cell::RefCell<LibraryGates> =
+        std::cell::RefCell::new(LibraryGates::default());
+}
+
+/// The `export_plans` hook of the library gate test: notes the package's
+/// gate of every instance of the library task, then declines.
+fn gate_export_plans(
+    world: &World,
+    program: &Program,
+    roots: &[&str],
+    optimize: bool,
+) -> Option<native::EntryPlans> {
+    let tasks: Vec<(String, u64)> = roots
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.to_string(), optimize as u64 | if i == 0 { 4 } else { 8 }))
+        .collect();
+    let gates = codegen_calls_words::calls_input_flags_wide(world, program, &tasks)
+        .map(|input| vesper_gates(&gates_entry().text(&input)));
+    let walked = native::export::library_walk_program(world, optimize).ok();
+    let graphs = walked.and_then(|p| vesper_graph_gates(world, &p));
+    let whole = gates.zip(graphs).and_then(|(tasks, graphs)| {
+        let task = tasks.into_iter().next()?;
+        Some(
+            task.instances
+                .into_iter()
+                .map(|(key, (source, instance))| {
+                    let graph = graphs.get(&source).copied().unwrap_or(false);
+                    (key, instance && graph)
+                })
+                .collect(),
+        )
+    });
+    LIBRARY_GATES.with(|cell| cell.borrow_mut().gates = whole);
+    None
+}
+
+/// The recording `body` hook: notes the function and declines.
+fn gate_record_request(lent: &mut codegen_swap::Lent<'_, '_>) -> Result<bool, String> {
+    if lent.op == codegen_swap::body::FUNCTION {
+        let function = lent.site.function.to_owned();
+        LIBRARY_GATES.with(|cell| cell.borrow_mut().asked.push(function));
+    }
+    Ok(false)
+}
+
+/// Library builds (`native_export::compile_world`, every sampled entry
+/// exported, and the fixtures) ask the `body` hook only for functions the
+/// package's gate leaves plain. A plain function the walk still keeps (the
+/// hook's later refusals: sequence drops or fused reads, a result home or a
+/// split local) is counted.
+#[test]
+fn body_gates_cover_library_requests() {
+    use vesper::native::export::{LibraryOptions, compile_world};
+    let (libraries, requests, kept, bad) = big_stack(|| {
+        let _ = (gates_entry(), graph_gates_entry());
+        let hooks = CodegenHooks {
+            export_plans: Some(gate_export_plans),
+            body: Some(gate_record_request),
+            ..CodegenHooks::default()
+        };
+        let step = env_or("NATIVE_WALK_FRAME_STEP", 4);
+        let per = env_or("NATIVE_WALK_FRAME_ENTRIES", 4);
+        let fixtures = gate_fixture_worlds();
+        let sources = source_worlds();
+        let worlds = fixtures
+            .iter()
+            .map(|(n, w)| (n, w))
+            .chain(corpus().iter().step_by(step).map(|c| (&c.name, &c.world)))
+            .chain(sources.iter().map(|(n, w)| (n, w)));
+        let (mut libraries, mut requests, mut kept, mut bad) = (0usize, 0usize, 0usize, 0usize);
+        for (name, w) in worlds {
+            let public: std::collections::BTreeSet<String> = entries(w, per).into_iter().collect();
+            if public.is_empty() {
+                continue;
+            }
+            for optimize in [false, true] {
+                let options = LibraryOptions {
+                    library: "walk",
+                    target: None,
+                    optimize,
+                };
+                LIBRARY_GATES.with(|cell| *cell.borrow_mut() = LibraryGates::default());
+                let quiet = quiet_panics();
+                let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    codegen_swap::with_hooks(hooks, || compile_world(w, &public, &options))
+                }));
+                drop(quiet);
+                let LibraryGates { gates, asked } =
+                    LIBRARY_GATES.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+                let (Ok(_), Some(gates)) = (built, gates) else {
+                    continue;
+                };
+                libraries += 1;
+                requests += asked.len();
+                for function in &asked {
+                    if gates.get(function) != Some(&true) {
+                        bad += 1;
+                        eprintln!(
+                            "{name} opt={optimize}: the walk asked for {function}, the package's gate says {:?}",
+                            gates.get(function)
+                        );
+                    }
+                }
+                kept += gates
+                    .iter()
+                    .filter(|(key, plain)| **plain && !asked.contains(*key))
+                    .count();
+            }
+        }
+        (libraries, requests, kept, bad)
+    });
+    eprintln!(
+        "library body gates: {libraries} libraries, {requests} body requests, {bad} outside the \
+         package's gate, {kept} plain functions kept by the walk"
+    );
+    assert!(libraries > 50, "only {libraries} libraries");
+    assert!(requests > 0, "no body requests");
+    assert_eq!(bad, 0);
+}
