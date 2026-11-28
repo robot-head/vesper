@@ -6,6 +6,7 @@ mod forge_commands;
 mod lib_commands;
 mod lint_commands;
 mod package_graph;
+mod sim_host;
 mod tool_commands;
 mod verify_commands;
 mod vsys_commands;
@@ -51,6 +52,7 @@ const COMPILER_COMMANDS: &[&str] = &[
     "lsp",
     "proof-audit",
     "run",
+    "sim-host",
     "test",
     "verify",
 ];
@@ -133,6 +135,10 @@ fn cli() -> Result<(), String> {
     }
     if command == "lsp" {
         return lsp::serve(io::BufReader::new(io::stdin()), io::stdout());
+    }
+    // Hidden: the evaluator behind `vesper-sim` (crates/vesper-sim-session).
+    if command == "sim-host" {
+        return sim_host::serve_stdio();
     }
     if !matches!(command.as_str(), "check" | "run" | "jit" | "build" | "emit") {
         return Err(format!("unknown command '{command}'; see --help"));

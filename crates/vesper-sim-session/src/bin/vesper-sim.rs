@@ -1,9 +1,10 @@
 //! `vesper-sim record <source.ves> <scenario.json> [recording.json]`
 //! `vesper-sim replay <source.ves> <scenario.json> <recording.json>`
 //!
-//! Runs checked source on the reference evaluator under SimPulse. Recordings
-//! are bound to this executable's SHA-256 digest; replay with a different
-//! build, source, scenario, model semantics or options is rejected. Version 2
+//! Runs checked source on the reference evaluator (`vesper sim-host`, found
+//! through `VESPER_COMPILER`, beside this executable or on `PATH`) under
+//! SimPulse. Recordings are bound to the digests of this executable and that
+//! compiler; replay with a different build, source, scenario, model semantics or options is rejected. Version 2
 //! scenarios also print lost tasks and the final durable log bytes; version 3
 //! scenarios print each NIC's final UMEM frame accounting.
 use std::process::ExitCode;
