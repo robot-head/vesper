@@ -2569,6 +2569,7 @@ stage2_port_builder(
     ]) + [
         "//packages/vesper-codegen-numeric:files",
         "//packages/vesper-cranelift:files",
+        "//crates/vesper-hybrid:native_backend_package",
         "//packages/vesper-crypto:files",
     ],
     seed = "//bootstrap/stage2-seed:seed",
