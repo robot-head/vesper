@@ -11,7 +11,9 @@ use @vesper/check-data::util::{n32, u32_at, w};
 use @vesper/check-data::world::{Generic, World, set_by_symbol};
 use @vesper/check-names-packages::{AssembledModule};
 use @vesper/place-ir::codes::{Lit, Pat};
-use @vesper/place-ir-lower::ast::{Ast as IrAst, Cl, Ef, Eop, Ex, FnR, Gn, Hd, PathR, Pm, Pt};
+use @vesper/place-ir-lower::ast::{
+    Ast as IrAst, Cl, Ef, Eop, Ex, FnR, Gn, Hd, PathR, Pm, Pt, hd_lit_tys
+};
 use @vesper-std/arena::{idx_from_raw};
 use self::collect::{CollectedProgram, ParamInfo, lower_effects, lower_ty, translate_sym};
 use self::traits::{MonoPlan, Rename, TraitInfo, find_rename, inst_vars, thunk_at};
@@ -877,8 +879,7 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
             return_clause: ret,
             op_count: on,
             outgoing: empty_row,
-            body_ty: NONE32,
-            out_ty: NONE32,
+            lit_tys: hd_lit_tys(NONE32, NONE32),
             move_start: 0,
             move_count: 0
         });

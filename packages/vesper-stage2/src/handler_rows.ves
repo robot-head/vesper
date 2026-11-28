@@ -12,7 +12,7 @@ use @vesper/check-data::types::{
 use @vesper/check-data::util::{n32, u32_at, u64_at, w};
 use @vesper/check-data::world::{World};
 use @vesper/place-ir::codes::{Lit, Pat};
-use @vesper/place-ir-lower::ast::{Ast, Cl, Ef, Eop, Ex, FnR, Hd};
+use @vesper/place-ir-lower::ast::{Ast, Cl, Ef, Eop, Ex, FnR, Hd, hd_lit_tys};
 use @vesper/wasm-backend::ir::{CallRow, Pair};
 use self::facts::{children};
 use self::typecheck::{find_eop};
@@ -948,8 +948,7 @@ pub fn infer_handler_rows(
                     Option::Some(h) => {
                         let mut h2 = h;
                         h2.outgoing = r.row;
-                        h2.body_ty = r.body_ty;
-                        h2.out_ty = r.out_ty;
+                        h2.lit_tys = hd_lit_tys(r.body_ty, r.out_ty);
                         let _ = a.hds.try_set(r.hd, h2);
                     },
                     Option::None => {},

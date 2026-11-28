@@ -146,6 +146,23 @@ pub copy struct Eop {
 }
 
 // A handler clause: patterns xs[pattern_start..pattern_start+pattern_count], body.
+// A handler's packed literal types (`Hd.lit_tys`): its handled body's
+// and its own, NONE32 where the span's type stands.
+pub fn hd_body_ty(h: Hd) -> u32 {
+    n32(wrapping_shr_u64(h.lit_tys, HD_LIT_SHIFT))
+}
+
+pub fn hd_out_ty(h: Hd) -> u32 {
+    n32(h.lit_tys & HD_LIT_LOW)
+}
+
+pub fn hd_lit_tys(body_ty: u32, out_ty: u32) -> u64 {
+    wrapping_shl_u64(w(body_ty), HD_LIT_SHIFT) | w(out_ty)
+}
+
+const HD_LIT_SHIFT: u32 = 32;
+const HD_LIT_LOW: u64 = 4294967295;
+
 pub copy struct Cl {
     name: u32,
     pattern_start: u64,
@@ -158,8 +175,9 @@ pub copy struct Cl {
 // expression (NONE without state); the return clause cls[return_clause] and
 // operation clauses cls[return_clause+1..return_clause+1+op_count]; outgoing
 // effects (a Row type); the handled body's and the handler's types where
-// they keep an integer literal's type (else NONE32: their spans' types);
-// moves xs[move_start..move_start+2*move_count].
+// they keep an integer literal's type, packed as body << 32 | handler
+// (each NONE32 for its span's type; `hd_body_ty`, `hd_out_ty`); moves
+// xs[move_start..move_start+2*move_count].
 pub copy struct Hd {
     pool: u64,
     label: u32,
@@ -173,8 +191,7 @@ pub copy struct Hd {
     return_clause: u64,
     op_count: u64,
     outgoing: u32,
-    body_ty: u32,
-    out_ty: u32,
+    lit_tys: u64,
     move_start: u64,
     move_count: u64,
 }
@@ -505,8 +522,7 @@ impl Ast {
                     return_clause: src.return_clause,
                     op_count: src.op_count,
                     outgoing: src.outgoing,
-                    body_ty: src.body_ty,
-                    out_ty: src.out_ty,
+                    lit_tys: src.lit_tys,
                     move_start: src.move_start,
                     move_count: src.move_count,
                 }),
@@ -699,8 +715,7 @@ impl Ast {
                 return_clause: 0,
                 op_count: 0,
                 outgoing: 0,
-                body_ty: NONE32,
-                out_ty: NONE32,
+                lit_tys: NONE64,
                 move_start: 0,
                 move_count: 0
             },
@@ -1027,8 +1042,7 @@ fn read_handler(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx, inout as
         return_clause: return_clause,
         op_count: op_count,
         outgoing: outgoing,
-        body_ty: NONE32,
-        out_ty: NONE32,
+        lit_tys: NONE64,
         move_start: move_start,
         move_count: move_count
     });
