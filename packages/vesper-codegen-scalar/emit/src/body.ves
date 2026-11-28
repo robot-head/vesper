@@ -50,7 +50,8 @@ use @vesper/cranelift::{
     seal_block, set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i128, ty_i32, ty_i64,
     ty_i8, use_var, vals1, value_type, create_stack_slot, ins_iadd_imm, ins_load, ins_stack_addr,
     ins_store, module_pointer_type, ins_imul_imm, ins_uload8, ins_uload16, ins_uload32,
-    mem_can_move, mem_readonly, mem_trusted
+    mem_can_move, mem_readonly, mem_trusted, data_align, data_define, data_new,
+    declare_anonymous_data, define_data, import_data, ins_symbol_value
 };
 use super::{
     BODY_ERROR, DECLINED, HANDLED, coerce, emit_overflow_test, kind_max_imm, kind_min_imm,
@@ -124,6 +125,16 @@ const SEQ_AS_BYTES: u64 = 3;
 const SEQ_BYTE_AT: u64 = 4;
 const SEQ_GET: u64 = 5;
 const SEQ_VIEW_WORD: u64 = 6;
+const SEQ_LAST: u64 = 7;
+const SEQ_LITERAL: u64 = 8;
+// The bits of a literal byte, and the bytes of a literal word.
+const BYTE_BITS: u64 = 8;
+const BYTE_MASK: u64 = 255;
+const STR_CAP: i32 = 8;
+// A literal's static bytes are aligned like the Rust walk's.
+const LITERAL_ALIGN: u64 = 8;
+// A literal byte's position within its word.
+const LITERAL_WORD_MASK: u64 = 7;
 // The header words (src/strings/native.rs, src/seq/native.rs): a
 // string's `{len, cap, data}`, a slice view's `{handle, start, len}`, a
 // sequence header's data pointer.
@@ -1388,6 +1399,61 @@ impl Body {
         switch_to_block(inout b, good);
     }
 
+    // `Codegen::string_literal`: `{n, 0, &static_bytes}` in fresh zeroed
+    // storage, `{0, 0, null}` when empty. Invalid when the module refuses
+    // the data.
+    fn literal(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words
+    ) -> Value eff [Ffi[Cranelift]] {
+        let n = w.next();
+        let len = ins_iconst(inout b, ty_i64(), wrapping_i64(n));
+        let zero = ins_iconst(inout b, ty_i64(), 0);
+        let data = if n == 0 {
+            zero
+        } else {
+            let mut bytes = ChunkSeq::with_capacity[u8](n);
+            let mut word: u64 = 0;
+            for k in 0..n {
+                if k & LITERAL_WORD_MASK == 0 {
+                    word = w.next();
+                }
+                bytes.push(wrapping_u8(word & BYTE_MASK));
+                word = word >> BYTE_BITS;
+            }
+            let id = declare_anonymous_data(inout m, false, false);
+            let mut d = match data_new() {
+                Some(d) => d,
+                None => return Value { id: invalid() },
+            };
+            data_define(inout d, in bytes.as_slice());
+            data_align(inout d, LITERAL_ALIGN);
+            if !define_data(inout m, id, d) {
+                return Value { id: invalid() };
+            }
+            let gv = import_data(inout b, in m, id);
+            ins_symbol_value(inout b, module_pointer_type(in m), gv)
+        };
+        // `str_value`: `Codegen::alloc(24)`, then the three words.
+        let slot = create_stack_slot(inout b, VIEW_BYTES, SLOT_ALIGN_SHIFT);
+        let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+        let mut offset: u32 = 0;
+        loop {
+            if offset >= VIEW_BYTES {
+                break;
+            }
+            let z = ins_iconst(inout b, ty_i64(), 0);
+            ins_store(inout b, PLAIN, z, ptr, wrapping_i32(offset));
+            offset = wrapping_add(offset, WORD_BYTES);
+        }
+        ins_store(inout b, PLAIN, len, ptr, STR_LEN);
+        ins_store(inout b, PLAIN, zero, ptr, STR_CAP);
+        ins_store(inout b, PLAIN, data, ptr, STR_DATA);
+        ptr
+    }
+
     // `Codegen::seq_op` of a string or slice operation (#2653) on
     // receiver `x` and index `y`: `str_op`'s `len`, `as_str`, `as_bytes`
     // and `byte_at` (`str_word`, `str_value`, `seq_guard`, `str_byte`),
@@ -1397,12 +1463,15 @@ impl Body {
     fn seq(
         inout self,
         inout b: Builder,
-        in m: Module,
+        inout m: Module,
         inout w: Words,
         x: Value,
         y: Value
     ) -> Value eff [Ffi[Cranelift]] {
         let form = w.next();
+        if form == SEQ_LITERAL {
+            return self.literal(inout b, inout m, inout w);
+        }
         if form == SEQ_WORD {
             let offset = w.next();
             return ins_load(inout b, ty_i64(), PLAIN, x, wrapping_i32(offset));
@@ -1446,34 +1515,19 @@ impl Body {
             let at = ins_iadd(inout b, data, y);
             return ins_uload8(inout b, ty_i64(), PLAIN, at, 0);
         }
+        if form == SEQ_LAST {
+            return self.seq_last(inout b, inout w, x);
+        }
         if form == SEQ_GET {
             let stride = w.next();
             let lane = w.next();
             let index = w.next();
             let size = w.next();
             let tag = w.next();
-            // `seq_view`: an invariant view's handle is invariant too.
-            let handle = self.seq_word(inout b, x, VIEW_HANDLE);
-            if self.is_invariant(x) {
-                self.invariant.push(handle.id);
-            }
-            let start = self.seq_word(inout b, x, VIEW_START);
-            let len = self.seq_word(inout b, x, VIEW_LEN);
+            let (handle, start, len) = self.seq_view(inout b, x);
             let valid = ins_icmp(inout b, cc_ult(), y, len);
             self.raising(inout b, in m, valid, false, index, size, tag);
-            // `seq_elem_addr`: from an invariant handle, `data + start *
-            // stride` first, which Cranelift computes once.
-            let data = self.seq_word(inout b, handle, HEADER_DATA);
-            let addr = if self.is_invariant(handle) {
-                let first = ins_imul_imm(inout b, start, wrapping_i64(stride));
-                let base = ins_iadd(inout b, data, first);
-                let offset = ins_imul_imm(inout b, y, wrapping_i64(stride));
-                ins_iadd(inout b, base, offset)
-            } else {
-                let at = ins_iadd(inout b, start, y);
-                let offset = ins_imul_imm(inout b, at, wrapping_i64(stride));
-                ins_iadd(inout b, data, offset)
-            };
+            let addr = self.seq_elem_addr(inout b, handle, start, y, stride);
             return if stride == STRIDE_BYTE {
                 ins_uload8(inout b, ty_i64(), PLAIN, addr, 0)
             } else if stride == STRIDE_HALF {
@@ -1485,6 +1539,107 @@ impl Body {
             };
         }
         Value { id: invalid() }
+    }
+
+    // `seq_view`: a slice view's handle, start and length, the handle
+    // invariant when the view is.
+    fn seq_view(
+        inout self,
+        inout b: Builder,
+        x: Value
+    ) -> (Value, Value, Value) eff [Ffi[Cranelift]] {
+        let handle = self.seq_word(inout b, x, VIEW_HANDLE);
+        if self.is_invariant(x) {
+            self.invariant.push(handle.id);
+        }
+        let start = self.seq_word(inout b, x, VIEW_START);
+        let len = self.seq_word(inout b, x, VIEW_LEN);
+        (handle, start, len)
+    }
+
+    // `seq_elem_addr` of element `i` from `start`: from an invariant
+    // handle, `data + start * stride` first, which Cranelift computes
+    // once.
+    fn seq_elem_addr(
+        inout self,
+        inout b: Builder,
+        handle: Value,
+        start: Value,
+        i: Value,
+        stride: u64
+    ) -> Value eff [Ffi[Cranelift]] {
+        let data = self.seq_word(inout b, handle, HEADER_DATA);
+        if self.is_invariant(handle) {
+            let first = ins_imul_imm(inout b, start, wrapping_i64(stride));
+            let base = ins_iadd(inout b, data, first);
+            let offset = ins_imul_imm(inout b, i, wrapping_i64(stride));
+            ins_iadd(inout b, base, offset)
+        } else {
+            let at = ins_iadd(inout b, start, i);
+            let offset = ins_imul_imm(inout b, at, wrapping_i64(stride));
+            ins_iadd(inout b, data, offset)
+        }
+    }
+
+    // A slice's `last` (#2653) through `seq_option` with a two-word
+    // request: the `Option`'s tag and payload joined at a block of two
+    // words, each then coerced and defined; the walk's zero is the
+    // instruction's own value.
+    fn seq_last(
+        inout self,
+        inout b: Builder,
+        inout w: Words,
+        x: Value
+    ) -> Value eff [Ffi[Cranelift]] {
+        let stride = w.next();
+        let none_tag = w.next();
+        let some_tag = w.next();
+        let (handle, start, len) = self.seq_view(inout b, x);
+        let present = ins_icmp_imm(inout b, cc_ne(), len, 0);
+        let none = create_block(inout b);
+        let some = create_block(inout b);
+        let done = create_block(inout b);
+        let tag_param = append_block_param(inout b, done, ty_i64());
+        let value_param = append_block_param(inout b, done, ty_i64());
+        ins_brif0(inout b, present, some, none);
+        switch_to_block(inout b, none);
+        let tag = ins_iconst(inout b, ty_i64(), wrapping_i64(none_tag));
+        let zero = ins_iconst(inout b, ty_i64(), 0);
+        let mut none_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        none_args.push(tag.id);
+        none_args.push(zero.id);
+        ins_jump(inout b, done, in none_args.as_slice());
+        switch_to_block(inout b, some);
+        let last = ins_iadd_imm(inout b, len, -1);
+        let addr = self.seq_elem_addr(inout b, handle, start, last, stride);
+        let value = if stride == STRIDE_BYTE {
+            ins_uload8(inout b, ty_i64(), PLAIN, addr, 0)
+        } else if stride == STRIDE_HALF {
+            ins_uload16(inout b, ty_i64(), PLAIN, addr, 0)
+        } else if stride == STRIDE_QUARTER {
+            ins_uload32(inout b, PLAIN, addr, 0)
+        } else {
+            ins_load(inout b, ty_i64(), PLAIN, addr, 0)
+        };
+        let some_value = ins_iconst(inout b, ty_i64(), wrapping_i64(some_tag));
+        let mut some_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        some_args.push(some_value.id);
+        some_args.push(value.id);
+        ins_jump(inout b, done, in some_args.as_slice());
+        switch_to_block(inout b, done);
+        let result = ins_iconst(inout b, ty_i64(), 0);
+        let mut params: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        params.push(tag_param.id);
+        params.push(value_param.id);
+        for k in 0..params.len() {
+            let index = w.next();
+            let word_kind = w.next();
+            let raw = Value { id: at32(in params, k) };
+            let v = body_coerce(inout b, raw, word_kind, self.optimize);
+            let ok = self.values.try_set(index, v.id);
+            def_var(inout b, var_at(in self.registers, index), v);
+        }
+        result
     }
 
     // One instruction (`ir_graph_at`'s instruction loop): its operands
@@ -2228,7 +2383,7 @@ impl Body {
             }
             ins_load(inout b, lane_type(flane), PLAIN, ptr, 0)
         } else if kind == INST_SEQ {
-            let v = self.seq(inout b, in m, inout w, x, y);
+            let v = self.seq(inout b, inout m, inout w, x, y);
             if is_invalid(v) {
                 return false;
             }

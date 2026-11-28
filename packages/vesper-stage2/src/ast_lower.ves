@@ -1148,8 +1148,8 @@ pub fn build_ir_ast_for_entry(
                         proj_start: 0,
                         proj_count: 0,
                         ty: pm.ty,
-                        s0: widen_u64(pm.start),
-                        s1: widen_u64(pm.end)
+                        s0: 0,
+                        s1: 0
                     });
                 },
                 Option::None => {},

@@ -572,7 +572,7 @@ pub fn specialized(
 }
 
 // `function_value_instance` of a world function (unsubstituted).
-fn function_value_instance(
+pub fn function_value_instance(
     inout types: Types,
     in names: Names,
     in world: World,

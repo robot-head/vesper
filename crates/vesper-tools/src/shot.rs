@@ -3,16 +3,24 @@
 //! in the Codex doctest sandbox (§40.1), with outputs cached in the
 //! content-addressed store keyed by BLAKE3(source partition, theme, config).
 
+use crate::compiler;
+use serde_json::Value;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use vesper::doctest::{self, DocTestLimits};
+use std::{collections::BTreeMap, ops::Range};
 use vesper_highlight::shot::{
     self, RasterOptions, SceneOptions, ShotFont, ShotLimits, ShotOutputFormat, ShotTheme,
     SvgOptions,
 };
-use vesper_highlight::{Highlight, HoverEntry};
+use vesper_highlight::{Highlight, HighlightSpan, highlight_tier0};
 use vesper_loom_cas::{DerivationInputs, Domain, Store, blob_id};
+
+/// The `vesper tool-facts` kind with the `--verify` verdict, the Tier 1
+/// facts and the callout answers.
+const SHOT_FACTS: &str = "shot";
+/// What the first callout pass answers while it collects the queries.
+const PLACEHOLDER_ANSWER: &str = "?";
 
 /// The bundled card font: JetBrains Mono 2.304 Regular, SIL OFL 1.1
 /// (assets/fonts/jetbrains-mono/OFL.txt).
@@ -119,18 +127,10 @@ fn default_store() -> Option<PathBuf> {
     Some(Path::new(&home).join(".vesper").join("store"))
 }
 
-/// Tier 0/Tier 1 highlighting of the displayed text (lane 1's highlighter).
-/// Tier 1 when the snippet checks, else Tier 0 (with lane 1's fallback
-/// reason); the hover table comes along for `//^?` queries.
-fn highlight(display: &str) -> Result<Highlight, String> {
-    crate::highlight::highlight_source(display, 1).map_err(|e| format!("highlight: {e:?}"))
-}
-
-/// Checks the displayed example and runs it in the doctest sandbox: the
-/// example becomes one declaration fence (entry `main`) of a generated doc
-/// comment, so it goes through the same checker, shared JIT module and
-/// evaluator fallback as `vesper doctest`.
-pub fn verify_example(display: &str) -> Result<(), String> {
+/// The displayed example as one declaration fence (entry `main`) of a
+/// generated doc comment, so `--verify` runs it through the same checker,
+/// shared JIT module and evaluator fallback as `vesper doctest`.
+fn wrap_example(display: &str) -> Result<String, String> {
     let mut wrapped = String::with_capacity(display.len() + 64);
     wrapped.push_str("//! ```vesper\n");
     for line in display.lines() {
@@ -145,103 +145,128 @@ pub fn verify_example(display: &str) -> Result<(), String> {
         wrapped.push('\n');
     }
     wrapped.push_str("//! ```\n");
-    let report =
-        doctest::run(&wrapped, DocTestLimits::default()).map_err(|e| format!("--verify: {e}"))?;
-    if report.passed && report.examples.len() == 1 {
+    Ok(wrapped)
+}
+
+/// `--verify`'s verdict in a `shot` answer: the example must pass.
+fn verdict(answer: &Value) -> Result<(), String> {
+    if let Some(error) = answer.get("doctest_error") {
+        return Err(format!("--verify: {}", error.as_str().unwrap_or_default()));
+    }
+    let report = answer
+        .get("doctest")
+        .ok_or("shot facts: no doctest verdict")?;
+    if report.get("passed").and_then(Value::as_bool) == Some(true) {
         return Ok(());
     }
-    let mut reasons = Vec::new();
-    for d in &report.base_diagnostics {
-        reasons.push(format!("{}: {}", d.code, d.message));
-    }
-    for e in &report.examples {
-        if !e.passed {
-            reasons.push(e.message.clone());
-            reasons.extend(
-                e.diagnostics
-                    .iter()
-                    .map(|d| format!("{}: {}", d.code, d.message)),
-            );
-        }
-    }
+    let reasons: Vec<&str> = report
+        .get("reasons")
+        .and_then(Value::as_array)
+        .map(|reasons| reasons.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
     Err(format!(
         "--verify: the example failed; not rendering it\n  {}",
         reasons.join("\n  ")
     ))
 }
 
-/// Answers a `//^?` query from the checker: the type and type mode of the
-/// expression or parameter at `start` (the same facts Lens hover shows).
-/// `None` when the snippet does not check or has no type there.
-fn checker_hover<'a>(
-    display: &'a str,
-    table: &'a [HoverEntry],
-) -> impl FnMut(&str, usize, usize) -> Option<String> + 'a {
-    let analysis = vesper::tooling::frontend::check_source(display, Default::default());
-    let index = vesper_span::LineIndex::new(display.into(), Default::default()).ok();
-    move |_token, start, end| {
-        // Tier 1's hover table first (it covers binding sites), then Lens hover.
-        if let Some(h) = table.iter().find(|h| h.span == (start..end)) {
-            return Some(h.text.to_string());
-        }
-        let checked = match &analysis {
-            Ok(checked) => checked,
-            Err(vesper::tooling::frontend::AnalysisFailure::Semantic { diagnostics }) => {
-                // The primary span must start on this token; merely enclosing
-                // it (for example, a whole-block diagnostic) is not evidence
-                // that the diagnostic belongs to this query. Equal-sized
-                // matches remain ambiguous, so do not guess.
-                let matches = diagnostics.iter().filter(|d| {
-                    start <= d.span.start && d.span.start < end && d.span.start < d.span.end
-                });
-                let minimum = matches.clone().map(|d| d.span.len()).min()?;
-                let mut most_specific = matches.filter(|d| d.span.len() == minimum);
-                let diagnostic = most_specific.next()?;
-                if most_specific.next().is_some() {
-                    return None;
-                }
-                let mut text = format!("{}: {}", diagnostic.code, diagnostic.message);
-                for label in &diagnostic.related {
-                    text.push_str("; related: ");
-                    text.push_str(&label.message);
-                }
-                // The renderer has its own character bound. Normalize control
-                // characters and bound the summary without splitting UTF-8.
-                return Some(
-                    text.chars()
-                        .take(600)
-                        .map(|c| if c.is_control() { ' ' } else { c })
-                        .collect(),
-                );
-            }
-            Err(_) => return None,
-        };
-        let index = index.as_ref()?;
-        let at = index.position(start).ok()?;
-        let to = index.position(end).ok()?;
-        let value =
-            vesper::lsp::navigation::hover(checked, index, at, Default::default()).ok()??;
-        // Only a fact about exactly this token: hover falls back to the
-        // smallest enclosing expression, which would describe something else.
-        let range = value.get("range")?;
-        let pos =
-            |v: &serde_json::Value| Some((v.get("line")?.as_u64()?, v.get("character")?.as_u64()?));
-        if pos(range.get("start")?)? != (u64::from(at.line), u64::from(at.character))
-            || pos(range.get("end")?)? != (u64::from(to.line), u64::from(to.character))
-        {
-            return None;
-        }
-        let text = value.pointer("/contents/value")?.as_str()?;
-        let ty = text.lines().find_map(|l| l.strip_prefix("type: "))?;
-        let mode = text
-            .lines()
-            .find_map(|l| l.strip_prefix("type mode: "))
-            .and_then(|m| m.split_whitespace().next());
-        Some(match mode {
-            Some(m) => format!("{ty} : mod {m}"),
-            None => ty.to_string(),
-        })
+/// The spans the callouts of `doc` ask about. Tier 1 keeps Tier 0's token
+/// boundaries, so Tier 0's spans locate them before any facts exist. Every
+/// query is answered with a placeholder, so that one without an answer does
+/// not stop the pass before the later ones are seen.
+fn callout_spans(
+    doc: &shot::ShotDocument,
+    spans: &[HighlightSpan],
+) -> Result<Vec<Range<usize>>, String> {
+    let mut asked = vec![];
+    shot::resolve_callouts(doc, spans, |_token, start, end| {
+        asked.push(start..end);
+        Some(PLACEHOLDER_ANSWER.to_owned())
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(asked)
+}
+
+/// Asks the shipped compiler, in one call, for everything the card needs
+/// from the checker (#2670): the `--verify` verdict, Chroma's Tier 1 facts
+/// and an answer for each callout span.
+fn ask(doc: &shot::ShotDocument, verify: bool, asked: &[Range<usize>]) -> Result<Value, String> {
+    let wrapped = if verify {
+        Some(compiler::TempFile::source(&wrap_example(&doc.display)?)?)
+    } else {
+        None
+    };
+    let mut options: Vec<String> = vec![];
+    if let Some(file) = &wrapped {
+        options.push("--doctest".into());
+        options.push(file.path().display().to_string());
     }
+    for span in asked {
+        options.push("--span".into());
+        options.push(format!("{}..{}", span.start, span.end));
+    }
+    let options: Vec<&str> = options.iter().map(String::as_str).collect();
+    let answer = compiler::facts_about(SHOT_FACTS, &doc.display, &options);
+    if verify {
+        // A verify failure is reported as `--verify: ...`, as before.
+        let answer = answer.map_err(|e| format!("--verify: {e}"))?;
+        verdict(&answer)?;
+        return Ok(answer);
+    }
+    answer
+}
+
+/// Tier 0/Tier 1 highlighting of the displayed text (lane 1's highlighter),
+/// Tier 1 when the snippet checks, else Tier 0 with lane 1's fallback reason,
+/// and the callout pins. A `//^?` query is answered from Tier 1's hover
+/// table first (it covers binding sites), then by the checker: the type and
+/// type mode of the expression or parameter there (the same facts Lens hover
+/// shows). `None` when the snippet does not check or has no type there.
+fn highlight_and_pins(
+    doc: &shot::ShotDocument,
+    verify: bool,
+) -> Result<(Highlight, Vec<shot::CalloutPin>), String> {
+    // `--verify` reports first, as it ran before highlighting.
+    let asked = highlight_tier0(&doc.display)
+        .map_err(|e| format!("highlight: {e:?}"))
+        .and_then(|tier0| callout_spans(doc, &tier0));
+    let asked = match asked {
+        Ok(asked) => asked,
+        Err(error) => {
+            if verify {
+                ask(doc, true, &[])?;
+            }
+            return Err(error);
+        }
+    };
+    let answer = ask(doc, verify, &asked)?;
+    let facts = match crate::highlight::over_budget(&doc.display) {
+        Some(reason) => Err(reason),
+        None => crate::highlight::facts_from_answer(
+            answer.get("chroma").ok_or("shot facts: no chroma facts")?,
+        ),
+    };
+    let highlight =
+        crate::highlight::tier1(&doc.display, facts).map_err(|e| format!("highlight: {e:?}"))?;
+    let replies = answer
+        .get("answers")
+        .and_then(Value::as_array)
+        .ok_or("shot facts: no callout answers")?;
+    let answers: BTreeMap<(usize, usize), Option<String>> = asked
+        .iter()
+        .zip(replies)
+        .map(|(span, reply)| ((span.start, span.end), reply.as_str().map(str::to_owned)))
+        .collect();
+    let table = &highlight.hovers;
+    let pins = shot::resolve_callouts(doc, &highlight.spans, |_token, start, end| {
+        table
+            .iter()
+            .find(|h| h.span == (start..end))
+            .map(|h| h.text.to_string())
+            .or_else(|| answers.get(&(start, end)).cloned().flatten())
+    })
+    .map_err(|e| e.to_string())?;
+    Ok((highlight, pins))
 }
 
 fn derivation(key: &shot::ShotCacheKey, png: bool) -> DerivationInputs {
@@ -266,9 +291,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     let source = std::fs::read_to_string(&args.input)
         .map_err(|e| format!("{}: {e}", args.input.display()))?;
     let doc = shot::parse_shot_source(&source, limits).map_err(|e| e.to_string())?;
-    if args.verify {
-        verify_example(&doc.display)?;
-    }
+    let (Highlight { spans, .. }, pins) = highlight_and_pins(&doc, args.verify)?;
     let theme = args.theme.or(doc.config.theme).unwrap_or(ShotTheme::Dusk);
     let dpi = args.dpi.or(doc.config.dpi).unwrap_or(4);
     let title = args
@@ -281,9 +304,6 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default()
         });
-    let Highlight { spans, hovers, .. } = highlight(&doc.display)?;
-    let pins = shot::resolve_callouts(&doc, &spans, checker_hover(&doc.display, &hovers))
-        .map_err(|e| e.to_string())?;
     let font = ShotFont::parse(CARD_FONT).map_err(|e| e.to_string())?;
     let out_format = if format_png {
         ShotOutputFormat::Png { dpi_scale: dpi }

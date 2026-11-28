@@ -43,53 +43,6 @@ _TOOLS = [
 # `<bin>/crates/vesper-tools/bin/`, as `//:bin/vesper` does.
 _HYBRID = "//crates/vesper-hybrid:bin/vesper-hybrid"
 
-# The files of every library a port crate links (tests/self_host_codegen_export/ports.rs).
-_PORT_FILES = [
-    "//crates/vesper-aegis:files",
-    "//crates/vesper-alloc:files",
-    "//crates/vesper-aura:files",
-    "//crates/vesper-beacon:files",
-    "//crates/vesper-bench:files",
-    "//crates/vesper-chorus:files",
-    "//crates/vesper-crucible:files",
-    "//crates/vesper-diagnostics:files",
-    "//crates/vesper-ebpf:files",
-    "//crates/vesper-flux:files",
-    "//crates/vesper-fmt:files",
-    "//crates/vesper-forge:files",
-    "//crates/vesper-grammar:files",
-    "//crates/vesper-highlight:files",
-    "//crates/vesper-hybrid:files",
-    "//crates/vesper-ignis:files",
-    "//crates/vesper-kinetic:files",
-    "//crates/vesper-lean-syntax:files",
-    "//crates/vesper-lint:files",
-    "//crates/vesper-loom-audit:files",
-    "//crates/vesper-loom-calculus:files",
-    "//crates/vesper-loom-solver:files",
-    "//crates/vesper-pact:files",
-    "//crates/vesper-port-build:files",
-    "//crates/vesper-port-pilot:files",
-    "//crates/vesper-prism:files",
-    # vesper/target/ is outside :files (no **/target/** glob).
-    "//crates/vesper-prism:target_package",
-    "//crates/vesper-prism-h3:files",
-    "//crates/vesper-quarry:files",
-    "//crates/vesper-resonance:files",
-    "//crates/vesper-semver:files",
-    "//crates/vesper-serde:files",
-    "//crates/vesper-silicon:files",
-    "//crates/vesper-simpulse:files",
-    "//crates/vesper-span:files",
-    "//crates/vesper-std-driver:files",
-    "//crates/vesper-tensor:files",
-    "//crates/vesper-warp:files",
-    "//crates/vesper-warp-bbr:files",
-    "//crates/vesper-warp-tcp:files",
-    "//crates/vesper-warp-wheel:files",
-]
-
-
 copy_file(
     name = "vesper_shipped_unix",
     src = _HYBRID,
@@ -352,14 +305,50 @@ vesper_crate(
             "examples/**/*.ves",
             "packages/**",
             "tests/**/*.ves",
-        ]) + _PORT_FILES,
-        # Bootstrap slice 3d (#2659): Stage 2's calls inputs against Rust's
-        # over the same port libraries.
-        "test/self_host_stage2_calls_input": glob([
-            "examples/**/*.ves",
-            "packages/**",
-            "tests/**/*.ves",
-        ]) + _PORT_FILES,
+        ]) + [
+            "//crates/vesper-aegis:files",
+            "//crates/vesper-alloc:files",
+            "//crates/vesper-aura:files",
+            "//crates/vesper-beacon:files",
+            "//crates/vesper-bench:files",
+            "//crates/vesper-chorus:files",
+            "//crates/vesper-crucible:files",
+            "//crates/vesper-diagnostics:files",
+            "//crates/vesper-ebpf:files",
+            "//crates/vesper-flux:files",
+            "//crates/vesper-fmt:files",
+            "//crates/vesper-forge:files",
+            "//crates/vesper-grammar:files",
+            "//crates/vesper-highlight:files",
+            "//crates/vesper-hybrid:files",
+            "//crates/vesper-ignis:files",
+            "//crates/vesper-kinetic:files",
+            "//crates/vesper-lean-syntax:files",
+            "//crates/vesper-lint:files",
+            "//crates/vesper-loom-audit:files",
+            "//crates/vesper-loom-calculus:files",
+            "//crates/vesper-loom-solver:files",
+            "//crates/vesper-pact:files",
+            "//crates/vesper-port-build:files",
+            "//crates/vesper-port-pilot:files",
+            "//crates/vesper-prism:files",
+            # vesper/target/ is outside :files (no **/target/** glob).
+            "//crates/vesper-prism:target_package",
+            "//crates/vesper-prism-h3:files",
+            "//crates/vesper-quarry:files",
+            "//crates/vesper-resonance:files",
+            "//crates/vesper-semver:files",
+            "//crates/vesper-serde:files",
+            "//crates/vesper-silicon:files",
+            "//crates/vesper-simpulse:files",
+            "//crates/vesper-span:files",
+            "//crates/vesper-std-driver:files",
+            "//crates/vesper-tensor:files",
+            "//crates/vesper-warp:files",
+            "//crates/vesper-warp-bbr:files",
+            "//crates/vesper-warp-tcp:files",
+            "//crates/vesper-warp-wheel:files",
+        ],
         # SH4 lane 14 (#1288): @vesper/codegen-freestanding against the
         # freestanding image builder.
         "test/self_host_freestanding": glob([
@@ -1449,8 +1438,6 @@ vesper_crate(
         "test/self_host_freestanding": "eternal",
         # Builds 51 port libraries with the vesper binary.
         "test/self_host_codegen_export": "long",
-        # Builds and checks the 52 port libraries with Rust and Stage 2.
-        "test/self_host_stage2_calls_input": "long",
         "test/self_host_place_ir_jit": "long",
         "test/self_host_ir_lower": "long",
         # Every runnable corpus world under six fuel and optimizer settings.
