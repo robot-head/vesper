@@ -182,7 +182,7 @@ pub fn receiver_type(inout ck: Ck, e: u32) -> u32 {
         return named(inout ck, known.string);
     }
     if ex.kind == E_INT {
-        let lit = mk_lit(inout ck.ctx.types, Lit { neg: ex.neg, mag: ex.mag });
+        let lit = mk_lit(inout ck.ctx.types, Lit { neg: ex.neg, mag: ex.mag, hi: ex.hi });
         return default_type(inout ck.ctx.types, lit);
     }
     let peeked = peek_type(inout ck, e);
@@ -1103,7 +1103,11 @@ fn tuple_index(inout ck: Ck, ex: Ex) -> u32 {
     }
     let array_ty = ck.ctx.types.tuple(in elems);
     constrain_literals(inout ck, ex.x, array_ty);
-    if index_ex.kind == E_INT && !index_ex.neg && index_ex.mag < widen_u64(node.n) {
+    if index_ex.kind == E_INT
+        && !index_ex.neg
+        && index_ex.hi == 0
+        && index_ex.mag < widen_u64(node.n)
+    {
         return item(in ck.ctx.types, add(w(node.a), index_ex.mag));
     }
     if !uniform {

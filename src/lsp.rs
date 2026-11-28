@@ -28,7 +28,7 @@ mod session;
 use serde_json::json;
 pub use session::LensConfig;
 #[doc(hidden)]
-pub use session::PortCheck;
+pub use session::{PortCheck, PortState, SERVER_VERSION};
 #[doc(hidden)]
 pub use session::{diagnostic_payload_answer, diagnostic_payload_words, payload_tags};
 

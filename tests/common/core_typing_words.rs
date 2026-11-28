@@ -40,6 +40,7 @@ pub const E_HANDLE: u64 = 22;
 pub const E_TRY: u64 = 23;
 pub const E_CLOSURE: u64 = 24;
 pub const E_ARRAY_WRITE: u64 = 25;
+pub const E_WIDE_INT: u64 = 26;
 pub const E_INDEX: u64 = 40;
 
 // Literal pattern kinds (`LIT_*` in exprs.ves).
@@ -120,9 +121,9 @@ fn encode_pattern(e: &mut Enc, p: &Pattern, out: &mut Vec<u64>) {
                 out.extend([LIT_TYPED_INT, e.name(kind.name())]);
                 return;
             }
-            // The literal's type (`literal_type`), for `bind_mode`.
-            // An integer past `u64::MAX` in magnitude is not ported yet (as
-            // in `encode_expr`): `LIT_WIDE_INT` skips the function.
+            // The literal's type (`literal_type`), for `bind_mode`. An
+            // integer past `u64::MAX` in magnitude is `LIT_WIDE_INT` with
+            // its sign and magnitude words (as `E_WIDE_INT` in `encode_expr`).
             out.push(match l {
                 Literal::Int(n) if fits_literal(*n) => LIT_INT,
                 Literal::Float(_) => LIT_FLOAT,
@@ -134,6 +135,9 @@ fn encode_pattern(e: &mut Enc, p: &Pattern, out: &mut Vec<u64>) {
                 && fits_literal(*n)
             {
                 out.extend([(*n < 0) as u64, n.unsigned_abs() as u64]);
+            }
+            if let Some((neg, magnitude)) = wide_magnitude(l) {
+                out.extend(wide_words(neg, magnitude));
             }
         }
         PatternKind::Tuple(ps) => {
@@ -166,6 +170,25 @@ fn fits_literal(n: i128) -> bool {
     n.unsigned_abs() <= u64::MAX as u128
 }
 
+/// The sign and magnitude of an integer literal past `u64::MAX` in
+/// magnitude (`Literal::WideInt` is above `i128::MAX`).
+fn wide_magnitude(l: &Literal) -> Option<(bool, u128)> {
+    match l {
+        Literal::Int(n) if !fits_literal(*n) => Some((*n < 0, n.unsigned_abs())),
+        Literal::WideInt(n) => Some((false, *n)),
+        _ => None,
+    }
+}
+
+/// A wide magnitude's words: the sign, then the low and high words.
+fn wide_words(neg: bool, magnitude: u128) -> [u64; 3] {
+    [
+        neg as u64,
+        magnitude as u64,
+        (magnitude >> u64::BITS) as u64,
+    ]
+}
+
 /// Whether an integer literal at `span` is an array's `len()` that
 /// `arrays::lower_world` wrote after checking: the checker typed the call,
 /// whose array receiver it recorded inside the span. Such a literal is
@@ -183,6 +206,10 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
     match &x.kind {
         ExprKind::Literal(Literal::Int(n)) if fits_literal(*n) && !lowered_len(w, &x.span) => {
             out.extend([E_INT, s, t, (*n < 0) as u64, n.unsigned_abs() as u64]);
+        }
+        ExprKind::Literal(l) if let Some((neg, magnitude)) = wide_magnitude(l) => {
+            out.extend([E_WIDE_INT, s, t]);
+            out.extend(wide_words(neg, magnitude));
         }
         ExprKind::Literal(Literal::Float(_)) => out.extend([E_FLOAT, s, t]),
         ExprKind::Literal(Literal::Bool(b)) => out.extend([E_BOOL, s, t, *b as u64]),
@@ -572,6 +599,42 @@ pub fn rust_types(w: &World, checked: &[(usize, usize)]) -> String {
     out
 }
 
+/// Each checked function's span and the `R type` result Vesper wrote for
+/// it (`Checker::results`).
+pub fn vesper_results(text: &str) -> Vec<((usize, usize), String)> {
+    let mut out = vec![];
+    let mut current = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("F ") {
+            let mut parts = rest.split(' ').map(|p| p.parse::<usize>().unwrap());
+            current = Some((parts.next().unwrap(), parts.next().unwrap()));
+        } else if let Some(ty) = line.strip_prefix("R ") {
+            out.push((current.take().unwrap(), ty.to_string()));
+        }
+    }
+    out
+}
+
+/// The Rust checker's result for each function span in `spans`
+/// (`World::function_results`, keyed by the function's span), as `vesper_results` writes it.
+pub fn rust_results(w: &World, spans: &[(usize, usize)]) -> Vec<((usize, usize), String)> {
+    let by_span: BTreeMap<(usize, usize), &String> = w
+        .functions
+        .iter()
+        .map(|(name, f)| ((f.span.start, f.span.end), name))
+        .collect();
+    spans
+        .iter()
+        .map(|span| {
+            let ty = by_span
+                .get(span)
+                .and_then(|name| w.function_results.get(*name))
+                .map_or_else(|| "none".to_string(), |t| format!("{t:?}"));
+            (*span, ty)
+        })
+        .collect()
+}
+
 /// Vesper's text: `F start end` then `T start end type` rows in insertion
 /// order (a later row for a span replaces an earlier one, as
 /// `types.insert` does), `S start end` for a skipped function and `D code
@@ -609,6 +672,8 @@ pub fn vesper_types(text: &str) -> (String, Vec<(usize, usize)>, usize) {
             }
             "S" => skipped += 1,
             "D" => out.push_str(&format!("{line}\n")),
+            // A checked function's result: `vesper_results`.
+            "R" => {}
             _ => panic!("unexpected line {line}"),
         }
     }
