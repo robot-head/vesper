@@ -193,6 +193,9 @@ const ABI_WIN64: Str = "win64";
 
 pub struct PlanInput {
     declined: u8,
+    // the instance wrappers' source (Rust `instance_wrappers`), which the
+    // root module's source ends with when the library is compiled
+    wrappers: ChunkSeq[u8],
     // `plan_words` input bytes (little-endian words) when not declined.
     bytes: ChunkSeq[u8],
 }
@@ -206,10 +209,13 @@ pub struct ExportFiles {
     // with the default binding options, as @vesper/native-lib's v2 section
     // takes it (`binding_input_of_plan`), when not declined
     native: ChunkSeq[u8],
+    // the instance wrappers' source, which the root module's source ends
+    // with when the library is compiled (`PlanInput.wrappers`)
+    wrappers: ChunkSeq[u8],
 }
 
 fn declined(why: u8) -> PlanInput {
-    PlanInput { declined: why, bytes: ChunkSeq::new[u8]() }
+    PlanInput { declined: why, wrappers: ChunkSeq::new[u8](), bytes: ChunkSeq::new[u8]() }
 }
 
 // The type table under construction: per type id its row index + 1, and
@@ -1297,13 +1303,133 @@ fn is_plain(in types: Types, t: u32, top: bool) -> bool {
     true
 }
 
+// The source of instance `ins`'s wrapper (Rust `instance_wrappers`):
+//
+//     pub fn <alias>(<pass> <name>: <type>, ..) -> <result> eff [<row>] {
+//         <spelling>(<pass> <name>, ..)
+//     }
+//
+// over the substituted parameters `cp.params[pa..pa+pn]`, keeping each
+// parameter's passing mode (a `sink` argument is passed bare).
+fn put_wrapper(
+    in cp: CollectedProgram,
+    in ins: Inst,
+    pa: u32,
+    pn: u32,
+    result: u32,
+    effects: u32,
+    inout out: ChunkSeq[u8]
+) {
+    out.extend(in WRAPPER_FN.as_bytes());
+    out.extend(in ins.alias.as_slice());
+    out.extend(in OPEN_PAREN.as_bytes());
+    for pi in 0..w(pn) {
+        let p = match cp.params.try_get(add(w(pa), pi)) {
+            Option::Some(p) => p,
+            Option::None => continue,
+        };
+        if pi != 0 {
+            out.extend(in LIST_SEP.as_bytes());
+        }
+        out.extend(in declared_pass(p.pass).as_bytes());
+        cp.names.write(p.name, inout out);
+        out.extend(in TYPE_SEP.as_bytes());
+        display(in cp.types, in cp.names, p.ty, inout out);
+    }
+    out.extend(in RESULT_ARROW.as_bytes());
+    display(in cp.types, in cp.names, result, inout out);
+    let row = cp.types.row(effects);
+    if row.n != 0 {
+        out.extend(in EFF_OPEN.as_bytes());
+        for i in 0..w(row.n) {
+            if i != 0 {
+                out.extend(in LIST_SEP.as_bytes());
+            }
+            let e = cp.types.effect_at(add(w(row.a), i));
+            if e.label != 0 {
+                cp.names.write(wrapping_sub(e.label, 1), inout out);
+                out.extend(in TYPE_SEP.as_bytes());
+            }
+            cp.names.write(e.name, inout out);
+            if e.n != 0 {
+                out.extend(in OPEN_BRACKET_TOKEN.as_bytes());
+                for k in 0..w(e.n) {
+                    if k != 0 {
+                        out.extend(in LIST_SEP.as_bytes());
+                    }
+                    let arg = u32_at(in cp.types.items, add(w(e.a), k));
+                    display(in cp.types, in cp.names, arg, inout out);
+                }
+                out.extend(in CLOSE_BRACKET_TOKEN.as_bytes());
+            }
+        }
+        out.extend(in CLOSE_BRACKET_TOKEN.as_bytes());
+    }
+    out.extend(in BODY_OPEN.as_bytes());
+    out.extend(in ins.spelling.as_slice());
+    out.extend(in OPEN_PAREN.as_bytes());
+    for pi in 0..w(pn) {
+        let p = match cp.params.try_get(add(w(pa), pi)) {
+            Option::Some(p) => p,
+            Option::None => continue,
+        };
+        if pi != 0 {
+            out.extend(in LIST_SEP.as_bytes());
+        }
+        out.extend(in passed_pass(p.pass).as_bytes());
+        cp.names.write(p.name, inout out);
+    }
+    out.extend(in BODY_CLOSE.as_bytes());
+}
+
+// A parameter's passing mode as the wrapper declares it, and as it passes
+// the parameter on.
+fn declared_pass(pass: u8) -> Str {
+    if pass == PASS_INOUT {
+        INOUT_WORD
+    } else if pass == PASS_SINK {
+        SINK_WORD
+    } else {
+        IN_WORD
+    }
+}
+
+fn passed_pass(pass: u8) -> Str {
+    if pass == PASS_INOUT {
+        INOUT_WORD
+    } else if pass == PASS_SINK {
+        NO_WORD
+    } else {
+        IN_WORD
+    }
+}
+
+// The wrapper's spelling (Rust `instance_wrappers`' format string).
+const WRAPPER_FN: Str = "pub fn ";
+const OPEN_PAREN: Str = "(";
+const LIST_SEP: Str = ", ";
+const TYPE_SEP: Str = ": ";
+const RESULT_ARROW: Str = ") -> ";
+const EFF_OPEN: Str = " eff [";
+const CLOSE_BRACKET_TOKEN: Str = "]";
+const BODY_OPEN: Str = " {\n    ";
+const BODY_CLOSE: Str = ")\n}\n";
+const IN_WORD: Str = "in ";
+const INOUT_WORD: Str = "inout ";
+const SINK_WORD: Str = "sink ";
+const NO_WORD: Str = "";
+// `ParamInfo.pass` (@vesper/stage2 collect.ves `PASS_*`).
+const PASS_INOUT: u8 = 1;
+const PASS_SINK: u8 = 2;
+
 // Adds instance `ins`'s wrapper to the collected functions and to
 // `exported` (Rust `instance_wrappers`), or false where Rust refuses it.
 fn add_instance(
     inout cp: CollectedProgram,
     in public: ChunkSeq[bool],
     inout exported: ChunkSeq[u64],
-    in ins: Inst
+    in ins: Inst,
+    inout wrappers: ChunkSeq[u8]
 ) -> bool {
     let fsym = cp.names.lookup(in ins.function.as_slice());
     if fsym == NONE32 || public.try_get(w(fsym)) != Option::Some(true) {
@@ -1373,6 +1499,7 @@ fn add_instance(
     if cp.types.row(effects).tail != 0 {
         return false;
     }
+    put_wrapper(in cp, in ins, pa, f.pn, result, effects, inout wrappers);
     let wrapper = n32(cp.fns.len());
     cp.fns.push(FnInfo {
         name: alias,
@@ -1384,7 +1511,9 @@ fn add_instance(
         result: result,
         effects: effects,
         mod_idx: f.mod_idx,
-        body: NONE32
+        body: NONE32,
+        inst: 0,
+        thunk: 0
     });
     insert_by_name(inout exported, in cp.fns, in cp.names, w(wrapper));
     true
@@ -1743,9 +1872,16 @@ pub fn export_plan_input(
     }
     // Each instance is a generated monomorphic `pub fn <alias>` calling the
     // generic at its type arguments (Rust `instance_wrappers`).
+    let mut wrappers: ChunkSeq[u8] = ChunkSeq::new[u8]();
     for ii in 0..plain.instances.len() {
         let added = match plain.instances.try_get(ii) {
-            Option::Some(ins) => add_instance(inout cp, in public, inout exported, in ins),
+            Option::Some(ins) => add_instance(
+                inout cp,
+                in public,
+                inout exported,
+                in ins,
+                inout wrappers
+            ),
             Option::None => false,
         };
         if !added {
@@ -1884,7 +2020,7 @@ pub fn export_plan_input(
             )));
         }
     }
-    PlanInput { declined: DECLINE_NONE, bytes: bytes }
+    PlanInput { declined: DECLINE_NONE, wrappers: wrappers, bytes: bytes }
 }
 
 // The planner's answer (plan.ves `write_plan`) for the package at
@@ -1894,11 +2030,21 @@ pub fn export_plan_dir(
     in library: Slice[u8],
     in triple: Slice[u8]
 ) -> (u8, ChunkSeq[u64]) eff [Ffi[StdFs]] {
+    let (why, answer, _wrappers) = export_plan_wrappers_dir(in root_dir, in library, in triple);
+    (why, answer)
+}
+
+// `export_plan_dir` and the instance wrappers' source (`PlanInput.wrappers`).
+fn export_plan_wrappers_dir(
+    in root_dir: Slice[u8],
+    in library: Slice[u8],
+    in triple: Slice[u8]
+) -> (u8, ChunkSeq[u64], ChunkSeq[u8]) eff [Ffi[StdFs]] {
     let input = export_plan_input(in root_dir, in library, in triple);
     if input.declined != DECLINE_NONE {
-        return (input.declined, ChunkSeq::new[u64]());
+        return (input.declined, ChunkSeq::new[u64](), ChunkSeq::new[u8]());
     }
-    (DECLINE_NONE, export_plan_bytes(in input.bytes.as_slice()))
+    (DECLINE_NONE, export_plan_bytes(in input.bytes.as_slice()), input.wrappers)
 }
 
 // `vesper build --lib`'s `--interface` and `--rust-binding` outputs for the
@@ -1912,7 +2058,7 @@ pub fn export_files_dir(
     has_types_path: bool,
     in types_path: Slice[u8]
 ) -> ExportFiles eff [Ffi[StdFs]] {
-    let (why, answer) = export_plan_dir(in root_dir, in library, in triple);
+    let (why, answer, wrappers) = export_plan_wrappers_dir(in root_dir, in library, in triple);
     if why != DECLINE_NONE {
         return declined_files(why);
     }
@@ -1929,7 +2075,8 @@ pub fn export_files_dir(
             declined: DECLINE_NONE,
             interface: interface,
             binding: binding,
-            native: native
+            native: native,
+            wrappers: wrappers
         };
     }
     match export_files_of_plan(in answer, has_types_path, in types_path) {
@@ -1937,7 +2084,8 @@ pub fn export_files_dir(
             declined: DECLINE_NONE,
             interface: interface,
             binding: binding,
-            native: native
+            native: native,
+            wrappers: wrappers
         },
         Option::None => declined_files(DECLINE_REFUSED),
     }
@@ -1948,6 +2096,7 @@ fn declined_files(why: u8) -> ExportFiles {
         declined: why,
         interface: ChunkSeq::new[u8](),
         binding: ChunkSeq::new[u8](),
-        native: ChunkSeq::new[u8]()
+        native: ChunkSeq::new[u8](),
+        wrappers: ChunkSeq::new[u8]()
     }
 }
