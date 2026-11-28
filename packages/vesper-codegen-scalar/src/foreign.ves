@@ -19,7 +19,7 @@
 
 use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at};
 use @vesper/check-data::types::{TyKind, default_type};
-use @vesper/check-layout::{L_ENUM, layout_of};
+use @vesper/check-layout::{L_ENUM, L_PRODUCT, layout_of};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::input::{Reader};
 use @vesper/place-ir::{InstRow};
@@ -44,6 +44,12 @@ const NO_REFUSAL: u64 = 0;
 const REFUSAL: u64 = 1;
 // A scalar word's bits.
 const SCALAR_BITS: u64 = 255;
+
+// A struct field (`body_field`).
+copy struct Field {
+    offset: u64,
+    ty: u32,
+}
 
 // Two variants of an in-memory enum (`body_two_variants`).
 copy struct TwoVariants {
@@ -93,6 +99,10 @@ pub const SOURCE_HANDLE_TEMP: u64 = 4;
 // or from a temporary of the value.
 pub const SOURCE_SLICE_LOCAL: u64 = 5;
 pub const SOURCE_SLICE_TEMP: u64 = 6;
+// A word field of a struct local (its local and the field's offset), read
+// at the call; a handle field, copied from its address first.
+pub const SOURCE_FIELD: u64 = 7;
+pub const SOURCE_HANDLE_FIELD: u64 = 8;
 
 // A call's argument words: pass, value, place root (+1, 0 for none),
 // place path (place-ir `Op::Call`).
@@ -246,11 +256,22 @@ impl Gen {
                 ops.push(v);
                 extra.push(SOURCE_TEMP);
                 extra.push(read);
-            } else {
-                // `ir_place_expr` of a whole local, read at the call.
-                if self.program.path(self.program.op(add(at, ARG_PATH))).n != 0 {
+            } else if self.program.path(self.program.op(add(at, ARG_PATH))).n != 0 {
+                // `ir_place_expr` of a word field of a struct local, read at
+                // the call.
+                let l = self.body_local(in h, wrapping_sub(root, 1));
+                if l == NONE64 {
                     return false;
                 }
+                let field = self.body_field(in h, l, self.program.op(add(at, ARG_PATH)));
+                if field.offset == NONE64 || !self.body_word_integer(field.ty) {
+                    return false;
+                }
+                extra.push(SOURCE_FIELD);
+                extra.push(l);
+                extra.push(field.offset);
+            } else {
+                // `ir_place_expr` of a whole local, read at the call.
                 let l = self.body_local(in h, wrapping_sub(root, 1));
                 if l == NONE64 {
                     return false;
@@ -433,14 +454,31 @@ impl Gen {
             extra.push(SOURCE_HANDLE_TEMP);
             return true;
         }
-        if (pass != PASS_IN && pass != PASS_INOUT)
-            || self.program.path(self.program.op(add(at, ARG_PATH))).n != 0
-        {
+        if pass != PASS_IN && pass != PASS_INOUT {
             return false;
         }
         let l = self.body_local(in h, wrapping_sub(root, 1));
         if l == NONE64 {
             return false;
+        }
+        let path = self.program.op(add(at, ARG_PATH));
+        if self.program.path(path).n != 0 {
+            // A handle field of a struct local lent `in`: `expr` copies the
+            // field's word from its address.
+            if pass != PASS_IN {
+                return false;
+            }
+            let field = self.body_field(in h, l, path);
+            if field.offset == NONE64
+                || self.body_lane(field.ty) != LANE_PRODUCT
+                || self.body_product_size(field.ty) != WORD_BYTES
+            {
+                return false;
+            }
+            extra.push(SOURCE_HANDLE_FIELD);
+            extra.push(l);
+            extra.push(field.offset);
+            return true;
         }
         let ty = self.body_local_type(in h, l);
         if self.body_lane(ty) != LANE_PRODUCT || self.body_product_size(ty) != WORD_BYTES {
@@ -481,6 +519,50 @@ impl Gen {
 }
 
 impl Gen {
+    // The one field that path `path` names in struct local `l`: its offset
+    // and type, offset NONE64 for any other path.
+    fn body_field(inout self, in h: Header, l: u64, path: u64) -> Field {
+        let mut out = Field { offset: NONE64, ty: NONE32 };
+        if self.program.path(path).n != 1 {
+            return out;
+        }
+        let name = self.program.path_name(path, 0);
+        let mark = self.layouts.mark();
+        let d = default_type(inout self.ctx.types, self.body_local_type(in h, l));
+        let lay = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            d
+        );
+        if lay != NONE32 && self.layouts.node(lay).kind == L_PRODUCT {
+            let node = self.layouts.node(lay);
+            for k in 0..widen_u64(node.n) {
+                let f = self.layouts.lfield(add(widen_u64(node.a), k));
+                if f.name == name {
+                    out.offset = wrapping_u64(widen_i64(f.offset));
+                    out.ty = f.ty;
+                }
+            }
+        }
+        self.layouts.reset(mark);
+        out
+    }
+
+    // Whether type `t` is a 64-bit integer, read whole from memory.
+    fn body_word_integer(inout self, t: u32) -> bool {
+        if t == NONE32 {
+            return false;
+        }
+        let d = default_type(inout self.ctx.types, t);
+        let n = self.ctx.types.node(d);
+        n.kind == TyKind::Named
+            && n.n == 0
+            && self.ctx.world.k.is_integer(n.name)
+            && self.body_kind(d) == 0
+    }
+
     // Whether type `t` is a `Slice[T]` (its view `{handle, start, len}`).
     fn body_is_slice(inout self, t: u32) -> bool {
         if t == NONE32 {
