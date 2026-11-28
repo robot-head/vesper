@@ -114,10 +114,11 @@ _without_stage2_ports = transition(
 )
 
 def _stage2_port_tools_impl(ctx):
-    if ctx.attr.builder == None:
+    # A transitioned attribute is a list, empty when the label is unset.
+    if not ctx.files.builder:
         return [Stage2PortToolsInfo(builder = None, tool = None, wasmtime = None)]
     return [Stage2PortToolsInfo(
-        builder = ctx.file.builder,
+        builder = ctx.files.builder[0],
         tool = ctx.attr.tool[DefaultInfo].files_to_run,
         wasmtime = ctx.attr.wasmtime[DefaultInfo].files_to_run,
     )]
