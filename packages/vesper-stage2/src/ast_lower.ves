@@ -523,12 +523,19 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
                     }
                     if n == 1 && lc.names.spells(n32(ce.b), in "eq".as_bytes()) {
                         let eop = widen_u64(lc.names.intern(in "==".as_bytes()));
-                        let rhs = match ast.args
+                        let (rhs, pass) = match ast.args
                             .get(idx_from_raw[ArgNode](list_at(in ast, e.c, 0)))
                         {
-                            Option::Some(ag) => lower_expr(inout lc, in ast, mod_idx, ag.expr),
-                            Option::None => 0,
+                            Option::Some(ag) => (
+                                lower_expr(inout lc, in ast, mod_idx, ag.expr),
+                                widen_u64(ag.pass)
+                            ),
+                            Option::None => (0, 0),
                         };
+                        // The `.eq` call's callee and argument pass stay on
+                        // the node (`x` = callee + 1, `n` = pass): native
+                        // lowering restores a sequence receiver's call
+                        // (`SeqOp::BytesEq`, tables.ves `restore_seq_eq`).
                         let idx = lc.ir.exs.len();
                         lc.ir.exs.push(Ex {
                             kind: X_BINARY,
@@ -537,9 +544,9 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
                             a: eop,
                             b: ce.a,
                             c: rhs,
-                            n: 0,
+                            n: pass,
                             m: 0,
-                            x: 0
+                            x: wrapping_add(callee, 1)
                         });
                         return idx;
                     }

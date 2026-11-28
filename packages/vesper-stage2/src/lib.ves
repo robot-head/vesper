@@ -28,7 +28,7 @@ use @vesper-std/fs::{IoError, write_path};
 use self::ast_lower::{build_ir_ast, build_ir_ast_for_entry};
 use self::collect::{collect_program};
 use self::facts::{record_failure_ops};
-use self::tables::{lower_table_reads};
+use self::tables::{lower_table_reads, restore_seq_eq};
 pub use self::ffi::{ForeignSource, foreign_source};
 use self::ffi::{
     add_foreign_decls, close_foreign_ops, foreign_none, foreign_read, rename_foreign_calls
@@ -479,6 +479,8 @@ pub fn stage2_lower_dir_with(
     close_foreign_ops(inout ir_ast, inout names, inout types, in world, in foreign);
     // Native code reads constant aggregates as tables.
     lower_table_reads(inout ir_ast, inout names, in types, in world);
+    // `recv.eq(arg)` on a sequence is the method, not `==`.
+    restore_seq_eq(inout ir_ast, in types, in world);
     let c = Ctx {
         names: names,
         types: types,

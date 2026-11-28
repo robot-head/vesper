@@ -81,10 +81,10 @@ const DECLINES: &[&str] = &[
 /// The functions Stage 2 must lower as Rust does today. The rest differ
 /// where Stage 2's checker records less than Rust's: overflow and partial
 /// operations (`fallible`) and the unit type of statements.
-const MIN_SAME_FUNCTIONS: usize = 51;
+const MIN_SAME_FUNCTIONS: usize = 52;
 
 /// The port functions Stage 2 must lower as Rust does today.
-const MIN_SAME_PORT_FUNCTIONS: usize = 18919;
+const MIN_SAME_PORT_FUNCTIONS: usize = 18937;
 
 /// Set to print the Rust and Stage 2 bodies of each function that differs.
 const SHOW_DIFFS: &str = "VESPER_STAGE2_CALLS_DIFFS";
@@ -300,8 +300,9 @@ pub fn tagged(x: u64) -> Result[u8, u64] { fail_with(x) }",
     (
         "views",
         "fn same(in a: Slice[u8], in b: Slice[u8]) -> bool { a.len() == b.len() }
-pub fn prefix_same(in x: ChunkSeq[u8], in y: ChunkSeq[u8], n: u64) -> bool { if n <= x.len() && n <= y.len() { same(in x[0..n], in y[0..n]) } else { false } }",
-        &["prefix_same"],
+pub fn prefix_same(in x: ChunkSeq[u8], in y: ChunkSeq[u8], n: u64) -> bool { if n <= x.len() && n <= y.len() { same(in x[0..n], in y[0..n]) } else { false } }
+pub fn bytes_eq(in a: Slice[u8], in b: Slice[u8]) -> bool { a.eq(in b) }",
+        &["bytes_eq", "prefix_same"],
     ),
     // A tuple branch's literals take the other branch's integer kinds.
     (
