@@ -4493,7 +4493,16 @@ impl<M: Module> Codegen<'_, '_, M> {
             .iter()
             .flat_map(|b| &b.instructions)
             .any(|i| matches!(i.op, Op::Seq { .. }));
-        if !has_seq {
+        // A sequence value with no sequence op (#2750), such as a `sink`
+        // parameter moved into a product, can still own a drop.
+        let seq_values = body
+            .params
+            .iter()
+            .map(|p| &p.ty)
+            .chain(body.locals.values())
+            .chain(body.values.values())
+            .any(crate::seq::is_seq_type);
+        if !has_seq && !seq_values {
             return true;
         }
         // The graph `ir_graph_at` lowers: small enums kept as words.
