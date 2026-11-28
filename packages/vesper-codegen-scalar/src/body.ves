@@ -108,6 +108,10 @@ const SEQ_GET: u64 = 5;
 // A slice view's header word (`seq_word`): read-only memory when the
 // view is a parameter read once at entry.
 const SEQ_VIEW_WORD: u64 = 6;
+// A slice's `last`, its `Option` kept as words.
+const SEQ_LAST: u64 = 7;
+// The words a small `Option` is kept as: its tag and its payload.
+const OPTION_WORDS: u64 = 2;
 // The header words (src/strings/native.rs, src/seq/native.rs): a
 // string's `{len, cap, data}`, a slice view's `{handle, start, len}`.
 const STR_LEN_OFFSET: u64 = 0;
@@ -1959,7 +1963,9 @@ impl Gen {
         let post = self.body_kind(ty);
         // A small enum kept as words is only made by a call (#2581).
         let kept = self.body_words(in h, dest);
-        if post == NONE64 || (self.body_lane(i.ty) == 0 && !(kept != 0 && i.op == Op::Call)) {
+        if post == NONE64
+            || (self.body_lane(i.ty) == 0 && !(kept != 0 && (i.op == Op::Call || i.op == Op::Seq)))
+        {
             return false;
         }
         // `ir_inline::operands`, which the walk reads before the arm.
@@ -2184,7 +2190,7 @@ impl Gen {
             extra.push(res_lane);
         } else if i.op == Op::Seq {
             kind = INST_SEQ;
-            if !self.body_seq(in h, i, inout ops, inout extra) {
+            if !self.body_seq(in h, i, dest, kept, inout ops, inout extra) {
                 return false;
             }
         } else if i.op == Op::Call {
@@ -2272,7 +2278,7 @@ impl Gen {
         }
         // A kept enum is only made by a call and returned: any other
         // instruction that names one is left to the walk.
-        if kept != 0 && kind != INST_WORDS_CALL {
+        if kept != 0 && kind != INST_WORDS_CALL && kind != INST_SEQ {
             return false;
         }
         for k in 0..ops.len() {
@@ -2336,6 +2342,8 @@ impl Gen {
         inout self,
         in h: Header,
         i: InstRow,
+        dest: u64,
+        kept: u64,
         inout ops: ChunkSeq[u64],
         inout extra: ChunkSeq[u64]
     ) -> bool {
@@ -2359,6 +2367,13 @@ impl Gen {
             && (node.name == k.string || node.name == k.str_);
         let slice = node.kind == TyKind::Named && node.n == 1 && node.name == k.slice;
         let ops_s = self.ops;
+        // An `Option` result kept as its tag and payload words (#2653).
+        if slice && n == 1 && label == ops_s.seq_last {
+            return self.body_seq_option(in h, i, dest, kept, receiver, inout extra);
+        }
+        if kept != 0 {
+            return false;
+        }
         if text && n == 1 && label == ops_s.seq_str_len {
             extra.push(SEQ_WORD);
             extra.push(STR_LEN_OFFSET);
@@ -2387,30 +2402,8 @@ impl Gen {
             );
         }
         if slice && n == 2 && label == ops_s.seq_slice_get {
-            let elem = default_type(inout self.ctx.types, self.ctx.types.arg(receiver, 0));
-            let lane = self.body_lane(elem);
-            let en = self.ctx.types.node(elem);
-            if en.kind != TyKind::Named || en.n != 0 || (lane != LANE_I64 && lane != LANE_F64) {
-                return false;
-            }
-            let stride = if en.name == k.u8_ || en.name == k.bool_ {
-                STRIDE_BYTE
-            } else if en.name == k.u16_ {
-                STRIDE_HALF
-            } else if en.name == k.u32_ {
-                STRIDE_QUARTER
-            } else {
-                self.body_product_size(elem)
-            };
-            if stride != STRIDE_BYTE
-                && stride != STRIDE_HALF
-                && stride != STRIDE_QUARTER
-                && stride != STRIDE_WORD
-            {
-                return false;
-            }
-            // A four-byte float loads as a zero-extended word.
-            if lane == LANE_F64 && stride != STRIDE_WORD {
+            let (stride, lane) = self.body_elem(receiver);
+            if stride == 0 {
                 return false;
             }
             extra.push(SEQ_GET);
@@ -2424,6 +2417,105 @@ impl Gen {
             );
         }
         false
+    }
+
+    // A slice's element as `seq_load_elem` loads it: its stride
+    // (`seq::elem_bytes`) and lane, for a one-word integer, `bool` or
+    // `f64`; stride 0 for any other element.
+    fn body_elem(inout self, receiver: u32) -> (u64, u64) {
+        let k = self.ctx.world.k;
+        let elem = default_type(inout self.ctx.types, self.ctx.types.arg(receiver, 0));
+        let lane = self.body_lane(elem);
+        let en = self.ctx.types.node(elem);
+        if en.kind != TyKind::Named || en.n != 0 || (lane != LANE_I64 && lane != LANE_F64) {
+            return (0, 0);
+        }
+        let stride = if en.name == k.u8_ || en.name == k.bool_ {
+            STRIDE_BYTE
+        } else if en.name == k.u16_ {
+            STRIDE_HALF
+        } else if en.name == k.u32_ {
+            STRIDE_QUARTER
+        } else {
+            self.body_product_size(elem)
+        };
+        if stride != STRIDE_BYTE
+            && stride != STRIDE_HALF
+            && stride != STRIDE_QUARTER
+            && stride != STRIDE_WORD
+        {
+            return (0, 0);
+        }
+        // A four-byte float loads as a zero-extended word.
+        if lane == LANE_F64 && stride != STRIDE_WORD {
+            return (0, 0);
+        }
+        (stride, lane)
+    }
+
+    // A slice's `last` (#2653), whose `Option` result the optimize path
+    // keeps as its tag and payload words (`aggregates::scalar_enums`,
+    // `seq_option` with a two-word request): the form, the element's
+    // stride, the `None` and `Some` tags, then each word's value and the
+    // kind it is coerced to. False when the result is kept in memory, or
+    // its element is a float (the payload word is an integer).
+    fn body_seq_option(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        dest: u64,
+        kept: u64,
+        receiver: u32,
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        if kept != OPTION_WORDS {
+            return false;
+        }
+        let ops_s = self.ops;
+        let (stride, lane) = self.body_elem(receiver);
+        if stride == 0 || lane != LANE_I64 {
+            return false;
+        }
+        extra.push(SEQ_LAST);
+        extra.push(stride);
+        // The tags of `Option`'s variants (`Layout::variant`).
+        let mark = self.layouts.mark();
+        let d = default_type(inout self.ctx.types, i.ty);
+        let l = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            d
+        );
+        let mut none_tag = NONE64;
+        let mut some_tag = NONE64;
+        if l != NONE32 && self.layouts.node(l).kind == L_ENUM {
+            let node = self.layouts.node(l);
+            for k in 0..widen_u64(node.n) {
+                let v = self.layouts.lvariant(add(widen_u64(node.a), k));
+                if v.name == ops_s.option_none {
+                    none_tag = k;
+                } else if v.name == ops_s.option_some {
+                    some_tag = k;
+                }
+            }
+        }
+        self.layouts.reset(mark);
+        if none_tag == NONE64 || some_tag == NONE64 {
+            return false;
+        }
+        extra.push(none_tag);
+        extra.push(some_tag);
+        for k in 0..kept {
+            let word = self.body_word(in h, dest, k);
+            if word == NONE64 {
+                return false;
+            }
+            extra.push(word);
+            extra.push(self.body_kind(n32(u64_at(in h.vty, word))));
+        }
+        true
     }
 
     // The default a `Never` value of type `t` stands for (`default_value`

@@ -2223,3 +2223,69 @@ fn vesper_string_and_slice_bodies_match() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// A slice's `last` (#2653), whose `Option` the optimize path keeps as
+/// its tag and payload words (`aggregates::scalar_enums`, `seq_option`),
+/// on `u8`, `u32` and `i64` elements and an empty slice. Unoptimized the
+/// `Option` is built in memory and matched there, which stays with the
+/// walk.
+const SLICE_LAST: &str = "
+fn last_or(in xs: Slice[u32]) -> u64 {
+    match xs.last() {
+        Option::Some(x) => widen_u64(x),
+        Option::None => 7,
+    }
+}
+fn last_byte(in xs: Slice[u8]) -> u64 {
+    match xs.last() {
+        Option::Some(x) => wrapping_mul(widen_u64(x), 3),
+        Option::None => 11,
+    }
+}
+fn last_word(in xs: Slice[i64], d: i64) -> i64 {
+    match xs.last() {
+        Option::Some(x) => wrapping_add(x, d),
+        Option::None => d,
+    }
+}
+fn main() -> i64 {
+    let mut q: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    q.push(70000);
+    q.push(5);
+    let e: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut w: ChunkSeq[i64] = ChunkSeq::new[i64]();
+    w.push(-40);
+    let s: String = \"hello\";
+    let a = last_or(in q.as_slice()) ^ last_or(in e.as_slice());
+    let b = last_byte(in s.as_bytes()) ^ last_byte(in \"\".as_bytes());
+    let c = last_word(in w.as_slice(), 3);
+    wrapping_i64(a ^ wrapping_mul(b, 3)) ^ c
+}
+";
+
+#[test]
+fn vesper_slice_last_matches() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SLICE_LAST);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("slice_last", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "slice_last: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        // The three functions optimized (and again for the JIT run
+        // off-cross).
+        let min_emitted = if cross() { 3 } else { 6 };
+        assert!(
+            emitted >= min_emitted,
+            "only {emitted} slice `last` functions came from Vesper (expected {min_emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
