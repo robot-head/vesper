@@ -83,7 +83,8 @@ const DECLINES: &[&str] = &[
 /// operations (`fallible`) and the unit type of statements.
 const MIN_SAME_FUNCTIONS: usize = 38;
 
-/// The port functions Stage 2 must lower as Rust does today.
+/// The port functions Stage 2 must lower as Rust does today (main's 18622
+/// after #2734 and #2736 crossed, plus the trait frontend's instances).
 const MIN_SAME_PORT_FUNCTIONS: usize = 19934;
 
 /// Set to print the Rust and Stage 2 bodies of each function that differs.
