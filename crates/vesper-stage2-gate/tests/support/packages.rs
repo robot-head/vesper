@@ -516,7 +516,11 @@ pub const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
     ),
     (
         "vesper-export-build",
-        "`vesper build --lib`'s interface and binding from Stage 2's front end (#2270) as a native executable beside the Rust CLI (tests/self_host_codegen_export.rs); it is @vesper/stage2 plus the export packages, built under Stage 2 as one program in bootstrap switch slice 3",
+        "`vesper build --lib`'s interface and binding from Stage 2's front end (#2270) as a native executable beside the Rust CLI (tests/self_host_codegen_export.rs); Stage 2 builds it inside @vesper/port-builder (//:vesper-port-builder.wasm, #2666)",
+    ),
+    (
+        "vesper-port-builder",
+        "`vesper build --lib` for the ports as one program: Stage 2 builds it into //:vesper-port-builder.wasm (tools/bazel/stage2_port_builder.bzl), composed with the Cranelift component and compared with the Rust CLI by crates/vesper-port-harness/tests/stage2_builder.rs (#2666)",
     ),
     (
         "vesper-stage2",
