@@ -28,7 +28,8 @@ use @vesper-std/fs::{IoError, write_path};
 use self::ast_lower::{build_ir_ast, build_ir_ast_for_entry};
 use self::collect::{collect_program};
 use self::facts::{record_failure_ops};
-use self::loader::{load_package_graph_bytes};
+use self::tables::{lower_table_reads};
+use self::loader::{load_package_graph_bytes, load_package_graph_bytes_for};
 use self::sugar_policy::{
     PolicyFailure, PolicyFailureKind, PolicyInputs, copy_inputs, explicit_access_valid, has_failure,
     policy_inputs, resolve_rows
@@ -306,15 +307,18 @@ pub struct Lowered {
     call_pairs: ChunkSeq[Pair],
 }
 
-/// `stage2_compile_dir`'s front end for the package at `root_dir`, every
-/// function included: load, assemble, collect, check and lower. `None`
+/// `stage2_compile_dir`'s front end for the package at `root_dir`, for
+/// native target OS `os` (`linux`, `macos`, `windows`; src/packages.rs
+/// `src-<os>` sources), every function included: load, assemble, collect,
+/// check and lower. `None`
 /// with the reason in `err` when a step fails. The Wasm-only element-view
 /// marks are not made.
 pub fn stage2_lower_dir(
     in root_dir: Slice[u8],
+    in os: Slice[u8],
     inout err: ChunkSeq[u8]
 ) -> Option[Lowered] eff [Ffi[StdFs]] {
-    let encoded = match load_package_graph_bytes(in root_dir) {
+    let encoded = match load_package_graph_bytes_for(in root_dir, in os) {
         Option::Some(b) => b,
         Option::None => {
             err.extend(in "load_package_graph".as_bytes());
@@ -375,6 +379,10 @@ pub fn stage2_lower_dir(
     }
     // Native lowering reads the operations that may fail.
     let (names, types, world) = record_failure_ops(in ir_ast, sink names, sink types, sink world);
+    // Native code reads constant aggregates as tables.
+    let mut ir_ast = ir_ast;
+    let mut names = names;
+    lower_table_reads(inout ir_ast, inout names, in types, in world);
     let c = Ctx {
         names: names,
         types: types,
