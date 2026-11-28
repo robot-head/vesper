@@ -2024,8 +2024,9 @@ fn ev_index(inout fw: Fw, in a: Ast, e: Ex) {
     let index = ex(in a, e.b);
     let _b = ev(inout fw, in a, e.a);
     let _i = ev(inout fw, in a, e.b);
-    if index.kind == X_RANGE {
-        // A slice or text view: no element check.
+    // A slice or text view (`s[a..b]`, whose interval ast_lower writes as
+    // the binary `..`): no element check.
+    if index.kind == X_RANGE || (index.kind == X_BINARY && spells(in fw, n32(index.a), "..")) {
         return;
     }
     let base_ty = ty_of(in fw, ex(in a, e.a));
