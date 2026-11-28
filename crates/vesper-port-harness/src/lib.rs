@@ -26,6 +26,8 @@
 //!    upper case appended (`VESPER_PORT_OBJECT_DECODER`).
 //! 2. [`COMPILER_ENV`]: a `vesper` executable, run as `vesper build --lib`.
 //!    CI builds `vesper` once and passes it here.
+//!    With [`stage2::BUILDER_ENV`] set, the Stage 2 port builder runs
+//!    first, and the compiler only builds the ports it declines.
 //! 3. Otherwise the in-tree compiler, built by a nested
 //!    `cargo build -p vesper --bin vesper` into
 //!    `<target dir>/vesper-port-compiler`, so a plain
@@ -42,6 +44,8 @@
 //! ```
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+pub mod stage2;
 
 /// Set to `1` to rewrite a stale committed binding instead of failing.
 pub const BLESS_ENV: &str = "VESPER_PORT_BLESS";
@@ -134,6 +138,10 @@ impl Port {
             GENERATED_BINDING_ENV,
             IN_COMPILER_BUILD_ENV,
             OBJECT_PACKAGES_ENV,
+            stage2::BUILDER_ENV,
+            stage2::WASMTIME_ENV,
+            stage2::WASMTIME_FALLBACK_ENV,
+            stage2::VERBOSE_ENV,
             &object_env,
             &binding_env,
         ] {
@@ -182,9 +190,13 @@ impl Port {
                 generated
             }
             None => {
-                let compiler = compiler()?;
                 let input = prepare_source(&source, &out.join("edited"), &self.edits)?;
                 let binding = out.join(format!("vesper_{}_binding.rs", self.library));
+                let interface = out.join(format!("vesper_{}.json", self.library));
+                if self.stage2_built(&input, &target, &out, &object, &interface, &binding)? {
+                    return self.finish(&dir, &source, &target, &object, Some(binding));
+                }
+                let compiler = compiler()?;
                 let mut command = Command::new(&compiler);
                 command
                     .args(["build", "--lib", "--lib-name", &self.library, "--target"])
@@ -193,7 +205,7 @@ impl Port {
                     .arg("-o")
                     .arg(&object)
                     .arg("--interface")
-                    .arg(out.join(format!("vesper_{}.json", self.library)))
+                    .arg(&interface)
                     .arg("--rust-binding")
                     .arg(&binding);
                 if let Some(types) = &self.types_path {
@@ -215,6 +227,60 @@ impl Port {
                 Some(binding)
             }
         };
+        self.finish(&dir, &source, &target, &object, generated)
+    }
+
+    /// Build the outputs with the Stage 2 port builder when
+    /// [`stage2::BUILDER_ENV`] names one. False when it is off or declines
+    /// any output (the Rust compiler then builds all three).
+    fn stage2_built(
+        &self,
+        input: &Path,
+        target: &str,
+        out: &Path,
+        object: &Path,
+        interface: &Path,
+        binding: &Path,
+    ) -> Result<bool, String> {
+        let Some(builder) = std::env::var_os(stage2::BUILDER_ENV) else {
+            return Ok(false);
+        };
+        let builder = PathBuf::from(builder);
+        println!("cargo:rerun-if-changed={}", builder.display());
+        let wasmtime = stage2::wasmtime();
+        let request = stage2::Request {
+            builder: &builder,
+            wasmtime: &wasmtime,
+            package: input,
+            library: &self.library,
+            target,
+            object,
+            interface,
+            binding,
+            rust_types: self.types_path.as_deref(),
+            scratch: &out.join("stage2"),
+        };
+        let outcome = stage2::build(&request);
+        let built = matches!(outcome, Ok(o) if o.built());
+        if !built && std::env::var(stage2::VERBOSE_ENV).as_deref() == Ok("1") {
+            println!(
+                "cargo:warning=vesper-port: the Stage 2 port builder left {} to the Rust compiler: {outcome:?}",
+                self.library
+            );
+        }
+        Ok(built)
+    }
+
+    /// Check the binding and archive the object (the steps after either
+    /// compiler).
+    fn finish(
+        &self,
+        dir: &Path,
+        source: &Path,
+        target: &str,
+        object: &Path,
+        generated: Option<PathBuf>,
+    ) -> Result<(), String> {
         if let Some(binding) = &self.binding {
             let path = dir.join(binding);
             println!("cargo:rerun-if-changed={}", path.display());
@@ -236,11 +302,11 @@ impl Port {
         // archive, so the linker finds them after the port's references.
         let mut build = cc::Build::new();
         build
-            .object(&object)
+            .object(object)
             .cargo_metadata(true)
             .opt_level(2)
             .warnings(false);
-        for file in package_objects(&source, &target)? {
+        for file in package_objects(source, target)? {
             println!("cargo:rerun-if-changed={}", file.display());
             // MSVC `cl.exe` rejects `\\?\` verbatim prefixes from `canonicalize`.
             let cc_file = strip_verbatim_prefix(&file);
@@ -485,6 +551,43 @@ pub fn prepare_source(
         write(&copy, &text)?;
         return Ok(copy);
     }
+    let (root, root_files) = copy_closure(source, scratch)?;
+    for (from, to) in edits {
+        let mut hits = Vec::new();
+        for file in &root_files {
+            let text =
+                std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+            let n = text.matches(from.as_str()).count();
+            if n > 0 {
+                hits.push((file.clone(), text, n));
+            }
+        }
+        match hits.as_slice() {
+            [(file, text, 1)] => write(file, &text.replacen(from.as_str(), to, 1))?,
+            _ => {
+                return Err(format!(
+                    "edit '{from}' must occur exactly once in the .ves files of {}",
+                    source.display()
+                ));
+            }
+        }
+    }
+    Ok(root)
+}
+
+/// A copy of the package at `source` and its path dependencies, with their
+/// relative layout, under `scratch`, made of regular files (symlinks
+/// followed): the copy's root package, and its `.ves` files. The Stage 2
+/// port builder reads its input through a WASI preopen, which refuses the
+/// absolute symlinks of Bazel's sandboxes and runfiles.
+pub fn copy_package(source: &Path, scratch: &Path) -> Result<PathBuf, String> {
+    if scratch.exists() {
+        std::fs::remove_dir_all(scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+    }
+    Ok(copy_closure(source, scratch)?.0)
+}
+
+fn copy_closure(source: &Path, scratch: &Path) -> Result<(PathBuf, Vec<PathBuf>), String> {
     let closure = package_closure(source)?;
     let base = common_ancestor(&closure);
     let mut root_files = Vec::new();
@@ -529,28 +632,8 @@ pub fn prepare_source(
             }
         }
     }
-    for (from, to) in edits {
-        let mut hits = Vec::new();
-        for file in &root_files {
-            let text =
-                std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
-            let n = text.matches(from.as_str()).count();
-            if n > 0 {
-                hits.push((file.clone(), text, n));
-            }
-        }
-        match hits.as_slice() {
-            [(file, text, 1)] => write(file, &text.replacen(from.as_str(), to, 1))?,
-            _ => {
-                return Err(format!(
-                    "edit '{from}' must occur exactly once in the .ves files of {}",
-                    source.display()
-                ));
-            }
-        }
-    }
     let root = closure[0].strip_prefix(&base).unwrap_or(&closure[0]);
-    Ok(scratch.join(root))
+    Ok((scratch.join(root), root_files))
 }
 
 /// The directories of `package` besides `src/` that `include_str` may read:
@@ -575,7 +658,7 @@ fn data_dirs(package: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(dirs)
 }
 
-fn common_ancestor(paths: &[PathBuf]) -> PathBuf {
+pub(crate) fn common_ancestor(paths: &[PathBuf]) -> PathBuf {
     let mut base = paths[0].clone();
     while !paths.iter().all(|p| p.starts_with(&base)) {
         if !base.pop() {
@@ -613,7 +696,7 @@ fn copy_file(from: &Path, to: &Path) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", from.display()))
 }
 
-fn write(path: &Path, text: &str) -> Result<(), String> {
+pub(crate) fn write(path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
@@ -687,7 +770,7 @@ fn compiler() -> Result<PathBuf, String> {
     Ok(target_dir.join(host).join("debug").join(exe))
 }
 
-fn run(command: &mut Command, program: &Path) -> Result<(), String> {
+pub(crate) fn run(command: &mut Command, program: &Path) -> Result<(), String> {
     let output = command
         .output()
         .map_err(|e| format!("{}: {e}", program.display()))?;

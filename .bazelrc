@@ -83,3 +83,8 @@ common:ci_opt --@rules_rust//rust/settings:extra_rustc_flag=-Coverflow-checks=on
 
 # Personal settings, such as the BuildBuddy API key.
 try-import %workspace%/user.bazelrc
+
+# --config=stage2-ports: build the port objects with the Stage 2 port builder
+# (`//:vesper-port-builder.wasm`), falling back to the Rust compiler for each
+# port it declines (#2666, bootstrap switch slice 3).
+common:stage2-ports --//tools/bazel:stage2_ports

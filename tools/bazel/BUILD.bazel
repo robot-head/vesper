@@ -1,3 +1,4 @@
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 # Host triples for `vesper build --lib` objects (vesper_port.bzl).
 [
     config_setting(
@@ -17,3 +18,18 @@
         "aarch64",
     ]
 ]
+
+# `--config=stage2-ports` (.bazelrc): vesper_port_object builds each port
+# with the Stage 2 port builder (`//:vesper-port-builder.wasm`) and falls
+# back to `//:bin/vesper` for the ports it declines (#2666).
+bool_flag(
+    name = "stage2_ports",
+    build_setting_default = False,
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "stage2_ports_enabled",
+    flag_values = {":stage2_ports": "True"},
+    visibility = ["//visibility:public"],
+)
