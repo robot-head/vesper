@@ -1,8 +1,10 @@
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
     path::PathBuf,
-    process::{Command, Output},
+    process::Output,
     sync::atomic::{AtomicU64, Ordering},
 };
 use vesper_semver::{
@@ -25,7 +27,7 @@ impl Fixture {
         Self(dir)
     }
     fn run(&self, extra: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_vesper"))
+        support::vesper()
             .current_dir(&self.0)
             .args(["semver", "old.vhir", "new.vhir"])
             .args(extra)

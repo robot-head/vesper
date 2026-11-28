@@ -1,8 +1,10 @@
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Output,
     sync::atomic::{AtomicU64, Ordering},
 };
 struct Fixture {
@@ -23,7 +25,7 @@ impl Fixture {
         Self { dir, path }
     }
     fn run(&self, args: &[&str]) -> Output {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_vesper"));
+        let mut c = support::vesper();
         c.arg("lint").arg(&self.path);
         c.args(args);
         c.output().unwrap()
@@ -57,7 +59,7 @@ fn findings(report: &Value, code: &str) -> Vec<Value> {
         .collect()
 }
 fn check(path: &Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_vesper"))
+    let output = support::vesper()
         .arg("check")
         .arg(path)
         .arg("--json")
@@ -81,11 +83,7 @@ fn unused_effects_fix_rechecks_disappears_and_is_semver_compatible() {
     assert!(fixed["applied_edits"].as_u64().unwrap() > 0);
     assert!(f.text().contains("/* keep */"));
     check(&f.path);
-    let run = Command::new(env!("CARGO_BIN_EXE_vesper"))
-        .arg("run")
-        .arg(&f.path)
-        .output()
-        .unwrap();
+    let run = support::vesper().arg("run").arg(&f.path).output().unwrap();
     assert!(
         run.status.success(),
         "{}",
@@ -257,10 +255,7 @@ fn token_edits_preserve_comments_and_remove_only_unused_instances() {
 }
 #[test]
 fn help_options_and_no_partial_temporary_files() {
-    let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
-        .args(["lint", "--help"])
-        .output()
-        .unwrap();
+    let out = support::vesper().args(["lint", "--help"]).output().unwrap();
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("--semver-safe"));
     let f = Fixture::new("effect E{fn no();} fn main() eff[E]{}");
@@ -275,7 +270,7 @@ fn symlink_and_readonly_failures_preserve_sources() {
     let f = Fixture::new(source);
     let link = f.dir.join("link.ves");
     std::os::unix::fs::symlink(&f.path, &link).unwrap();
-    let o = Command::new(env!("CARGO_BIN_EXE_vesper"))
+    let o = support::vesper()
         .arg("lint")
         .arg(&link)
         .args(["--fix", "--json"])
@@ -435,7 +430,7 @@ fn result_construction_is_supported_only_with_explicit_closed_types() {
 fn configured(fixture: &Fixture, policy: &str, args: &[&str]) -> Output {
     let config = fixture.dir.join("Loom.toml");
     fs::write(&config, policy).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_vesper"))
+    support::vesper()
         .arg("lint")
         .arg(&fixture.path)
         .arg("--config")
@@ -533,11 +528,7 @@ fn configured_fix_clears_unused_deny_but_truthfully_reports_changed_when_other_d
     assert_eq!(r["changed"], true);
     assert_eq!(r["outcome"]["remaining_denied"], 0);
     check(&f.path);
-    let run = Command::new(env!("CARGO_BIN_EXE_vesper"))
-        .arg("run")
-        .arg(&f.path)
-        .output()
-        .unwrap();
+    let run = support::vesper().arg("run").arg(&f.path).output().unwrap();
     assert!(run.status.success());
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "42");
     let f = Fixture::new(PROJECTION_POLICY_SOURCE);
@@ -678,7 +669,7 @@ fn nearest_manifest_applies_to_file_and_package_and_explicit_config_wins() {
     let source = nested.join("nested.ves");
     fs::write(&source, POLICY_SOURCE).unwrap();
     for path in [&source, &nested] {
-        let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+        let out = support::vesper()
             .arg("lint")
             .arg(path)
             .arg("--json")
@@ -698,7 +689,7 @@ fn nearest_manifest_applies_to_file_and_package_and_explicit_config_wins() {
         assert_eq!(report["policy"]["provenance"]["kind"], "discovered");
         assert!(findings(report, "L0102").is_empty());
     }
-    let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+    let out = support::vesper()
         .arg("lint")
         .arg(&source)
         .arg("--json")
@@ -765,7 +756,7 @@ fn explicit_policy_rejects_symlink_and_directory_without_source_changes() {
     let link = f.dir.join("link.toml");
     std::os::unix::fs::symlink(&config, &link).unwrap();
     for path in [&link, &f.dir] {
-        let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+        let out = support::vesper()
             .arg("lint")
             .arg(&f.path)
             .arg("--config")

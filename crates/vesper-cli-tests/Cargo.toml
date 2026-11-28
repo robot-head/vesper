@@ -11,3 +11,18 @@ publish = false
 [dev-dependencies]
 blake3 = "1.8"
 serde_json = { workspace = true }
+# The libraries the CLI tests check `vesper` results against, as the root
+# package linked them: the frozen seeds until their port crates are the
+# default (#1397 R7).
+vesper-bench = { path = "../vesper-bench/seed", package = "vesper-bench-seed" }
+vesper-chrono = { path = "../vesper-chrono" }
+vesper-ffi = { path = "../vesper-ffi" }
+vesper-highlight = { path = "../vesper-highlight/seed", package = "vesper-highlight-seed" }
+vesper-loom-calculus = { path = "../vesper-loom-calculus/seed", package = "vesper-loom-calculus-seed" }
+vesper-loom-cas = { path = "../vesper-loom-cas/seed", package = "vesper-loom-cas-seed" }
+vesper-semver = { path = "../vesper-semver/seed", package = "vesper-semver-seed" }
+vesper-simd = { path = "../vesper-simd/seed", package = "vesper-simd-seed" }
+
+# attestation_import_cli makes a FIFO.
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }

@@ -1,19 +1,21 @@
 //! `vesper highlight` acceptance (§43): Tier 0 losslessness over the
 //! repository's `.ves` sources, Tier 1 facts from the real checker, the typed
 //! Tier 0 fallback, and byte-exact HTML.
+mod support;
+
 use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Output,
 };
 use vesper_highlight::{css, highlight_tier0, highlight_tier0_tokens, verify_lossless_spans};
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    support::repo_root()
 }
 
 fn vesper(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_vesper"))
+    support::vesper()
         .args(args)
         .current_dir(root())
         .output()

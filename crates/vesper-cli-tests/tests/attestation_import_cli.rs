@@ -1,8 +1,10 @@
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
     path::PathBuf,
-    process::{Command, Output},
+    process::Output,
     sync::atomic::{AtomicU64, Ordering},
 };
 use vesper_loom_cas::{ObjectId, Store};
@@ -24,7 +26,7 @@ impl Fixture {
             "artifact.bin",
         ] {
             fs::copy(
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                support::repo_root()
                     .join("crates/vesper-loom-trust/tests/fixtures")
                     .join(name),
                 path.join(name),
@@ -63,7 +65,7 @@ impl Fixture {
         ])
     }
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_vesper"))
+        support::vesper()
             .current_dir(&self.0)
             .args(args)
             .output()
@@ -235,7 +237,7 @@ fn special_and_symlink_artifacts_fail_promptly_without_creating_store() {
             "directory" => fs::create_dir(&path).unwrap(),
             _ => unreachable!(),
         }
-        let mut child = Command::new(env!("CARGO_BIN_EXE_vesper"))
+        let mut child = support::vesper()
             .current_dir(&f.0)
             .args([
                 "attest",

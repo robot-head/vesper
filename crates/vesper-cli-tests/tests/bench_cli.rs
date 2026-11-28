@@ -1,9 +1,11 @@
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
@@ -32,7 +34,7 @@ impl Drop for Fixture {
     }
 }
 fn run(args: &[&str]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vesper"))
+    let mut child = support::vesper()
         .arg("bench")
         .args(args)
         .stdout(Stdio::piped())

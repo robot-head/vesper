@@ -1,8 +1,10 @@
 //! Integration B (#136): `vesper migrate` lifting C headers and Rust crates.
+mod support;
+
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Output,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -35,10 +37,7 @@ impl Drop for Temp {
 }
 
 fn vesper(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_vesper"))
-        .args(args)
-        .output()
-        .unwrap()
+    support::vesper().args(args).output().unwrap()
 }
 
 fn text(o: &Output) -> String {

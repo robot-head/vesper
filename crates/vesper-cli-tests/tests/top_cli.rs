@@ -1,8 +1,10 @@
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     fs,
     path::PathBuf,
-    process::{Command, Output},
+    process::Output,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -28,7 +30,7 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_vesper"))
+        support::vesper()
             .current_dir(&self.0)
             .arg("top")
             .args(args)
@@ -161,7 +163,7 @@ fn top_executes_ves_module_and_reads_env_trace_path() {
     assert!(f.0.join("captured.json").is_file());
 
     // Re-read captured trace via VESPER_PULSE_TRACE_PATH without CLI flag.
-    let via_env = Command::new(env!("CARGO_BIN_EXE_vesper"))
+    let via_env = support::vesper()
         .current_dir(&f.0)
         .env("VESPER_PULSE_TRACE_PATH", "captured.json")
         .args(["top", "--fail-on-cycle", "--json"])
