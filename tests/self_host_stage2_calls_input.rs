@@ -17,8 +17,11 @@ mod check_words;
 mod codegen_calls_words;
 #[path = "common/ir_words.rs"]
 mod ir_words;
+#[allow(dead_code)]
+#[path = "self_host_codegen_export/ports.rs"]
+mod ports;
 
-use check_harness::{Package, repo};
+use check_harness::{Entry, Package, repo};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -76,7 +79,13 @@ const DECLINES: &[&str] = &[
 /// The functions Stage 2 must lower as Rust does today. The rest differ
 /// where Stage 2's checker records less than Rust's: overflow and partial
 /// operations (`fallible`) and the unit type of statements.
-const MIN_SAME_FUNCTIONS: usize = 8;
+const MIN_SAME_FUNCTIONS: usize = 32;
+
+/// The port functions Stage 2 must lower as Rust does today.
+const MIN_SAME_PORT_FUNCTIONS: usize = 2895;
+
+/// Set to print the Rust and Stage 2 bodies of each function that differs.
+const SHOW_DIFFS: &str = "VESPER_STAGE2_CALLS_DIFFS";
 
 /// The functions of a `place_ir_dump`, by name: each body's lines with
 /// path ids replaced by the paths they name, and the spans (which Stage 2
@@ -155,6 +164,52 @@ pub fn total(a: u64, b: u64) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]
         &["total"],
     ),
     (
+        "guards",
+        "pub fn safe_div(a: u64, b: u64) -> u64 eff [Fail[RuntimeError]] { if b == 0 { return 0; } a / b }
+pub fn bounded(x: u8) -> u8 eff [Fail[ArithOverflow]] { if x < 200 { x + 50 } else { x } }
+pub fn negate(x: i32) -> i32 eff [Fail[ArithOverflow]] { -x }
+pub fn consts() -> i64 eff [Fail[ArithOverflow]] { let a = 5; let b = a * 3; b - 1 }
+pub fn shifts(x: u64, n: u32) -> u64 eff [Fail[ArithOverflow]] { if n < 64 { x << n } else { x >> (n & 7) } }
+pub fn low_byte(x: u64) -> u8 eff [Fail[ArithOverflow]] { narrow_u8(x & 255) }
+pub fn any_byte(x: u64) -> u8 eff [Fail[ArithOverflow]] { narrow_u8(x) }
+pub fn modulo(x: u64, m: u64) -> u64 eff [Fail[RuntimeError]] { x % (m | 1) }
+pub fn halve(x: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] { x / 2 }
+pub fn signed_div(x: i64, y: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] { if y > 0 { x / y } else { 0 } }",
+        &["any_byte", "bounded", "consts", "halve", "low_byte", "modulo", "negate", "safe_div", "shifts", "signed_div"],
+    ),
+    (
+        "loops",
+        "pub fn sum_to(n: u64) -> u64 eff [Fail[ArithOverflow]] { let mut s: u64 = 0; for i in 0..n { s = s + i; } s }
+pub fn count_down(n: i64) -> i64 eff [Fail[ArithOverflow]] { let mut k = n; let mut c: i64 = 0; loop { if k <= 0 { break; } k = k - 1; c += 1; } c }
+pub fn fixed(lo: u32, hi: u32) -> u32 eff [Fail[ArithOverflow]] { let mut t: u32 = 0; for i in lo..hi { t = wrapping_add(t, i * 2); } t }
+pub fn product() -> u64 eff [Fail[ArithOverflow]] { let mut acc: u64 = 1; for i in 1..=16 { acc = wrapping_mul(acc, i + 1); } acc }",
+        &["count_down", "fixed", "product", "sum_to"],
+    ),
+    (
+        "arrays",
+        "pub fn pick(i: u64, a: u32) -> u32 eff [Fail[RuntimeError]] { let t: [u32; 4] = [a, a, a, a]; t[i] }
+pub fn pick_masked(i: u64, a: u32) -> u32 eff [Fail[RuntimeError]] { let t: [u32; 4] = [a, a, a, a]; t[i & 3] }
+pub fn guarded(i: u64, a: u32) -> u32 eff [Fail[RuntimeError]] { let t: [u32; 4] = [a, a, a, a]; if i < 4 { t[i] } else { a } }",
+        &["guarded", "pick", "pick_masked"],
+    ),
+    (
+        "seqs",
+        "fn first(in s: Slice[u64], j: u64) -> u64 eff [Fail[RuntimeError]] { s[j] }
+pub fn seqs(n: u64, j: u64) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] { let mut v = ChunkSeq::new[u64](); v.push(n); v.push(j); let mut t: u64 = 0; for i in 0..v.len() { t = t + v.get(i); } t + v[j] + first(in v.as_slice(), j) }",
+        &["seqs"],
+    ),
+    // Literal typing the Stage 2 checker does not match yet (#2691): a
+    // shift amount, a range typed by its index's uses, array literal
+    // elements and sequence indices.
+    (
+        "literals",
+        "pub fn shift3(x: u64) -> u64 { x >> 3 }
+pub fn steps() -> u32 eff [Fail[ArithOverflow]] { let mut t: u32 = 0; for i in 0..10 { t = wrapping_add(t, i * 2); } t }
+pub fn sum_arr() -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] { let t: [u32; 4] = [1, 2, 3, 4]; let mut s: u32 = 0; for i in 0..4 { s = s + t[i]; } s }
+pub fn second(n: u64) -> u64 eff [Fail[RuntimeError]] { let mut v = ChunkSeq::new[u64](); v.push(n); v[0] }",
+        &["second", "shift3", "steps", "sum_arr"],
+    ),
+    (
         "floats",
         "pub fn lerp(a: f64, b: f64, t: f64) -> f64 { a + (b - a) * t }
 pub fn half(x: f32) -> f32 { x * 0.5 }",
@@ -200,11 +255,18 @@ fn build_driver(dir: &Path) -> PathBuf {
 
 /// The calls input the Rust compiler encodes for the package at `dir`'s
 /// library task over `roots`, optimized, from its first lowering.
-fn rust_input(dir: &Path, roots: &[&str]) -> Vec<u8> {
-    let p = vesper::packages::load(dir).unwrap_or_else(|e| panic!("{e:?}"));
-    assert!(p.ok(), "{:?} {:?}", p.diagnostics, p.manifest_errors);
+fn rust_input(dir: &Path, roots: &[&str]) -> Result<Vec<u8>, String> {
+    let p = vesper::packages::load(dir).map_err(|e| format!("{e:?}"))?;
+    if !p.ok() {
+        return Err(format!("{:?} {:?}", p.diagnostics, p.manifest_errors));
+    }
     let checked = vesper::check::check(&p.module);
-    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    if let Some(d) = checked.diagnostics.first() {
+        return Err(format!(
+            "Rust's checker: {} diagnostics, first {d:?}",
+            checked.diagnostics.len()
+        ));
+    }
     let program = vesper::ir_swap::lower(&checked.world);
     let tasks: Vec<(String, u64)> = roots
         .iter()
@@ -219,7 +281,118 @@ fn rust_input(dir: &Path, roots: &[&str]) -> Vec<u8> {
         })
         .collect();
     codegen_calls_words::calls_input_flags_wide(&checked.world, &program, &tasks)
-        .expect("the library encodes")
+        .ok_or_else(|| "Rust does not encode the library".to_string())
+}
+
+/// What comparing one library found.
+#[derive(Default)]
+struct Tally {
+    same_calls: usize,
+    same_fns: usize,
+    failures: Vec<String>,
+    differing: Vec<String>,
+}
+
+/// The two readers of a calls input.
+struct Readers {
+    calls: Entry,
+    dump: Entry,
+}
+
+impl Readers {
+    fn load() -> Readers {
+        Readers {
+            calls: Package::load("packages/vesper-codegen-calls").entry("codegen_calls_text", true),
+            dump: Package::load("packages/vesper-place-ir").entry("place_ir_dump", true),
+        }
+    }
+}
+
+/// Runs the Stage 2 driver on the package at `package` over `roots` and
+/// compares its calls input with Rust's.
+fn compare(
+    t: &mut Tally,
+    driver: &Path,
+    readers: &Readers,
+    scratch: &Path,
+    library: &str,
+    package: &Path,
+    roots: &[&str],
+) {
+    let roots_file = scratch.join(format!("{library}.roots"));
+    std::fs::write(&roots_file, roots.join("\n")).unwrap();
+    let out = scratch.join(format!("{library}.calls"));
+    let status = Command::new(driver)
+        .arg(package)
+        .arg(&roots_file)
+        .arg("1")
+        .arg(&out)
+        .status()
+        .unwrap();
+    let written = std::fs::read(&out).unwrap_or_default();
+    match status.code() {
+        Some(0) => {}
+        Some(c) => {
+            let why = DECLINES.get(c as usize).copied().unwrap_or("?");
+            t.failures.push(format!(
+                "{library}: declined: {why}: {}",
+                String::from_utf8_lossy(&written)
+            ));
+            return;
+        }
+        None => panic!("{library}: the driver was killed"),
+    }
+    let rust = match rust_input(package, roots) {
+        Ok(r) => r,
+        Err(e) => {
+            t.failures.push(format!("{library}: {e}"));
+            return;
+        }
+    };
+    let (rust_calls, stage2_calls) = (readers.calls.text(&rust), readers.calls.text(&written));
+    if rust_calls != stage2_calls {
+        t.failures.push(format!(
+            "{library}: instances or declarations differ\nRust:\n{rust_calls}\nStage 2:\n{stage2_calls}"
+        ));
+        return;
+    }
+    t.same_calls += 1;
+    let rust_fns = functions(&readers.dump.text(&rust));
+    let stage2_fns = functions(&readers.dump.text(&written));
+    for (name, body) in &rust_fns {
+        match stage2_fns.get(name) {
+            Some(b) if same_body(body, b) => t.same_fns += 1,
+            Some(b) => {
+                if std::env::var_os(SHOW_DIFFS).is_some() {
+                    eprintln!(
+                        "{library}::{name}\nRust:\n{}\nStage 2:\n{}",
+                        body.join("\n"),
+                        b.join("\n")
+                    );
+                }
+                t.differing.push(format!("{library}::{name}"))
+            }
+            None => t
+                .failures
+                .push(format!("{library}: Stage 2 did not lower {name}")),
+        }
+    }
+}
+
+/// A one-file library as a package directory.
+fn one_file_package(scratch: &Path, library: &str, source: &str) -> PathBuf {
+    let package = scratch.join(format!("pkg-{library}"));
+    std::fs::create_dir_all(package.join("src")).unwrap();
+    std::fs::write(
+        package.join("Loom.toml"),
+        format!(
+            "[package]\nname = \"@port/{}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+            library.replace('_', "-")
+        ),
+    )
+    .unwrap();
+    std::fs::write(package.join("src/lib.ves"), source).unwrap();
+    package
 }
 
 #[cfg(unix)]
@@ -228,73 +401,135 @@ fn stage2_calls_inputs_read_as_rust_ones() {
     let scratch = std::env::temp_dir().join(format!("vesper-stage2-calls-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     let driver = build_driver(&scratch);
-    let calls = Package::load("packages/vesper-codegen-calls").entry("codegen_calls_text", true);
-    let dump = Package::load("packages/vesper-place-ir").entry("place_ir_dump", true);
-    let (mut same_calls, mut same_fns, mut failures, mut differing) = (0, 0, vec![], vec![]);
+    let readers = Readers::load();
+    let mut t = Tally::default();
     for (library, source, roots) in LIBRARIES {
-        let package = scratch.join(format!("pkg-{library}"));
-        std::fs::create_dir_all(package.join("src")).unwrap();
-        std::fs::write(
-            package.join("Loom.toml"),
-            format!(
-                "[package]\nname = \"@port/{library}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n"
-            ),
-        )
-        .unwrap();
-        std::fs::write(package.join("src/lib.ves"), source).unwrap();
-        let roots_file = scratch.join(format!("{library}.roots"));
-        std::fs::write(&roots_file, roots.join("\n")).unwrap();
-        let out = scratch.join(format!("{library}.calls"));
-        let status = Command::new(&driver)
-            .arg(&package)
-            .arg(&roots_file)
-            .arg("1")
-            .arg(&out)
-            .status()
-            .unwrap();
-        let written = std::fs::read(&out).unwrap_or_default();
-        match status.code() {
-            Some(0) => {}
-            Some(c) => {
-                let why = DECLINES.get(c as usize).copied().unwrap_or("?");
-                failures.push(format!(
-                    "{library}: declined: {why}: {}",
-                    String::from_utf8_lossy(&written)
-                ));
-                continue;
-            }
-            None => panic!("{library}: the driver was killed"),
-        }
-        let rust = rust_input(&package, roots);
-        let (rust_calls, stage2_calls) = (calls.text(&rust), calls.text(&written));
-        if rust_calls != stage2_calls {
-            failures.push(format!(
-                "{library}: instances or declarations differ\nRust:\n{rust_calls}\nStage 2:\n{stage2_calls}"
-            ));
-            continue;
-        }
-        same_calls += 1;
-        let rust_fns = functions(&dump.text(&rust));
-        let stage2_fns = functions(&dump.text(&written));
-        for (name, body) in &rust_fns {
-            match stage2_fns.get(name) {
-                Some(b) if same_body(body, b) => same_fns += 1,
-                Some(_) => differing.push(format!("{library}::{name}")),
-                None => failures.push(format!("{library}: Stage 2 did not lower {name}")),
-            }
-        }
+        let package = one_file_package(&scratch, library, source);
+        compare(
+            &mut t, &driver, &readers, &scratch, library, &package, roots,
+        );
     }
     let _ = std::fs::remove_dir_all(&scratch);
     eprintln!(
-        "stage2 calls inputs: {same_calls} of {} libraries with Rust's instances and \
-         declarations; {same_fns} functions lowered as Rust lowers them, {} differ ({})",
+        "stage2 calls inputs: {} of {} libraries with Rust's instances and \
+         declarations; {} functions lowered as Rust lowers them, {} differ ({})",
+        t.same_calls,
         LIBRARIES.len(),
-        differing.len(),
-        differing.join(", ")
+        t.same_fns,
+        t.differing.len(),
+        t.differing.join(", ")
     );
-    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    assert!(t.failures.is_empty(), "{}", t.failures.join("\n\n"));
     assert!(
-        same_fns >= MIN_SAME_FUNCTIONS,
-        "only {same_fns} functions lowered as Rust lowers them"
+        t.same_fns >= MIN_SAME_FUNCTIONS,
+        "only {} functions lowered as Rust lowers them",
+        t.same_fns
+    );
+}
+
+/// `STAGE2_CALLS_PORTS` limits the port corpus to a comma-separated list
+/// of libraries (the default is all of them).
+const PORTS_ENV: &str = "STAGE2_CALLS_PORTS";
+
+/// `STAGE2_CALLS_FAILURES=<file>` writes every port failure there.
+const FAILURES_ENV: &str = "STAGE2_CALLS_FAILURES";
+
+/// The export roots of a port: its interface's functions, in name order,
+/// as `vesper build --lib` writes them (`native_export::object`).
+fn port_roots(port: &ports::Port, input: &Path, scratch: &Path) -> Result<Vec<String>, String> {
+    let library = port.1;
+    let json = scratch.join(format!("{library}.json"));
+    let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+        .args(["build", "--no-opt", "--lib", "--lib-name", library])
+        .arg(input)
+        .arg("-o")
+        .arg(scratch.join(format!("{library}.o")))
+        .arg("--interface")
+        .arg(&json)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+    let text = std::fs::read_to_string(&json).map_err(|e| e.to_string())?;
+    let interface: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let mut names: Vec<String> = interface["functions"]
+        .as_array()
+        .map(|fs| {
+            fs.iter()
+                .filter_map(|f| f["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    Ok(names)
+}
+
+/// The port libraries (tests/self_host_codegen_export/ports.rs), each over
+/// its export roots. Reports how far Stage 2's calls inputs are from
+/// Rust's; the floor is [`MIN_SAME_PORT_FUNCTIONS`].
+#[cfg(unix)]
+#[test]
+fn stage2_port_calls_inputs_read_as_rust_ones() {
+    let scratch =
+        std::env::temp_dir().join(format!("vesper-stage2-port-calls-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let driver = build_driver(&scratch);
+    let readers = Readers::load();
+    let mut t = Tally::default();
+    let selected = |library: &str| match std::env::var(PORTS_ENV) {
+        Ok(list) if !list.is_empty() => list.split(',').any(|l| l.trim() == library),
+        _ => true,
+    };
+    let mut libraries = 0;
+    for port in ports::PORTS.iter().filter(|p| selected(p.1)) {
+        let library = port.1;
+        libraries += 1;
+        let input = ports::port_input(port, &repo(), &scratch).unwrap();
+        let roots = match port_roots(port, &input, &scratch) {
+            Ok(r) => r,
+            Err(e) => {
+                t.failures
+                    .push(format!("{library}: Rust build failed: {e}"));
+                continue;
+            }
+        };
+        let package = if input.is_dir() {
+            input
+        } else {
+            one_file_package(&scratch, library, &std::fs::read_to_string(&input).unwrap())
+        };
+        let roots: Vec<&str> = roots.iter().map(String::as_str).collect();
+        let before = (t.same_fns, t.differing.len(), t.failures.len());
+        compare(
+            &mut t, &driver, &readers, &scratch, library, &package, &roots,
+        );
+        eprintln!(
+            "{library}: {} same, {} differ{}",
+            t.same_fns - before.0,
+            t.differing.len() - before.1,
+            if t.failures.len() > before.2 {
+                format!(", {}", t.failures[before.2].lines().next().unwrap_or(""))
+            } else {
+                String::new()
+            }
+        );
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    if let Some(path) = std::env::var_os(FAILURES_ENV) {
+        std::fs::write(path, t.failures.join("\n\n")).unwrap();
+    }
+    eprintln!(
+        "stage2 port calls inputs: {} of {libraries} libraries with Rust's instances and \
+         declarations; {} functions lowered as Rust lowers them, {} differ; {} failures",
+        t.same_calls,
+        t.same_fns,
+        t.differing.len(),
+        t.failures.len()
+    );
+    assert!(
+        t.same_fns >= MIN_SAME_PORT_FUNCTIONS,
+        "only {} port functions lowered as Rust lowers them",
+        t.same_fns
     );
 }

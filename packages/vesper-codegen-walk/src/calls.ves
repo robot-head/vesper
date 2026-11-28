@@ -324,9 +324,9 @@ fn plain_call(
     {
         return NO_CALLEE;
     }
-    // A pure callee may borrow scalar locals `inout` (#2563): each such
+    // The callee may borrow scalar locals `inout` (#2563): each such
     // argument is a whole local, passed by its address and loaded back
-    // after the call.
+    // after the call (a `fail_only` callee too, #2614).
     for j in 0..nargs {
         let at = add(add(a, CALL_ARGS_AT), wrapping_mul(j, ARG_WORDS));
         let pass = p.op(at);
@@ -336,7 +336,6 @@ fn plain_call(
         }
         let whole_local = pass == PASS_INOUT
             && param == PASS_INOUT
-            && !fails
             && p.path(p.op(add(at, ARG_PATH))).n == 0
             && scalar_local(
                 inout ls,
