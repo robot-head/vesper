@@ -1,6 +1,7 @@
 //! Stage 2 (stage A: today's sources built by the committed seed) builds
-//! every compiler package's probe and runs it, and builds and runs a few
-//! lowering smokes (#1397, #2671). Also checks that every directory under
+//! every compiler package's probe and runs it, builds and runs a few
+//! lowering smokes (#1397, #2671), and checks that it refuses misused linear `.vsys`
+//! handles (#2701). Also checks that every directory under
 //! `packages/` is listed in the gate's tables.
 mod support;
 
@@ -70,9 +71,225 @@ pub fn main() -> u64 {
 ";
 const LHS_LITERAL_SMOKE_ANSWER: u64 = 38;
 
+/// `for` over array literals (of integers, narrowed by their use, and of
+/// text), a fixed array, `ChunkSeq` places and temporaries and a `Slice`,
+/// with `continue` and `break` (#2703: these loops ran zero times).
+const FOR_SEQUENCES_SMOKE: &str = "\
+fn digits(in xs: Slice[u64]) -> u64 {
+    let mut s: u64 = 0;
+    for x in xs {
+        if x == 3 {
+            continue;
+        }
+        if x == 9 {
+            break;
+        }
+        s = s * 10 + x;
+    }
+    s
+}
+
+fn pair() -> ChunkSeq[u64] {
+    let mut xs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    xs.push(2);
+    xs.push(4);
+    xs
+}
+
+pub fn main() -> u64 {
+    let mut s: u64 = 0;
+    for w in [1, 2, 3] {
+        s = s * 10 + w;
+    }
+    let mut narrow: u32 = 0;
+    for w in [4, 5] {
+        narrow = narrow * 10 + w;
+    }
+    let fixed: [u64; 3] = [6, 7, 8];
+    let mut seq: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for x in fixed {
+        seq.push(x);
+    }
+    let mut from_seq: u64 = 0;
+    for x in seq {
+        from_seq = from_seq * 10 + x;
+    }
+    let mut cut: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for x in [1, 3, 2, 9, 5] {
+        cut.push(x);
+    }
+    let mut nested: u64 = 0;
+    for x in pair() {
+        for y in [1, 2] {
+            nested = nested * 10 + x * y;
+        }
+    }
+    let mut text: u64 = 0;
+    for t in [\"ab\", \"cde\"] {
+        text = text * 10 + t.len();
+    }
+    let mut out = s * 100 + widen_u64(narrow);
+    out = out * 1000 + from_seq;
+    out = out * 100 + digits(in cut.as_slice());
+    out = out * 10000 + nested;
+    out * 100 + text
+}
+";
+const FOR_SEQUENCES_SMOKE_ANSWER: u64 = 1_234_567_812_244_823;
+
 /// What the evaluator answers for [`STAGE2_FLOAT_SMOKE`] (checked against
 /// it while the Rust evaluator existed, tests/wasm_seed_package_io.rs).
 const FLOAT_SMOKE_ANSWER: u64 = 3_732_379_685_888_365_023;
+
+/// Programs over `@vesper/cranelift`'s linear `.vsys` handles, each the
+/// body of `main`, and the code Stage 2 refuses it with (#2701, the codes
+/// of src/check.rs), or `None` when it builds.
+const LINEAR_HANDLE_CASES: &[(&str, &str, Option<&str>)] = &[
+    (
+        "leaked builder",
+        "match module_new(in \"\".as_bytes(), in \"\".as_bytes(), in \"\".as_bytes()) {
+    Some(m) => {
+        let mut m = m;
+        let s = sig_new(inout m, 0);
+        let b = builder_new(in m, s);
+        module_free(m);
+        0
+    },
+    None => 1,
+}",
+        Some("E0302"),
+    ),
+    (
+        "builder defined twice",
+        "match module_new(in \"\".as_bytes(), in \"\".as_bytes(), in \"\".as_bytes()) {
+    Some(m) => {
+        let mut m = m;
+        let s = sig_new(inout m, 0);
+        let f = declare_function(inout m, in \"f\".as_bytes(), 4, s);
+        match builder_new(in m, s) {
+            Some(b) => {
+                define_function(inout m, f, b);
+                define_function(inout m, f, b);
+            },
+            None => {},
+        }
+        module_free(m);
+        0
+    },
+    None => 1,
+}",
+        Some("E0303"),
+    ),
+    (
+        "builder freed on one branch",
+        "match module_new(in \"\".as_bytes(), in \"\".as_bytes(), in \"\".as_bytes()) {
+    Some(m) => {
+        let mut m = m;
+        let s = sig_new(inout m, 0);
+        match builder_new(in m, s) {
+            Some(b) => {
+                if s == 7 {
+                    builder_free(b);
+                }
+            },
+            None => {},
+        }
+        module_free(m);
+        0
+    },
+    None => 1,
+}",
+        Some("E0309"),
+    ),
+    (
+        "builder freed in a loop",
+        "match module_new(in \"\".as_bytes(), in \"\".as_bytes(), in \"\".as_bytes()) {
+    Some(m) => {
+        let mut m = m;
+        let s = sig_new(inout m, 0);
+        match builder_new(in m, s) {
+            Some(b) => {
+                for i in 0..3 {
+                    builder_free(b);
+                }
+            },
+            None => {},
+        }
+        module_free(m);
+        0
+    },
+    None => 1,
+}",
+        Some("E0303"),
+    ),
+    (
+        "builder defined once",
+        "match module_new(in \"\".as_bytes(), in \"\".as_bytes(), in \"\".as_bytes()) {
+    Some(m) => {
+        let mut m = m;
+        let s = sig_new(inout m, 0);
+        let f = declare_function(inout m, in \"f\".as_bytes(), 4, s);
+        match builder_new(in m, s) {
+            Some(b) => {
+                define_function(inout m, f, b);
+            },
+            None => {},
+        }
+        module_free(m);
+        0
+    },
+    None => 1,
+}",
+        None,
+    ),
+    (
+        "consumed on every path",
+        "match module_new(in \"\".as_bytes(), in \"\".as_bytes(), in \"\".as_bytes()) {
+    Some(m) => {
+        let mut m = m;
+        let s = sig_new(inout m, 0);
+        match builder_new(in m, s) {
+            Some(b) => {
+                if s == 7 {
+                    builder_free(b);
+                    module_free(m);
+                    return 3;
+                }
+                builder_free(b);
+            },
+            None => {},
+        }
+        loop {
+            if s == 0 {
+                module_free(m);
+                break;
+            }
+        }
+        0
+    },
+    None => 1,
+}",
+        None,
+    ),
+];
+
+/// Builds `@vesper/cranelift` plus a `main` of `body` with `compiler`.
+fn build_over_cranelift(
+    compiler: &Compiler,
+    dir: &std::path::Path,
+    body: &str,
+) -> Result<Vec<u8>, String> {
+    let package = repo().join("packages/vesper-cranelift");
+    let manifest = std::fs::read_to_string(package.join("Loom.toml"))
+        .unwrap()
+        .replace("\"@vesper/cranelift\"", "\"@vesper-test/linear-handles\"");
+    let lib = std::fs::read_to_string(package.join("src/lib.ves")).unwrap();
+    let main = format!("{lib}\npub fn main() -> u64 eff [Ffi[Cranelift]] {{\n{body}\n}}\n");
+    let wrap = dir.join("wrap");
+    write_probe(&wrap, &manifest, &main);
+    std::fs::copy(package.join("cranelift.vsys"), wrap.join("cranelift.vsys")).unwrap();
+    build_compiler_package_probe(compiler, dir)
+}
 
 /// Builds `lib_src` as a package in `<dir>/wrap` with `compiler`.
 fn build(
@@ -125,6 +342,11 @@ fn stage2_compiles_compiler_packages() {
                 LHS_LITERAL_SMOKE_ANSWER,
             ),
             ("stage2-floats", STAGE2_FLOAT_SMOKE, FLOAT_SMOKE_ANSWER),
+            (
+                "stage2-for-sequences",
+                FOR_SEQUENCES_SMOKE,
+                FOR_SEQUENCES_SMOKE_ANSWER,
+            ),
         ] {
             let bytes = build(&a, &dir, &smoke_manifest(stem), src)
                 .unwrap_or_else(|e| panic!("Stage 2 on {stem}: {e}"));
@@ -145,6 +367,15 @@ fn stage2_compiles_compiler_packages() {
                 && err.contains("unknown_host_fn"),
             "expected werr_syms symbol details in the diagnostic, got:\n{err}"
         );
+
+        for (label, body, code) in LINEAR_HANDLE_CASES {
+            match (build_over_cranelift(&a, &dir, body), code) {
+                (Ok(_), None) => {}
+                (Ok(_), Some(code)) => panic!("{label}: built, want {code}"),
+                (Err(e), Some(code)) if e.contains(&format!("{code}: linear value")) => {}
+                (Err(e), _) => panic!("{label}: want {code:?}, got:\n{e}"),
+            }
+        }
         std::fs::remove_dir_all(dir).unwrap();
     });
 }

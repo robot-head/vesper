@@ -27,9 +27,6 @@ cranelift-jit = "0.125"
 cranelift-native = "0.125"
 
 [dev-dependencies]
-# Only tests/checker.rs: Stage 2 does not refuse leaked or reused linear
-# handles yet (#2701).
-vesper = { path = "../.." }
 vesper-ffi = { path = "../vesper-ffi" }
 # tests/support/stage2.rs runs the fixtures as Stage 2 components with the
 # Cranelift component, through the Stage 2 gate's harness (the same

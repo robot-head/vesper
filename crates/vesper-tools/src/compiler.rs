@@ -27,6 +27,11 @@ pub const FACTS_COMMAND: &str = "tool-facts";
 /// The schema of the answer (`SCHEMA` in `src/tool_facts.rs`).
 const FACTS_SCHEMA: &str = "vesper.tool-facts/1";
 
+/// The extension of a temporary source file.
+const SOURCE_EXTENSION: &str = "ves";
+/// The extension of an answer file.
+const ANSWER_EXTENSION: &str = "json";
+
 /// The field an answer carries when the compiler service itself failed.
 const ERROR_FIELD: &str = "error";
 
@@ -83,21 +88,32 @@ pub fn locate() -> Result<PathBuf, String> {
         })
 }
 
-/// A private file for one answer, removed when dropped.
-struct Answer(PathBuf);
+/// A private temporary file, removed when dropped.
+pub struct TempFile(PathBuf);
 
-impl Answer {
-    fn new() -> Self {
+impl TempFile {
+    fn new(extension: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        Answer(env::temp_dir().join(format!(
-            "vesper-tool-facts-{}-{}.json",
+        TempFile(env::temp_dir().join(format!(
+            "vesper-tool-facts-{}-{}.{extension}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         )))
     }
+
+    /// A temporary `.ves` file holding `text`.
+    pub fn source(text: &str) -> Result<Self, String> {
+        let file = TempFile::new(SOURCE_EXTENSION);
+        fs::write(&file.0, text).map_err(|e| format!("{}: {e}", file.0.display()))?;
+        Ok(file)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
 }
 
-impl Drop for Answer {
+impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
     }
@@ -108,7 +124,7 @@ impl Drop for Answer {
 /// `Err` with the compiler's message, as the in-process call returned it.
 pub fn facts(kind: &str, source: &Path, options: &[&str]) -> Result<Value, String> {
     let compiler = locate()?;
-    let answer = Answer::new();
+    let answer = TempFile::new(ANSWER_EXTENSION);
     let status = Command::new(&compiler)
         .arg(FACTS_COMMAND)
         .arg(kind)
@@ -139,6 +155,13 @@ pub fn facts(kind: &str, source: &Path, options: &[&str]) -> Result<Value, Strin
     Ok(value)
 }
 
+/// [`facts`] about `text`, which the tool holds in memory rather than in a
+/// file (a snippet's displayed text, a generated doc comment).
+pub fn facts_about(kind: &str, text: &str, options: &[&str]) -> Result<Value, String> {
+    let source = TempFile::source(text)?;
+    facts(kind, source.path(), options)
+}
+
 /// The parse or check error count an answer reports, if the source did not
 /// parse (`syntax`) or check (`semantic`).
 pub enum Rejected {
@@ -152,33 +175,4 @@ pub fn rejected(facts: &Value) -> Option<Rejected> {
     count("syntax_errors")
         .map(Rejected::Syntax)
         .or_else(|| count("semantic_errors").map(Rejected::Semantic))
-}
-
-/// A private source file for one question, removed when dropped.
-struct Question(PathBuf);
-
-impl Question {
-    fn new(text: &str) -> Result<Self, String> {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = env::temp_dir().join(format!(
-            "vesper-tool-facts-{}-{}.ves",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(Question(path))
-    }
-}
-
-impl Drop for Question {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-
-/// [`facts`] about source text the tool holds rather than a file (a
-/// baseline read from git, or a source it already read and checked).
-pub fn facts_about(kind: &str, text: &str, options: &[&str]) -> Result<Value, String> {
-    let question = Question::new(text)?;
-    facts(kind, &question.0, options)
 }

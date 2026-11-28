@@ -5861,7 +5861,6 @@ dependencies = [
  "cranelift-native 0.125.4",
  "cranelift-object",
  "target-lexicon",
- "vesper",
  "vesper-ffi",
  "wasmtime",
  "wasmtime-wasi",
