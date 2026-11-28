@@ -2278,6 +2278,23 @@ pub fn load_package_graph_bytes_for(
     in root_dir: Slice[u8],
     in os: Slice[u8]
 ) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    load_package_graph_bytes_with(in root_dir, in os, in NO_ROOT_EXTRA.as_bytes())
+}
+
+// No source appended to the root module.
+const NO_ROOT_EXTRA: Str = "";
+// The line break before appended source (the module may not end in one).
+const ROOT_EXTRA_BREAK: u8 = 10;
+
+// `load_package_graph_bytes_for` with `root_extra` appended to the root
+// package's `src/lib.ves`: generated items the compiled library holds, as
+// `vesper build --lib` appends an `// @export instance`'s wrapper
+// (`native_export::instance_wrappers`).
+pub fn load_package_graph_bytes_with(
+    in root_dir: Slice[u8],
+    in os: Slice[u8],
+    in root_extra: Slice[u8]
+) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
     let mut pkgs = ChunkSeq::new[PkgNode]();
     match load_pkg_graph(in root_dir, inout pkgs) {
         Option::Some(_) => {},
@@ -2302,7 +2319,12 @@ pub fn load_package_graph_bytes_for(
         let main_p = join_path(in src_dir.as_slice(), in "main.ves".as_bytes());
         let root_segs = ChunkSeq::new[ChunkSeq[u8]]();
         match try_read_file(in lib_p.as_slice()) {
-            Option::Some(t) => {
+            Option::Some(t0) => {
+                let mut t = t0;
+                if pi == 0 && root_extra.len() != 0 {
+                    t.push(ROOT_EXTRA_BREAK);
+                    t.extend(in root_extra);
+                }
                 collect_mod_files(
                     pi,
                     in dir.as_slice(),
