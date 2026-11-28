@@ -63,7 +63,7 @@ const PAIR_WORDS: u64 = 2;
 const COLON: u8 = 58;
 const PATH_SEPARATOR_BYTES: u64 = 2;
 // A parameter range packs its start into the high half of a word.
-const HALF_WORD_BITS: u64 = 32;
+const HALF_WORD_BITS: u32 = 32;
 const HALF_WORD_MASK: u64 = 4294967295;
 // A call argument whose pass is not known (beyond `TyPass`).
 const PASS_UNRESOLVED: u8 = 255;
