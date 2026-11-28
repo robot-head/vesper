@@ -410,6 +410,48 @@ impl L {
         NONE64
     }
 
+    // Before returning a scalar (or `()`) from a reclaiming function: reset
+    // the heap to the entry mark, since a scalar result holds no pointer to
+    // a block allocated since (Rust's `rewind_before_return`). A body that
+    // moves the heap itself (`stage2_heap_reset`/`stage2_heap_swap`) keeps
+    // the heap it leaves.
+    pub fn emit_scalar_return_rewind(inout self) eff [Fail[WErr]] {
+        if self.cur_fn.heap_mark == NONE32 || self.cur_fn.heap_moves {
+            return;
+        }
+        if self.returns_copy_size() != 0 {
+            return;
+        }
+        self.cur_fn.code.get(self.cur_fn.heap_mark);
+        self.cur_fn.code.global_set(self.heap);
+    }
+
+    // Mark the current function when its body calls a heap intrinsic that
+    // moves the heap pointer (see `emit_scalar_return_rewind`).
+    pub fn scan_heap_moves(inout self, fn_index: u64) {
+        let row = self.ctx.ir.program.function(fn_index);
+        for block_index in 0..row.bc {
+            let blk = self.ctx.ir.program.block(add(row.b0, block_index));
+            for ii in 0..blk.ic {
+                let instr = self.ctx.ir.program.inst(add(blk.i0, ii));
+                if instr.op == Op::Call {
+                    let callee = n32(self.ctx.ir.word(instr.a));
+                    if self.moves_heap(callee) {
+                        self.cur_fn.heap_moves = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Whether `callee` is a heap intrinsic that moves the heap pointer.
+    pub fn moves_heap(in self, callee: u32) -> bool {
+        sym_ends_with(in self.ctx.names, callee, in "stage2_1heap_1reset".as_bytes())
+            || sym_ends_with(in self.ctx.names, callee, in "stage2_heap_reset".as_bytes())
+            || sym_ends_with(in self.ctx.names, callee, in "stage2_1heap_1swap".as_bytes())
+            || sym_ends_with(in self.ctx.names, callee, in "stage2_heap_swap".as_bytes())
+    }
+
     pub fn emit_return_rewind(inout self, ret_val: u32) eff [Fail[WErr]] {
         if self.cur_fn.heap_mark == 4294967295 {
             return;

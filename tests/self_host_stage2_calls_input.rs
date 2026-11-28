@@ -29,8 +29,13 @@ use std::process::Command;
 /// writes the Stage 2 calls input and exits 0, or exits with the reason it
 /// declined (`CALLS_*` in packages/vesper-export-build/src/calls_input.ves)
 /// after writing the front end's error.
-const DRIVER: &str = r#"use @vesper/export-build::calls_input::{stage2_calls_input};
-use @vesper-std/env::{arg_bytes};
+///
+/// With a sixth argument, it writes only the calls section's world-flags
+/// word (8 bytes, little-endian) of the input it made.
+const DRIVER: &str = r#"use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/export-build::calls_input::{stage2_calls_input};
+use @vesper/place-ir::{read_program};
+use @vesper-std/env::{arg_bytes, arg_count};
 use @vesper-std/fs::{IoError, read_path, write_path};
 
 fn arg(i: u64) -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
@@ -59,7 +64,16 @@ pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv]] {
         in roots.as_slice(),
         optimize.try_get(0).unwrap_or(0) == 49
     );
-    let body = if made.declined == 0 { made.bytes } else { made.err };
+    let mut body = if made.declined == 0 { made.bytes } else { made.err };
+    if made.declined == 0 && arg_count() > 6 {
+        let mut reader = Reader { pos: 0 };
+        let ctx = read_ctx(inout reader, in body.as_slice());
+        let _program = read_program(inout reader, in body.as_slice(), in ctx);
+        let flags = reader.word(in body.as_slice());
+        body = ChunkSeq::new[u8]();
+        body.resize(8, 0);
+        let _ok = body.try_write_u64_le(0, flags);
+    }
     handle Fail[IoError] in {
         write_path(in out.as_slice(), in body.as_slice());
     } with {
@@ -365,10 +379,14 @@ fn build_driver(dir: &Path) -> PathBuf {
         format!(
             "[package]\nname = \"@test/stage2-calls-driver\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
              [dependencies]\n\
+             \"@vesper/check-data\" = {{ version = \"^0.1\", path = {} }}\n\
              \"@vesper/export-build\" = {{ version = \"^0.1\", path = {} }}\n\
+             \"@vesper/place-ir\" = {{ version = \"^0.1\", path = {} }}\n\
              \"@vesper-std/env\" = {{ version = \"^0.1\", path = {} }}\n\
              \"@vesper-std/fs\" = {{ version = \"^0.1\", path = {} }}\n",
+            path("packages/vesper-check-data"),
             path("packages/vesper-export-build"),
+            path("packages/vesper-place-ir"),
             path("packages/vesper-std/env"),
             path("packages/vesper-std/fs"),
         ),
@@ -712,4 +730,87 @@ fn stage2_port_calls_inputs_read_as_rust_ones() {
         "only {} port functions lowered as Rust lowers them",
         t.same_fns
     );
+}
+
+/// The calls section's world-flags bit for element views
+/// (packages/vesper-export-build/src/calls_input.ves `WORLD_ELEMENT_VIEWS`).
+const WORLD_ELEMENT_VIEWS: u64 = 4;
+
+/// Libraries with and without element-view matches (src/seq/check.rs
+/// `element_view_scrutinee`): a `try_get` match on copy elements is not a
+/// view; one on non-copy elements and any `try_get_mut` match are.
+/// Each library with whether it has a view.
+const ELEMENT_VIEW_LIBRARIES: &[(&str, &str, bool)] = &[
+    (
+        "copy_reads",
+        "pub fn at(i: u64) -> u64 { let mut v = ChunkSeq::new[u64](); v.push(i); match v.try_get(0) { Option::Some(x) => x, Option::None => 0 } }",
+        false,
+    ),
+    (
+        "nested_view",
+        "pub fn width(i: u64) -> u64 { let mut v = ChunkSeq::new[ChunkSeq[u8]](); v.push(ChunkSeq::new[u8]()); match v.try_get(i) { Option::Some(s) => s.len(), Option::None => 0 } }",
+        true,
+    ),
+    (
+        "mut_view",
+        "pub fn bump(i: u64) -> u64 { let mut v = ChunkSeq::new[u64](); v.push(i); match v.try_get_mut(0) { Option::Some(x) => { x = wrapping_add(x, 1); }, Option::None => {} } v.len() }",
+        true,
+    ),
+];
+
+/// Stage 2 sets the element-views world flag exactly when Rust's checker
+/// records an element view.
+#[cfg(unix)]
+#[test]
+fn stage2_element_view_flag_matches_rust() {
+    let scratch = std::env::temp_dir().join(format!("vesper-stage2-views-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let driver = build_driver(&scratch);
+    let mut wrong = vec![];
+    for (library, source, views) in ELEMENT_VIEW_LIBRARIES {
+        let package = one_file_package(&scratch, library, source);
+        let p = vesper::packages::load(&package).unwrap();
+        let checked = vesper::check::check(&p.module);
+        assert!(
+            checked.diagnostics.is_empty(),
+            "{library}: {:?}",
+            checked.diagnostics
+        );
+        let rust = !checked.world.element_views.is_empty();
+        assert_eq!(rust, *views, "{library}: Rust's element views");
+        let roots = scratch.join(format!("{library}.roots"));
+        std::fs::write(
+            &roots,
+            source
+                .split("pub fn ")
+                .nth(1)
+                .unwrap()
+                .split('(')
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let out = scratch.join(format!("{library}.flags"));
+        let status = Command::new(&driver)
+            .arg(&package)
+            .arg(&roots)
+            .arg("1")
+            .arg(&out)
+            .arg(std::env::consts::OS)
+            .arg("flags")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "{library}: the driver declined ({status})"
+        );
+        let bytes = std::fs::read(&out).unwrap();
+        let flags = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+        let stage2 = flags & WORLD_ELEMENT_VIEWS != 0;
+        if stage2 != rust {
+            wrong.push(format!("{library}: Rust {rust}, Stage 2 {stage2}"));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

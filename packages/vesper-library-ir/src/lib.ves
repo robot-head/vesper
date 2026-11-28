@@ -26,6 +26,7 @@
 // which tests/common/ir_words.rs `decode_program` reads back.
 
 use @vesper/check-data::input::{Ctx, Reader, put_world, read_ctx};
+use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset, stage2_heap_swap};
 use @vesper/place-ir::{
     Program, put_names, put_program, put_program_section, put_types, read_program
 };
@@ -33,9 +34,9 @@ use @vesper/codegen-calls::data::{Calls, put_calls, read_calls};
 use @vesper/ir-opt::view::{type_classes};
 use @vesper/ir-opt::forward::{forward_program_kept};
 use @vesper/ir-opt-policy::screen::{screen_program};
-use @vesper/bounds-hoist::pass::{hoist_program};
+use @vesper/bounds-hoist::pass::{hoist_program, hoist_until};
 use self::widths::{lower_bit_builtin_calls, refine_wide_tuples};
-use self::tokens::{thread_tokens};
+use self::tokens::{thread_tokens, thread_tokens_until};
 use self::inline::{inline_input_words, inline_program};
 use self::drops::{DropStatus, elaborate_drops};
 use self::reuse::{fip_reuse, reuse_facts};
@@ -104,44 +105,243 @@ const WORD_BYTES: u64 = 8;
 // @vesper/native-lib. The status word, then the input's bytes when it is
 // `Status::Ok`.
 pub fn library_walk_calls_input(in input: Slice[u8], optimize: bool) -> (u64, ChunkSeq[u8]) {
+    // Stage 2's self-built heap frees nothing by itself, and each pass
+    // leaves its temporaries behind: a big library's pipeline outgrew the
+    // 4 GiB memory (#2735). Between passes the state is written into a
+    // hole reserved here and read back past it, which drops every
+    // temporary before (`compact`).
+    let size = wrapping_add(wrapping_mul(input.len(), HOLE_INPUT_FACTOR), HOLE_SLACK_BYTES);
+    let mut reserved: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let hole_end = if stage2_heap_mark() != 0 {
+        reserved.reserve(size);
+        stage2_heap_mark()
+    } else {
+        0
+    };
     let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in input);
     let mut p = read_program(inout r, in input, in c);
-    let calls = read_calls(inout r, in input, in c);
-    let status = run(inout c, inout p, in calls, Stage::Hoist, optimize);
-    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut calls = read_calls(inout r, in input, in c);
+    // A world with the `Box` prelude is not compacted: reuse and drop
+    // elaboration have not been checked against the round trip yet.
+    let hole_end = if c.world.box_active { 0 } else { hole_end };
+    let hole_start = if hole_end != 0 {
+        wrapping_sub(hole_end, size)
+    } else {
+        0
+    };
+    let status = run_optimize(inout c, inout p, in calls, Stage::Hoist, optimize);
     if status != Status::Ok {
-        return (status, out);
+        return (status, ChunkSeq::new[u8]());
     }
+    let _ = compact(inout c, inout p, inout calls, hole_start, hole_end);
+    let status = run_inline(inout c, inout p, in calls, Stage::Hoist, optimize);
+    if status != Status::Ok {
+        return (status, ChunkSeq::new[u8]());
+    }
+    let _ = compact(inout c, inout p, inout calls, hole_start, hole_end);
+    // Token threading and bounds hoisting go function by function, with
+    // the state compacted whenever the heap outgrows the budget. A
+    // compaction that did not fit ends the budget: the rest runs as it
+    // would with no hole.
+    let mut limit = budget_mark(hole_end);
+    if optimize {
+        let n = p.fn_count();
+        let mut next: u64 = 0;
+        loop {
+            next = thread_tokens_until(inout p, in c.names, next, limit);
+            if next >= n || limit == 0 {
+                break;
+            }
+            let compaction = compact(inout c, inout p, inout calls, hole_start, hole_end);
+            if compaction != Compaction::Done {
+                limit = 0;
+            }
+        }
+        if limit != 0 {
+            let compaction = compact(inout c, inout p, inout calls, hole_start, hole_end);
+            if compaction != Compaction::Done {
+                limit = 0;
+            }
+        }
+    }
+    let status = run_drops(inout c, inout p, in calls, Stage::Hoist);
+    if status != Status::Ok {
+        return (status, ChunkSeq::new[u8]());
+    }
+    if optimize {
+        let n = p.fn_count();
+        let mut next: u64 = 0;
+        loop {
+            let (after, versioned) = hoist_until(inout p, inout c, next, limit);
+            next = after;
+            if next >= n || limit == 0 {
+                break;
+            }
+            let compaction = compact(inout c, inout p, inout calls, hole_start, hole_end);
+            if compaction != Compaction::Done {
+                limit = 0;
+            }
+        }
+    }
+    (Status::Ok, calls_input_bytes(in c, in p, in calls))
+}
+
+// The calls input of `c`, `p` and `calls`: check-data's names, types and
+// world, the place-ir program section and the calls section, as bytes.
+fn calls_input_bytes(in c: Ctx, in p: Program, in calls: Calls) -> ChunkSeq[u8] {
+    let o = calls_input_words(in c, in p, in calls);
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](wrapping_mul(o.len(), WORD_BYTES));
+    words_into(in o, inout out);
+    out
+}
+
+fn calls_input_words(in c: Ctx, in p: Program, in calls: Calls) -> ChunkSeq[u64] {
     let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
     put_names(inout o, in c.names);
     put_types(inout o, in c.types);
     put_world(in c.world, inout o);
     put_program_section(in p, inout o);
     put_calls(in calls, in c.types, inout o);
-    out.resize(wrapping_mul(o.len(), WORD_BYTES), 0);
+    o
+}
+
+// Appends `o`'s words to `out`, little-endian.
+fn words_into(in o: ChunkSeq[u64], inout out: ChunkSeq[u8]) {
     for i in 0..o.len() {
-        let ok = out.try_write_u64_le(wrapping_mul(i, WORD_BYTES), o.try_get(i).unwrap_or(0));
+        let v = o.try_get(i).unwrap_or(0);
+        for k in 0..WORD_BYTES {
+            out.push(wrapping_u8(
+                wrapping_shr_u64(v, wrapping_u32(wrapping_mul(k, BYTE_BITS))) & BYTE_MASK
+            ));
+        }
     }
-    (status, out)
+}
+
+const BYTE_BITS: u64 = 8;
+const BYTE_MASK: u64 = 255;
+
+// The hole's size: the input's bytes this many times over, plus the slack,
+// for the pipeline's state as the passes grow it (the inliner most).
+const HOLE_INPUT_FACTOR: u64 = 8;
+const HOLE_SLACK_BYTES: u64 = 67108864;
+
+// Heap a pass may use past the hole before the state is compacted.
+const COMPACT_BUDGET_BYTES: u64 = 1073741824;
+
+// The heap mark past which a pass stops for `compact` (0: never, when
+// there is no hole).
+fn budget_mark(hole_end: u64) -> u64 {
+    if hole_end == 0 {
+        0
+    } else {
+        wrapping_add(hole_end, COMPACT_BUDGET_BYTES)
+    }
+}
+
+// What `compact` did.
+pub enum Compaction: _ {
+    Done = 0,
+    NoHole = 1,
+    // The encoding is bigger than the hole.
+    TooBig = 2,
+    // The copy ran past the hole's end.
+    Overran = 3,
+}
+
+// The state replaced by its own calls input read back, written into the hole
+// (`hole_start`..`hole_end`, which `library_walk_calls_input` reserves; no
+// hole outside Stage 2's self-built heap) after the heap is reset to the
+// hole's end, so every temporary since the hole was reserved is freed
+// (`Compaction::Done`). The state is left as it is when there is no hole
+// or its encoding does not fit, and the answer says why. Only one bulk copy runs inside the hole:
+// Stage 2 frees nothing a function with an `inout` parameter allocates,
+// so an element-by-element copy there would run past it.
+fn compact(
+    inout c: Ctx,
+    inout p: Program,
+    inout calls: Calls,
+    hole_start: u64,
+    hole_end: u64
+) -> u64 {
+    if hole_end == 0 {
+        return Compaction::NoHole;
+    }
+    let bytes = calls_input_bytes(in c, in p, in calls);
+    let size = bytes.len();
+    if wrapping_add(size, HOLE_SLACK_BYTES) > wrapping_sub(hole_end, hole_start) {
+        return Compaction::TooBig;
+    }
+    let outside = stage2_heap_swap(hole_start);
+    let mut kept: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](size);
+    kept.extend(in bytes.as_slice());
+    let kept_end = stage2_heap_mark();
+    let _ = stage2_heap_swap(outside);
+    if kept_end > hole_end {
+        return Compaction::Overran;
+    }
+    stage2_heap_reset(hole_end);
+    let mut r = Reader { pos: 0 };
+    c = read_ctx(inout r, in kept.as_slice());
+    p = read_program(inout r, in kept.as_slice(), in c);
+    calls = read_calls(inout r, in kept.as_slice(), in c);
+    Compaction::Done
 }
 
 // The pipeline through `stage` over the first lowering `p`: the status.
 fn run(inout c: Ctx, inout p: Program, in calls: Calls, stage: u64, optimize: bool) -> u64 {
+    let status = run_optimize(inout c, inout p, in calls, stage, optimize);
+    if status != Status::Ok {
+        return status;
+    }
+    let status = run_inline(inout c, inout p, in calls, stage, optimize);
+    if status != Status::Ok {
+        return status;
+    }
+    run_rethread(inout c, inout p, stage, optimize);
+    let status = run_drops(inout c, inout p, in calls, stage);
+    if status != Status::Ok {
+        return status;
+    }
+    run_hoist(inout c, inout p, stage, optimize);
+    Status::Ok
+}
+
+// `run` up to the inliner: widths, then `optimize_step`.
+fn run_optimize(
+    inout c: Ctx,
+    inout p: Program,
+    in calls: Calls,
+    stage: u64,
+    optimize: bool
+) -> u64 {
     lower_bit_builtin_calls(inout p, in c.names, c.world.k, in calls);
     refine_wide_tuples(inout p, inout c.types, c.world.k);
     if stage >= Stage::Optimize {
-        let st = optimize_step(inout c, inout p, in calls, optimize);
-        if st != Status::Ok {
-            return st;
-        }
-        if optimize && stage >= Stage::Inline {
-            if !inline_program(inout p, inout c.names, inout c.types, in c.world, in calls) {
-                return Status::InlineMismatch;
-            }
-            thread_tokens(inout p, in c.names);
+        return optimize_step(inout c, inout p, in calls, optimize);
+    }
+    Status::Ok
+}
+
+// `run`'s inliner, then token threading again (`run_rethread`).
+fn run_inline(inout c: Ctx, inout p: Program, in calls: Calls, stage: u64, optimize: bool) -> u64 {
+    if stage >= Stage::Inline && optimize {
+        if !inline_program(inout p, inout c.names, inout c.types, in c.world, in calls) {
+            return Status::InlineMismatch;
         }
     }
+    Status::Ok
+}
+
+fn run_rethread(inout c: Ctx, inout p: Program, stage: u64, optimize: bool) {
+    if stage >= Stage::Inline && optimize {
+        thread_tokens(inout p, in c.names);
+    }
+}
+
+// `run`'s drop elaboration (drops.ves), which a world without the `Box`
+// prelude skips: the status.
+fn run_drops(inout c: Ctx, inout p: Program, in calls: Calls, stage: u64) -> u64 {
     if stage >= Stage::Drops && c.world.box_active {
         let fx = fact_names(inout c.names);
         let st = elaborate_drops(inout p, inout c.names, inout c.types, in c.world, in calls, fx);
@@ -149,10 +349,14 @@ fn run(inout c: Ctx, inout p: Program, in calls: Calls, stage: u64, optimize: bo
             return st;
         }
     }
+    Status::Ok
+}
+
+// `run`'s bounds hoisting.
+fn run_hoist(inout c: Ctx, inout p: Program, stage: u64, optimize: bool) {
     if stage >= Stage::Hoist && optimize {
         let versioned = hoist_program(inout p, inout c);
     }
-    Status::Ok
 }
 
 // `ir_opt::optimize` through the native policy then `thread_tokens`

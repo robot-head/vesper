@@ -2772,6 +2772,7 @@ impl<'l, 'a> Emit<'l, 'a> {
             match &block.terminator {
                 Terminator::Return(v) => {
                     let x = self.value(*v)?;
+                    self.rewind_before_return()?;
                     self.get(x);
                     self.push(I::Return);
                 }
@@ -2882,6 +2883,40 @@ impl<'l, 'a> Emit<'l, 'a> {
             I::GlobalSet(heap),
             I::End,
         ]);
+        Ok(())
+    }
+
+    /// Region reset before returning a scalar.
+    ///
+    /// A *reclaiming* function (see `reclaiming`) whose result is a scalar
+    /// (or `()`) and whose effect row holds no host capability returns no
+    /// pointer, so every heap block allocated since its entry `mark` is
+    /// unreachable once it returns and the heap goes back to the mark.
+    /// Without this, Stage 2 frees nothing a non-tail call allocates.
+    fn rewind_before_return(&mut self) -> Result<(), WasmError> {
+        let Some(mark) = self.mark else {
+            return Ok(());
+        };
+        let base = &self.l.plan.instances[&self.name].base;
+        let host = self.l.world.functions.get(base).is_some_and(|w| {
+            w.effects
+                .instances
+                .iter()
+                .any(|e| self.l.plan.host.iter().any(|c| c.effect() == e.name))
+        });
+        if host {
+            return Ok(());
+        }
+        let result = self.subst(&self.f.result);
+        let scalar = match layout::shape(self.l.world, &result)? {
+            Shape::Scalar(_) => true,
+            Shape::Tuple(items) => items.is_empty(),
+            _ => false,
+        };
+        if scalar {
+            let heap = self.l.heap;
+            self.code.extend([I::LocalGet(mark), I::GlobalSet(heap)]);
+        }
         Ok(())
     }
 

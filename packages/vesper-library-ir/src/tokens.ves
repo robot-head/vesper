@@ -3,7 +3,7 @@
 // and a read observes the current one, and each block lists the outgoing
 // token of every edge into it. `ir_opt::optimize` ends with it.
 
-use @vesper/check-data::util::{add, inc, n32, u64_at};
+use @vesper/check-data::util::{add, inc, n32, stage2_heap_mark, u64_at};
 use @vesper/check-data::names::{Names};
 use @vesper/place-ir::{InstRow, Program};
 use @vesper/place-ir::codes::{Op, Tag};
@@ -39,9 +39,21 @@ fn state_action(in p: Program, in names: Names, inst: InstRow) -> bool {
 }
 
 pub fn thread_tokens(inout p: Program, in names: Names) {
-    for fi in 0..p.fn_count() {
+    let next = thread_tokens_until(inout p, in names, 0, 0);
+}
+
+// `thread_tokens` over the functions from `from`, stopping after a
+// function once Stage 2's heap mark passes `limit` (0: no limit): the next
+// function's index, for a caller that compacts the program in between.
+pub fn thread_tokens_until(inout p: Program, in names: Names, from: u64, limit: u64) -> u64 {
+    let n = p.fn_count();
+    for fi in from..n {
         thread_function(inout p, in names, fi);
+        if limit != 0 && stage2_heap_mark() > limit {
+            return inc(fi);
+        }
     }
+    n
 }
 
 fn thread_function(inout p: Program, in names: Names, fi: u64) {
