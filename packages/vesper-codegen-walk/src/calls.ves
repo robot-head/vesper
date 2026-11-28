@@ -21,11 +21,11 @@
 
 use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, w};
 use @vesper/check-data::names::{Names};
-use @vesper/check-data::types::{TyKind, Types};
+use @vesper/check-data::types::{TyKind, Types, default_type};
 use @vesper/check-data::world::{World};
 use @vesper/check-data::input::{Reader, read_ctx};
 use @vesper/check-layout::{Layouts, layouts_new};
-use @vesper/place-ir::{Program, read_program};
+use @vesper/place-ir::{FnRow, Program, read_program};
 use @vesper/place-ir::codes::{Op};
 use @vesper/codegen-calls::data::{Calls, read_calls};
 use @vesper/codegen-calls::instances::{
@@ -55,6 +55,20 @@ const PASS_IN: u64 = 0;
 // argument its pass, value, place root and place path.
 const CALL_ARGS_AT: u64 = 2;
 const ARG_WORDS: u64 = 4;
+// `Pass::Inout`'s word, and an argument's place root (a name + 1, or 0)
+// and path after its pass.
+const PASS_INOUT: u64 = 1;
+// A graph header's words (place-ir `header`): a parameter's projection
+// count follows its name and pass, and its fixed words (name, pass,
+// count, type, span start, span end) surround the projections; the
+// result and effects; a (name, value) pair of the bounds, values and
+// locals tables.
+const HEADER_PARAM_PROJECTIONS: u64 = 2;
+const HEADER_PARAM_FIXED: u64 = 6;
+const HEADER_RESULT_WORDS: u64 = 2;
+const HEADER_PAIR_WORDS: u64 = 2;
+const ARG_ROOT: u64 = 2;
+const ARG_PATH: u64 = 3;
 // The callee names of other lowerings (src/ffi_lowering/types.rs,
 // src/integer_widths.rs, src/atomics.rs, src/arrays.rs) and the slice type
 // (src/seq.rs).
@@ -208,6 +222,69 @@ fn scalar_type(
     scalar(in t, in names, in d, k, d.fn_info(f.func_index), ty, inout err) != V_NONE
 }
 
+// A graph's locals (`FunctionIr::locals`): local i is `names[i]` of type
+// `tys[i]`.
+struct Locals {
+    names: ChunkSeq[u32],
+    tys: ChunkSeq[u32],
+}
+
+// The locals of graph `f`, from its header words (place-ir `header`:
+// parameters, result, effects, bounds, captures, values, locals).
+fn header_locals(in p: Program, f: FnRow) -> Locals {
+    let mut out = Locals { names: ChunkSeq::new[u32](), tys: ChunkSeq::new[u32]() };
+    let mut i = f.ha;
+    let np = p.op(i);
+    i = inc(i);
+    for j in 0..np {
+        // name, pass, projections, then the type and span
+        let nproj = p.op(add(i, HEADER_PARAM_PROJECTIONS));
+        i = add(add(i, HEADER_PARAM_FIXED), nproj);
+    }
+    // result, effects
+    i = add(i, HEADER_RESULT_WORDS);
+    let nb = p.op(i);
+    i = add(inc(i), wrapping_mul(nb, HEADER_PAIR_WORDS));
+    let nc = p.op(i);
+    i = add(inc(i), nc);
+    let nv = p.op(i);
+    i = add(inc(i), wrapping_mul(nv, HEADER_PAIR_WORDS));
+    let nl = p.op(i);
+    i = inc(i);
+    for j in 0..nl {
+        out.names.push(n32(p.op(i)));
+        out.tys.push(n32(p.op(inc(i))));
+        i = add(i, HEADER_PAIR_WORDS);
+    }
+    out
+}
+
+// Whether `root` (a place root: a name + 1, or 0) names a local of a
+// scalar layout, as `plain_call` lets a whole local be borrowed `inout`.
+fn scalar_local(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in locals: Locals,
+    root: u64
+) -> bool {
+    if root == 0 {
+        return false;
+    }
+    let sym = n32(wrapping_sub(root, 1));
+    for j in 0..locals.names.len() {
+        if u32_at(in locals.names, j) != sym {
+            continue;
+        }
+        let ty = default_type(inout t, u32_at(in locals.tys, j));
+        let mut err = Errs { text: ChunkSeq::new[u8]() };
+        let l = layout_facts(inout ls, inout t, inout names, in wd, ty, inout err);
+        return l.ok && !l.aggregate;
+    }
+    false
+}
+
 // `plain_call` of the call at instruction operands `a`: the callee's word,
 // or NO_CALLEE.
 fn plain_call(
@@ -220,6 +297,7 @@ fn plain_call(
     b: Builtins,
     in p: Program,
     in task: Task,
+    in locals: Locals,
     a: u64
 ) -> u64 {
     let callee = n32(p.op(a));
@@ -246,8 +324,29 @@ fn plain_call(
     {
         return NO_CALLEE;
     }
+    // A pure callee may borrow scalar locals `inout` (#2563): each such
+    // argument is a whole local, passed by its address and loaded back
+    // after the call.
     for j in 0..nargs {
-        if p.op(add(add(a, CALL_ARGS_AT), wrapping_mul(j, ARG_WORDS))) != PASS_IN {
+        let at = add(add(a, CALL_ARGS_AT), wrapping_mul(j, ARG_WORDS));
+        let pass = p.op(at);
+        let param = widen_u64(d.param(add(w(info.param_start), j)).pass);
+        if pass == PASS_IN && param == PASS_IN {
+            continue;
+        }
+        let whole_local = pass == PASS_INOUT
+            && param == PASS_INOUT
+            && !fails
+            && p.path(p.op(add(at, ARG_PATH))).n == 0
+            && scalar_local(
+                inout ls,
+                inout t,
+                inout names,
+                in wd,
+                in locals,
+                p.op(add(at, ARG_ROOT))
+            );
+        if !whole_local {
             return NO_CALLEE;
         }
     }
@@ -312,6 +411,7 @@ fn graph_calls(
     inout o: ChunkSeq[u64]
 ) {
     let f = p.function(fi);
+    let locals = header_locals(in p, f);
     let at = o.len();
     o.push(0);
     let mut n: u64 = 0;
@@ -332,6 +432,7 @@ fn graph_calls(
                 b,
                 in p,
                 in task,
+                in locals,
                 inst.a
             ));
             n = inc(n);

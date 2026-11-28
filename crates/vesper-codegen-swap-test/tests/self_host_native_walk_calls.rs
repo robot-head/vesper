@@ -28,6 +28,8 @@ mod codegen_calls_sources;
 mod codegen_calls_words;
 #[path = "../../../tests/common/ir_words.rs"]
 mod ir_words;
+#[path = "common/native_lib_fixtures.rs"]
+mod native_lib_fixtures;
 
 use std::cell::RefCell;
 use std::sync::OnceLock;
@@ -324,77 +326,11 @@ fn big_stack<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     })
 }
 
-/// Libraries of plain functions: the fixtures of self_host_native_lib.rs,
-/// then callers of `fail_only` functions with and without a register
-/// status, small enum results, and calls the walk leaves to itself
-/// (generic, `inout` and struct-result callees).
-const LIBRARIES: &[(&str, &str)] = &[
-    (
-        "arith",
-        "pub fn add3(a: i64, b: i64, c: i64) -> i64 { wrapping_add(wrapping_add(a, b), c) }
-pub fn mix(a: u32, b: u32) -> u32 { (a ^ b) | (a & 7) }",
-    ),
-    (
-        "calls",
-        "fn square(x: i64) -> i64 { wrapping_mul(x, x) }
-pub fn sum_squares(a: i64, b: i64) -> i64 { wrapping_add(square(a), square(b)) }
-pub fn quad(x: i64) -> i64 { square(square(x)) }",
-    ),
-    (
-        "fails",
-        "fn step(a: u64, b: u64) -> u64 eff [Fail[ArithOverflow]] { a * b + 1 }
-pub fn total(a: u64, b: u64) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] { step(a, b) / b }",
-    ),
-    (
-        "wide",
-        "pub fn xor128(a: u128, b: u128) -> u128 { a ^ b }
-pub fn negate(a: i128) -> i128 { wrapping_sub(0, a) }
-pub fn is_zero(a: u128) -> bool { a == 0 }
-pub fn mixed(x: u64, a: i128, y: f64) -> f64 { if a < 0 { y } else { y + 1.0 } }
-pub fn scaled(a: u128, b: u64) -> u64 eff [Fail[ArithOverflow]] { b * 2 }",
-    ),
-    (
-        "cold",
-        "fn slow(x: u64, y: u64, z: u64) -> u64 {
-    let mut a: u64 = x;
-    let mut acc: u64 = 0;
-    for i in 0..8 {
-        acc = wrapping_add(acc, wrapping_add(a, y));
-        a = wrapping_add(a, i);
-        acc = wrapping_add(acc, z);
-    }
-    acc
-}
-pub fn dispatch(x: u64, y: u64, z: u64) -> u64 {
-    if x < 100 {
-        wrapping_add(wrapping_mul(x, 3), y)
-    } else {
-        let a = slow(x, y, z);
-        let b = slow(y, z, x);
-        wrapping_add(a, b)
-    }
-}
-pub fn early(n: u64, x: u64, y: u64) -> u64 {
-    let mut acc: u64 = 0;
-    for i in 0..n {
-        if wrapping_add(i, x) > 50 {
-            let mut tmp: u64 = 0;
-            for j in 0..4 {
-                tmp = wrapping_add(tmp, slow(i, j, y));
-            }
-            return tmp;
-        }
-        acc = wrapping_add(acc, wrapping_add(i, y));
-    }
-    acc
-}",
-    ),
-    (
-        "v2",
-        "// @export abi 3
-pub fn add(a: u64, b: u64) -> u64 { wrapping_add(a, b) }",
-    ),
-    // Recursive callees, so the inliner keeps the calls.
+/// Libraries beyond the native-lib fixtures: callers of `fail_only`
+/// functions with and without a register status, small enum results, and
+/// calls the walk leaves to itself (generic, `inout` and struct-result
+/// callees). Recursive callees, so the inliner keeps the calls.
+const EXTRA_LIBRARIES: &[(&str, &str)] = &[
     (
         "recursive_fails",
         "fn down(n: u64, acc: u64) -> u64 eff [Fail[ArithOverflow]] {
@@ -449,7 +385,7 @@ fn step() -> usize {
 fn vesper_call_words_match_plain_call() {
     big_stack(|| {
         let mut total = Tally::default();
-        for (name, source) in LIBRARIES {
+        for (name, source) in native_lib_fixtures::LIBRARIES.iter().chain(EXTRA_LIBRARIES) {
             total.add(library(name, source));
         }
         let sources = codegen_calls_sources::worlds_in(BODY_TESTS)
