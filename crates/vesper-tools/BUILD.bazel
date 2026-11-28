@@ -3,4 +3,9 @@ load("//tools/bazel:defs.bzl", "vesper_crate")
 # `vesper-shot` embeds the root package's JetBrains Mono font.
 vesper_crate(
     extra_compile_data = ["//:fonts"],
+    # The bench unit tests compile kernels with the shipped compiler, which
+    # they find on PATH (src/compiler.rs, #2670).
+    test_path_binaries = {
+        "vesper-tools_unit_test": ["//:bin/vesper"],
+    },
 )

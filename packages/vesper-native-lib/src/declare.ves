@@ -77,6 +77,31 @@ impl Exports {
         self.bounds.try_get(i).unwrap_or(0)
     }
 
+    // The index of the export whose symbol is `symbol`, or `count()`.
+    pub fn find_symbol(in self, in symbol: Slice[u8]) -> u64 {
+        let n = self.count();
+        for e in 0..n {
+            let start = self.bound(wrapping_add(wrapping_mul(e, 3), 1));
+            let end = self.bound(wrapping_add(wrapping_mul(e, 3), 2));
+            if wrapping_sub(end, start) != symbol.len() {
+                continue;
+            }
+            let mut same = true;
+            for i in 0..symbol.len() {
+                if self.bytes.try_get(wrapping_add(start, i)).unwrap_or(0)
+                    != symbol.try_get(i).unwrap_or(0)
+                {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                return e;
+            }
+        }
+        n
+    }
+
     // The index of the export whose key is `key`, or `count()`.
     fn find(in self, in key: Slice[u8]) -> u64 {
         let n = self.count();
@@ -136,6 +161,9 @@ pub struct Declared {
     // of the `RESULT_*` codes) and the result's register words
     pub result_kind: ChunkSeq[u64],
     pub result_words: ChunkSeq[u64],
+    // per instance: the index of its export in the request, or the
+    // exports' count when it is not exported
+    pub export: ChunkSeq[u64],
     // the library task's optimize flag (every definition's `optimize`)
     pub optimize: bool,
 }
@@ -156,6 +184,7 @@ pub fn declared_new() -> Declared {
         const_time: ChunkSeq::new[u64](),
         result_kind: ChunkSeq::new[u64](),
         result_words: ChunkSeq::new[u64](),
+        export: ChunkSeq::new[u64](),
         optimize: false,
     }
 }
@@ -355,6 +384,7 @@ pub fn declare_library(
         let mut key: ChunkSeq[u8] = ChunkSeq::new[u8]();
         c.names.write(inst.key, inout key);
         let e = exports.find(in key.as_slice());
+        d.export.push(e);
         let mut symbol: ChunkSeq[u8] = ChunkSeq::new[u8]();
         // An export with a by-value 128-bit parameter or result is local
         // under `local_symbol`; its `define_wide_entry` adapter takes the

@@ -14,7 +14,6 @@ thread_local! {
     static LAST_DOC_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_TEST_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_VERIFY_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    static LAST_LSP_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Commands the Vesper command layers answered (the driver's
@@ -39,6 +38,9 @@ impl Drop for FlushOnReturn {
 /// HybridCommands rust=crate::commands::host` in modules/driver).
 pub mod host {
     use super::*;
+
+    // `vesper lsp`'s engine seam (#1828 part 15c).
+    pub use crate::lsp_engine::*;
 
     /// The bytes of a lent `nocapture in CSlice[u8]`.
     ///
@@ -1133,41 +1135,6 @@ pub mod host {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn hc_verify_err(buf: *mut u8, len: usize) -> u64 {
         super::LAST_VERIFY_ERR.with(|cell| {
-            let data = cell.borrow();
-            if data.len() <= len && !buf.is_null() && !data.is_empty() {
-                // SAFETY: `buf` holds `len >= data.len()` bytes.
-                unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len()) };
-            }
-            data.len() as u64
-        })
-    }
-
-    /// Run `vesper lsp` (`src/lsp.rs::serve`) from the Vesper `lsp` command
-    /// layer.
-    ///
-    /// Returns `0` on success, or the byte length of the error message stored in
-    /// `LAST_LSP_ERR`.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn hc_lsp_serve() -> u64 {
-        let _flush = FlushOnReturn;
-        match crate::lsp::serve(io::BufReader::new(io::stdin()), io::stdout()) {
-            Ok(()) => 0,
-            Err(err) => {
-                let bytes = err.into_bytes();
-                let n = bytes.len() as u64;
-                super::LAST_LSP_ERR.with(|cell| *cell.borrow_mut() = bytes);
-                n
-            }
-        }
-    }
-
-    /// Copy `LAST_LSP_ERR` into `buf` (copy-out protocol).
-    ///
-    /// # Safety
-    /// `buf` is a lent writable slice of `len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_lsp_err(buf: *mut u8, len: usize) -> u64 {
-        super::LAST_LSP_ERR.with(|cell| {
             let data = cell.borrow();
             if data.len() <= len && !buf.is_null() && !data.is_empty() {
                 // SAFETY: `buf` holds `len >= data.len()` bytes.

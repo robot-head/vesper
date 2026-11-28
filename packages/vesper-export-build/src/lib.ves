@@ -34,7 +34,10 @@ use @vesper/check-names-packages::{
     AssembledModule, assemble_next_bytes, assembly_begin_bytes, assembly_metadata,
     assembly_parse_errors
 };
-use @vesper/codegen-export::{export_files_of_plan, export_plan_bytes};
+use @vesper/codegen-export::{export_files_of_plan, export_plan_bytes, rust_binding};
+use @vesper/codegen-export::handoff::{binding_input_of_plan};
+use @vesper/codegen-export::iface::{read_iface};
+use @vesper/codegen-export::json::{interface_json};
 use @vesper/codegen-export::directives::{directives_text};
 use @vesper/stage2::collect::{CollectedProgram, FnInfo, ParamInfo, collect_program};
 use @vesper/vsys::{parse_and_encode};
@@ -113,6 +116,9 @@ const EFFECT_PREFIX: Str = "Ffi$";
 
 // The root module, whose `// @export` lines are the directives.
 const ROOT_MODULE: Str = "/src/lib.ves";
+
+// The binding options' types path when there is none.
+const NO_TYPES_PATH: Str = "";
 
 // The lines of a directives dump with no instance or `.vsys` import.
 const DUMP_ABI: Str = "abi ";
@@ -196,6 +202,10 @@ pub struct ExportFiles {
     // `--interface` JSON and `--rust-binding` text when not declined.
     interface: ChunkSeq[u8],
     binding: ChunkSeq[u8],
+    // the interface in the words of tests/self_host_codegen_export/words.rs
+    // with the default binding options, as @vesper/native-lib's v2 section
+    // takes it (`binding_input_of_plan`), when not declined
+    native: ChunkSeq[u8],
 }
 
 fn declined(why: u8) -> PlanInput {
@@ -1074,6 +1084,15 @@ fn text_of(in s: Str) -> ChunkSeq[u8] {
     o
 }
 
+// The target OS (`linux`, `macos`, `windows`) of `triple`, as Stage 2's
+// loader takes it, or empty for a target without `.vsys` support.
+pub fn target_os(in triple: Slice[u8]) -> ChunkSeq[u8] {
+    match target_of(in triple) {
+        Option::Some(t) => t.os,
+        Option::None => ChunkSeq::new[u8](),
+    }
+}
+
 fn target_of(in triple: Slice[u8]) -> Option[Target] {
     let mut t = ChunkSeq::new[u8]();
     t.extend(in triple);
@@ -1799,22 +1818,40 @@ pub fn export_files_dir(
 ) -> ExportFiles eff [Ffi[StdFs]] {
     let (why, answer) = export_plan_dir(in root_dir, in library, in triple);
     if why != DECLINE_NONE {
+        return declined_files(why);
+    }
+    let native = match binding_input_of_plan(in answer, false, in NO_TYPES_PATH.as_bytes()) {
+        Option::Some(bytes) => bytes,
+        Option::None => {
+            return declined_files(DECLINE_REFUSED);
+        },
+    };
+    if !has_types_path {
+        let interface = interface_json(in read_iface(in native.as_slice()));
+        let binding = rust_binding(read_iface(in native.as_slice()));
         return ExportFiles {
-            declined: why,
-            interface: ChunkSeq::new[u8](),
-            binding: ChunkSeq::new[u8]()
+            declined: DECLINE_NONE,
+            interface: interface,
+            binding: binding,
+            native: native
         };
     }
     match export_files_of_plan(in answer, has_types_path, in types_path) {
         Option::Some((interface, binding)) => ExportFiles {
             declined: DECLINE_NONE,
             interface: interface,
-            binding: binding
+            binding: binding,
+            native: native
         },
-        Option::None => ExportFiles {
-            declined: DECLINE_REFUSED,
-            interface: ChunkSeq::new[u8](),
-            binding: ChunkSeq::new[u8]()
-        },
+        Option::None => declined_files(DECLINE_REFUSED),
+    }
+}
+
+fn declined_files(why: u8) -> ExportFiles {
+    ExportFiles {
+        declined: why,
+        interface: ChunkSeq::new[u8](),
+        binding: ChunkSeq::new[u8](),
+        native: ChunkSeq::new[u8]()
     }
 }
