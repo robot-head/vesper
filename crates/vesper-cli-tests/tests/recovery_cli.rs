@@ -1,10 +1,12 @@
 //! Actual original-buffer recovery, strict semantic gates and CST update paths.
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
     ops::Range,
     path::PathBuf,
-    process::{Command, Stdio},
+    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
@@ -16,7 +18,7 @@ const VALID_REPAIR: &str = "// 😀\r\nlinear struct Tx{}\r\nfn damaged(/*🦀*/
 fn binary() -> PathBuf {
     let path = std::env::var_os("VESPER_RECOVERY_BINARY")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_vesper")));
+        .unwrap_or_else(support::vesper_path);
     let exe = PathBuf::from(format!("{}.exe", path.display()));
     if exe.is_file() { exe } else { path }
 }
@@ -66,7 +68,7 @@ fn run(mut messages: Vec<Value>) -> Vec<Value> {
         write!(input, "Content-Length: {}\r\n\r\n", bytes.len()).unwrap();
         input.extend(bytes);
     }
-    let mut child = Command::new(binary())
+    let mut child = support::command(&binary())
         .arg("lsp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

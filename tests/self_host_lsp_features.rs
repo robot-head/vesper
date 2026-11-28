@@ -9,7 +9,7 @@
 //!   generated sources that reach the navigation limits. Each answer is the
 //!   JSON-RPC result or error object the session sends, as text.
 //! - `sessions_match_server`: recorded `vesper lsp` sessions (the
-//!   navigation scenario of tests/lsp_cli.rs, both symbol shapes, editing
+//!   navigation scenario of crates/vesper-cli-tests/tests/lsp_cli.rs, both symbol shapes, editing
 //!   sessions over examples, and workspace queries over several open
 //!   documents). Every navigation response the server wrote is compared,
 //!   byte for byte after `serde_json` normalization, with the Vesper
@@ -1544,7 +1544,7 @@ fn serve(input: &[u8]) -> Vec<u8> {
 /// The session scripts: client messages, in order.
 fn scripts() -> Vec<(String, Vec<Value>)> {
     let mut out = vec![];
-    // tests/lsp_cli.rs's unicode navigation scenario, in both shapes.
+    // crates/vesper-cli-tests/tests/lsp_cli.rs's unicode navigation scenario, in both shapes.
     for hierarchical in [true, false] {
         let uri = "untitled:stdio/🦀";
         let source = "// 😀\r\nfn first()->u64{1}\r\nfn main()->u64{first()}\r\n";
