@@ -96,6 +96,27 @@ pub const INST_INOUT_CALL: u64 = 48;
 // A direct call whose small enum result comes back as words in registers
 // (#2581); codes from 56 leave room for the other body slices.
 pub const INST_WORDS_CALL: u64 = 56;
+// A sequence or string operation (`Op::Seq`, #2653): one of the `SEQ_*`
+// forms below, then its words.
+pub const INST_SEQ: u64 = 80;
+// `INST_SEQ`'s forms: a header word loaded at an offset (`Str::len`,
+// `Slice::len`); the operand itself (`as_str`); a byte view of a string
+// (`as_bytes`); a checked byte (`byte_at`); a checked slice element
+// (`s[i]`).
+const SEQ_WORD: u64 = 1;
+const SEQ_SAME: u64 = 2;
+const SEQ_AS_BYTES: u64 = 3;
+const SEQ_BYTE_AT: u64 = 4;
+const SEQ_GET: u64 = 5;
+// The header words (src/strings/native.rs, src/seq/native.rs): a
+// string's `{len, cap, data}`, a slice view's `{handle, start, len}`.
+const STR_LEN_OFFSET: u64 = 0;
+const SLICE_LEN_OFFSET: u64 = 16;
+// `seq::elem_bytes`: the strides of a slice's one-word elements.
+const STRIDE_BYTE: u64 = 1;
+const STRIDE_HALF: u64 = 2;
+const STRIDE_QUARTER: u64 = 4;
+const STRIDE_WORD: u64 = 8;
 
 // A failure record's tag word, and the word its payload is rounded to
 // (`fail_record_size`).
@@ -387,10 +408,14 @@ impl Gen {
         if n.kind == TyKind::Tuple {
             return self.body_product_lane(d);
         }
+        let k = self.ctx.world.k;
+        // A slice is its view `{handle, start, len}` (#2653).
+        if n.kind == TyKind::Named && n.n == 1 && n.name == k.slice {
+            return self.body_product_lane(d);
+        }
         if n.kind != TyKind::Named || n.n != 0 {
             return 0;
         }
-        let k = self.ctx.world.k;
         if n.name == k.f32_ {
             LANE_F32
         } else if n.name == k.f64_ {
@@ -2157,6 +2182,11 @@ impl Gen {
             kind = INST_PROJECT;
             extra.push(off);
             extra.push(res_lane);
+        } else if i.op == Op::Seq {
+            kind = INST_SEQ;
+            if !self.body_seq(in h, i, inout ops, inout extra) {
+                return false;
+            }
         } else if i.op == Op::Call {
             let mut bops: ChunkSeq[u64] = ChunkSeq::new[u64]();
             if self.body_call_builtin(
@@ -2255,7 +2285,9 @@ impl Gen {
         }
         // A product is only built (INST_DATA) and returned: any other
         // instruction that makes or reads one is left to the walk.
-        if kind != INST_DATA && kind != INST_WORDS_CALL {
+        // A sequence operation reads its view and may make one
+        // (`body_seq`).
+        if kind != INST_DATA && kind != INST_WORDS_CALL && kind != INST_SEQ {
             if self.body_lane(i.ty) == LANE_PRODUCT && kind != INST_READ && kind != INST_READ_COPY {
                 return false;
             }
@@ -2294,6 +2326,107 @@ impl Gen {
             o.push(u64_at(in extra, k));
         }
         true
+    }
+
+    // `Codegen::seq_op` of a string or slice operation (#2653) that reads
+    // its operands only: `Str`/`String` `len`, `as_str`, `as_bytes` and
+    // `byte_at`, and `Slice` `len` and `get` of a one-word integer, `bool`
+    // or `f64` element. The operands go in `ops`, the form and its words
+    // in `extra`: a word's offset, or for a checked access the raise of
+    // `RuntimeError::IndexOutOfBounds` (`seq_guard`) and, for a slice
+    // element, its stride and lane. False for any other operation.
+    fn body_seq(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        inout ops: ChunkSeq[u64],
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        // pool row, count, then each argument's call-style words
+        let label = self.program.pool_row(self.program.op(i.a)).label;
+        let n = self.program.op(inc(i.a));
+        for k in 0..n {
+            let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
+            if !self.body_operand(in h, inc(at), inout ops) {
+                return false;
+            }
+        }
+        if n == 0 {
+            return false;
+        }
+        let receiver = default_type(inout self.ctx.types, n32(u64_at(in h.vty, u64_at(in ops, 0))));
+        let node = self.ctx.types.node(receiver);
+        let k = self.ctx.world.k;
+        let text = node.kind == TyKind::Named
+            && node.n == 0
+            && (node.name == k.string || node.name == k.str_);
+        let slice = node.kind == TyKind::Named && node.n == 1 && node.name == k.slice;
+        let ops_s = self.ops;
+        if text && n == 1 && label == ops_s.seq_str_len {
+            extra.push(SEQ_WORD);
+            extra.push(STR_LEN_OFFSET);
+            return true;
+        }
+        if text && n == 1 && label == ops_s.seq_str_as_str {
+            extra.push(SEQ_SAME);
+            return true;
+        }
+        if text && n == 1 && label == ops_s.seq_str_as_bytes {
+            extra.push(SEQ_AS_BYTES);
+            return true;
+        }
+        if slice && n == 1 && label == ops_s.seq_slice_len {
+            extra.push(SEQ_WORD);
+            extra.push(SLICE_LEN_OFFSET);
+            return true;
+        }
+        if text && n == 2 && label == ops_s.seq_str_byte_at {
+            extra.push(SEQ_BYTE_AT);
+            return self.body_raise(
+                in h,
+                ops_s.runtime_error,
+                ops_s.index_out_of_bounds,
+                inout extra
+            );
+        }
+        if slice && n == 2 && label == ops_s.seq_slice_get {
+            let elem = default_type(inout self.ctx.types, self.ctx.types.arg(receiver, 0));
+            let lane = self.body_lane(elem);
+            let en = self.ctx.types.node(elem);
+            if en.kind != TyKind::Named || en.n != 0 || (lane != LANE_I64 && lane != LANE_F64) {
+                return false;
+            }
+            let stride = if en.name == k.u8_ || en.name == k.bool_ {
+                STRIDE_BYTE
+            } else if en.name == k.u16_ {
+                STRIDE_HALF
+            } else if en.name == k.u32_ {
+                STRIDE_QUARTER
+            } else {
+                self.body_product_size(elem)
+            };
+            if stride != STRIDE_BYTE
+                && stride != STRIDE_HALF
+                && stride != STRIDE_QUARTER
+                && stride != STRIDE_WORD
+            {
+                return false;
+            }
+            // A four-byte float loads as a zero-extended word.
+            if lane == LANE_F64 && stride != STRIDE_WORD {
+                return false;
+            }
+            extra.push(SEQ_GET);
+            extra.push(stride);
+            extra.push(lane);
+            return self.body_raise(
+                in h,
+                ops_s.runtime_error,
+                ops_s.index_out_of_bounds,
+                inout extra
+            );
+        }
+        false
     }
 
     // The default a `Never` value of type `t` stands for (`default_value`

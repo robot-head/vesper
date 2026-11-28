@@ -3233,11 +3233,208 @@ fn command_cases() -> Vec<(vesper::lsp::PortCheck, String, Option<String>)> {
     for m in members {
         proof(Some(proof_call(&m)));
     }
+    request_cases(&mut cases);
     cases
 }
 
+/// The `PortCheck::Request` rows: every lifecycle state against the
+/// methods and parameter shapes the gate tells apart, then `initialize`
+/// capability negotiation under each auditor and background setting.
+fn request_cases(cases: &mut Vec<(vesper::lsp::PortCheck, String, Option<String>)>) {
+    use vesper::lsp::PortCheck::Request;
+    use vesper::lsp::PortState::{Running, Shutdown, Uninitialized};
+    let plain = |state| Request {
+        state,
+        auditor: false,
+        background_ms: None,
+    };
+    let methods = [
+        "initialize",
+        "shutdown",
+        "textDocument/hover",
+        "textDocument/definition",
+        "textDocument/documentSymbol",
+        "workspace/symbol",
+        "vesper/signatureSearch",
+        "vesper/recoveryStatus",
+        "vesper/macroPreview",
+        "textDocument/formatting",
+        "textDocument/codeAction",
+        "textDocument/completion",
+        "textDocument/inlayHint",
+        "textDocument/codeLens",
+        "textDocument/hove",
+        "textDocument/hoverx",
+        "Shutdown",
+        "exit",
+        "workspace/executeCommand",
+        "$/cancelRequest",
+        "",
+        "tab\there",
+    ];
+    let shapes = [
+        None,
+        Some("null".to_owned()),
+        Some("{}".into()),
+        Some("[]".into()),
+        Some("1".into()),
+        Some("\"x\"".into()),
+        Some("{\"a\":1}".into()),
+        Some("{\"textDocument\":{\"uri\":\"file:///a.ves\"}}".into()),
+        Some(nested(70, true, "0")),
+    ];
+    for state in [Uninitialized, Running, Shutdown] {
+        for method in methods {
+            for p in &shapes {
+                cases.push((plain(state), method.to_owned(), p.clone()));
+            }
+        }
+    }
+    // `initialize` parameters.
+    let mut inits: Vec<Option<String>> = vec![None];
+    for p in [
+        "null",
+        "[]",
+        "1",
+        "{}",
+        "{\"capabilities\":null}",
+        "{\"capabilities\":[]}",
+    ] {
+        inits.push(Some(p.to_owned()));
+    }
+    let caps = |c: &str| format!("{{\"capabilities\":{c}}}");
+    for b in ["true", "false", "1", "\"true\"", "null"] {
+        inits.push(Some(caps(&format!(
+            "{{\"textDocument\":{{\"publishDiagnostics\":{{\"relatedInformation\":{b}}}}}}}"
+        ))));
+        inits.push(Some(caps(&format!(
+            "{{\"textDocument\":{{\"publishDiagnostics\":{{\"dataSupport\":{b}}}}}}}"
+        ))));
+        inits.push(Some(caps(&format!(
+            "{{\"textDocument\":{{\"documentSymbol\":{{\"hierarchicalDocumentSymbolSupport\":{b}}}}}}}"
+        ))));
+        inits.push(Some(caps(&format!(
+            "{{\"workspace\":{{\"codeLens\":{{\"refreshSupport\":{b}}}}}}}"
+        ))));
+    }
+    for pd in ["[]", "null", "true", "[{\"relatedInformation\":true}]"] {
+        inits.push(Some(caps(&format!(
+            "{{\"textDocument\":{{\"publishDiagnostics\":{pd}}}}}"
+        ))));
+    }
+    inits.push(Some(caps(
+        "{\"textDocument\":[{\"publishDiagnostics\":{\"dataSupport\":true}}]}",
+    )));
+    inits.push(Some(caps(
+        "{\"text\\u0044ocument\":{\"publishDiagnostics\":{\"dataSupport\":true,\"relatedInformation\":true}}}",
+    )));
+    for changes in ["true", "false", "1", "null"] {
+        for literal in ["{}", "{\"a\":1}", "[]", "null", "true"] {
+            inits.push(Some(caps(&format!(
+                "{{\"workspace\":{{\"workspaceEdit\":{{\"documentChanges\":{changes}}}}},\
+                 \"textDocument\":{{\"codeAction\":{{\"codeActionLiteralSupport\":{literal}}}}}}}"
+            ))));
+        }
+        inits.push(Some(caps(&format!(
+            "{{\"workspace\":{{\"workspaceEdit\":{{\"documentChanges\":{changes}}}}}}}"
+        ))));
+    }
+    let everything = "{\"workspace\":{\"workspaceEdit\":{\"documentChanges\":true},\
+        \"codeLens\":{\"refreshSupport\":true}},\"textDocument\":{\"publishDiagnostics\":\
+        {\"relatedInformation\":true,\"dataSupport\":true},\"documentSymbol\":\
+        {\"hierarchicalDocumentSymbolSupport\":true},\"codeAction\":{\"codeActionLiteralSupport\":{}}}}";
+    inits.push(Some(caps(everything)));
+    let options =
+        |o: &str| format!("{{\"capabilities\":{everything},\"initializationOptions\":{o}}}");
+    for o in [
+        "null",
+        "[]",
+        "1",
+        "{}",
+        "{\"vesperLens\":null}",
+        "{\"vesperLens\":[]}",
+    ] {
+        inits.push(Some(options(o)));
+    }
+    for requested in [None, Some("true"), Some("false"), Some("1"), Some("null")] {
+        for ms in [
+            None,
+            Some("0"),
+            Some("1"),
+            Some("150"),
+            Some("60000"),
+            Some("60001"),
+            Some("-1"),
+            Some("-0"),
+            Some("1.0"),
+            Some("1e3"),
+            Some("18446744073709551615"),
+            Some("18446744073709551616"),
+            Some("99999999999999999999999"),
+            Some("\"100\""),
+            Some("null"),
+        ] {
+            let mut members = vec![];
+            if let Some(r) = requested {
+                members.push(format!("\"backgroundProofs\":{r}"));
+            }
+            if let Some(ms) = ms {
+                members.push(format!("\"debounceMs\":{ms}"));
+            }
+            inits.push(Some(options(&format!(
+                "{{\"vesperLens\":{{{}}}}}",
+                members.join(",")
+            ))));
+        }
+    }
+    inits.push(Some(options(
+        "{\"vesperLens\":{\"background\\u0050roofs\":true,\"debounce\\u004ds\":7}}",
+    )));
+    inits.push(Some(format!(
+        "{{\"capabilities\":{},\"initializationOptions\":{{}}}}",
+        nested(70, false, "1")
+    )));
+    let lenses = [
+        (false, None),
+        (true, None),
+        (true, Some(0)),
+        (true, Some(200)),
+        (true, Some(60_000)),
+        (true, Some(60_001)),
+        (false, Some(200)),
+    ];
+    for (auditor, background_ms) in lenses {
+        let check = Request {
+            state: Uninitialized,
+            auditor,
+            background_ms,
+        };
+        for p in &inits {
+            cases.push((check, "initialize".to_owned(), p.clone()));
+        }
+    }
+    for state in [Running, Shutdown] {
+        let check = Request {
+            state,
+            auditor: true,
+            background_ms: Some(200),
+        };
+        cases.push((check, "initialize".to_owned(), Some(caps(everything))));
+    }
+}
+
+/// The kind word of a `PortCheck::Request` row: the kind in the low byte,
+/// the state (0 uninitialized, 1 running, 2 shut down) in the next, an
+/// auditor bit, a configured-background bit and its milliseconds in the
+/// high half.
+const REQUEST_KIND: u64 = 4;
+const REQUEST_STATE_SHIFT: u64 = 8;
+const REQUEST_AUDITOR_BIT: u64 = 16;
+const REQUEST_BACKGROUND_BIT: u64 = 17;
+const REQUEST_BACKGROUND_MS_SHIFT: u64 = 32;
+
 /// `lsp_commands`' input: the word count W, the rounds, the document and
-/// check counts, three words per document (URI start and length, version)
+/// check counts, the server version's start and length, three words per document (URI start and length, version)
 /// and five per check (kind, method start and length, parameter start and
 /// length, start `u64::MAX` for none), then the blob at byte W * 8.
 fn command_checks_input(
@@ -3253,6 +3450,8 @@ fn command_checks_input(
         blob.extend_from_slice(s.as_bytes());
         (at, s.len() as u64)
     };
+    let (v_at, v_len) = put(&mut blob, vesper::lsp::SERVER_VERSION);
+    words.extend([v_at, v_len]);
     for (uri, version) in open {
         let (at, len) = put(&mut blob, uri);
         words.extend([at, len, i64::from(*version) as u64]);
@@ -3262,6 +3461,23 @@ fn command_checks_input(
             PortCheck::Input => 1,
             PortCheck::Cancel => 2,
             PortCheck::Proof => 3,
+            PortCheck::Request {
+                state,
+                auditor,
+                background_ms,
+            } => {
+                let state = match state {
+                    vesper::lsp::PortState::Uninitialized => 0,
+                    vesper::lsp::PortState::Running => 1,
+                    vesper::lsp::PortState::Shutdown => 2,
+                };
+                REQUEST_KIND
+                    | (state << REQUEST_STATE_SHIFT)
+                    | (u64::from(*auditor) << REQUEST_AUDITOR_BIT)
+                    | background_ms.map_or(0, |ms| {
+                        (1 << REQUEST_BACKGROUND_BIT) | (ms << REQUEST_BACKGROUND_MS_SHIFT)
+                    })
+            }
         };
         let (m_at, m_len) = put(&mut blob, method);
         let (p_at, p_len) = match params {
@@ -3371,9 +3587,12 @@ fn commands_speed() {
             std::hint::black_box(entry.words(&input1));
         }));
     }
-    use vesper::lsp::PortCheck;
-    for kind in [PortCheck::Input, PortCheck::Cancel, PortCheck::Proof] {
-        let sub: Vec<_> = cases.iter().filter(|c| c.0 == kind).cloned().collect();
+    for kind in ["Input", "Cancel", "Proof", "Request"] {
+        let sub: Vec<_> = cases
+            .iter()
+            .filter(|c| format!("{:?}", c.0).starts_with(kind))
+            .cloned()
+            .collect();
         let sub_values = command_values(&sub);
         let sub_input = command_checks_input(&sub, &open, rounds);
         let (mut a, mut b) = (std::time::Duration::MAX, std::time::Duration::MAX);
@@ -3391,7 +3610,7 @@ fn commands_speed() {
         }
         let per = (sub.len() as u32) * (rounds as u32);
         eprintln!(
-            "commands {kind:?} ({} checks): rust {:?} vesper {:?} per check, ratio {:.2}",
+            "commands {kind} ({} checks): rust {:?} vesper {:?} per check, ratio {:.2}",
             sub.len(),
             a / per,
             b / per,

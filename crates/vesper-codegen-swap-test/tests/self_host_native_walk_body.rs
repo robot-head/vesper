@@ -2122,6 +2122,108 @@ const MIN_INOUT_PROGRAM_BODIES: u64 = 12;
 /// once per comparison (a JIT-running host compares each setting twice).
 const MIN_INOUT_BODIES: u64 = 6;
 
+/// Strings and slices (#2653): `Str` and `String` `len`, `as_str`,
+/// `as_bytes` and `byte_at` (raising `IndexOutOfBounds` through the
+/// failure record), and slice `len` and checked elements of each stride
+/// (`u8`, `u16`, `u32`, `i32`, `u64`, `f64`). `main` builds the sequences
+/// and handles the raise, so it stays with the walk. Optimized, a slice
+/// parameter is read once at entry (`bounds_hoist::header_hoists`), its
+/// header words then loaded as read-only memory.
+const STRINGS_SLICES: &str = "
+fn text_len(in s: String) -> u64 {
+    s.len()
+}
+fn view_len(in s: Str) -> u64 {
+    wrapping_add(s.len(), 1)
+}
+fn whole_len(in s: String) -> u64 {
+    view_len(in s.as_str())
+}
+fn bytes_len(in s: Str) -> u64 {
+    words_of(in s.as_bytes())
+}
+fn words_of(in xs: Slice[u8]) -> u64 {
+    wrapping_mul(xs.len(), 3)
+}
+fn byte_of(in s: Str, i: u64) -> u64 eff [Fail[RuntimeError]] {
+    widen_u64(s.byte_at(i))
+}
+fn byte_pair(in s: String, i: u64) -> u64 eff [Fail[RuntimeError]] {
+    let a: u8 = s.byte_at(i);
+    let b: u8 = s.byte_at(wrapping_add(i, 1));
+    widen_u64(a) ^ wrapping_mul(widen_u64(b), 256)
+}
+fn pick_word(in xs: Slice[u64], i: u64) -> u64 eff [Fail[RuntimeError]] {
+    wrapping_add(xs[i], xs.len())
+}
+fn pick_small(in xs: Slice[u8], in ys: Slice[u32], i: u64) -> u64 eff [Fail[RuntimeError]] {
+    wrapping_add(widen_u64(xs[i]), widen_u64(ys[i]))
+}
+fn pick_half(in xs: Slice[u16], in zs: Slice[i32], i: u64) -> i64 eff [Fail[RuntimeError]] {
+    wrapping_add(widen_i64(xs[i]), widen_i64(zs[i]))
+}
+fn pick_float(in fs: Slice[f64], i: u64) -> f64 eff [Fail[RuntimeError]] {
+    fs[i] * 2.0
+}
+fn main() -> i64 {
+    let s: String = \"hello, world\";
+    let mut w: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    w.push(7);
+    w.push(11);
+    let mut h: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    h.push(300);
+    h.push(40000);
+    let mut q: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    q.push(70000);
+    q.push(5);
+    let mut z: ChunkSeq[i32] = ChunkSeq::new[i32]();
+    z.push(-3);
+    z.push(9);
+    let mut f: ChunkSeq[f64] = ChunkSeq::new[f64]();
+    f.push(1.5);
+    f.push(-2.25);
+    let lens = text_len(in s) ^ view_len(in \"abc\") ^ whole_len(in s) ^ bytes_len(in \"wxyz\");
+    handle Fail[RuntimeError] in {
+        let a = byte_of(in \"abc\", 1) ^ byte_pair(in s, 3) ^ pick_word(in w.as_slice(), 1);
+        let b = pick_small(in s.as_bytes(), in q.as_slice(), 0) ^ lens;
+        let c = pick_half(in h.as_slice(), in z.as_slice(), 1);
+        let d = saturating_i64(pick_float(in f.as_slice(), 1));
+        let e = byte_of(in \"abc\", 3);
+        wrapping_i64(a ^ b) ^ c ^ d ^ wrapping_i64(e)
+    } with {
+        return value => value,
+        raise(error, resume) => 4242,
+    }
+}
+";
+
+#[test]
+fn vesper_string_and_slice_bodies_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(STRINGS_SLICES);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("strings_slices", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "strings_slices: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        // The string and slice functions in both builds (and again for
+        // the JIT runs off-cross).
+        let min_emitted = if cross() { 20 } else { 40 };
+        assert!(
+            emitted >= min_emitted,
+            "only {emitted} string and slice functions came from Vesper (expected {min_emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
 /// `inout` arguments to `fail_only` callees (#2614), next to struct results
 /// of `fail_only` functions built in the result pointer, with checked arithmetic, a partial division and a call of
 /// another `fail_only` function raising through the failure record, whose

@@ -9,6 +9,14 @@ use self::util::{add, copy_seq, fold, inc, inc32, n32, push_decimal, u32_at, u64
 use self::names::{Names};
 
 const NONE32: u32 = 4294967295;
+// Bits in half a u64 word, and its low half.
+const HALF_WORD_BITS: u64 = 32;
+const HALF_WORD_MASK: u64 = 4294967295;
+const DECIMAL_BASE: u64 = 10;
+const ASCII_ZERO: u64 = 48;
+const I64_MAX_U64: u64 = 9223372036854775807;
+// The magnitude of i64::MIN.
+const I64_MIN_MAGNITUDE: u64 = 9223372036854775808;
 
 // A type node's kind. Every checker, lowering and backend package that
 // reads check-data's type table compares against these, so they live here
@@ -83,6 +91,7 @@ pub struct Types {
     s_dyn: u32,
     s_u64: u32,
     s_i64: u32,
+    s_i128: u32,
     s_unit: u32,
     unit: u32,
     infer: u32,
@@ -111,6 +120,7 @@ pub fn types_new(inout names: Names) -> Types {
         s_dyn: names.intern(in "dyn".as_bytes()),
         s_u64: names.intern(in "u64".as_bytes()),
         s_i64: names.intern(in "i64".as_bytes()),
+        s_i128: names.intern(in "i128".as_bytes()),
         s_unit: names.intern(in "Unit".as_bytes()),
         unit: 0,
         infer: 0,
@@ -277,6 +287,7 @@ impl Types {
             s_dyn,
             s_u64,
             s_i64,
+            s_i128,
             s_unit,
             unit,
             infer,
@@ -297,6 +308,7 @@ impl Types {
             s_dyn: s_dyn,
             s_u64: s_u64,
             s_i64: s_i64,
+            s_i128: s_i128,
             s_unit: s_unit,
             unit: unit,
             infer: infer,
@@ -359,6 +371,7 @@ impl Types {
             s_dyn: self.s_dyn,
             s_u64: self.s_u64,
             s_i64: self.s_i64,
+            s_i128: self.s_i128,
             s_unit: self.s_unit,
             unit: self.unit,
             infer: self.infer,
@@ -576,8 +589,23 @@ impl Types {
     // An integer literal type: Rust holds an `i128`; Vesper has no 128-bit
     // integer, so the sample keeps a sign (in `mode`) and a u64 magnitude.
     pub fn literal(inout self, neg: bool, magnitude: u64) -> u32 {
+        self.wide_literal(neg, magnitude, 0)
+    }
+
+    // An integer literal type past u64 in magnitude: the magnitude's high
+    // word is split over `r` (low half) and `r2` (high half), which a
+    // literal does not otherwise use.
+    pub fn wide_literal(inout self, neg: bool, lo: u64, hi: u64) -> u32 {
         let no_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        self.mk(TyKind::Lit, if neg { 1 } else { 0 }, 0, in no_args, 0, 0, wrapping_i64(magnitude))
+        self.mk(
+            TyKind::Lit,
+            if neg { 1 } else { 0 },
+            0,
+            in no_args,
+            wrapping_u32(hi),
+            wrapping_u32(hi >> HALF_WORD_BITS),
+            wrapping_i64(lo)
+        )
     }
 
     pub fn row_type(inout self, row: u32) -> u32 {
@@ -1036,11 +1064,17 @@ fn push_unique(
     effs.push(eff);
 }
 
-// `numeric::default_type`: integer literals take i64, or u64 above i64::MAX.
+// `numeric::default_type`: integer literals take `IntegerKind::default_for`:
+// i128 past u64::MAX or below i64::MIN, u64 above i64::MAX, else i64.
 pub fn default_type(inout types: Types, ty: u32) -> u32 {
     let node = types.node(ty);
     if node.kind == TyKind::Lit {
-        if node.mode == 0 && wrapping_u64(node.lit) > 9223372036854775807 {
+        let lo = wrapping_u64(node.lit);
+        let wide = literal_hi(node) != 0;
+        if wide || (node.mode == 1 && lo > I64_MIN_MAGNITUDE) {
+            return types.named0(types.s_i128);
+        }
+        if node.mode == 0 && lo > I64_MAX_U64 {
             return types.named0(types.s_u64);
         }
         return types.named0(types.s_i64);
@@ -1089,9 +1123,33 @@ fn default_row(inout types: Types, row_id: u32) -> u32 {
     types.mk_row(in effs, in args, row.tail)
 }
 
+// The high word of a literal's magnitude (`wide_literal`).
+pub fn literal_hi(node: TypeNode) -> u64 {
+    widen_u64(node.r) | (widen_u64(node.r2) << HALF_WORD_BITS)
+}
+
 fn push_literal(inout out: ChunkSeq[u8], node: TypeNode) {
     if node.mode == 1 {
         out.push(45);
     }
-    push_decimal(inout out, wrapping_u64(node.lit));
+    push_wide_decimal(inout out, literal_hi(node), wrapping_u64(node.lit));
+}
+
+// The decimal digits of the 128-bit value `hi * 2^64 + lo`.
+pub fn push_wide_decimal(inout out: ChunkSeq[u8], hi: u64, lo: u64) {
+    if hi == 0 {
+        push_decimal(inout out, lo);
+        return;
+    }
+    // Divide by ten a 32-bit digit at a time: each partial dividend is
+    // below 10 * 2^32, so it fits a u64.
+    let q_hi = hi / DECIMAL_BASE;
+    let r_hi = hi % DECIMAL_BASE;
+    let upper = (r_hi << HALF_WORD_BITS) | (lo >> HALF_WORD_BITS);
+    let q_upper = upper / DECIMAL_BASE;
+    let lower = ((upper % DECIMAL_BASE) << HALF_WORD_BITS) | (lo & HALF_WORD_MASK);
+    let q_lower = lower / DECIMAL_BASE;
+    let digit = lower % DECIMAL_BASE;
+    push_wide_decimal(inout out, q_hi, (q_upper << HALF_WORD_BITS) | q_lower);
+    out.push(wrapping_u8(wrapping_add(digit, ASCII_ZERO)));
 }

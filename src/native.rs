@@ -4200,6 +4200,13 @@ impl<M: Module> Codegen<'_, '_, M> {
         if !plain || crate::codegen_swap::installed().body.is_none() {
             return Ok(false);
         }
+        // Sequence and string operations (#2653): the body hook emits the
+        // plain ones only, so a graph whose sequences the walk drops,
+        // fuses into a match or reads through hoisted headers stays on
+        // the walk.
+        if !self.seq_body_plain(body) {
+            return Ok(false);
+        }
         let mut args = vec![
             u64::from(self.own_abi.status),
             u64::from(self.source_locations),
@@ -4314,6 +4321,32 @@ impl<M: Module> Codegen<'_, '_, M> {
             name,
             &args,
         )
+    }
+    /// Whether the walk lowers graph `body`'s sequence and string
+    /// operations with no drops, fused `try_get` matches or hoisted
+    /// header reads (#2653): true for a graph with none.
+    fn seq_body_plain(&self, body: &crate::ir::FunctionIr) -> bool {
+        use crate::ir::Op;
+        let has_seq = body
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .any(|i| matches!(i.op, Op::Seq { .. }));
+        if !has_seq {
+            return true;
+        }
+        // The graph `ir_graph_at` lowers: small enums kept as words.
+        let join = self.own_scalar_join(body);
+        let scalar_graph = self.scalar_graph(body, join.as_ref());
+        let graph = scalar_graph.as_ref().map_or(body, |s| &s.f);
+        let drops = self.drops_enabled()
+            && (!crate::fip::replace_drops(self.world, graph, None).is_empty()
+                || !crate::fip::temporary_drops(self.world, graph).is_empty()
+                || !crate::fip::fail_exit_drops(self.world, graph).is_empty());
+        !drops
+            && crate::fip::seq_drop_plan(self.world, graph).is_empty()
+            && seq_native::fused_reads(graph).is_empty()
+            && (!self.operands_only || crate::bounds_hoist::header_hoists(graph).is_empty())
     }
     /// The enum shape a top-level graph `f` returns as words: the
     /// function's own register-result ABI when its result is a small enum
