@@ -346,6 +346,15 @@ copy struct Ops {
     arith_overflow: u32,
     runtime_error: u32,
     division_by_zero: u32,
+    // the sequence and string operations of the body hook (body.ves,
+    // #2653): `Op::Seq` pool labels, the `SeqOp` `Debug` text
+    index_out_of_bounds: u32,
+    seq_str_len: u32,
+    seq_str_byte_at: u32,
+    seq_str_as_str: u32,
+    seq_str_as_bytes: u32,
+    seq_slice_len: u32,
+    seq_slice_get: u32,
 }
 
 fn mark(inout table: ChunkSeq[u32], symbol: u32, flag: u32) {
@@ -502,6 +511,13 @@ fn ops_new(inout names: Names, inout tables: Tables) -> Ops {
         arith_overflow: intern(inout names, in "ArithOverflow"),
         runtime_error: intern(inout names, in "RuntimeError"),
         division_by_zero: intern(inout names, in "DivisionByZero"),
+        index_out_of_bounds: intern(inout names, in "IndexOutOfBounds"),
+        seq_str_len: intern(inout names, in "Str(Len)"),
+        seq_str_byte_at: intern(inout names, in "Str(ByteAt)"),
+        seq_str_as_str: intern(inout names, in "Str(AsStr)"),
+        seq_str_as_bytes: intern(inout names, in "Str(AsBytes)"),
+        seq_slice_len: intern(inout names, in "SliceLen"),
+        seq_slice_get: intern(inout names, in "SliceGet"),
         amp: intern(inout names, in "&"),
         pipe: intern(inout names, in "|"),
         caret: intern(inout names, in "^"),
