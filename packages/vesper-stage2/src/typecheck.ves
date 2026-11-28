@@ -19,6 +19,11 @@ use @vesper/wasm-backend::ir::{CallRow, Pair};
 use @vesper/place-ir-lower::ast::{Ast, Ef, Eop, Ex, FnR, Hd, Pm, Pt};
 use self::ffi::{OPEN_TYPE};
 use self::facts::{loop_breaks, loop_never_breaks, loop_plain_breaks};
+use self::traits::{
+    BoxCo, GenCall, TraitCall, TraitCalls, TraitInfo, boxed_object, boxed_trait, bound_stub,
+    conf_fn, is_object, select_conf, stub_of, stub_trait, trait_calls_new, trait_index,
+    trait_info_new
+};
 use self::sugar_policy::{
     POLICY_BAD_METADATA, POLICY_OK, PolicyFailure, PolicyInputs, PolicySpan, caller_supplied,
     captured_value_fault, contains, diagnose_policy_fault, effect_failure, empty_inputs,
@@ -101,6 +106,11 @@ struct Tc {
     sugar_handler_row: u32,
     sugar_generic_start: u64,
     sugar_generic_count: u64,
+    // The trait frontend (traits.ves): its tables, the function being
+    // checked, and the trait and generic calls the first pass records.
+    tr: TraitInfo,
+    cur_fn: u32,
+    trait_calls: TraitCalls,
     lit_open: ChunkSeq[u64],
     lit_uses: ChunkSeq[LitUse],
     lit_hints: ChunkSeq[LitUse],
@@ -156,6 +166,9 @@ fn tc_new(sink names: Names, sink types: Types, sink world: World, sink sugar: P
         sugar_handler_row: empty_row,
         sugar_generic_start: 0,
         sugar_generic_count: 0,
+        tr: trait_info_new(false),
+        cur_fn: NONE32,
+        trait_calls: trait_calls_new(),
         lit_open: ChunkSeq::new[u64](),
         lit_uses: ChunkSeq::new[LitUse](),
         lit_hints: ChunkSeq::new[LitUse](),
@@ -1365,6 +1378,23 @@ fn check_fn_call(
         }
         if vn > 0 {
             tc.calls.push(CallRow { s0: e.s0, s1: e.s1, v0: v0, vn: vn });
+            if tc.tr.active {
+                let g0 = tc.trait_calls.pairs.len();
+                for k in 0..vn {
+                    match tc.pairs.try_get(wrapping_add(v0, k)) {
+                        Option::Some(pr) => tc.trait_calls.pairs.push(pr),
+                        Option::None => {},
+                    }
+                }
+                tc.trait_calls.gcalls.push(GenCall {
+                    s0: e.s0,
+                    s1: e.s1,
+                    caller: tc.cur_fn,
+                    callee: f.name,
+                    v0: g0,
+                    vn: vn
+                });
+            }
         }
     }
     if tc.sugar.policies.regions.len() != 0 {
@@ -2450,6 +2480,26 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                             return check_sugar_value_call(inout tc, in a, callable, e, ce);
                         }
                     }
+                    if tc.tr.active && e.n > 0 {
+                        let (tq, tm) = split_last_colon(inout tc.names, cname);
+                        if tq != NONE32 && trait_index(in tc.tr, tq) != NONE64 {
+                            // `Trait::method(x, ...)`: the first argument is the
+                            // receiver.
+                            let recv = check_expr(
+                                inout tc,
+                                in a,
+                                call_arg_expr(in a, e, 0),
+                                tc.infer_ty
+                            );
+                            let mut rest = e;
+                            rest.b = wrapping_add(e.b, CALL_ARG_STRIDE);
+                            rest.n = wrapping_sub(e.n, 1);
+                            match trait_call(inout tc, in a, tq, tm, recv, rest, ce, expected) {
+                                Option::Some(rt) => return rt,
+                                Option::None => {},
+                            }
+                        }
+                    }
                     let authored = sugar_applies(inout tc, e);
                     let fn_opt = if authored && lookup_var(in tc, cname) != NONE32 {
                         Option::None
@@ -2655,6 +2705,9 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                     Option::None => expected,
                                 }
                             };
+                            if tc.tr.active && is_op(in tc, cname, in "Box::new") {
+                                record_box_coercion(inout tc, rty, arg0_ty);
+                            }
                             record_span(inout tc, ce.s0, ce.s1, rty);
                             record_span(inout tc, e.s0, e.s1, rty);
                             return rty;
@@ -2678,6 +2731,21 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                             return check_fn_call(inout tc, in a, f, bt, e, ce, expected);
                         },
                         Option::None => {
+                            if tc.tr.active {
+                                match trait_call(
+                                    inout tc,
+                                    in a,
+                                    NONE32,
+                                    mname,
+                                    bt,
+                                    e,
+                                    ce,
+                                    expected
+                                ) {
+                                    Option::Some(rt) => return rt,
+                                    Option::None => {},
+                                }
+                            }
                             if sugar_applies(inout tc, e) {
                                 let callable = field_step(
                                     inout tc.types,
@@ -2733,6 +2801,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 let sl_nm = tc.names.intern(in "Slice".as_bytes());
                                 named1(inout tc, sl_nm, u8t)
                             } else if (is_op(in tc, mname, in "as_slice")
+                                || is_op(in tc, mname, in "as_slice_mut")
                                 || is_op(in tc, mname, in "sub_slice"))
                                 && tc.types.arity(bt) > 0
                             {
@@ -3001,6 +3070,14 @@ fn undo_fn_run(inout tc: Tc, n_spans: u64, n_calls: u64, n_pairs: u64) {
     tc.lit_uses.clear();
 }
 
+fn undo_trait_calls(inout tc: Tc, n: (u64, u64, u64, u64)) {
+    let (calls, gcalls, pairs, cos) = n;
+    tc.trait_calls.calls.truncate(calls);
+    tc.trait_calls.gcalls.truncate(gcalls);
+    tc.trait_calls.pairs.truncate(pairs);
+    tc.trait_calls.cos.truncate(cos);
+}
+
 // Checks `f`, then, when it has open bindings and an integer use of the
 // wrong kind (where Rust's checker fails), types those bindings from their
 // uses and checks it again (`function_with_literal_typing`).
@@ -3018,12 +3095,20 @@ fn check_fn_with_literal_typing(
     tc.lit_probe = false;
     tc.lit_mismatch = false;
     let violation = tc.sugar_violation;
+    // The trait calls the run records, dropped with its spans on a rerun.
+    let n_tcalls = (
+        tc.trait_calls.calls.len(),
+        tc.trait_calls.gcalls.len(),
+        tc.trait_calls.pairs.len(),
+        tc.trait_calls.cos.len()
+    );
     check_fn_body(inout tc, in a, f);
     if tc.lit_open.len() == 0 || !tc.lit_mismatch {
         return;
     }
     for _round in 0..LITERAL_PROBE_ROUNDS {
         undo_fn_run(inout tc, n_spans, n_calls, n_pairs);
+        undo_trait_calls(inout tc, n_tcalls);
         tc.lit_probe = true;
         tc.sugar_violation = violation;
         check_fn_body(inout tc, in a, f);
@@ -3033,6 +3118,7 @@ fn check_fn_with_literal_typing(
     }
     tc.lit_probe = false;
     undo_fn_run(inout tc, n_spans, n_calls, n_pairs);
+    undo_trait_calls(inout tc, n_tcalls);
     tc.sugar_violation = violation;
     check_fn_body(inout tc, in a, f);
     tc.lit_hints.clear();
@@ -3069,6 +3155,9 @@ fn dummy_tc(k: Known) -> Tc {
         sugar_handler_row: empty_row,
         sugar_generic_start: 0,
         sugar_generic_count: 0,
+        tr: trait_info_new(false),
+        cur_fn: NONE32,
+        trait_calls: trait_calls_new(),
         lit_open: ChunkSeq::new[u64](),
         lit_uses: ChunkSeq::new[LitUse](),
         lit_hints: ChunkSeq::new[LitUse](),
@@ -3118,6 +3207,9 @@ fn rebuild_tc(
         sugar_handler_row: tc_sugar_handler_row,
         sugar_generic_start: tc_sugar_generic_start,
         sugar_generic_count: tc_sugar_generic_count,
+        tr: tc_tr,
+        cur_fn: tc_cur_fn,
+        trait_calls: tc_trait_calls,
         lit_open: tc_lit_open,
         lit_uses: tc_lit_uses,
         lit_hints: tc_lit_hints,
@@ -3210,6 +3302,9 @@ fn rebuild_tc(
         sugar_handler_row: tc_sugar_handler_row,
         sugar_generic_start: tc_sugar_generic_start,
         sugar_generic_count: tc_sugar_generic_count,
+        tr: tc_tr,
+        cur_fn: tc_cur_fn,
+        trait_calls: tc_trait_calls,
         lit_open: tc_lit_open,
         lit_uses: tc_lit_uses,
         lit_hints: tc_lit_hints,
@@ -3235,7 +3330,38 @@ pub fn typecheck_ast(
     sink world: World,
     sink sugar: PolicyInputs
 ) -> (Names, Types, World, ChunkSeq[CallRow], ChunkSeq[Pair], Option[PolicyFailure]) {
+    let (n, t, wd, calls, pairs, violation, _tcalls, _tr) = typecheck_ast_traits(
+        in a,
+        sink names,
+        sink types,
+        sink world,
+        sink sugar,
+        sink trait_info_new(false)
+    );
+    (n, t, wd, calls, pairs, violation)
+}
+
+// `typecheck_ast` with the trait frontend's tables `tr`: trait calls are
+// resolved and, with the generic calls, returned for its plan.
+pub fn typecheck_ast_traits(
+    in a: Ast,
+    sink names: Names,
+    sink types: Types,
+    sink world: World,
+    sink sugar: PolicyInputs,
+    sink tr: TraitInfo
+) -> (
+    Names,
+    Types,
+    World,
+    ChunkSeq[CallRow],
+    ChunkSeq[Pair],
+    Option[PolicyFailure],
+    TraitCalls,
+    TraitInfo
+) {
     let mut tc = tc_new(sink names, sink types, sink world, sink sugar);
+    tc.tr = tr;
     if tc.sugar.policies.regions.len() != 0 {
         tc.sugar_checked_calls.resize(a.exs.len(), false);
     }
@@ -3288,6 +3414,7 @@ pub fn typecheck_ast(
         let n_nodes = tc.types.nodes.len();
         let n_rows = tc.types.rows.len();
         let n_effs = tc.types.effs_len();
+        tc.cur_fn = f.name;
         check_fn_with_literal_typing(inout tc, in a, f, n_spans, n_calls, n_pairs);
         tc.scratch1.clear();
         if tc.names.mask_val() == n_mask
@@ -3305,9 +3432,12 @@ pub fn typecheck_ast(
             && tc.lit_peak <= max_lit
             && tc.spans.len() < max_spans
             && tc.calls.len() < max_calls
-            && tc.pairs.len() < max_pairs
-            && tc_perm < tc_perm_end
-        {
+            && tc.pairs.len()
+                < max_pairs
+                // The trait frontend's records (`tc.trait_calls`) do not survive
+        // the reset: its first pass keeps the heap, and lib.ves
+        // `keep_first_pass` compacts what the second pass needs.
+        && !tc.tr.active && tc_perm < tc_perm_end {
             let mut dtc = dummy_tc(tc.world.k);
             swap(inout tc, inout dtc);
             let (ntc, next_perm) = rebuild_tc(
@@ -3382,5 +3512,108 @@ pub fn typecheck_ast(
         primitive_failure(inout context, in a, in tc.sugar, in tc.sugar_checked_calls)
     };
     let violation = diagnose_policy_fault(in tc.sugar, fault);
-    (context.names, context.types, context.world, tc.calls, tc.pairs, violation)
+    (
+        context.names,
+        context.types,
+        context.world,
+        tc.calls,
+        tc.pairs,
+        violation,
+        tc.trait_calls,
+        tc.tr
+    )
+}
+
+// A `Box::new` call typed `Box[dyn Trait]` whose value has the concrete
+// type `value` boxes it as a trait object (§7.3): the trait frontend
+// builds the value type's vtable (traits.ves `dyn_vtable`).
+fn record_box_coercion(inout tc: Tc, boxed: u32, value: u32) {
+    let object = boxed_object(inout tc.names, in tc.types, boxed);
+    if object == NONE32 || value == NONE32 {
+        return;
+    }
+    let vk = tc.types.kind(value);
+    if vk == TyKind::Infer || is_object(inout tc.names, in tc.types, value) {
+        return;
+    }
+    tc.trait_calls.cos.push(BoxCo { caller: tc.cur_fn, self_ty: value, object: object });
+}
+
+// Whether `ty` is a generic parameter of the function being checked.
+fn is_own_generic(in tc: Tc, in a: Ast, ty: u32) -> bool {
+    if tc.types.kind(ty) != TyKind::Named || tc.types.arity(ty) != 0 {
+        return false;
+    }
+    let nm = tc.types.name(ty);
+    for gi in 0..tc.sugar_generic_count {
+        match a.gens.try_get(wrapping_add(tc.sugar_generic_start, gi)) {
+            Option::Some(g) => {
+                if g.name == nm {
+                    return true;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    false
+}
+
+// A trait call of `method` (of trait `trait_name`, or any when NONE32) on a
+// receiver of type `recv`, the call's arguments after the receiver in `e`:
+// on a bounded parameter, the bound's stub; else the generated function of
+// the conformance for `recv` (`TraitCalls::resolve`). Records the call.
+fn trait_call(
+    inout tc: Tc,
+    in a: Ast,
+    trait_name: u32,
+    method: u32,
+    recv: u32,
+    e: Ex,
+    ce: Ex,
+    expected: u32
+) -> Option[u32] {
+    let mut stub = false;
+    let mut boxed = false;
+    let mut target = NONE32;
+    let mut tname = trait_name;
+    let object_trait = boxed_trait(inout tc.names, in tc.types, recv);
+    if object_trait != NONE32 && trait_index(in tc.tr, object_trait) != NONE64 {
+        // A call on a boxed trait object (§7.3): typed by the trait's stub,
+        // with `Self` the box, and made through its vtable stub.
+        if trait_name != NONE32 && trait_name != object_trait {
+            return Option::None;
+        }
+        target = stub_of(in tc.tr, object_trait, method);
+        boxed = true;
+        tname = object_trait;
+    } else if is_own_generic(in tc, in a, recv) {
+        target = bound_stub(in tc.tr, tc.cur_fn, tc.types.name(recv), method);
+        stub = true;
+        if target != NONE32 && tname == NONE32 {
+            tname = stub_trait(in tc.tr, target);
+        }
+    } else {
+        // A `use model` in scope at the call selects its model (§7.2).
+        let conf = select_conf(in tc.tr, inout tc.types, trait_name, method, recv, e.s0);
+        target = conf_fn(in tc.tr, conf, method);
+    }
+    if target == NONE32 {
+        return Option::None;
+    }
+    let f = match find_fn(in a, target) {
+        Option::Some(v) => v,
+        Option::None => return Option::None,
+    };
+    tc.trait_calls.calls.push(TraitCall {
+        s0: e.s0,
+        s1: e.s1,
+        caller: tc.cur_fn,
+        target: target,
+        recv: recv,
+        stub: stub,
+        boxed: boxed,
+        trait_name: tname,
+        method: method
+    });
+    Option::Some(check_fn_call(inout tc, in a, f, recv, e, ce, expected))
 }

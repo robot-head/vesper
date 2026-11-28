@@ -12,6 +12,8 @@
 //   reinterpretation).
 // - vectors.ves: the reserved `Vec::`, `Mask::` and `Isa::` intrinsics.
 // - regions.ves: region types, `r.op(args)` and region annotations.
+// - opfacts.ves: the operations that may raise `Fail[RuntimeError]` or
+//   `Fail[ArithOverflow]` (`world.partial_ops`, `world.overflow_ops`).
 //
 // The entries below are the differential's tasks.
 
