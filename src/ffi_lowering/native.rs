@@ -78,7 +78,7 @@ fn c_type(bits: u8) -> ir::Type {
 }
 /// C functions the runtimes import, with their word signatures (`n`
 /// 64-bit integer parameters, and a 64-bit result or none).
-fn runtime_import(symbol: &str) -> Option<(usize, bool)> {
+pub(crate) fn runtime_import(symbol: &str) -> Option<(usize, bool)> {
     Some(match symbol {
         "write" | "memcpy" | "memmove" | "memset" => (3, true),
         "malloc" => (1, true),

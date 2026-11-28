@@ -1,0 +1,231 @@
+// Foreign (`.vsys`) calls in the native walk's body plans (#2751): an
+// `Op::Call` of an operation of an imported library's `Ffi$Lib` effect is
+// `Codegen::foreign_perform` (src/ffi_lowering/native.rs), a direct call of
+// the C symbol. The library plan stays on the walk's side, so the facts
+// after the handler facts name each foreign operation the program calls,
+// its C symbol and its form (tests/common/foreign_facts.rs,
+// `ffi_lowering::plan_probe::body_call`).
+//
+// The plan covers direct calls whose parameters are scalars and `bool`s
+// and whose result is `Unit` or a scalar. Each argument is evaluated where
+// the walk evaluates it: an `in` argument with a place reads its whole
+// local at the call (`ir_place_expr`), any other is a temporary of the
+// value already computed (`ir_temp`). Handles, slices, C strings,
+// pointers, structs, enums and validated results stay on the walk.
+
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::input::{Reader};
+use @vesper/place-ir::{InstRow};
+use super::{Gen};
+use super::body::{Header};
+
+// The section's first word, "FOREIGNS" in ASCII (`FOREIGN_FACTS`).
+pub const FOREIGN_FACTS: u64 = 6002813733352656710;
+const NONE64: u64 = 18446744073709551615;
+
+// `plan_probe::body_call`'s forms.
+const CALL_DIRECT: u64 = 1;
+pub const PARAM_SCALAR: u64 = 0;
+pub const PARAM_BOOL: u64 = 1;
+const RESULT_UNIT: u64 = 0;
+const RESULT_SCALAR: u64 = 1;
+// A plan form's words: the form, then its scalar word.
+const FORM_WORDS: u64 = 2;
+
+// An argument's source in the plan: a temporary of the next operand, or a
+// whole local read at the call.
+pub const SOURCE_TEMP: u64 = 0;
+pub const SOURCE_LOCAL: u64 = 1;
+
+// A call's argument words: pass, value, place root (+1, 0 for none),
+// place path (place-ir `Op::Call`).
+const CALL_ARGS: u64 = 2;
+const CALL_ARG_WORDS: u64 = 4;
+const ARG_VALUE: u64 = 1;
+const ARG_ROOT: u64 = 2;
+const ARG_PATH: u64 = 3;
+const PASS_IN: u64 = 0;
+
+const BYTE_BITS: u32 = 8;
+const WORD_BITS: u32 = 64;
+const WORD_BYTES: u64 = 8;
+
+pub struct ForeignFacts {
+    // per row: the callee's name, its C symbol, and its words
+    // words[a..a+n]
+    callee: ChunkSeq[u32],
+    symbol: ChunkSeq[u32],
+    a: ChunkSeq[u64],
+    n: ChunkSeq[u64],
+    words: ChunkSeq[u64],
+}
+
+pub fn foreign_facts_none() -> ForeignFacts {
+    ForeignFacts {
+        callee: ChunkSeq::new[u32](),
+        symbol: ChunkSeq::new[u32](),
+        a: ChunkSeq::new[u64](),
+        n: ChunkSeq::new[u64](),
+        words: ChunkSeq::new[u64]()
+    }
+}
+
+fn read_text(inout reader: Reader, in bytes: Slice[u8], inout names: Names) -> u32 {
+    let len = reader.word(in bytes);
+    let start = reader.pos;
+    let name = names.intern(in bytes[start..wrapping_add(start, len)]);
+    reader.pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / WORD_BYTES, WORD_BYTES));
+    name
+}
+
+// The facts at the reader, or none (the reader left where it was) when the
+// next word does not start them.
+pub fn read_foreign_facts(
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout names: Names
+) -> ForeignFacts {
+    let mut facts = foreign_facts_none();
+    let at = reader.pos;
+    if at >= bytes.len() || reader.word(in bytes) != FOREIGN_FACTS {
+        reader.pos = at;
+        return facts;
+    }
+    let rows = reader.word(in bytes);
+    for k in 0..rows {
+        facts.callee.push(read_text(inout reader, in bytes, inout names));
+        facts.symbol.push(read_text(inout reader, in bytes, inout names));
+        let n = reader.word(in bytes);
+        facts.a.push(facts.words.len());
+        facts.n.push(n);
+        for j in 0..n {
+            facts.words.push(reader.word(in bytes));
+        }
+    }
+    facts
+}
+
+impl ForeignFacts {
+    // The row of callee `name`, or NONE64.
+    pub fn row(in self, name: u32) -> u64 {
+        for k in 0..self.callee.len() {
+            if u32_at(in self.callee, k) == name {
+                return k;
+            }
+        }
+        NONE64
+    }
+
+    pub fn word(in self, row: u64, k: u64) -> u64 {
+        u64_at(in self.words, add(u64_at(in self.a, row), k))
+    }
+}
+
+impl Gen {
+    // `foreign_perform` of the call `i` (`INST_FOREIGN`): its temporaries
+    // go in `ops`, and in `extra` the C symbol's bytes, then per argument
+    // its source (`SOURCE_TEMP`, or `SOURCE_LOCAL` and the local), the
+    // kind its read coerces to and its form with its scalar word, then the
+    // result's form and scalar word. False for a call the plan does not
+    // cover.
+    fn body_foreign(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        inout ops: ChunkSeq[u64],
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        let row = self.foreign.row(n32(self.program.op(i.a)));
+        if row == NONE64 || u64_at(in self.foreign.n, row) == 0 {
+            return false;
+        }
+        if self.foreign.word(row, 0) != CALL_DIRECT {
+            return false;
+        }
+        let nparams = self.foreign.word(row, 1);
+        let nargs = self.program.op(inc(i.a));
+        if nargs != nparams {
+            return false;
+        }
+        self.body_symbol(u32_at(in self.foreign.symbol, row), inout extra);
+        extra.push(nargs);
+        for k in 0..nargs {
+            let form = self.foreign.word(row, add(2, wrapping_mul(k, FORM_WORDS)));
+            if form != PARAM_SCALAR && form != PARAM_BOOL {
+                return false;
+            }
+            let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
+            if self.program.op(at) != PASS_IN {
+                return false;
+            }
+            let root = self.program.op(add(at, ARG_ROOT));
+            if root == 0 {
+                // `ir_temp` of the argument's value.
+                let v = self.body_value(in h, self.program.op(add(at, ARG_VALUE)));
+                if v == NONE64 {
+                    return false;
+                }
+                let read = self.body_kind(n32(u64_at(in h.vty, v)));
+                if read == NONE64 {
+                    return false;
+                }
+                ops.push(v);
+                extra.push(SOURCE_TEMP);
+                extra.push(read);
+            } else {
+                // `ir_place_expr` of a whole local, read at the call.
+                if self.program.path(self.program.op(add(at, ARG_PATH))).n != 0 {
+                    return false;
+                }
+                let l = self.body_local(in h, wrapping_sub(root, 1));
+                if l == NONE64 {
+                    return false;
+                }
+                let read = self.body_kind(self.body_local_type(in h, l));
+                if read == NONE64 {
+                    return false;
+                }
+                extra.push(SOURCE_LOCAL);
+                extra.push(l);
+                extra.push(read);
+            }
+            extra.push(form);
+            extra.push(self.foreign.word(row, add(add(2, wrapping_mul(k, FORM_WORDS)), 1)));
+        }
+        let at = add(2, wrapping_mul(nargs, FORM_WORDS));
+        let result = self.foreign.word(row, at);
+        if result == RESULT_UNIT {
+            extra.push(result);
+            extra.push(0);
+        } else if result == RESULT_SCALAR {
+            extra.push(result);
+            extra.push(self.foreign.word(row, inc(at)));
+        } else {
+            return false;
+        }
+        true
+    }
+
+    // A symbol's bytes: their count, then eight to a word, little-endian,
+    // the last word zero-padded.
+    fn body_symbol(in self, symbol: u32, inout extra: ChunkSeq[u64]) {
+        let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        self.ctx.names.write(symbol, inout bytes);
+        extra.push(bytes.len());
+        let mut word: u64 = 0;
+        let mut shift: u32 = 0;
+        for k in 0..bytes.len() {
+            word = word | wrapping_shl_u64(widen_u64(u8_at(in bytes, k)), shift);
+            shift = wrapping_add(shift, BYTE_BITS);
+            if shift == WORD_BITS {
+                extra.push(word);
+                word = 0;
+                shift = 0;
+            }
+        }
+        if shift != 0 {
+            extra.push(word);
+        }
+    }
+}

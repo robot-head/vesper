@@ -27,6 +27,8 @@ mod aggregate_facts;
 mod check_harness;
 #[path = "../../../tests/common/check_words.rs"]
 mod check_words;
+#[path = "../../../tests/common/foreign_facts.rs"]
+mod foreign_facts;
 #[path = "../../../tests/common/handler_facts.rs"]
 mod handler_facts;
 #[path = "../../../tests/common/ir_words.rs"]
@@ -124,6 +126,10 @@ fn plan_of(world: &vesper::check::World, program: &Program, optimize: bool) -> P
         // What each handler's expression holds (#2657), before the
         // optimize path's enum facts.
         input.extend(handler_facts::facts(world, program));
+        // The foreign operations it calls (#2751), from the library plan
+        // the compile installed.
+        let foreign_target = target().or_else(host_target).unwrap_or_default();
+        input.extend(foreign_facts::facts(world, program, foreign_target));
         if optimize {
             input.extend(aggregate_facts::facts(world, program));
         }
@@ -2704,3 +2710,162 @@ fn vesper_inout_arguments_to_fail_only_callees_match() {
 /// `SRET_FAIL_SOURCE`'s four struct results, both settings, both
 /// comparisons of a JIT-running host.
 const MIN_FAIL_SRET: u64 = 16;
+
+/// Foreign (`.vsys`) calls in plain bodies (#2751): `Ffi[Lib]` rows are
+/// passive for the frame, and a foreign operation is a direct call of its
+/// import symbol.
+const FFI_VSYS: &str = r#"sys library Probe (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "static", name = "probe", artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    linear extern type Ctx;
+    fn probe_sum(a: u32, b: u64) -> ForeignVal[u32];
+    fn probe_word(x: u64) -> ForeignVal[u64];
+    fn probe_byte(x: u8) -> ForeignVal[u16];
+    fn probe_signed(x: i64) -> ForeignVal[i32];
+    fn probe_unit(x: u64, f: bool) -> ForeignVal[Unit];
+    fn probe_new() -> ForeignVal[Option[Ctx]];
+    fn probe_use(inout c: Ctx, x: u32) -> ForeignVal[u32];
+    fn probe_peek(in c: Ctx) -> ForeignVal[u64];
+    fn probe_free(sink c: Ctx) -> ForeignVal[Unit];
+}
+"#;
+
+const FFI_SOURCE: &str = "
+fn sum(a: u32, b: u64) -> u32 eff [Ffi[Probe]] {
+    Probe::probe_sum(a, b)
+}
+fn word(x: u64) -> u64 eff [Ffi[Probe]] {
+    Probe::probe_word(x)
+}
+fn small(x: u8) -> u16 eff [Ffi[Probe]] {
+    Probe::probe_byte(x)
+}
+fn signed(y: i64) -> i32 eff [Ffi[Probe]] {
+    Probe::probe_signed(y)
+}
+fn twice(x: u64) -> u64 eff [Ffi[Probe]] {
+    let y = word(x);
+    word(wrapping_add(y, 1))
+}
+fn unit(x: u64) -> u64 eff [Ffi[Probe]] {
+    Probe::probe_unit(x, true);
+    x
+}
+fn use_ctx(inout c: Ctx, x: u32) -> u32 eff [Ffi[Probe]] {
+    Probe::probe_use(inout c, x)
+}
+fn peek(in c: Ctx) -> u64 eff [Ffi[Probe]] {
+    Probe::probe_peek(in c)
+}
+fn main() -> u64 eff [Ffi[Probe]] {
+    let s = sum(1, 2);
+    let t = twice(3);
+    let u = unit(4);
+    let v = small(5);
+    let w = signed(-6);
+    match Probe::probe_new() {
+        Some(c) => {
+            let mut c = c;
+            let k = use_ctx(inout c, s);
+            let p = peek(in c);
+            Probe::probe_free(c);
+            wrapping_add(wrapping_add(t, u), wrapping_add(p, widen_u64(k)))
+        },
+        None => 0,
+    }
+}
+";
+
+fn ffi_abi(target: &str) -> &'static str {
+    match target {
+        "x86_64-unknown-linux-gnu" => "sysv64",
+        "x86_64-pc-windows-msvc" => "win64",
+        "aarch64-apple-darwin" => "darwin64",
+        _ => "aapcs64",
+    }
+}
+
+/// Builds `entry` of a foreign program with its call plan in place.
+fn build_ffi(
+    checked: &vesper::ffi_lowering::ForeignChecked,
+    target: &'static str,
+    optimize: bool,
+) -> Result<Build, String> {
+    checked
+        .with_lowering(Some(target), |w| {
+            vesper::native::object_with_options(w, "main", Some(target), optimize)
+        })
+        .map(|(object, clif)| Build {
+            clif: split_clif(&clif),
+            object,
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[test]
+fn vesper_bodies_with_foreign_calls_match() {
+    big_stack(|| {
+        // Compile the planner and hook first: their own compile would
+        // replace the foreign-call plan the builds below install.
+        vesper();
+        let target = target().unwrap_or("x86_64-unknown-linux-gnu");
+        let vsys = FFI_VSYS
+            .replace("@TARGET@", target)
+            .replace("@ABI@", ffi_abi(target));
+        let mut imports = vesper::ffi_lowering::Imports::new();
+        imports
+            .add(&vsys, vesper::ffi_lowering::Handler::Direct)
+            .expect("the probe library imports");
+        let checked =
+            vesper::ffi_lowering::check_source(FFI_SOURCE, &imports).unwrap_or_else(|e| {
+                panic!(
+                    "the foreign program does not check: {e} {:?}",
+                    e.diagnostics
+                )
+            });
+        let mut total = Diff::default();
+        let before = EMITTED.load(Ordering::Relaxed);
+        for optimize in [true, false] {
+            PLAN.with(|p| *p.borrow_mut() = None);
+            let rust = build_ffi(&checked, target, optimize);
+            let hooked =
+                codegen_swap::with_hooks(hooks(), || build_ffi(&checked, target, optimize));
+            let (r, h) = (rust.expect("rust build"), hooked.expect("hooked build"));
+            let mut d = Diff {
+                worlds: 1,
+                functions: r.clif.len(),
+                ..Diff::default()
+            };
+            for (key, text) in &r.clif {
+                match h.clif.get(key) {
+                    Some(t) if t == text => {}
+                    Some(t) => d
+                        .clif
+                        .push(("ffi".into(), key.clone(), first_difference(text, t))),
+                    None => d.clif.push(("ffi".into(), key.clone(), "missing".into())),
+                }
+            }
+            if r.object != h.object {
+                d.objects.push(format!("ffi (optimize {optimize})"));
+            }
+            total.add(d);
+        }
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "foreign bodies: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        assert_eq!(total.worlds, 2, "{}", total.summary());
+        assert!(
+            emitted >= MIN_FOREIGN_BODIES,
+            "only {emitted} foreign bodies came from Vesper (expected >= {MIN_FOREIGN_BODIES})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// `FFI_SOURCE`'s `sum`, `word`, `small`, `signed`, `unit` (foreign calls of
+/// scalars, narrow results and `bool`s) and `twice` (calls of an `Ffi` function), at both optimizer
+/// settings. The handle calls and `main`'s match stay on the walk.
+const MIN_FOREIGN_BODIES: u64 = 12;

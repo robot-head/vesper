@@ -30,6 +30,7 @@ use @vesper/place-ir::{FnRow, InstRow, Program, read_program};
 use self::blocks::{block_layout};
 use @vesper/codegen-aggregates::{EnumWords, enum_words_none, scalar_enum_words};
 use self::handlers::{HandlerFacts, read_handler_facts};
+use self::foreign::{ForeignFacts, read_foreign_facts};
 use self::body::{NO_LOCAL};
 use @vesper/place-ir::codes::{Lit, Op, Tag, Term};
 
@@ -578,6 +579,9 @@ pub struct Gen {
     // call of the handler `body_inst` plans.
     handlers: HandlerFacts,
     hstack: ChunkSeq[u64],
+    // The foreign operations the program calls (#2751), from the facts
+    // after the handler facts.
+    foreign: ForeignFacts,
     // The `raise` clause's error name while its plan is made: a product
     // error bound to its storage's address (NO_LOCAL otherwise).
     bound_error: u64,
@@ -1475,6 +1479,8 @@ fn read_gen_with(in bytes: Slice[u8], facts: bool) -> Gen {
     let mut program = read_program(inout reader, in bytes, in ctx);
     // The handler facts (#2657), when the input has them.
     let handlers = read_handler_facts(inout reader, in bytes, inout ctx.names, program.fn_count());
+    // The foreign-call facts (#2751), when the input has them.
+    let foreign = read_foreign_facts(inout reader, in bytes, inout ctx.names);
     // `scalar_enums` facts after the program (the optimize path's body
     // plans): the graphs as the walk lowers them, small enums as words.
     let enums = if facts && reader.pos < bytes.len() {
@@ -1505,6 +1511,7 @@ fn read_gen_with(in bytes: Slice[u8], facts: bool) -> Gen {
         fi: 0,
         handlers: handlers,
         hstack: ChunkSeq::new[u64](),
+        foreign: foreign,
         bound_error: NO_LOCAL,
         handle_row: 0,
         handle_base: 0,

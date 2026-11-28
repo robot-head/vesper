@@ -37,7 +37,7 @@ mod dyn_native;
 pub mod export;
 /// Foreign calls of imported `.vsys` libraries (§13, `crate::ffi_lowering`).
 #[path = "ffi_lowering/native.rs"]
-mod ffi;
+pub(crate) mod ffi;
 /// `f32`, float intrinsics and conversions (`vesper.float.ieee754/1`).
 #[path = "float_math/native.rs"]
 mod float_math;
@@ -4186,10 +4186,18 @@ impl<M: Module> Codegen<'_, '_, M> {
     ) -> Option<u64> {
         let source = self.world.functions.get(callee)?;
         let fails = fail_only(self.world, source);
+        // A callee whose row holds only foreign-library effects (`Ffi[Lib]`,
+        // #2751) is compiled once like a pure one (`capability_only`): its
+        // operations are direct native calls that need no evidence.
+        let foreign = source
+            .effects
+            .instances
+            .iter()
+            .all(|e| crate::ffi_lowering::is_foreign_effect(&e.name));
         if capability.is_some()
             || !types.is_empty()
             || !source.generics.is_empty()
-            || (!source.effects.instances.is_empty() && !fails)
+            || (!source.effects.instances.is_empty() && !fails && !foreign)
             || source.effects.tail.is_some()
             || callee == crate::ffi_lowering::types::PINNED_ADDRESS
             || callee == crate::integer_widths::MUL_WIDE

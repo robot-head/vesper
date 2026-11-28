@@ -1978,6 +1978,70 @@ pub mod plan_probe {
             .collect()
     }
 
+    /// The native walk body hook's view of foreign operation `op` of
+    /// `effect` (#2751), read from the plan the compile in progress
+    /// installed (`ForeignChecked::with_lowering`): the C symbol a direct
+    /// call imports, then [`BODY_CALL_DIRECT`] and the call's words when it
+    /// is a plain direct call, else [`BODY_CALL_OTHER`] alone. `None` when
+    /// no plan is installed or `effect` is no imported library's.
+    ///
+    /// A plain direct call has the `direct` handler and no callback
+    /// pointer, `errno`, variadic tail, mapping, `@vesper-std/cpu` code or
+    /// runtime-shared symbol, its parameters are scalars, `bool`s or
+    /// handles and its result is `Unit` or a scalar. Its words are the
+    /// parameter count, then two words per parameter, its form
+    /// ([`BODY_PARAM_SCALAR`], [`BODY_PARAM_BOOL`] or [`BODY_PARAM_HANDLE`])
+    /// and its scalar word (`bits | signed << 8`, 0 for the others), then
+    /// the result's two: [`BODY_RESULT_UNIT`] and 0, or
+    /// [`BODY_RESULT_SCALAR`] and its scalar word.
+    pub fn body_call(effect: &str, op: &str, target: &str) -> Option<(String, Vec<u64>)> {
+        let installed = PLAN.with(|p| p.borrow().is_some());
+        if !installed {
+            return None;
+        }
+        let plan = super::op_plan(effect, op).ok()?;
+        let function = &plan.function;
+        let symbol = function.link_symbol().to_owned();
+        let architecture = target.parse::<target_lexicon::Triple>().ok()?.architecture;
+        let scalar = |s: sys::Scalar| u64::from(s.bits()) | u64::from(s.signed()) << SIGNED_SHIFT;
+        let mut words = vec![BODY_CALL_DIRECT, function.parameters().len() as u64];
+        for p in function.parameters() {
+            match p.ty() {
+                ParameterType::Value(sys::ValueType::Scalar(s)) => {
+                    words.extend([BODY_PARAM_SCALAR, scalar(*s)])
+                }
+                ParameterType::Value(sys::ValueType::Bool) => words.extend([BODY_PARAM_BOOL, 0]),
+                ParameterType::Handle { handle, .. } if handle.mapping().is_none() => {
+                    words.extend([BODY_PARAM_HANDLE, 0])
+                }
+                _ => return Some((symbol, vec![BODY_CALL_OTHER])),
+            }
+        }
+        match function.result() {
+            sys::ValueType::Unit => words.extend([BODY_RESULT_UNIT, 0]),
+            sys::ValueType::Scalar(s) => words.extend([BODY_RESULT_SCALAR, scalar(*s)]),
+            _ => return Some((symbol, vec![BODY_CALL_OTHER])),
+        }
+        let plain = plan.handler == Handler::Direct
+            && !function.is_indirect()
+            && !function.reads_errno()
+            && function.variadic_from().is_none()
+            && function.mapping_length().is_none()
+            && crate::native::ffi::runtime_import(&symbol).is_none()
+            && cpu::code_for(&symbol, architecture).is_ok_and(|c| c.is_none());
+        Some((symbol, if plain { words } else { vec![BODY_CALL_OTHER] }))
+    }
+    /// [`body_call`]'s forms.
+    pub const BODY_CALL_OTHER: u64 = 0;
+    pub const BODY_CALL_DIRECT: u64 = 1;
+    pub const BODY_PARAM_SCALAR: u64 = 0;
+    pub const BODY_PARAM_BOOL: u64 = 1;
+    pub const BODY_PARAM_HANDLE: u64 = 2;
+    pub const BODY_RESULT_UNIT: u64 = 0;
+    pub const BODY_RESULT_SCALAR: u64 = 1;
+    /// The bit of a scalar word above its width: whether it is signed.
+    const SIGNED_SHIFT: u32 = 8;
+
     /// `op_plan` of operation `op` of `effect`, with the plan
     /// `ForeignChecked::object` installs for `target` (libraries the target
     /// cannot call are blocked): (library, handler, symbol), or the error.

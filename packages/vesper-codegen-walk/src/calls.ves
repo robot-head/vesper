@@ -32,7 +32,7 @@ use @vesper/place-ir::codes::{Op};
 use @vesper/codegen-calls::data::{Calls, read_calls};
 use @vesper/codegen-calls::instances::{
     Conc, Found, Syms, concrete, contains_function, discover_roots, fail_only,
-    function_value_instance, is_root, ivars_new, program_facts, specialized, syms_new
+    function_value_instance, is_foreign, is_root, ivars_new, program_facts, specialized, syms_new
 };
 use @vesper/codegen-calls::abi::{
     Errs, FnAbi, default_abi, internal, layout_facts, scalar, trace_entry_ok, uses_caller_slot
@@ -317,10 +317,18 @@ fn plain_call(
     let f = concrete(inout t, inout names, in d, callee, in ivars_new());
     let fails = fail_only(inout t, in names, in wd, k, in f);
     let row = t.row(info.row);
+    // A row of foreign-library effects only (`Ffi[Lib]`, #2751): the callee
+    // is compiled once like a pure one, its operations direct native calls.
+    let mut foreign = true;
+    for j in 0..w(row.n) {
+        if !is_foreign(in names, t.effect_at(add(w(row.a), j)).name) {
+            foreign = false;
+        }
+    }
     if capability != 0
         || ntypes != 0
         || info.generic_count != 0
-        || (row.n != 0 && !fails)
+        || (row.n != 0 && !fails && !foreign)
         || row.tail != 0
         || intercepted(in names, k, b, callee)
         || d.is_stub(callee)
