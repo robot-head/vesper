@@ -23,7 +23,7 @@
 
 use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, w};
 use @vesper/check-data::names::{Names};
-use @vesper/check-data::types::{TyKind, Types, default_type};
+use @vesper/check-data::types::{TyKind, Types, default_type, substitute};
 use @vesper/check-data::world::{World};
 use @vesper/check-data::input::{Reader, read_ctx};
 use @vesper/check-layout::{L_PRODUCT, L_SCALAR, Layouts, layout_of, layouts_new};
@@ -31,8 +31,8 @@ use @vesper/place-ir::{FnRow, Program, read_program};
 use @vesper/place-ir::codes::{Op};
 use @vesper/codegen-calls::data::{Calls, read_calls};
 use @vesper/codegen-calls::instances::{
-    Conc, Found, Syms, concrete, contains_function, discover_roots, fail_only,
-    function_value_instance, is_root, ivars_new, program_facts, specialized, syms_new
+    Conc, Found, IVars, Syms, concrete, contains_function, discover_roots, fail_only,
+    function_value_instance, instance_key, is_root, ivars_new, program_facts, specialized, syms_new
 };
 use @vesper/codegen-calls::abi::{
     Errs, FnAbi, default_abi, internal, layout_facts, scalar, trace_entry_ok, uses_caller_slot
@@ -302,6 +302,9 @@ fn plain_call(
     in p: Program,
     in task: Task,
     in locals: Locals,
+    in vars: IVars,
+    s0: u64,
+    s1: u64,
     a: u64
 ) -> u64 {
     let callee = n32(p.op(a));
@@ -314,12 +317,25 @@ fn plain_call(
     let types_at = add(add(a, CALL_ARGS_AT), wrapping_mul(nargs, ARG_WORDS));
     let ntypes = p.op(types_at);
     let capability = p.op(add(inc(types_at), ntypes));
-    let f = concrete(inout t, inout names, in d, callee, in ivars_new());
+    // A generic callee (#2715) is its instance at the call site's type
+    // arguments (`world.calls` at the instruction's span) under the
+    // caller's substitution `vars`, as the walk names it (`call_vars`). A
+    // `dyn` function's one erased instance is left to the walk.
+    let subst = vars.vars();
+    let mut inst = ivars_new();
+    let site = d.call_row(s0, s1);
+    for j in 0..w(site.pair_count) {
+        let at = add(w(site.pair_start), j);
+        let ty = substitute(inout t, d.pair_ty(at), in subst);
+        inst.insert(in names, d.pair_key(at), ty);
+    }
+    if inst.len() != w(info.generic_count) || d.dyn_row(callee).pair_count > 0 {
+        return NO_CALLEE;
+    }
+    let f = concrete(inout t, inout names, in d, callee, in inst);
     let fails = fail_only(inout t, in names, in wd, k, in f);
     let row = t.row(info.row);
     if capability != 0
-        || ntypes != 0
-        || info.generic_count != 0
         || (row.n != 0 && !fails)
         || row.tail != 0
         || intercepted(in names, k, b, callee)
@@ -353,7 +369,8 @@ fn plain_call(
             return NO_CALLEE;
         }
     }
-    let i = task.instance(callee);
+    let key = instance_key(inout names, in t, callee, in inst);
+    let i = task.instance(key);
     if i == NO_CALLEE {
         return NO_CALLEE;
     }
@@ -469,6 +486,7 @@ fn graph_calls(
     in p: Program,
     in task: Task,
     fi: u64,
+    in vars: IVars,
     inout o: ChunkSeq[u64]
 ) {
     let f = p.function(fi);
@@ -494,6 +512,9 @@ fn graph_calls(
                 in p,
                 in task,
                 in locals,
+                in vars,
+                inst.s0,
+                inst.s1,
                 inst.a
             ));
             n = inc(n);
@@ -610,6 +631,7 @@ pub fn call_words_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {
                 o.push(0);
                 continue;
             }
+            let vars = task.found.vars_of(x);
             graph_calls(
                 inout ls,
                 inout c.types,
@@ -621,6 +643,7 @@ pub fn call_words_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {
                 in p,
                 in task,
                 wrapping_sub(g, 1),
+                in vars,
                 inout o
             );
         }

@@ -368,10 +368,10 @@ pub fn cyclic_blocks(f: &crate::ir::FunctionIr) -> BTreeSet<usize> {
 fn nested_calls<'a>(
     program: &'a crate::ir::Program,
     f: &'a crate::ir::FunctionIr,
-    out: &mut Vec<&'a crate::ir::Op>,
+    out: &mut Vec<&'a crate::ir::Instruction>,
 ) {
     for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
-        handle_calls(program, &inst.op, out);
+        handle_calls(program, inst, out);
     }
 }
 /// The calls of the nested graphs of `op` when it is an `Op::Handle`: its
@@ -380,10 +380,10 @@ fn nested_calls<'a>(
 /// graph's calls as `graph_calls` lists them.
 fn handle_calls<'a>(
     program: &'a crate::ir::Program,
-    op: &'a crate::ir::Op,
-    out: &mut Vec<&'a crate::ir::Op>,
+    inst: &'a crate::ir::Instruction,
+    out: &mut Vec<&'a crate::ir::Instruction>,
 ) {
-    if let crate::ir::Op::Handle { expr, .. } = op
+    if let crate::ir::Op::Handle { expr, .. } = &inst.op
         && let ExprKind::Handle { body, ret, ops, .. } = &expr.kind
     {
         let nested = std::iter::once(crate::ir::nested_name("handler_body", &body.span))
@@ -408,12 +408,12 @@ fn handle_calls<'a>(
 fn graph_calls<'a>(
     program: &'a crate::ir::Program,
     f: &'a crate::ir::FunctionIr,
-    out: &mut Vec<&'a crate::ir::Op>,
+    out: &mut Vec<&'a crate::ir::Instruction>,
 ) {
     for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
         match &inst.op {
-            op @ crate::ir::Op::Call { .. } => out.push(op),
-            op => handle_calls(program, op, out),
+            crate::ir::Op::Call { .. } => out.push(inst),
+            _ => handle_calls(program, inst, out),
         }
     }
 }
@@ -4167,7 +4167,8 @@ impl<M: Module> Codegen<'_, '_, M> {
     }
     /// The callee of an `Op::Call` that `call_function_into` lowers to one
     /// `call` of an imported function and nothing else (part 6b of the
-    /// body hook, #2094): a compiled-once, pure, non-generic function of
+    /// body hook, #2094): a compiled-once, pure function (a generic one at
+    /// its instance, #2715) of
     /// scalar `in` parameters (or `inout` scalars borrowed from whole
     /// locals, #2563) and a scalar result, with no status word,
     /// register result, caller slot or trace flag, not a reserved builtin,
@@ -4181,14 +4182,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         callee: &str,
         args: &[crate::ir::Argument],
         capability: Option<&str>,
-        types: &[Type],
+        span: &crate::ast::Span,
         locals: &BTreeMap<String, Type>,
     ) -> Option<u64> {
         let source = self.world.functions.get(callee)?;
         let fails = fail_only(self.world, source);
         if capability.is_some()
-            || !types.is_empty()
-            || !source.generics.is_empty()
             || (!source.effects.instances.is_empty() && !fails)
             || source.effects.tail.is_some()
             || callee == crate::ffi_lowering::types::PINNED_ADDRESS
@@ -4228,11 +4227,24 @@ impl<M: Module> Codegen<'_, '_, M> {
                 && Layout::of(self.world, t).is_ok_and(|l| !l.aggregate())
                 && scalar(t, &[]).is_ok()
         };
-        let f = concrete(self.world, callee, &BTreeMap::new()).ok()?;
+        // A generic callee (#2715) is its instance at the call site's type
+        // arguments under the caller's own substitution, as
+        // `call_function_into` names it (`call_vars`).
+        // A `dyn` function's one erased instance is left to the walk.
+        let site = Expr {
+            kind: ExprKind::Tuple(vec![]),
+            span: span.clone(),
+        };
+        let vars = call_vars(self.world, &site, &self.generic_vars);
+        if vars.len() != source.generics.len() || self.world.dyn_objects.params.contains_key(callee)
+        {
+            return None;
+        }
+        let f = concrete(self.world, callee, &vars).ok()?;
         // A small enum result the callee returns as words in registers
         // (#2581): `aggregates::enum_shape`'s words, as many as its ABI
         // returns.
-        let key = instance_key(callee, &BTreeMap::new());
+        let key = instance_key(callee, &vars);
         let words_result =
             aggregates::enum_shape(self.world, &crate::numeric::default_type(&f.result))
                 .is_some_and(|shape| {
@@ -4383,23 +4395,28 @@ impl<M: Module> Codegen<'_, '_, M> {
             .blocks
             .iter()
             .flat_map(|b| &b.instructions)
-            .map(|inst| &inst.op)
-            .filter(|op| matches!(op, crate::ir::Op::Call { .. }))
+            .filter(|inst| matches!(inst.op, crate::ir::Op::Call { .. }))
             .collect::<Vec<_>>();
         let own = graph_ops.len();
         nested_calls(self.program, body, &mut graph_ops);
         let nested = graph_ops.len() - own;
         let calls = graph_ops
             .into_iter()
-            .filter_map(|op| match op {
+            .filter_map(|inst| match &inst.op {
                 crate::ir::Op::Call {
                     callee,
                     args,
                     capability,
-                    types,
+                    ..
                 } => Some(
-                    self.plain_call(callee, args, capability.as_deref(), types, &body.locals)
-                        .unwrap_or(crate::codegen_swap::body::NO_CALLEE),
+                    self.plain_call(
+                        callee,
+                        args,
+                        capability.as_deref(),
+                        &inst.span,
+                        &body.locals,
+                    )
+                    .unwrap_or(crate::codegen_swap::body::NO_CALLEE),
                 ),
                 _ => None,
             })
