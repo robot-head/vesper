@@ -2572,7 +2572,12 @@ impl Gen {
                 }
             } else {
                 let res_lane = self.body_lane(i.ty);
-                if res_lane == 0 || res_lane == LANE_PRODUCT || post != 0 {
+                // An `in` read of a struct field lends its storage: the
+                // field's address (a foreign handle argument's place,
+                // #2751).
+                let lent_field = res_lane == LANE_PRODUCT
+                    && self.program.op(add(i.a, 2)) == PASS_IN;
+                if res_lane == 0 || (res_lane == LANE_PRODUCT && !lent_field) || post != 0 {
                     return false;
                 }
                 let mut cur_ty = self.body_local_type(in h, k);
@@ -2872,6 +2877,7 @@ impl Gen {
             if self.body_lane(i.ty) == LANE_PRODUCT
                 && kind != INST_READ
                 && kind != INST_READ_COPY
+                && kind != INST_READ_FIELD
                 && kind != INST_CALL
                 && kind != INST_FOREIGN
             {

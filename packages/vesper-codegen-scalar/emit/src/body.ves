@@ -417,6 +417,8 @@ const FOREIGN_SOURCE_HANDLE_TEMP: u64 = 4;
 const FOREIGN_PARAM_SLICE: u64 = 3;
 const FOREIGN_SOURCE_SLICE_LOCAL: u64 = 5;
 const FOREIGN_SOURCE_SLICE_TEMP: u64 = 6;
+const FOREIGN_SOURCE_FIELD: u64 = 7;
+const FOREIGN_SOURCE_HANDLE_FIELD: u64 = 8;
 const FOREIGN_RESULT_SCALAR: u64 = 1;
 const FOREIGN_CALL_INDIRECT: u64 = 2;
 const FOREIGN_PARAM_CSTR: u64 = 4;
@@ -1452,6 +1454,26 @@ impl Body {
                     self.use_local(inout b, l)
                 };
                 ins_load(inout b, ty_i64(), PLAIN, ptr, 0)
+            } else if source == FOREIGN_SOURCE_FIELD || source == FOREIGN_SOURCE_HANDLE_FIELD {
+                // `ir_place_expr` of a field: the local's storage plus the
+                // field's offset, read at the call; a handle field's word
+                // is copied first (`expr`, `foreign_word`).
+                let l = w.next();
+                let off = w.next();
+                if l >= self.locals.len() {
+                    return Value { id: invalid() };
+                }
+                let base = self.use_local(inout b, l);
+                let at = ins_iadd_imm(inout b, base, wrapping_i64(off));
+                if source == FOREIGN_SOURCE_FIELD {
+                    ins_load(inout b, ty_i64(), PLAIN, at, 0)
+                } else {
+                    // A field's copy is zeroed on either path (`Codegen::alloc`).
+                    let copy = self.zeroed(inout b, in m, widen_u64(WORD_BYTES));
+                    let word = ins_load(inout b, ty_i64(), PLAIN, at, 0);
+                    ins_store(inout b, PLAIN, word, copy, 0);
+                    ins_load(inout b, ty_i64(), PLAIN, copy, 0)
+                }
             } else if source == FOREIGN_SOURCE_TEMP {
                 let read = w.next();
                 if ti >= temps.len() {
@@ -3257,7 +3279,12 @@ impl Body {
                 let off = w.next();
                 ptr = ins_iadd_imm(inout b, ptr, wrapping_i64(off));
             }
-            ins_load(inout b, lane_type(flane), PLAIN, ptr, 0)
+            // A struct field lent `in` is its address.
+            if flane == LANE_PRODUCT {
+                ptr
+            } else {
+                ins_load(inout b, lane_type(flane), PLAIN, ptr, 0)
+            }
         } else if kind == INST_SEQ {
             let v = self.seq(inout b, inout m, inout w, x, y, dest);
             if is_invalid(v) {

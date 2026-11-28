@@ -3008,55 +3008,60 @@ fn build_ffi(
         .map_err(|e| e.to_string())
 }
 
+/// Builds `source` over the library `vsys` (its `@TARGET@` and `@ABI@`
+/// filled in) with and without the body hook at both optimizer settings:
+/// the differences and the bodies that came from Vesper.
+fn foreign_bodies(vsys: &str, source: &str, label: &str) -> (Diff, u64) {
+    // Compile the planner and hook first: their own compile would
+    // replace the foreign-call plan the builds below install.
+    vesper();
+    let target = target().unwrap_or("x86_64-unknown-linux-gnu");
+    let vsys = vsys
+        .replace("@TARGET@", target)
+        .replace("@ABI@", ffi_abi(target));
+    let mut imports = vesper::ffi_lowering::Imports::new();
+    imports
+        .add(&vsys, vesper::ffi_lowering::Handler::Direct)
+        .expect("the library imports");
+    let checked = vesper::ffi_lowering::check_source(source, &imports).unwrap_or_else(|e| {
+        panic!(
+            "the {label} program does not check: {e} {:?}",
+            e.diagnostics
+        )
+    });
+    let mut total = Diff::default();
+    let before = EMITTED.load(Ordering::Relaxed);
+    for optimize in [true, false] {
+        PLAN.with(|p| *p.borrow_mut() = None);
+        let rust = build_ffi(&checked, target, optimize);
+        let hooked = codegen_swap::with_hooks(hooks(), || build_ffi(&checked, target, optimize));
+        let (r, h) = (rust.expect("rust build"), hooked.expect("hooked build"));
+        let mut d = Diff {
+            worlds: 1,
+            functions: r.clif.len(),
+            ..Diff::default()
+        };
+        for (key, text) in &r.clif {
+            match h.clif.get(key) {
+                Some(t) if t == text => {}
+                Some(t) => d
+                    .clif
+                    .push((label.into(), key.clone(), first_difference(text, t))),
+                None => d.clif.push((label.into(), key.clone(), "missing".into())),
+            }
+        }
+        if r.object != h.object {
+            d.objects.push(format!("{label} (optimize {optimize})"));
+        }
+        total.add(d);
+    }
+    (total, EMITTED.load(Ordering::Relaxed) - before)
+}
+
 #[test]
 fn vesper_bodies_with_foreign_calls_match() {
     big_stack(|| {
-        // Compile the planner and hook first: their own compile would
-        // replace the foreign-call plan the builds below install.
-        vesper();
-        let target = target().unwrap_or("x86_64-unknown-linux-gnu");
-        let vsys = FFI_VSYS
-            .replace("@TARGET@", target)
-            .replace("@ABI@", ffi_abi(target));
-        let mut imports = vesper::ffi_lowering::Imports::new();
-        imports
-            .add(&vsys, vesper::ffi_lowering::Handler::Direct)
-            .expect("the probe library imports");
-        let checked =
-            vesper::ffi_lowering::check_source(FFI_SOURCE, &imports).unwrap_or_else(|e| {
-                panic!(
-                    "the foreign program does not check: {e} {:?}",
-                    e.diagnostics
-                )
-            });
-        let mut total = Diff::default();
-        let before = EMITTED.load(Ordering::Relaxed);
-        for optimize in [true, false] {
-            PLAN.with(|p| *p.borrow_mut() = None);
-            let rust = build_ffi(&checked, target, optimize);
-            let hooked =
-                codegen_swap::with_hooks(hooks(), || build_ffi(&checked, target, optimize));
-            let (r, h) = (rust.expect("rust build"), hooked.expect("hooked build"));
-            let mut d = Diff {
-                worlds: 1,
-                functions: r.clif.len(),
-                ..Diff::default()
-            };
-            for (key, text) in &r.clif {
-                match h.clif.get(key) {
-                    Some(t) if t == text => {}
-                    Some(t) => d
-                        .clif
-                        .push(("ffi".into(), key.clone(), first_difference(text, t))),
-                    None => d.clif.push(("ffi".into(), key.clone(), "missing".into())),
-                }
-            }
-            if r.object != h.object {
-                d.objects.push(format!("ffi (optimize {optimize})"));
-            }
-            total.add(d);
-        }
-        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        let (total, emitted) = foreign_bodies(FFI_VSYS, FFI_SOURCE, "ffi");
         eprintln!(
             "foreign bodies: {}; {emitted} functions emitted from Vesper",
             total.summary()
@@ -3069,6 +3074,68 @@ fn vesper_bodies_with_foreign_calls_match() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// The port pilot's callback-handle library (`fnptrs.ves`, #1502): its
+/// `.vsys` block and its functions, with an entry that calls each.
+#[test]
+fn vesper_bodies_of_the_fnptrs_port_match() {
+    big_stack(|| {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../vesper-port-pilot/vesper/fnptrs.ves");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let vsys: String = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("// | "))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let source = format!("{text}{FNPTRS_MAIN}");
+        let (total, emitted) = foreign_bodies(&vsys, &source, "fnptrs");
+        eprintln!(
+            "fnptrs bodies: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        assert_eq!(total.worlds, 2, "{}", total.summary());
+        assert!(
+            emitted >= MIN_FNPTRS_BODIES,
+            "only {emitted} fnptrs bodies came from Vesper (expected >= {MIN_FNPTRS_BODIES})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// An entry for `fnptrs.ves` that reaches each of its functions.
+const FNPTRS_MAIN: &str = "
+fn main() -> u64 eff [Ffi[Ops]] {
+    let mut n: u64 = 0;
+    match open(3) {
+        Option::Some(t) => {
+            let mut u = t;
+            swap(inout u);
+            n = combine(in u, 1, 2);
+            n = wrapping_add(n, call(pick(u, true), 4, 5));
+        },
+        Option::None => {},
+    }
+    match missing() {
+        Option::Some(f) => n = wrapping_add(n, call(f, 6, 7)),
+        Option::None => {},
+    }
+    match double() {
+        Option::Some(f) => n = wrapping_add(n, call_unary(f, 8)),
+        Option::None => {},
+    }
+    n
+}
+";
+
+/// `fnptrs.ves`'s `find` (a C string argument and an `Option` of a
+/// callback result), `double`, `call`, `call_unary` (calls through C
+/// function pointers) and `combine` (handle and word fields of an `in`
+/// struct as arguments), at both optimizer settings. `open` and `missing`
+/// call `find` with a `Str` (not a plain call of the walk) and `pick` and
+/// `swap` choose and assign struct fields: those stay on the walk.
+const MIN_FNPTRS_BODIES: u64 = 10;
 
 /// `FFI_SOURCE`'s `sum`, `word`, `small`, `signed`, `unit` (foreign calls of
 /// scalars, narrow results and `bool`s), `use_ctx`, `peek` and `close`
