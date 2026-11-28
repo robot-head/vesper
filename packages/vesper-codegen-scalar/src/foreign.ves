@@ -6,19 +6,22 @@
 // its C symbol and its form (tests/common/foreign_facts.rs,
 // `ffi_lowering::plan_probe::body_call`).
 //
-// The plan covers direct calls whose parameters are scalars and `bool`s
-// and whose result is `Unit` or a scalar. Each argument is evaluated where
-// the walk evaluates it: an `in` argument with a place reads its whole
-// local at the call (`ir_place_expr`), any other is a temporary of the
-// value already computed (`ir_temp`). Handles, slices, C strings,
-// pointers, structs, enums and validated results stay on the walk.
+// The plan covers direct calls whose parameters are scalars, `bool`s and
+// handles and whose result is `Unit` or a scalar. Each argument is
+// evaluated where the walk evaluates it: an `in` or `inout` argument with
+// a place reads its whole local at the call (`ir_place_expr`), any other
+// is a temporary of the value already computed (`ir_temp`). A handle is
+// its struct's one word, copied first as `expr` copies an aggregate.
+// Slices, C strings, pointers, wire structs, enums and validated or handle
+// results stay on the walk.
 
 use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::input::{Reader};
 use @vesper/place-ir::{InstRow};
+use @vesper/place-ir::codes::{Op};
 use super::{Gen};
-use super::body::{Header};
+use super::body::{Header, LANE_PRODUCT};
 
 // The section's first word, "FOREIGNS" in ASCII (`FOREIGN_FACTS`).
 pub const FOREIGN_FACTS: u64 = 6002813733352656710;
@@ -28,6 +31,7 @@ const NONE64: u64 = 18446744073709551615;
 const CALL_DIRECT: u64 = 1;
 pub const PARAM_SCALAR: u64 = 0;
 pub const PARAM_BOOL: u64 = 1;
+pub const PARAM_HANDLE: u64 = 2;
 const RESULT_UNIT: u64 = 0;
 const RESULT_SCALAR: u64 = 1;
 // A plan form's words: the form, then its scalar word.
@@ -37,6 +41,13 @@ const FORM_WORDS: u64 = 2;
 // whole local read at the call.
 pub const SOURCE_TEMP: u64 = 0;
 pub const SOURCE_LOCAL: u64 = 1;
+// A handle (`ParameterType::Handle`), whose word the call loads: from a
+// copy of a whole local lent `in` (`expr` copies an aggregate), from the
+// local itself lent `inout` (after the same copy, `address`), or from a
+// temporary of the value (a `sink` argument).
+pub const SOURCE_HANDLE_IN: u64 = 2;
+pub const SOURCE_HANDLE_INOUT: u64 = 3;
+pub const SOURCE_HANDLE_TEMP: u64 = 4;
 
 // A call's argument words: pass, value, place root (+1, 0 for none),
 // place path (place-ir `Op::Call`).
@@ -46,6 +57,8 @@ const ARG_VALUE: u64 = 1;
 const ARG_ROOT: u64 = 2;
 const ARG_PATH: u64 = 3;
 const PASS_IN: u64 = 0;
+const PASS_INOUT: u64 = 1;
+const PASS_SINK: u64 = 2;
 
 const BYTE_BITS: u32 = 8;
 const WORD_BITS: u32 = 64;
@@ -152,15 +165,16 @@ impl Gen {
         extra.push(nargs);
         for k in 0..nargs {
             let form = self.foreign.word(row, add(2, wrapping_mul(k, FORM_WORDS)));
-            if form != PARAM_SCALAR && form != PARAM_BOOL {
-                return false;
-            }
             let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
-            if self.program.op(at) != PASS_IN {
-                return false;
-            }
+            let pass = self.program.op(at);
             let root = self.program.op(add(at, ARG_ROOT));
-            if root == 0 {
+            if form == PARAM_HANDLE {
+                if !self.body_foreign_handle(in h, at, pass, root, inout ops, inout extra) {
+                    return false;
+                }
+            } else if (form != PARAM_SCALAR && form != PARAM_BOOL) || pass != PASS_IN {
+                return false;
+            } else if root == 0 {
                 // `ir_temp` of the argument's value.
                 let v = self.body_value(in h, self.program.op(add(at, ARG_VALUE)));
                 if v == NONE64 {
@@ -204,6 +218,79 @@ impl Gen {
         } else {
             return false;
         }
+        true
+    }
+
+    // Whether value `v` of the function being planned is lent `inout` to a
+    // foreign call (`SOURCE_HANDLE_INOUT`): the `inout` read that makes it
+    // emits nothing, as the walk's does.
+    fn body_foreign_lends(in self, v: u64) -> bool {
+        let f = self.program.function(self.fi);
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            for ii in 0..row.ic {
+                let i = self.program.inst(add(row.i0, ii));
+                if i.op != Op::Call || self.foreign.row(n32(self.program.op(i.a))) == NONE64 {
+                    continue;
+                }
+                let nargs = self.program.op(inc(i.a));
+                for k in 0..nargs {
+                    let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
+                    if self.program.op(at) == PASS_INOUT
+                        && self.program.op(add(at, ARG_VALUE)) == v
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    // The source words of a handle argument at call words `at`: a whole
+    // local of a one-word product (the handle struct), lent `in` or
+    // `inout`, or a `sink` temporary.
+    fn body_foreign_handle(
+        inout self,
+        in h: Header,
+        at: u64,
+        pass: u64,
+        root: u64,
+        inout ops: ChunkSeq[u64],
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        if pass == PASS_SINK {
+            // A `sink` argument is a temporary of its value even with a
+            // place (`ir_temp`).
+            let v = self.body_value(in h, self.program.op(add(at, ARG_VALUE)));
+            if v == NONE64 || self.body_lane(n32(u64_at(in h.vty, v))) != LANE_PRODUCT {
+                return false;
+            }
+            ops.push(v);
+            extra.push(SOURCE_HANDLE_TEMP);
+            return true;
+        }
+        if (pass != PASS_IN && pass != PASS_INOUT)
+            || self.program.path(self.program.op(add(at, ARG_PATH))).n != 0
+        {
+            return false;
+        }
+        let l = self.body_local(in h, wrapping_sub(root, 1));
+        if l == NONE64 {
+            return false;
+        }
+        let ty = self.body_local_type(in h, l);
+        if self.body_lane(ty) != LANE_PRODUCT || self.body_product_size(ty) != WORD_BYTES {
+            return false;
+        }
+        extra.push(
+            if pass == PASS_IN {
+                SOURCE_HANDLE_IN
+            } else {
+                SOURCE_HANDLE_INOUT
+            }
+        );
+        extra.push(l);
         true
     }
 

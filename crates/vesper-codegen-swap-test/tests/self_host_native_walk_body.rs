@@ -2899,6 +2899,10 @@ fn use_ctx(inout c: Ctx, x: u32) -> u32 eff [Ffi[Probe]] {
 fn peek(in c: Ctx) -> u64 eff [Ffi[Probe]] {
     Probe::probe_peek(in c)
 }
+fn close(sink c: Ctx) -> u64 eff [Ffi[Probe]] {
+    Probe::probe_free(c);
+    0
+}
 fn main() -> u64 eff [Ffi[Probe]] {
     let s = sum(1, 2);
     let t = twice(3);
@@ -2910,7 +2914,7 @@ fn main() -> u64 eff [Ffi[Probe]] {
             let mut c = c;
             let k = use_ctx(inout c, s);
             let p = peek(in c);
-            Probe::probe_free(c);
+            let _z = close(c);
             wrapping_add(wrapping_add(t, u), wrapping_add(p, widen_u64(k)))
         },
         None => 0,
@@ -3007,9 +3011,11 @@ fn vesper_bodies_with_foreign_calls_match() {
 }
 
 /// `FFI_SOURCE`'s `sum`, `word`, `small`, `signed`, `unit` (foreign calls of
-/// scalars, narrow results and `bool`s) and `twice` (calls of an `Ffi` function), at both optimizer
-/// settings. The handle calls and `main`'s match stay on the walk.
-const MIN_FOREIGN_BODIES: u64 = 12;
+/// scalars, narrow results and `bool`s), `use_ctx`, `peek` and `close`
+/// (handles lent `inout`, `in` and `sink`) and `twice` (calls of an `Ffi`
+/// function), at both optimizer settings. `main` (an `Option` result)
+/// stays on the walk.
+const MIN_FOREIGN_BODIES: u64 = 18;
 
 // #2654 slice 3: the `Option` results of `try_byte_at` and a slice's
 // `try_get`, kept as words or built in memory (`seq_option`).
