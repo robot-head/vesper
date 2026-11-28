@@ -38,17 +38,17 @@ pub const NO_TOKEN: u64 = 18446744073709551615;
 // A parsed envelope: its variant and its parts as token indices into the
 // body's tape (`NO_TOKEN` when absent).
 pub copy struct Env {
-    kind: u64,
-    id_tag: u64,
-    id_int: i64,
-    id: u64,
-    method: u64,
-    params: u64,
-    result: u64,
-    error: u64,
-    code: i64,
-    message: u64,
-    data: u64
+    pub kind: u64,
+    pub id_tag: u64,
+    pub id_int: i64,
+    pub id: u64,
+    pub method: u64,
+    pub params: u64,
+    pub result: u64,
+    pub error: u64,
+    pub code: i64,
+    pub message: u64,
+    pub data: u64
 }
 
 // `indexed_error`.

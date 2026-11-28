@@ -2,8 +2,9 @@
 //! integer arithmetic of `src/native.rs` (`checked_arithmetic`, `binary`,
 //! `check_overflow`), emitted from Vesper (tests/fixtures/checked.ves) and
 //! from the Rust lowering below, must give byte-identical objects for the
-//! host and for every CI target. Also measures the per-instruction cost of
-//! emitting through the shim.
+//! host and for every CI target. Stage 2 builds the fixture and the
+//! Cranelift component runs it (tests/support/stage2.rs). Also measures the
+//! per-instruction cost of emitting through the shim.
 mod support;
 
 use std::time::{Duration, Instant};
@@ -227,25 +228,23 @@ fn rust_family(triple: &str, opt: &str) -> Vec<u8> {
     m.finish().emit().unwrap()
 }
 
-fn vesper_family(entry: &str) -> Vec<u8> {
-    let target = host_target().unwrap();
-    let checked = checked_with(&fixture("checked.ves"), target);
-    let id = jit(&checked, entry);
+fn vesper_family(stage2: &'static stage2::Stage2, entry: &str) -> Vec<u8> {
+    let id = stage2.answer(&fixture("checked.ves"), entry);
     assert_ne!(id, 0, "{entry}: the Vesper lowering failed");
-    vesper_cranelift_sys::take_published(id).unwrap()
+    stage2.published(id).unwrap()
 }
 
 #[test]
 fn vesper_and_rust_lowerings_emit_identical_objects() {
-    if host_target().is_none() {
-        eprintln!("no .vsys target for this host; comparison unavailable");
+    let Some(stage2) = stage2::stage2() else {
         return;
-    }
-    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let before = vesper_cranelift_sys::live_handles();
+    };
+    // The Cranelift component reads an empty triple as the host's, with
+    // that ISA's baseline flags (no probing of the CPU it runs on).
+    let host = host_target().unwrap().0;
     for (entry, triple, opt) in [
-        ("checked_none", "", ""),
-        ("checked_speed", "", "speed"),
+        ("checked_none", host, ""),
+        ("checked_speed", host, "speed"),
         ("checked_x64_linux", "x86_64-unknown-linux-gnu", "speed"),
         (
             "checked_aarch64_linux",
@@ -255,7 +254,7 @@ fn vesper_and_rust_lowerings_emit_identical_objects() {
         ("checked_aarch64_macos", "aarch64-apple-darwin", "speed"),
         ("checked_x64_windows", "x86_64-pc-windows-msvc", "speed"),
     ] {
-        let vesper = vesper_family(entry);
+        let vesper = vesper_family(stage2, entry);
         let rust = rust_family(triple, opt);
         assert!(rust.len() > 1000, "{entry}: {} bytes", rust.len());
         assert!(
@@ -265,7 +264,6 @@ fn vesper_and_rust_lowerings_emit_identical_objects() {
             rust.len()
         );
     }
-    assert_eq!(vesper_cranelift_sys::live_handles(), before);
 }
 
 /// Emission of `n` chained iadds directly through `FunctionBuilder`.
@@ -324,12 +322,13 @@ fn time<T>(f: impl FnOnce() -> T) -> (T, Duration) {
 }
 
 /// The emission paths: Rust calling `FunctionBuilder` directly, Rust
-/// calling the C ABI, and Vesper (JIT) calling the raw import, the typed
-/// wrappers, or `vcl_emit` with 512 instructions per call.
+/// calling the C ABI, and Vesper (built by Stage 2, run under Wasmtime with
+/// the Cranelift component) calling the raw import, the typed wrappers, or
+/// `vcl_emit` with 512 instructions per call.
 const PATHS: [&str; 5] = ["direct", "shim", "raw", "wrapped", "batched"];
 
 /// A prepared run of `n` chained iadds along `path`.
-fn prepare(path: &str, n: u64) -> Box<dyn Fn() -> u64> {
+fn prepare(stage2: &'static stage2::Stage2, path: &str, n: u64) -> Box<dyn Fn() -> u64> {
     match path {
         "direct" => Box::new(move || u64::from(rust_direct(n))),
         "shim" => Box::new(move || u64::from(rust_through_shim(n))),
@@ -337,30 +336,40 @@ fn prepare(path: &str, n: u64) -> Box<dyn Fn() -> u64> {
             let entry = format!(
                 "pub fn bench_entry() -> u64 eff [Ffi[Cranelift]] {{\n    emit_{path}({n})\n}}\n"
             );
-            let source = format!("{}\n{entry}", fixture("checked.ves"));
-            let checked = checked_with(&source, host_target().unwrap());
-            Box::new(move || jit(&checked, "bench_entry"))
+            let source = format!(
+                "{}\n{entry}\n{}",
+                fixture("checked.ves"),
+                stage2::entry_main("bench_entry")
+            );
+            let component = stage2
+                .build(&source)
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+            let path = path.to_string();
+            Box::new(move || {
+                stage2
+                    .run(&component)
+                    .unwrap_or_else(|e| panic!("{path}: {e}"))
+            })
         }
     }
 }
 
 /// Nanoseconds per emitted instruction along each path: a run of N minus a
-/// run of 1, divided by N - 1, which removes the JIT's compile time. Set
+/// run of 1, divided by N - 1, which removes Wasmtime's compile time. Set
 /// VESPER_CRANELIFT_BENCH=1 for the report's runs (1,000,000 instead of
 /// 20,000, fastest of 5). For instruction counts, run one path under callgrind with
 /// VESPER_CRANELIFT_BENCH_PATH=<path> VESPER_CRANELIFT_BENCH_N=<n> at two
 /// values of n and divide the difference.
 #[test]
 fn emission_overhead_through_the_shim() {
-    if host_target().is_none() {
+    let Some(stage2) = stage2::stage2() else {
         return;
-    }
-    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    };
     if let Some(path) = std::env::var_os("VESPER_CRANELIFT_BENCH_PATH") {
         let path = path.to_str().unwrap();
         let n: u64 =
             std::env::var("VESPER_CRANELIFT_BENCH_N").map_or(20_000, |v| v.parse().unwrap());
-        assert_eq!(prepare(path, n)(), n, "{path}");
+        assert_eq!(prepare(stage2, path, n)(), n, "{path}");
         return;
     }
     let big = std::env::var_os("VESPER_CRANELIFT_BENCH").is_some();
@@ -368,9 +377,9 @@ fn emission_overhead_through_the_shim() {
     let reps = if big { 5 } else { 1 };
     let mut report = String::from("ns per iadd:");
     for path in PATHS {
-        let (run_n, run_1) = (prepare(path, n), prepare(path, 1));
+        let (run_n, run_1) = (prepare(stage2, path, n), prepare(stage2, path, 1));
         // The value is the last value number: n iadds after the parameter.
-        // The fastest of `reps` runs of each, to keep JIT compile noise out.
+        // The fastest of `reps` runs of each, to keep compile noise out.
         let fastest = |run: &dyn Fn() -> u64, want: u64| {
             (0..reps)
                 .map(|_| {
