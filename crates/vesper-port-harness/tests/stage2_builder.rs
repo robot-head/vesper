@@ -131,7 +131,7 @@ fn rust_build(compiler: &Path, port: &Port, input: &Path, out: &Outputs) -> Resu
 struct Tally {
     same: usize,
     differ: Vec<&'static str>,
-    declined: BTreeMap<&'static str, usize>,
+    declined: BTreeMap<&'static str, Vec<&'static str>>,
 }
 
 impl Tally {
@@ -143,8 +143,8 @@ impl Tally {
         }
     }
 
-    fn decline(&mut self, why: &'static str) {
-        *self.declined.entry(why).or_default() += 1;
+    fn decline(&mut self, library: &'static str, why: &'static str) {
+        self.declined.entry(why).or_default().push(library);
     }
 
     fn report(&self, what: &str, total: usize) {
@@ -152,10 +152,10 @@ impl Tally {
             "stage2 port builder {what}: {} identical, {} differ, {} declined of {total}",
             self.same,
             self.differ.len(),
-            self.declined.values().sum::<usize>()
+            self.declined.values().map(Vec::len).sum::<usize>()
         );
-        for (why, n) in &self.declined {
-            eprintln!("  {n} declined: {why}");
+        for (why, libraries) in &self.declined {
+            eprintln!("  {} declined: {why}: {libraries:?}", libraries.len());
         }
         if !self.differ.is_empty() {
             eprintln!("  differ: {:?}", self.differ);
@@ -230,13 +230,13 @@ fn stage2_port_builder_matches_rust() {
             binding.compare(library, &rust.binding, &ours.binding);
         } else {
             let why = reason(EXPORT_DECLINES, outcome.export);
-            interface.decline(why);
-            binding.decline(why);
+            interface.decline(library, why);
+            binding.decline(library, why);
         }
         if outcome.object == 0 {
             object.compare(library, &rust.object, &ours.object);
         } else {
-            object.decline(reason(OBJECT_DECLINES, outcome.object));
+            object.decline(library, reason(OBJECT_DECLINES, outcome.object));
         }
     }
     let _ = std::fs::remove_dir_all(&scratch);

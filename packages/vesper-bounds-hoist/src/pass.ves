@@ -6,6 +6,7 @@
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{Types, TyPass};
 use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-data::util::{stage2_heap_mark};
 use @vesper/place-ir::{InstRow, Program, put_program, read_program};
 use self::fun::{Fun, add, inc, insert, n32, read_fun, u32_at, u64_at, u8_at, w};
 use self::encode::{POOL_GUARD, TypeCache, encode_fun, type_cache};
@@ -565,6 +566,16 @@ pub fn hoist_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
 // `bounds_hoist::run` on a program already in tables (the library IR
 // pipeline of @vesper/library-ir, #2662): how many loops it versioned.
 pub fn hoist_program(inout p: Program, inout c: Ctx) -> u64 {
+    let (next, versioned) = hoist_until(inout p, inout c, 0, 0);
+    versioned
+}
+
+// `hoist_program` over the functions from `from`, stopping after a
+// function once Stage 2's heap mark passes `limit` (0: no limit): the next
+// function's index and the loops versioned. A caller under Stage 2's
+// self-built heap, which frees nothing by itself, can compact the program
+// between calls (@vesper/library-ir's `library_walk_calls_input`).
+pub fn hoist_until(inout p: Program, inout c: Ctx, from: u64, limit: u64) -> (u64, u64) {
     let s_bool = c.names.intern(in "bool".as_bytes());
     let u64_ty = c.types.named0(c.types.s_u64);
     let bool_ty = c.types.named0(s_bool);
@@ -575,11 +586,15 @@ pub fn hoist_program(inout p: Program, inout c: Ctx) -> u64 {
         infer: c.types.infer,
     };
     let mut versioned: u64 = 0;
-    for fi in 0..p.fn_count() {
+    let n = p.fn_count();
+    for fi in from..n {
         versioned = add(
             versioned,
             hoist_function(inout p, inout c.types, inout c.names, inout cx, fi)
         );
+        if limit != 0 && stage2_heap_mark() > limit {
+            return (inc(fi), versioned);
+        }
     }
-    versioned
+    (n, versioned)
 }
