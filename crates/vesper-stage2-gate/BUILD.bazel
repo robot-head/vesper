@@ -1,0 +1,48 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+# The Stage 2 gate (#2671): the committed seed builds today's @vesper/stage2
+# from the repository's packages, under Wasmtime (crate and the hermetic
+# @wasmtime CLI). Packages with their own BUILD.bazel are outside //:files.
+vesper_crate(
+    extra_test_data = [
+        "//:files",
+        "//bootstrap/stage2-seed:seed",
+        "//packages/vesper-codegen-numeric:files",
+        "//packages/vesper-cranelift:files",
+        "//packages/vesper-crypto:files",
+        "//bootstrap:files",
+        # @vesper/run keeps region books in @vesper/alloc (#2053).
+        "//crates/vesper-alloc:files",
+        # @vesper/lsp-publish renders through @vesper/diagnostics (#1828).
+        "//crates/vesper-diagnostics:files",
+        "//crates/vesper-ebpf:files",
+        # @vesper/driver-commands formats through @vesper/fmt (#1996).
+        "//crates/vesper-fmt:files",
+        "//crates/vesper-lean-syntax:files",
+        # ... and graphs Loom.lock through @vesper/loom-calculus (#1996).
+        "//crates/vesper-loom-calculus:files",
+        "//crates/vesper-pact:files",
+        "//crates/vesper-resonance:files",
+        "//crates/vesper-serde:files",
+        "//crates/vesper-span:files",
+    ],
+    test_path_binaries = {
+        "test/fixed_point": ["@wasmtime//:wasmtime"],
+    },
+    # One Stage 2 build at a time, under Wasmtime with up to 4 GiB of linear
+    # memory; the old root target peaked at 3.4-4.6 GiB per build.
+    test_tags = {
+        "test/compiler_packages": [
+            "resources:memory:6144",
+            "resources:cpu:2",
+        ],
+        "test/fixed_point": [
+            "resources:memory:6144",
+            "resources:cpu:2",
+        ],
+    },
+    test_timeouts = {
+        "test/compiler_packages": "long",
+        "test/fixed_point": "eternal",
+    },
+)

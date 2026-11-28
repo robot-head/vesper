@@ -178,11 +178,13 @@ to.
    bit, and `bootstrap/stage2.lock` records the digests. Checked by:
    `bootstrap/stage2.sh verify` and `.github/workflows/bootstrap-stage2.yml`
    (manual dispatch and nightly). Today `@vesper/stage2` rebuilds itself
-   bit for bit (#1690), and every compiler package it builds (49, listed in
-   `COMPILER_PACKAGES` in `tests/wasm_seed_package_io.rs`) comes out
-   byte-identical from the boot Stage 2 (built by the Rust wasm backend),
-   from `stage2.wasm` (built by itself) and from the precompiled
-   `stage2.cwasm` under the pinned wasmtime CLI (#1928). Four packages are
+   bit for bit (#1690). Since #2671 the gate (`crates/vesper-stage2-gate`)
+   boots from the committed seed `bootstrap/stage2-seed/stage2.wasm` with no
+   Rust compiler, and every compiler package it builds (listed in
+   `COMPILER_PACKAGES` in `crates/vesper-stage2-gate/tests/support/packages.rs`)
+   comes out byte-identical from stage A (built by the seed), from stage B
+   (built by itself, when the seed is stale) and from the precompiled last
+   stage under the pinned wasmtime CLI (#1928). Four packages are
    gaps, listed in `STAGE2_PACKAGE_GAPS` with the reason: the native
    Cranelift glue (`codegen-base`, `codegen-control-emit`,
    `codegen-numeric`: they assemble and check, since the Stage 2 loader

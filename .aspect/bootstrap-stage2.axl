@@ -4,7 +4,12 @@ load("./lib/process.axl", "capture", "check", "command", "root_path", "scratch_d
 
 _VERSION = "50.0.1"
 _TARGET = "@wasmtime//:wasmtime"
-_USAGE = "usage: aspect bootstrap stage2 -- <which|precompile|run|verify> ..."
+_USAGE = "usage: aspect bootstrap stage2 -- <which|precompile|run|verify|refresh-seed> ..."
+
+# The committed Stage 2 seed (#2671), which crates/vesper-stage2-gate boots
+# from.
+_SEED = "bootstrap/stage2-seed/stage2.wasm"
+_STAGE2_PACKAGE = "packages/vesper-stage2"
 
 def _parent(path: str) -> str:
     return path.rpartition("/")[0] or ("/" if path.startswith("/") else ".")
@@ -129,14 +134,40 @@ def _stage2(ctx: TaskContext) -> int:
         if not command(ctx, "cmp", ["-s", "--", original, stage3], cwd).status().success:
             ctx.std.process.exit(1, "stage2 fixed-point mismatch: %s differs from %s" % (original, stage3))
         ctx.std.io.stdout.write("== Stage 2 fixed-point verified under wasmtime: stage2 == stage3 (%d bytes)\n" % ctx.std.fs.metadata(stage3).size)
+    elif mode == "refresh-seed" and len(values) <= 1:
+        _refresh_seed(ctx, root, cwd, root_path(cwd, values[0]) if values else root + "/target/bootstrap-stage2", syms)
     else:
         ctx.std.process.exit(2, _USAGE)
     return 0
 
+def _same(ctx: TaskContext, cwd: str, left: str, right: str) -> bool:
+    return command(ctx, "cmp", ["-s", "--", left, right], cwd).status().success
+
+def _refresh_seed(ctx: TaskContext, root: str, cwd: str, work: str, syms: str):
+    # The seed builds stage A from today's sources. A equal to the seed means
+    # the seed is current. Otherwise A builds B and B builds C; B == C is
+    # Stage 2 rebuilding itself, and B becomes the seed.
+    binary = _wasmtime(ctx, root, cwd)
+    ctx.std.io.stdout.write("== Using %s (%s)\n" % (_version(ctx, binary, cwd), binary))
+    seed = root + "/" + _SEED
+    stage_a = work + "/stage2_a.wasm"
+    _run(ctx, binary, root, cwd, seed, _STAGE2_PACKAGE, stage_a, "main", [], syms or "1")
+    if _same(ctx, cwd, seed, stage_a):
+        ctx.std.io.stdout.write("== The seed is current: it rebuilds itself (%d bytes)\n" % ctx.std.fs.metadata(seed).size)
+        return
+    stage_b = work + "/stage2_b.wasm"
+    stage_c = work + "/stage2_c.wasm"
+    _run(ctx, binary, root, cwd, stage_a, _STAGE2_PACKAGE, stage_b, "main", [], syms or "1")
+    _run(ctx, binary, root, cwd, stage_b, _STAGE2_PACKAGE, stage_c, "main", [], syms or "1")
+    if not _same(ctx, cwd, stage_b, stage_c):
+        ctx.std.process.exit(1, "stage2 fixed-point mismatch: %s differs from %s; the seed is left as it was" % (stage_b, stage_c))
+    ctx.std.fs.copy(stage_b, seed)
+    ctx.std.io.stdout.write("== Refreshed %s (%d bytes); commit it on its own\n" % (_SEED, ctx.std.fs.metadata(seed).size))
+
 stage2 = task(
     kind = "stage2",
     group = ["bootstrap"],
-    summary = "Run, precompile, or verify Stage 2 using Wasmtime",
+    summary = "Run, precompile, verify, or refresh the seed of Stage 2 using Wasmtime",
     implementation = _stage2,
     args = {"tool_args": args.trailing_var_args(description = "Stage 2 subcommand and its flags and paths.")},
 )
