@@ -17,17 +17,40 @@ use @vesper/codegen-calls::instances::{
     Conc, Syms, concrete, discover_roots, is_root, program_facts, syms_new
 };
 use @vesper/codegen-calls::abi::{
-    Errs, Sig, V_F32, V_F64, V_I128, default_abi, internal, push_symbol_key, signature
+    Errs, Sig, V_F32, V_F64, V_I128, check_entry, default_abi, internal, push_symbol_key, signature
 };
 use @vesper/native-walk::frame::{frame_plan};
 use @vesper/check-data::types::{Types};
 
 const NO_LIBRARY: Str = "the calls input has no library task";
+const NO_ENTRY: Str = "the calls input has no executable entry task";
+// `vesper build`'s check of an executable entry (src/main.rs).
+const BAD_MAIN: Str = "executable main must take no arguments and return an integer or Unit";
+// `Calls::function` of a name that is no function.
+const NO_FUNCTION: u32 = 4294967295;
+// `Types::name` of a type that is not `Named`: Rust's `Type::name` is ""
+// then, which `vesper build` takes as Unit.
+const NO_NAME: u32 = 0;
 const NOT_STANDALONE: Str = " is not compiled as a standalone native function";
 const DECLARE_FAILED: Str = "declaring a function failed: ";
 // `local_symbol`'s prefix (src/native.rs, #1451): the instance index and
 // key follow.
 const LOCAL_PREFIX: Str = "vesper_function_";
+// `FramePlan::result` (src/native.rs `FrameResult`): a scalar result, an
+// aggregate written through the leading pointer parameter, a register
+// result built in a local buffer, or one kept as words.
+pub const RESULT_VALUE: u64 = 0;
+pub const RESULT_SRET: u64 = 1;
+pub const RESULT_BUFFER: u64 = 2;
+pub const RESULT_WORDS: u64 = 3;
+// The frame plan text's result field (`FramePlan::text`'s first line).
+const RESULT_FIELD: Str = "result=";
+const RESULT_SRET_TEXT: Str = "sret";
+const RESULT_BUFFER_TEXT: Str = "buffer";
+const RESULT_WORDS_TEXT: Str = "words";
+const SPACE: u8 = 32;
+const NEWLINE: u8 = 10;
+const DIGIT_NINE: u64 = 57;
 const UNDERSCORE: u8 = 95;
 const QUOTE: u8 = 39;
 const DECIMAL_BASE: u64 = 10;
@@ -142,6 +165,10 @@ pub struct Declared {
     // `ConstTime` (no cold outlining); 1 or 0
     pub plain: ChunkSeq[u64],
     pub const_time: ChunkSeq[u64],
+    // per instance: how it returns its result (`FramePlan::result`, one
+    // of the `RESULT_*` codes) and the result's register words
+    pub result_kind: ChunkSeq[u64],
+    pub result_words: ChunkSeq[u64],
     // per instance: the index of its export in the request, or the
     // exports' count when it is not exported
     pub export: ChunkSeq[u64],
@@ -163,6 +190,8 @@ pub fn declared_new() -> Declared {
         status: ChunkSeq::new[u64](),
         plain: ChunkSeq::new[u64](),
         const_time: ChunkSeq::new[u64](),
+        result_kind: ChunkSeq::new[u64](),
+        result_words: ChunkSeq::new[u64](),
         export: ChunkSeq::new[u64](),
         optimize: false,
     }
@@ -223,6 +252,30 @@ pub fn declare_library(
     in exports: Exports,
     inout d: Declared
 ) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    declare_task(inout m, in input, in exports, false, inout d)
+}
+
+// Declares the instances of the first executable entry task of `input`
+// (slice 4e, #2752), as `compile_entry` declares an object entry's
+// (`declare_instances_with_trace`): the entry exported under the one
+// symbol `exports` names for it, every other instance local. Empty on
+// success, else the error.
+pub fn declare_executable(
+    inout m: Module,
+    in input: Slice[u8],
+    in exports: Exports,
+    inout d: Declared
+) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    declare_task(inout m, in input, in exports, true, inout d)
+}
+
+fn declare_task(
+    inout m: Module,
+    in input: Slice[u8],
+    in exports: Exports,
+    executable: bool,
+    inout d: Declared
+) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in input);
@@ -233,22 +286,54 @@ pub fn declare_library(
     let mut ls = layouts_new();
     let mut first = calls.tasks.len();
     for ti in 0..calls.tasks.len() {
-        if calls.task(ti).library {
+        let t = calls.task(ti);
+        let mut wanted = t.library;
+        if executable {
+            wanted = !t.library && !t.more_roots;
+        }
+        if wanted {
             first = ti;
             break;
         }
     }
     if first == calls.tasks.len() {
-        err.extend(in NO_LIBRARY.as_bytes());
+        err.extend(in (if executable { NO_ENTRY } else { NO_LIBRARY }).as_bytes());
         return err;
     }
     let task = calls.task(first);
     d.optimize = task.optimize;
     let mut roots: ChunkSeq[u32] = ChunkSeq::new[u32]();
     roots.push(task.entry);
+    if executable {
+        // `vesper build`'s check of `main`, then `compile_entry`'s.
+        let func_index = calls.function(task.entry);
+        let mut entry_ok = false;
+        if func_index != NO_FUNCTION {
+            let info = calls.fn_info(func_index);
+            let result = c.types.name(info.result);
+            entry_ok = info.param_count == 0
+                && (k.is_integer(result) || result == k.unit || result == NO_NAME);
+        }
+        if !entry_ok {
+            err.extend(in BAD_MAIN.as_bytes());
+            return err;
+        }
+        let mut entry_errs = Errs { text: ChunkSeq::new[u8]() };
+        if !check_entry(
+            inout c.types,
+            in c.names,
+            in c.world,
+            in calls,
+            task.entry,
+            inout entry_errs
+        ) {
+            err.extend(in entry_errs.text.as_slice());
+            return err;
+        }
+    }
     let mut tj = wrapping_add(first, 1);
     loop {
-        if tj >= calls.tasks.len() || !calls.task(tj).more_roots {
+        if executable || tj >= calls.tasks.len() || !calls.task(tj).more_roots {
             break;
         }
         roots.push(calls.task(tj).entry);
@@ -350,6 +435,9 @@ pub fn declare_library(
             return err;
         }
         d.plain.push(if plain && !calls.const_denorm { 1 } else { 0 });
+        let mut result_words: u64 = 0;
+        d.result_kind.push(frame_result(in plan_text, inout result_words));
+        d.result_words.push(result_words);
         d.const_time.push(
             if row_const_time(in c.types, k, in f) {
                 1
@@ -365,7 +453,7 @@ pub fn declare_library(
         // An export with a by-value 128-bit parameter or result is local
         // under `local_symbol`; its `define_wide_entry` adapter takes the
         // export symbol (exports.ves).
-        let linkage = if e < exports.count() && !has_wide(in sig) {
+        let linkage = if e < exports.count() && (executable || !has_wide(in sig)) {
             exports.push_symbol(e, inout symbol);
             linkage_export()
         } else {
@@ -398,4 +486,54 @@ pub fn declare_library(
         c.names.write(inst.name, inout d.names);
     }
     err
+}
+
+// The `RESULT_*` code of a frame plan's text (its first line's
+// `result=` field), with a register result's words in `words`.
+fn frame_result(in text: ChunkSeq[u8], inout words: u64) -> u64 {
+    let mut at: u64 = 0;
+    loop {
+        if at >= text.len() || text.try_get(at).unwrap_or(NEWLINE) == NEWLINE {
+            return RESULT_VALUE;
+        }
+        if starts_at(in text, at, in RESULT_FIELD.as_bytes()) {
+            break;
+        }
+        at = wrapping_add(at, 1);
+    }
+    at = wrapping_add(at, RESULT_FIELD.len());
+    let kind = if starts_at(in text, at, in RESULT_SRET_TEXT.as_bytes()) {
+        return RESULT_SRET;
+    } else if starts_at(in text, at, in RESULT_BUFFER_TEXT.as_bytes()) {
+        at = wrapping_add(at, RESULT_BUFFER_TEXT.len());
+        RESULT_BUFFER
+    } else if starts_at(in text, at, in RESULT_WORDS_TEXT.as_bytes()) {
+        at = wrapping_add(at, RESULT_WORDS_TEXT.len());
+        RESULT_WORDS
+    } else {
+        return RESULT_VALUE;
+    };
+    if text.try_get(at).unwrap_or(NEWLINE) == SPACE {
+        at = wrapping_add(at, 1);
+    }
+    let mut n: u64 = 0;
+    loop {
+        let c = widen_u64(text.try_get(at).unwrap_or(NEWLINE));
+        if c < DIGIT_ZERO || c > DIGIT_NINE {
+            break;
+        }
+        n = wrapping_add(wrapping_mul(n, DECIMAL_BASE), wrapping_sub(c, DIGIT_ZERO));
+        at = wrapping_add(at, 1);
+    }
+    words = n;
+    kind
+}
+
+fn starts_at(in text: ChunkSeq[u8], at: u64, in word: Slice[u8]) -> bool {
+    for k in 0..word.len() {
+        if text.try_get(wrapping_add(at, k)) != word.try_get(k) {
+            return false;
+        }
+    }
+    true
 }
